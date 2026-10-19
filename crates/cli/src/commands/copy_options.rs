@@ -47,6 +47,18 @@ pub fn resolve_parent(
     output: &Path,
     format: ImageFormat,
 ) -> Result<(BackupType, Option<PathBuf>)> {
+    resolve_parent_in(kind, explicit, auto, output, format.extension())
+}
+
+/// [`resolve_parent`] for chains of `container` (`vhdx`, `qcow2`, `obk`): an
+/// encrypted copy continues only an encrypted chain.
+pub fn resolve_parent_in(
+    kind: BackupType,
+    explicit: Option<&str>,
+    auto: bool,
+    output: &Path,
+    container: &str,
+) -> Result<(BackupType, Option<PathBuf>)> {
     if kind == BackupType::Full {
         return Ok((kind, None));
     }
@@ -78,7 +90,7 @@ pub fn resolve_parent(
         .filter(|c| {
             c.images
                 .iter()
-                .all(|i| i.container.eq_ignore_ascii_case(format.extension()))
+                .all(|i| i.container.eq_ignore_ascii_case(container))
         })
         .max_by(|a, b| a.newest_created_at().cmp(b.newest_created_at()));
     let Some(chain) = newest else {

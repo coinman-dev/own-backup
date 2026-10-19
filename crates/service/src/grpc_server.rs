@@ -1356,8 +1356,18 @@ impl BackupService for BackupServiceImpl {
         req: Request<Empty>,
     ) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
-        let json = serde_json::to_string(&own_backup_core::capabilities::current())
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let caps = own_backup_core::capabilities::current();
+        // Linux: encryption is offered only where this machine has a key
+        // store, and the window is told what protects it (TPM2 or host key).
+        #[cfg(target_os = "linux")]
+        let caps = {
+            let store = self.state.store.clone();
+            let protection = tokio::task::spawn_blocking(move || store.key_store_protection())
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            own_backup_core::capabilities::with_key_store(caps, protection)
+        };
+        let json = serde_json::to_string(&caps).map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(JsonReply { json }))
     }
 
@@ -2461,6 +2471,9 @@ impl BackupService for BackupServiceImpl {
             recovery_key: String,
             fingerprint: String,
             job_id: String,
+            /// What will keep this machine's authorization: `dpapi`, `tpm2`
+            /// or `host`.
+            key_protection: &'static str,
         }
         let p: In = serde_json::from_str(&req.into_inner().json)
             .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
@@ -2469,11 +2482,25 @@ impl BackupService for BackupServiceImpl {
         validate_job(&p.job, true)?;
         // Without a local key store the authorization can never be confirmed:
         // handing out a recovery key for it would be a promise nobody keeps.
-        if cfg!(not(target_os = "windows")) {
-            return Err(Status::failed_precondition(
-                tr!("grpc_server.archive_key_store_missing").into_owned(),
-            ));
-        }
+        // Linux has one where `systemd-creds` can protect its machine key.
+        #[cfg(target_os = "linux")]
+        let key_protection = {
+            let store = self.state.store.clone();
+            tokio::task::spawn_blocking(move || store.key_store_protection())
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?
+                .map_err(|e| {
+                    Status::failed_precondition(
+                        tr!("grpc_server.archive_key_store_unavailable", error = e).into_owned(),
+                    )
+                })?
+        };
+        #[cfg(target_os = "windows")]
+        let key_protection = "dpapi";
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        return Err(Status::failed_precondition(
+            tr!("grpc_server.archive_key_store_missing").into_owned(),
+        ));
 
         // Sealing the envelope is Argon2id at the production profile — seconds,
         // not milliseconds, and it must not sit on the async runtime.
@@ -2483,13 +2510,14 @@ impl BackupService for BackupServiceImpl {
             .map_err(|e| Status::internal(format!("key setup task panicked: {e}")))?
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
-        info!(job = %begun.job_id, fingerprint = %begun.fingerprint,
+        info!(job = %begun.job_id, fingerprint = %begun.fingerprint, key_protection,
             "Archive encryption prepared — waiting for the recovery key to be confirmed");
         json_reply(&Out {
             token: begun.token,
             recovery_key: begun.recovery_key.to_string(),
             fingerprint: begun.fingerprint,
             job_id: begun.job_id,
+            key_protection,
         })
     }
 
@@ -2504,6 +2532,9 @@ impl BackupService for BackupServiceImpl {
             token: String,
             recovery_key: String,
         }
+        // Commits a key that opens the job's archives without a password.
+        #[cfg(target_os = "linux")]
+        crate::polkit::authorize(&req, crate::polkit::Action::ManageKeys).await?;
         let p: In = serde_json::from_str(&req.into_inner().json)
             .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
 

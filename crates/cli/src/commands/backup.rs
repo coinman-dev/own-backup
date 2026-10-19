@@ -68,6 +68,14 @@ pub struct BackupArgs {
     /// «проверять после создания» в задании.
     #[arg(long)]
     pub verify: bool,
+
+    /// Linux: write an encrypted copy (`.obk`, --output must end in `.obk`).
+    /// A full copy gets a new key: a password asked twice and a recovery key
+    /// shown once and typed back. A child of an encrypted parent always
+    /// continues with the parent's key (its password or recovery key is
+    /// asked), with or without this flag.
+    #[arg(long)]
+    pub encrypt: bool,
 }
 
 #[cfg(target_os = "windows")]
@@ -241,13 +249,19 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
     let passphrase = std::sync::Arc::new(SourcePassphrase::resolve(&args)?);
     // Which version this is and what it is written over: --parent, or the
     // newest command-line chain beside the output (`copy_options`).
-    let (kind, parent_image) = super::copy_options::resolve_parent(
+    let (kind, parent_image) = super::copy_options::resolve_parent_in(
         kind,
         args.parent.as_deref(),
         args.parent_auto,
         &image_path,
-        args.format,
+        if args.encrypt {
+            own_backup_backup::seal::obk::OBK_EXTENSION
+        } else {
+            args.format.extension()
+        },
     )?;
+    // The keys of an encrypted copy, asked for before anything is held.
+    let encryption = archive_keys(&args, parent_image.as_deref())?;
     // A point in time to read: an LVM or device-mapper snapshot (its change
     // area beside the output; an opened LUKS container may need --password
     // for that), a short partition held still, or the device itself when
@@ -299,9 +313,12 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         },
         job_id: None,
         passphrase: passphrase.known(),
-        image_format: args.format,
-        // The command line does not open encrypted archives yet (E5).
-        encryption: None,
+        image_format: if encryption.is_some() {
+            own_backup_common::types::ImageFormat::Qcow2
+        } else {
+            args.format
+        },
+        encryption: encryption.clone(),
         // The settings' default — what a job that has not chosen its own gets.
         zstd_level: own_backup_backup::qcow2::zstd_level_or_default(
             own_backup_common::config::AppConfig::load_or_default().default_compression_level,
@@ -392,7 +409,14 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
             kind, summary.blocks_copied, summary.blocks_unchanged
         );
     }
-    let v = verify_image(&summary.image_path, |_, _| Ok(()))?;
+    let v = match &encryption {
+        Some(keys) => own_backup_backup::engine_linux::verify_image_with_keys(
+            &summary.image_path,
+            Some(keys),
+            |_, _| Ok(()),
+        )?,
+        None => verify_image(&summary.image_path, |_, _| Ok(()))?,
+    };
     println!(
         "Verify: {}",
         if v.valid() {
@@ -402,6 +426,91 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         }
     );
     Ok(())
+}
+
+/// The keys an encrypted copy is written with (`--encrypt`, or a parent that
+/// is encrypted), or `None` for a plaintext copy.
+#[cfg(target_os = "linux")]
+fn archive_keys(
+    args: &BackupArgs,
+    parent: Option<&std::path::Path>,
+) -> own_backup_common::Result<Option<own_backup_backup::seal::context::ArchiveKeys>> {
+    use own_backup_backup::seal::obk::OBK_EXTENSION;
+    use own_backup_common::OwnBackupError;
+    let sealed_parent = match parent {
+        Some(p) => own_backup_backup::sidecar::detect_container_format(p)? == OBK_EXTENSION,
+        None => false,
+    };
+    if let (true, Some(p)) = (sealed_parent, parent) {
+        println!("Родитель зашифрован: копия продолжает цепочку его ключом.");
+        return crate::commands::archive_key::open_keys_for_image(p);
+    }
+    if !args.encrypt {
+        return Ok(None);
+    }
+    if parent.is_some() {
+        return Err(OwnBackupError::Config(
+            "зашифрованная копия не может продолжить незашифрованную цепочку: \
+             начните её с полной копии (--kind full --encrypt)"
+                .into(),
+        ));
+    }
+    if args.format == own_backup_common::types::ImageFormat::Vhdx {
+        return Err(OwnBackupError::Config(
+            "зашифрованные копии пишутся в .obk поверх qcow2 — уберите --format vhdx".into(),
+        ));
+    }
+    new_archive_keys().map(Some)
+}
+
+/// A new key for a copy made from the command line: a password asked twice,
+/// a recovery key shown once and typed back — the same two steps as turning
+/// encryption on for a job (`archive-key`), with nothing stored anywhere.
+#[cfg(target_os = "linux")]
+fn new_archive_keys() -> own_backup_common::Result<own_backup_backup::seal::context::ArchiveKeys> {
+    use crate::secret_prompt::{ask_secret, ask_secret_twice};
+    use own_backup_backup::seal::context::ArchiveKeys;
+    use own_backup_backup::seal::keypair::{JobKeyPair, KdfParams, SealedPrivateKey};
+    use own_backup_backup::seal::recovery::RecoveryKey;
+    use own_backup_common::OwnBackupError;
+    let err = |e: std::io::Error| OwnBackupError::Config(e.to_string());
+
+    println!(
+        "Копия будет зашифрована. Прочитать её можно будет только этим паролем \
+         или ключом восстановления."
+    );
+    let password = zeroize::Zeroizing::new(
+        ask_secret_twice("  Пароль архива (не отображается): ", "  Ещё раз: ").map_err(err)?,
+    );
+    let min = own_backup_core::archive_setup::MIN_PASSWORD_CHARS;
+    if password.chars().count() < min {
+        return Err(OwnBackupError::Config(format!(
+            "пароль архива короче {min} символов"
+        )));
+    }
+    let job_id = format!("cli-{}", uuid::Uuid::new_v4());
+    println!("  Готовлю ключ (это несколько секунд)…");
+    let pair = JobKeyPair::generate()?;
+    let recovery = RecoveryKey::generate()?;
+    let portable =
+        SealedPrivateKey::seal(&job_id, &pair, &password, &recovery, &KdfParams::strong())?;
+    let shown = recovery.to_string_grouped();
+    println!();
+    println!("  Ключ восстановления — запишите его сейчас:");
+    println!();
+    println!("      {}", *shown);
+    println!();
+    println!("  Он показывается ОДИН раз и нигде не сохраняется.");
+    let echo = zeroize::Zeroizing::new(
+        ask_secret("  Введите ключ восстановления для подтверждения: ").map_err(err)?,
+    );
+    let typed = RecoveryKey::parse(&echo)?;
+    if typed.to_string_grouped() != shown {
+        return Err(OwnBackupError::Config(
+            "введённый ключ восстановления не совпадает с показанным — копия не сделана".into(),
+        ));
+    }
+    ArchiveKeys::from_private(portable, pair.private)
 }
 
 /// The passphrase of an encrypted Linux source, obtained the least visible way

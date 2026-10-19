@@ -3890,9 +3890,10 @@ async fn perform_backup(
     cancel: &Arc<AtomicBool>,
     _last_success: Option<JobRun>,
     passwords: &Arc<dyn PasswordResolver>,
-    // The local key store is Windows-only, so an encrypted job never gets this
-    // far on Linux: `archive_keys_for_run` fails first and the run says so.
-    _keys: Option<own_backup_backup::seal::context::ArchiveKeys>,
+    // An encrypted job's keys, opened from the service's key store before
+    // the run (`archive_keys_for_run`): every image is `.obk`, its parent,
+    // check and consolidation read through them.
+    keys: Option<own_backup_backup::seal::context::ArchiveKeys>,
 ) -> JobRun {
     use own_backup_backup::engine_linux::{
         backup_volume, container_key_from, VolumeBackupRequest, DEFAULT_BLOCK_SIZE,
@@ -3914,7 +3915,7 @@ async fn perform_backup(
     // FIRST, before the format check, before a parent is chosen and long
     // before anything is written: finish what a crash left half-done. Every
     // decision below reads these chains (audit AUD-06).
-    if let Some(msg) = recover_interrupted_consolidations(job, &folder, None) {
+    if let Some(msg) = recover_interrupted_consolidations(job, &folder, keys.as_ref()) {
         run.finished_at = chrono::Utc::now().to_rfc3339();
         run.status = "error".into();
         run.error = msg;
@@ -3954,7 +3955,7 @@ async fn perform_backup(
     }
     // A whole disk → one image with its GPT and restore manifest.
     if let Some(ds) = job.disk_source.clone() {
-        return perform_disk_backup(sink, job, &ds, cancel, passwords, run).await;
+        return perform_disk_backup(sink, job, &ds, cancel, passwords, keys, run).await;
     }
     let count = volumes.len() as u64;
     let mut totals = backup_run::VolumeTotals::new(volumes.len());
@@ -4027,7 +4028,7 @@ async fn perform_backup(
             passphrase: passwords.resolve(&token),
             image_format: job.image_format,
             source_disk,
-            encryption: None,
+            encryption: keys.clone(),
             zstd_level: job.zstd_level(),
         };
         let image_name = image_path
@@ -4111,8 +4112,9 @@ async fn perform_backup(
             let scope = backup_run::verify_scope(job);
             let handle = {
                 let progress = progress.clone();
+                let keys = keys.clone();
                 tokio::task::spawn_blocking(move || {
-                    backup_run::verify_copy(&progress, &image, None, scope)
+                    backup_run::verify_copy(&progress, &image, keys.as_ref(), scope)
                 })
             };
             match engine_watch::wait_engine(handle, &watch, cancel, sink).await {
@@ -4143,7 +4145,7 @@ async fn perform_backup(
         }
     }
 
-    totals.finish(run, fatal, job, None)
+    totals.finish(run, fatal, job, keys.as_ref())
 }
 
 /// A device-mapper snapshot whose store the destination could not keep
@@ -4183,6 +4185,7 @@ async fn perform_disk_backup(
     ds: &DiskSourceSpec,
     cancel: &Arc<AtomicBool>,
     passwords: &Arc<dyn PasswordResolver>,
+    keys: Option<own_backup_backup::seal::context::ArchiveKeys>,
     mut run: JobRun,
 ) -> JobRun {
     use own_backup_backup::engine_linux::{
@@ -4268,8 +4271,7 @@ async fn perform_disk_backup(
         block_size: DEFAULT_BLOCK_SIZE,
         image_format: job.image_format,
         job_id: Some(job.id.clone()),
-        // The local key store is Windows-only: an encrypted job fails earlier.
-        encryption: None,
+        encryption: keys.clone(),
         exclusion_patterns_windows: excl_win,
         exclusion_patterns_linux: excl_linux,
         kind: match plan.kind {
@@ -4364,8 +4366,9 @@ async fn perform_disk_backup(
         let scope = backup_run::verify_scope(job);
         let handle = {
             let progress = progress.clone();
+            let keys = keys.clone();
             tokio::task::spawn_blocking(move || {
-                backup_run::verify_copy(&progress, &image, None, scope)
+                backup_run::verify_copy(&progress, &image, keys.as_ref(), scope)
             })
         };
         match engine_watch::wait_engine(handle, &watch, cancel, sink).await {
@@ -4393,7 +4396,7 @@ async fn perform_disk_backup(
         return run;
     }
     let protected = [(tag, image_path)];
-    backup_run::retain_and_consolidate(&mut run, job, &protected, None);
+    backup_run::retain_and_consolidate(&mut run, job, &protected, keys.as_ref());
     run
 }
 
@@ -6867,6 +6870,112 @@ mod linux_run_tests {
         assert_eq!(reasons.len(), 1, "{reasons:?}");
         assert!(run.error.contains(&reasons[0]), "{}", run.error);
         assert_eq!(std::fs::read_dir(&fresh).unwrap().count(), 0);
+    }
+
+    /// An encrypted job on Linux (decision 6): with the keys the service
+    /// opened before the run, every version is an `.obk` — a full, then an
+    /// increment over it, consolidated in their window — checked with those
+    /// keys, and the newest restores only with them.
+    #[tokio::test]
+    async fn an_encrypted_chain_is_written_checked_and_restored_on_linux() {
+        use own_backup_backup::seal::context::ArchiveKeys;
+        use own_backup_backup::seal::keypair::{JobKeyPair, KdfParams, SealedPrivateKey};
+        use std::os::unix::fs::FileExt;
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("volume.img");
+        let data: Vec<u8> = (0..4u32 << 20).map(|i| (i % 239) as u8).collect();
+        std::fs::write(&src, &data).unwrap();
+        let dest = dir.path().join("backups");
+        std::fs::create_dir(&dest).unwrap();
+
+        let pair = JobKeyPair::generate().unwrap();
+        let recovery = own_backup_backup::seal::recovery::RecoveryKey::generate().unwrap();
+        let portable = SealedPrivateKey::seal(
+            "linux-obk",
+            &pair,
+            "archive password",
+            &recovery,
+            &KdfParams {
+                algorithm: "argon2id".into(),
+                m_kib: 64 * 1024,
+                t: 3,
+                p: 1,
+            },
+        )
+        .unwrap();
+        let keys = ArchiveKeys::from_private(portable.clone(), pair.private.clone()).unwrap();
+        let mut job = Job {
+            id: "linux-obk".into(),
+            name: "linux obk".into(),
+            source: src.to_str().unwrap().into(),
+            dest_folder: dest.to_str().unwrap().into(),
+            image_format: own_backup_common::types::ImageFormat::Qcow2,
+            archive_encryption: Some(crate::backup_encryption::ArchiveEncryption {
+                portable_key: portable,
+                local_key: serde_json::from_value(serde_json::json!({"id": uuid::Uuid::new_v4()}))
+                    .unwrap(),
+            }),
+            ..Default::default()
+        };
+        job.scheme.method = "incremental".into();
+        job.scheme.only_incremental = true;
+        job.scheme.rolling_incrementals = Some(1);
+        job.exclusions.enabled = false;
+        job.advanced.validate_after = true;
+        assert!(crate::capabilities::refusals(&job, &crate::capabilities::linux()).is_empty());
+        let sink: Arc<dyn EventSink> = Arc::new(Phases::default());
+        let passwords: Arc<dyn PasswordResolver> = Arc::new(NoPasswords);
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        let mut last = None;
+        for n in 0..3u64 {
+            if n > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(1100));
+                let f = std::fs::OpenOptions::new().write(true).open(&src).unwrap();
+                f.write_all_at(&[0xA0 + n as u8; 1000], n << 20).unwrap();
+            }
+            let run =
+                perform_backup(&sink, &job, &cancel, None, &passwords, Some(keys.clone())).await;
+            assert_eq!(run.status, "success", "run {n}: {}", run.error);
+            assert!(run.image_path.ends_with(".obk"), "{}", run.image_path);
+            last = Some(run);
+        }
+        let last = last.unwrap();
+        assert_eq!(last.backup_kind, "incremental");
+        assert_eq!(last.consolidated_increments, 1, "the window holds one");
+        for entry in std::fs::read_dir(&dest).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            assert!(name.ends_with(".obk"), "only encrypted images: {name}");
+        }
+        // Nothing of the source is in the folder in the clear.
+        let probe = &data[(2 << 20) + 4096..(2 << 20) + 8192];
+        for entry in std::fs::read_dir(&dest).unwrap() {
+            let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+            assert!(!bytes.windows(probe.len()).any(|w| w == probe));
+        }
+
+        let target = dir.path().join("restored.img");
+        std::fs::File::create(&target)
+            .unwrap()
+            .set_len(data.len() as u64)
+            .unwrap();
+        let restore = |encryption| {
+            own_backup_backup::engine_linux::restore_volume(
+                &own_backup_backup::engine_linux::LinuxRestoreRequest {
+                    image_path: PathBuf::from(&last.image_path),
+                    target: target.to_str().unwrap().into(),
+                    verify_checksums: true,
+                    encryption,
+                },
+                |_| Ok(()),
+            )
+        };
+        assert!(restore(None).is_err(), "not without its keys");
+        let by_password =
+            ArchiveKeys::from_image_password(Path::new(&last.image_path), "archive password")
+                .unwrap();
+        restore(Some(by_password)).unwrap();
+        assert!(std::fs::read(&target).unwrap() == std::fs::read(&src).unwrap());
     }
 
     /// A job with its default exclusion rules is run, not refused (plan L3):

@@ -44,6 +44,10 @@ pub struct BackupCapabilities {
     pub after_backup: bool,
     /// Encrypted archives (OBK): needs the machine's key store.
     pub archive_encryption: bool,
+    /// What keeps that key store's keys on this machine: `dpapi` (Windows),
+    /// `tpm2` or `host` (Linux, `systemd-creds`); empty when there is no
+    /// store — `archive_encryption` is then false ([`with_key_store`]).
+    pub archive_key_protection: &'static str,
     /// Event triggers the scheduler fires (`schedule.event_trigger`).
     pub schedule_events: Vec<&'static str>,
     /// `schedule.wake_to_run`: a wake timer is armed for the next slot.
@@ -77,6 +81,7 @@ pub fn windows() -> BackupCapabilities {
         low_priority: true,
         after_backup: true,
         archive_encryption: true,
+        archive_key_protection: "dpapi",
         schedule_events: vec!["dest_connected", "logon", "logoff", "startup"],
         wake_to_run: true,
         keeps_awake: true,
@@ -106,9 +111,13 @@ pub fn linux() -> BackupCapabilities {
         low_priority: true,
         // logind: `Suspend`, `ScheduleShutdown` (stage 4).
         after_backup: true,
-        // No key store on Linux yet: `archive_keys_for_run` and
-        // `BeginArchiveEncryption` refuse (decision 6).
-        archive_encryption: false,
+        // The key store (`seal/local_linux.rs`, machine key through
+        // `systemd-creds`) together with the key directory left out of every
+        // copy by the engine (decision 6/E4). Whether this machine has a
+        // store is the service's to say ([`with_key_store`]); a run whose keys
+        // cannot be opened says so (`archive_keys_for_run`).
+        archive_encryption: true,
+        archive_key_protection: "",
         // logon/logoff are logind's session signals, heard by the installed
         // engine (`logind_events`); the destination is watched in the mount
         // table, startup is a timer.
@@ -118,6 +127,23 @@ pub fn linux() -> BackupCapabilities {
         // logind `sleep` block inhibitor (`power_linux::KeepAwake`).
         keeps_awake: true,
     }
+}
+
+/// `caps` as this machine's key store answers: what protects it, or — when
+/// there is no store (no `systemd-creds`, not the installed service, the boot
+/// medium) — no encrypted archives offered at all.
+pub fn with_key_store(
+    mut caps: BackupCapabilities,
+    protection: own_backup_common::Result<&'static str>,
+) -> BackupCapabilities {
+    match protection {
+        Ok(p) => caps.archive_key_protection = p,
+        Err(_) => {
+            caps.archive_encryption = false;
+            caps.archive_key_protection = "";
+        }
+    }
+    caps
 }
 
 /// The container a chain of this job would be written in, by the names of
@@ -241,9 +267,10 @@ mod tests {
     }
 
     /// The Linux table refuses exactly what its engine does not do: a VHDX
-    /// chain, a disk named by number, encryption — and nothing else.
+    /// chain, a disk named by number — and nothing else. Encrypted archives
+    /// are offered once the key store is (decision 6/E4).
     #[test]
-    fn linux_refuses_vhdx_chains_numbered_disks_and_encryption_only() {
+    fn linux_refuses_vhdx_chains_and_numbered_disks_only() {
         let caps = linux();
         let mut j = job();
         j.scheme.method = "incremental".into();
@@ -277,6 +304,24 @@ mod tests {
             refusals(&j, &caps),
             [tr!("lib.linux_unsupported_whole_disk").into_owned()]
         );
+    }
+
+    /// Without a key store the window is not offered encryption; with one it
+    /// is told what protects it.
+    #[test]
+    fn the_key_store_decides_whether_encryption_is_offered() {
+        let without = with_key_store(
+            linux(),
+            Err(own_backup_common::OwnBackupError::Encryption(
+                "no systemd-creds".into(),
+            )),
+        );
+        assert!(!without.archive_encryption);
+        assert_eq!(without.archive_key_protection, "");
+        let with = with_key_store(linux(), Ok("tpm2"));
+        assert!(with.archive_encryption);
+        assert_eq!(with.archive_key_protection, "tpm2");
+        assert!(with.chain_formats.contains(&"obk"));
     }
 
     /// What the window is told it may offer is what a run accepts: a job

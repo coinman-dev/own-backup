@@ -1147,6 +1147,10 @@ pub struct BegunArchiveEncryption {
     pub recovery_key: String,
     pub fingerprint: String,
     pub job_id: String,
+    /// What keeps this machine's authorization: `dpapi`, `tpm2` or `host`;
+    /// empty from an older service.
+    #[serde(default)]
+    pub key_protection: String,
 }
 
 /// What a copy says about itself without any key.

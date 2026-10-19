@@ -514,5 +514,6 @@
   "polkit.unavailable": {
     "ru": "Отказано: для этого действия (%{action}) нужно подтверждение администратора, но polkit недоступен (%{error}). Выполните действие от root (sudo own-backup-cli …).",
     "en": "Denied: this action (%{action}) needs an administrator's confirmation, but polkit is unavailable (%{error}). Run it as root (sudo own-backup-cli …)."
-  }
+  },
+  "grpc_server.archive_key_store_unavailable": {"ru": "Шифрование копий недоступно: у службы нет хранилища ключей (%{error}). Ключ восстановления не выдан — без хранилища разрешение нельзя было бы завершить.", "en": "Archive encryption is unavailable: the service has no key store (%{error}). No recovery key was issued — without the store the authorization could never be completed."}
 }

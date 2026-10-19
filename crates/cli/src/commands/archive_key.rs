@@ -149,6 +149,14 @@ pub async fn run(args: ArchiveKeyArgs) -> Result<()> {
     println!();
     println!("  Он показывается ОДИН раз и нигде не сохраняется.");
     println!("  Отпечаток ключа задания: {}", begun.fingerprint);
+    match begun.key_protection.as_str() {
+        "tpm2" => println!("  На этой машине ключ задания защищён TPM2 (systemd-creds)."),
+        "host" => println!(
+            "  На этой машине ключ задания защищён ключом хоста (systemd-creds): TPM2 нет."
+        ),
+        "dpapi" => println!("  На этой машине ключ задания защищён DPAPI."),
+        _ => {}
+    }
     println!();
 
     let echo = ask_secret("  Введите ключ восстановления для подтверждения: ")
