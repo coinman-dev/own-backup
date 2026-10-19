@@ -494,6 +494,35 @@
     "en": "the partition manager refused the new layout of disk %{disk}: %{error}. Usually this means one of the affected volumes is in use — close the files open on it and try again."
   },
 
+  "disk_session_linux.sector_mismatch": {
+    "ru": "план рассчитан на сектор %{planned} Б, а у диска %{disk} — %{actual} Б",
+    "en": "the plan assumes %{planned} B sectors, but disk %{disk} has %{actual} B"
+  },
+  "disk_session_linux.not_a_disk": {
+    "ru": "%{disk} — не целый диск: таблицу разделов можно записать только на диск, а не на раздел или файл",
+    "en": "%{disk} is not a whole disk: a partition table can only be written to a disk, not to a partition or a file"
+  },
+  "disk_session_linux.busy": {
+    "ru": "диск %{disk} занят — на нём что-то смонтировано, включено как swap или используется LVM, md или LUKS (%{error}). Отмонтируйте и закройте это и повторите.",
+    "en": "disk %{disk} is busy — something on it is mounted, used as swap or held by LVM, md or LUKS (%{error}). Unmount or close it and try again."
+  },
+  "disk_session_linux.lock_failed": {
+    "ru": "не удалось заблокировать диск %{disk} от udev: %{error}",
+    "en": "could not lock disk %{disk} against udev: %{error}"
+  },
+  "disk_session_linux.reread_failed": {
+    "ru": "ядро не приняло новую таблицу разделов диска %{disk}: %{error}",
+    "en": "the kernel did not accept the new partition table of disk %{disk}: %{error}"
+  },
+  "disk_session_linux.partition_busy": {
+    "ru": "ядро не обновило раздел %{number} диска %{disk}: %{error}. Раздел открыт другой программой — закройте её и повторите.",
+    "en": "the kernel did not update partition %{number} of disk %{disk}: %{error}. Another program has the partition open — close it and try again."
+  },
+  "disk_session_linux.udev_timeout": {
+    "ru": "разделы диска %{disk} не появились за %{seconds} с: %{pending}",
+    "en": "the partitions of disk %{disk} did not appear within %{seconds} s: %{pending}"
+  },
+
   "windows_unlock_win.wrong_secret": {
     "ru": "пароль или ключ не подходит этому тому",
     "en": "the password or key does not match this volume"

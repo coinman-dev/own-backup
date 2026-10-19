@@ -109,6 +109,14 @@ impl LinuxRawDevice {
             .map_err(|e| OwnBackupError::Device(format!("write({}) at {offset}: {e}", self.path)))
     }
 
+    /// Another descriptor of the same open file (for ioctls and `flock`, whose
+    /// locks belong to the open file, not the descriptor).
+    pub fn try_clone_file(&self) -> Result<File> {
+        self.file
+            .try_clone()
+            .map_err(|e| OwnBackupError::Device(format!("dup({}): {e}", self.path)))
+    }
+
     /// Flush written data to the device.
     pub fn flush(&mut self) -> Result<()> {
         self.file
