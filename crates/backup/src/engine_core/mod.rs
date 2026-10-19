@@ -10,6 +10,8 @@
 pub(crate) mod chain;
 // The whole-disk building blocks run on Windows only until phase E6.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) mod disk;
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) mod disk_image;
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) mod disk_prepare;
