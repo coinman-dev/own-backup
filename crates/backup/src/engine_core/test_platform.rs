@@ -150,6 +150,7 @@ pub(crate) struct TestSession {
     snapshot: bool,
     frozen: bool,
     completed: bool,
+    key_store: bool,
     /// Not `Send`, like a VSS session: the engine must not need it to be.
     _not_send: PhantomData<*const ()>,
 }
@@ -180,6 +181,10 @@ impl SourceSession for TestSession {
         self.completed = true;
         Some(Ok(()))
     }
+
+    fn must_exclude_key_store(&self) -> bool {
+        self.key_store
+    }
 }
 
 /// The platform itself: which sources may be held, and how, and where the
@@ -189,6 +194,8 @@ pub(crate) struct TestPlatform {
     sources: HashMap<String, TestSource>,
     /// Partition device → (disk number, byte offset).
     slots: HashMap<String, (u32, u64)>,
+    /// Sources said to hold the service's key directory.
+    key_stores: std::collections::HashSet<String>,
 }
 
 impl TestPlatform {
@@ -199,6 +206,12 @@ impl TestPlatform {
     /// Allow `source` to be held, as `how`. Any other source is refused.
     pub(crate) fn source(mut self, source: &str, how: TestSource) -> Self {
         self.sources.insert(source.to_string(), how);
+        self
+    }
+
+    /// Say that `source` holds the service's key directory.
+    pub(crate) fn key_store_on(mut self, source: &str) -> Self {
+        self.key_stores.insert(source.to_string());
         self
     }
 
@@ -235,6 +248,7 @@ impl EnginePlatform for TestPlatform {
             TestSource::Snapshot { .. } => (source.to_string(), false, false),
         };
         Ok(TestSession {
+            key_store: self.key_stores.contains(source),
             read_path,
             snapshot,
             frozen,

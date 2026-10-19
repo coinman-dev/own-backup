@@ -446,3 +446,45 @@ fn a_partition_in_another_slot_is_refused_and_leaves_nothing() {
     assert!(matches!(err, Some(OwnBackupError::Config(_))), "{err:?}");
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }
+
+/// Decision 6/E4 in a whole disk: the partition holding the service's key
+/// directory is copied with it left out though the job has no rules; when
+/// that partition cannot be walked, the disk is not copied at all.
+#[test]
+fn the_key_directory_is_left_out_of_a_whole_disk_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(ext4) = ext4_partition(300_000) else {
+        return;
+    };
+    let disk = TestDisk::new(fat16(&[b'1'; 20_000]), ext4);
+    // Walked: the rule runs on the ext4 partition (nothing there carries the
+    // name) and the summary says the directory is not in the copy.
+    let platform = disk
+        .platform(TestSource::Direct { frozen: true })
+        .key_store_on(&disk.data);
+    let image = dir.path().join("disk.qcow2");
+    let summary = run(&platform, &disk.request(&image, ImageFormat::Qcow2)).unwrap();
+    assert!(summary.key_store_excluded);
+    let data = image_bytes(&image, disk.data_offset(), disk.data_bytes.len());
+    assert_same(&data, &disk.data_bytes, "nothing else is touched");
+
+    // Not held still: refused, nothing published.
+    let platform = disk
+        .platform(TestSource::Direct { frozen: false })
+        .key_store_on(&disk.data);
+    let refused = dir.path().join("refused.qcow2");
+    let e = run(&platform, &disk.request(&refused, ImageFormat::Qcow2))
+        .err()
+        .expect("refused");
+    assert!(e.to_string().contains(&disk.data), "{e}");
+    assert!(!refused.exists());
+
+    // The key directory on the FAT16 ESP, which no scanner reads: refused.
+    let platform = disk
+        .platform(TestSource::Direct { frozen: true })
+        .key_store_on(&disk.esp);
+    let e = run(&platform, &disk.request(&refused, ImageFormat::Qcow2))
+        .err()
+        .expect("refused");
+    assert!(e.to_string().contains(&disk.esp), "{e}");
+}

@@ -96,6 +96,17 @@ pub(crate) trait SourceSession {
     /// when there was nothing to complete; an error only means the snapshot
     /// could not be released cleanly — the data is already copied.
     fn complete(&mut self) -> Option<Result<()>>;
+
+    /// The service's key directory is on this source and holds something
+    /// (decision 6, `seal/LOCAL.md` E4): the copy must leave it out whatever
+    /// the job's rules say — exclusions disabled included — or not be made.
+    /// The engine adds the rule itself and refuses a copy the rule cannot be
+    /// applied to (sector by sector, a source not held still, a filesystem no
+    /// scanner reads). Linux asks the mount table; Windows keeps its own
+    /// handling, and a test session is told.
+    fn must_exclude_key_store(&self) -> bool {
+        false
+    }
 }
 
 /// A window onto the device that holds an encrypted volume's ciphertext.

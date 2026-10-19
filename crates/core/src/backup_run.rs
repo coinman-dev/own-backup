@@ -306,6 +306,9 @@ impl VolumeTotals {
         self.all_smart &= summary.smart_mode;
         run.vss_used |= summary.vss_used;
         run.categories = merge_categories(run.categories.take(), summary.categories);
+        if summary.key_store_excluded {
+            note_key_store_excluded(run);
+        }
         // One line per volume that went unwalked; a run over three
         // volumes must not report the reason of whichever came last.
         if let Some(why) = summary.file_scan_skipped {
@@ -416,6 +419,15 @@ impl VolumeTotals {
 /// Record a finished whole-disk copy in its run; returns the image the
 /// engine published. `disk_token` is the disk's file-name token
 /// ([`crate::DiskSourceSpec::file_tag`]).
+/// The service's key directory is not in this copy — not one of the job's
+/// rules, so the summary says it (decision 6/E4). Once per run.
+fn note_key_store_excluded(run: &mut JobRun) {
+    let note = own_backup_common::tr!("lib.key_store_excluded").into_owned();
+    if !run.notes.contains(&note) {
+        run.notes.push(note);
+    }
+}
+
 pub(crate) fn record_disk(
     run: &mut JobRun,
     job: &Job,
@@ -441,6 +453,9 @@ pub(crate) fn record_disk(
     run.categories = summary.categories;
     run.file_scan_skipped = summary.file_scan_skipped.unwrap_or_default();
     run.excluded_entries_kept = summary.excluded_entries_kept.unwrap_or_default();
+    if summary.key_store_excluded {
+        note_key_store_excluded(run);
+    }
     run.duration_secs = summary.duration.as_secs_f64();
     // Record what was ACTUALLY produced (the engine may have fallen back
     // to a full when the parent chain was unusable) so the next run plans

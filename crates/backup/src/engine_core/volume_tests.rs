@@ -584,3 +584,119 @@ fn backup_volume_refused_at_publication_leaves_no_image() {
         names_in(dir.path())
     );
 }
+
+/// An ext4 volume made by `mke2fs -d` with the service's key directory in it,
+/// in memory; `None` without the tool.
+#[cfg(target_os = "linux")]
+fn ext4_with_key_store() -> Option<Vec<u8>> {
+    let dir = tempfile::tempdir().ok()?;
+    let src = dir.path().join("src");
+    let keys = src
+        .join("var/lib/own-backup")
+        .join(crate::seal::local::KEY_DIRECTORY_NAME);
+    std::fs::create_dir_all(&keys).ok()?;
+    std::fs::write(keys.join("machine.cred"), [0x6Bu8; 8192]).ok()?;
+    std::fs::write(src.join("var/lib/own-backup/jobs.json"), [0x4Au8; 4096]).ok()?;
+    let img = dir.path().join("fs.img");
+    let out = std::process::Command::new("mke2fs")
+        .args(["-q", "-F", "-t", "ext4", "-b", "4096", "-d"])
+        .arg(&src)
+        .arg(&img)
+        .arg("2048")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    std::fs::read(img).ok()
+}
+
+/// Decision 6/E4: the service's key directory is left out of the copy of its
+/// volume although the job has no exclusion rules at all, and the summary
+/// says so; the rest of the volume is copied as usual.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_key_directory_is_left_out_whatever_the_rules() {
+    let Some(volume) = ext4_with_key_store() else {
+        eprintln!("skipped: no mke2fs");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let source = unique_path("root-with-keys");
+    register_device(&source, volume.clone(), 512);
+    let platform = TestPlatform::new()
+        .source(&source, TestSource::Direct { frozen: true })
+        .key_store_on(&source);
+    let image = dir.path().join("full.qcow2");
+    let summary = run(&platform, &request(&source, &image, ImageFormat::Qcow2));
+    assert!(summary.key_store_excluded);
+    assert!(summary.excluded_files >= 1, "{}", summary.excluded_files);
+    assert_eq!(summary.file_scan_skipped, None);
+    let copied = volume_in(&image, volume.len());
+    let key = [0x6Bu8; 4096];
+    assert!(
+        volume.windows(4096).any(|w| w == key),
+        "the fixture holds the key bytes"
+    );
+    assert!(
+        !copied.chunks(4096).any(|w| w == key),
+        "the key bytes are not in the copy"
+    );
+    assert!(
+        copied.chunks(4096).any(|w| w == [0x4Au8; 4096]),
+        "the rest of the volume is"
+    );
+
+    // The same volume not on the service's machine (nothing says the key
+    // store is on it) and no rules: copied as it is — the rule is the
+    // engine's, for this machine's key directory.
+    let other = dir.path().join("other.qcow2");
+    let plain = TestPlatform::new().source(&source, TestSource::Direct { frozen: true });
+    let summary = run(&plain, &request(&source, &other, ImageFormat::Qcow2));
+    assert!(!summary.key_store_excluded);
+}
+
+/// A copy the rule cannot be applied to is not made: sector by sector, a
+/// source that does not hold still, a filesystem no scanner reads.
+#[test]
+fn a_copy_that_would_keep_the_key_directory_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let fat = Fat32::build();
+    let refused = |source: &str, how: TestSource, all_sectors: bool| {
+        let platform = TestPlatform::new().source(source, how).key_store_on(source);
+        let image = dir.path().join(format!("{}.qcow2", unique_path("refused")));
+        let req = VolumeBackupRequest {
+            all_sectors,
+            ..request(source, &image, ImageFormat::Qcow2)
+        };
+        let e = backup_volume_inner(&platform, &req, None, &req.image_path, |_| Ok(()))
+            .err()
+            .expect("refused");
+        assert!(!image.exists(), "nothing published");
+        e.to_string()
+    };
+    let still = unique_path("fat32-keys");
+    register_device(&still, fat.image.clone(), 512);
+    let e = refused(&still, TestSource::Direct { frozen: true }, true);
+    assert!(
+        e.contains(&*own_backup_common::tr!("engine_win.skip_sector_mode")),
+        "{e}"
+    );
+    let e = refused(&still, TestSource::Direct { frozen: false }, false);
+    assert!(
+        e.contains(&*own_backup_common::tr!("engine.skip_not_frozen")),
+        "{e}"
+    );
+    let fat16 = unique_path("fat16-keys");
+    register_device(&fat16, fat16_volume(b"keys"), 512);
+    let e = refused(&fat16, TestSource::Direct { frozen: true }, false);
+    assert!(e.contains(&fat16), "{e}");
+
+    // Held still and FAT32: the rule runs (it matches nothing there).
+    let platform = TestPlatform::new()
+        .source(&still, TestSource::Direct { frozen: true })
+        .key_store_on(&still);
+    let image = dir.path().join("fat32.qcow2");
+    let summary = run(&platform, &request(&still, &image, ImageFormat::Qcow2));
+    assert!(summary.key_store_excluded && summary.categories.is_some());
+}

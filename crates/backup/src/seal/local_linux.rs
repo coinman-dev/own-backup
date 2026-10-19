@@ -683,6 +683,70 @@ impl crate::secrets::SecretStore for MachineKeySecrets {
     }
 }
 
+/// Data directories whose key directory the engine must keep out of every
+/// copy, besides the configured one: the service registers its own at start
+/// (it may run with another `--data-dir`).
+static KEY_STORE_DATA_DIRS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Tell the engine where a key store lives (the service, at start).
+pub fn register_data_dir(data_dir: &Path) {
+    if let Ok(mut dirs) = KEY_STORE_DATA_DIRS.lock() {
+        if !dirs.iter().any(|d| d == data_dir) {
+            dirs.push(data_dir.to_path_buf());
+        }
+    }
+}
+
+/// Does the volume `source` hold a key directory of this machine that has
+/// anything in it? Decision 6/E4: such a volume is copied only with that
+/// directory left out, whatever the job's rules say.
+///
+/// Answered by where the directory's bytes lie (`source_identity`: the same
+/// extent comparison as "destination on the source", through LUKS, LVM and
+/// partitions alike). When that cannot be told, the answer is yes: the cost
+/// of a wrong yes is one scan for a name, of a wrong no a copy carrying the
+/// keys.
+pub fn key_store_on_source(source: &str) -> bool {
+    let mut dirs: Vec<PathBuf> = KEY_STORE_DATA_DIRS
+        .lock()
+        .map(|d| d.clone())
+        .unwrap_or_default();
+    let configured = own_backup_common::config::AppConfig::load_or_default().data_dir;
+    if !dirs.contains(&configured) {
+        dirs.push(configured);
+    }
+    key_store_in(source, &dirs)
+}
+
+/// [`key_store_on_source`] over the data directories given.
+fn key_store_in(source: &str, dirs: &[PathBuf]) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    // A volume is a block device. A regular file read as a source (an image
+    // the CLI is pointed at, the engine's own tests) is not where this
+    // machine's key directory lives, and must not be refused for it.
+    if std::fs::metadata(source).is_ok_and(|m| !m.file_type().is_block_device()) {
+        return false;
+    }
+    dirs.iter()
+        .map(|d| d.join(KEY_DIRECTORY_NAME))
+        .filter(|d| holds_anything(d))
+        .any(|d| {
+            let Some(path) = d.to_str() else { return true };
+            !matches!(
+                crate::source_identity::where_the_destination_sits(&[source.to_string()], path),
+                crate::source_identity::DestPlacement::Clear
+            )
+        })
+}
+
+/// An entry of any kind in `dir`; an unreadable directory counts as full.
+fn holds_anything(dir: &Path) -> bool {
+    match std::fs::read_dir(dir) {
+        Ok(mut entries) => entries.next().is_some(),
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
 /// What protects (or would protect) this machine's key store: `tpm2` or
 /// `host`; an error says why there is no store at all.
 pub fn protection(data_dir: &Path) -> Result<KeyProtection> {
@@ -910,7 +974,6 @@ pub(super) mod tests {
 
     #[test]
     fn job_keys_and_volume_passwords_are_sealed_under_the_machine_key() {
-        use crate::secrets::SecretStore;
         let data = data_dir();
         let creds = FakeCreds::new(8);
         let b = backend(data.path(), &creds);
@@ -928,6 +991,23 @@ pub(super) mod tests {
         assert_eq!(&*secrets.unprotect(&sealed).unwrap(), b"luks passphrase");
         // The two purposes do not share a key.
         assert!(b.unprotect(SECRET_AAD, &sealed).is_err());
+    }
+
+    /// A key directory with something in it, on a source that cannot be
+    /// placed: the engine must treat it as on that source. An empty one, or
+    /// none, asks for nothing.
+    #[test]
+    fn a_key_store_that_cannot_be_placed_counts_as_on_the_source() {
+        // Not registered: other tests run the engine in this process.
+        let data = data_dir();
+        let dirs = [data.path().to_path_buf()];
+        let nowhere = "/dev/own-backup-test-no-such-device";
+        assert!(!key_store_in(nowhere, &dirs), "no key directory yet");
+        let root = data.path().join(KEY_DIRECTORY_NAME);
+        std::fs::create_dir(&root).unwrap();
+        assert!(!key_store_in(nowhere, &dirs), "an empty one holds nothing");
+        std::fs::write(root.join(MACHINE_KEY_FILE), b"x").unwrap();
+        assert!(key_store_in(nowhere, &dirs), "fail closed");
     }
 
     /// The real `systemd-creds`, host key: only as root, where it is present.

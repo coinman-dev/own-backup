@@ -33,7 +33,7 @@ mod platform;
 pub use platform::PrivateSecretDatabase;
 
 #[cfg(target_os = "linux")]
-pub use platform::{KeyProtection, MACHINE_KEY_FILE};
+pub use platform::{key_store_on_source, register_data_dir, KeyProtection, MACHINE_KEY_FILE};
 
 pub const KEY_DIRECTORY_NAME: &str = ".own-backup-service-keys";
 pub(super) const MAX_LOCAL_BLOB: usize = 16 * 1024;

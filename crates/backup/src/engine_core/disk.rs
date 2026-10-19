@@ -175,6 +175,9 @@ fn backup_disk_inner<P: DiskPlatform>(
     // Partitions whose files nobody walked, each with its reason (see
     // `PreparedMap::skipped`).
     let mut scan_skips: Vec<String> = Vec::new();
+    // The service key directory was on one of the partitions and is not in
+    // the copy (decision 6/E4).
+    let mut key_store_excluded = false;
     for p in &req.partitions {
         let entry = layout
             .partitions
@@ -215,6 +218,18 @@ fn backup_disk_inner<P: DiskPlatform>(
         // VSS for a live lettered volume; else read the source directly.
         let session = platform.open_partition_session(&source)?;
         let read_path = session.read_path().to_string();
+        // The service's key directory on this partition is left out whatever
+        // the job's rules say (decision 6/E4), as in a volume copy.
+        let key_store = session.must_exclude_key_store();
+        let with_key_store = |list: &Vec<String>| -> Vec<String> {
+            if key_store && list.is_empty() {
+                vec![crate::seal::local::KEY_DIRECTORY_NAME.to_string()]
+            } else {
+                list.clone()
+            }
+        };
+        let patterns_windows = with_key_store(&req.exclusion_patterns_windows);
+        let patterns_linux = with_key_store(&req.exclusion_patterns_linux);
 
         // What sort of container this partition is, asked of its first sectors
         // and of nobody's memory. Read whether or not a passphrase came with
@@ -377,7 +392,7 @@ fn backup_disk_inner<P: DiskPlatform>(
                     b.params.clone(),
                 )),
                 req.block_size,
-                &req.exclusion_patterns_windows,
+                &patterns_windows,
                 // Своя обёртка: скану есть что сказать про общее число записей,
                 // и полоса «N из M» честнее бегущего счётчика.
                 |done, total| {
@@ -411,8 +426,8 @@ fn backup_disk_inner<P: DiskPlatform>(
                 &read_path,
                 req.block_size,
                 &luks,
-                &req.exclusion_patterns_windows,
-                &req.exclusion_patterns_linux,
+                &patterns_windows,
+                &patterns_linux,
                 // Снимок этого раздела взят, или мы на носителе и система
                 // офлайн — только тогда сырые метаданные не движутся.
                 session.frozen(),
@@ -423,6 +438,23 @@ fn backup_disk_inner<P: DiskPlatform>(
                 prepare_tick,
             ),
         }?;
+        if key_store {
+            // Only a scan that walked the files can have left the directory
+            // out; a partition copied whole, or one whose walk did not run,
+            // would carry the keys.
+            if pm.map.is_none() || pm.categories.is_none() || pm.skipped.is_some() {
+                let why = pm
+                    .skipped
+                    .clone()
+                    .unwrap_or_else(|| tr!("engine.key_store_not_walked").into_owned());
+                return Err(super::volume_exclusions::key_store_refusal(&source, &why));
+            }
+            key_store_excluded = true;
+            info!(
+                part = p.part_index,
+                "the service key directory is left out of this copy"
+            );
+        }
         let used = pm
             .map
             .unwrap_or_else(|| Box::new(AllUsedMap::new(volume_len.div_ceil(bs))));
@@ -1116,6 +1148,7 @@ fn backup_disk_inner<P: DiskPlatform>(
             Some(scan_skips.join("; "))
         },
         excluded_entries_kept,
+        key_store_excluded,
     })
 }
 

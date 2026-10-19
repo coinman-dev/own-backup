@@ -832,6 +832,10 @@ pub async fn run_main_loop(
     // which the engine leaves out of every copy — sealed by the key store's
     // machine key (`systemd-creds`). Passwords an older build sealed with
     // `secret.key` beside the public data move there first.
+    // Wherever this instance keeps its key directory, the engine leaves it
+    // out of every copy of the volume it is on (decision 6/E4).
+    #[cfg(target_os = "linux")]
+    own_backup_backup::seal::local::register_data_dir(&config.data_dir);
     #[cfg(target_os = "linux")]
     let passwords = if installed_service {
         let guard = own_backup_backup::seal::local::PrivateSecretDatabase::new(&config.data_dir)?;

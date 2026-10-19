@@ -148,6 +148,10 @@ pub struct VolumeBackupSummary {
     /// image, in words for the result screen — `None` when they were, or when
     /// there was nothing to delete. See `engine_win::DiskBackupSummary::excluded_entries_kept`.
     pub excluded_entries_kept: Option<String>,
+    /// The service's key directory was on this volume and is not in the copy
+    /// (decision 6/E4) — said in the summary, since it is not one of the
+    /// job's own rules.
+    pub key_store_excluded: bool,
 }
 
 /// Back up a volume into a fresh image, on `platform`.
@@ -343,6 +347,7 @@ fn backup_volume_inner<P: EnginePlatform>(
         removal_paths,
         in_image_exclusions,
         entries_kept,
+        key_store_excluded,
     } = resolve_exclusions(
         platform,
         &session,
@@ -728,6 +733,7 @@ fn backup_volume_inner<P: EnginePlatform>(
         categories,
         file_scan_skipped,
         excluded_entries_kept,
+        key_store_excluded,
     })
 }
 

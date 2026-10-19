@@ -73,6 +73,7 @@ impl LinuxPlatform {
             _ => None,
         };
         Ok(LinuxSession {
+            key_store: crate::seal::local::key_store_on_source(source),
             read_path,
             snapshot: matches!(mode, Some("lvm" | "dm")),
             frozen: own_backup_snapshot::linux::is_frozen(snapshot),
@@ -112,6 +113,9 @@ pub(crate) struct LinuxSession {
     snapshot: bool,
     frozen: bool,
     quiesced: bool,
+    /// The service's key directory lies on this source
+    /// (`seal::local::key_store_on_source`).
+    key_store: bool,
     /// The exclusive claim on an idle device, held until the session ends.
     _hold: Option<std::fs::File>,
 }
@@ -145,6 +149,10 @@ impl SourceSession for LinuxSession {
     /// the engine's last read of the source.
     fn complete(&mut self) -> Option<Result<()>> {
         None
+    }
+
+    fn must_exclude_key_store(&self) -> bool {
+        self.key_store
     }
 }
 

@@ -42,6 +42,9 @@ pub(crate) struct VolumeExclusions {
     /// their contents zeroed), in words for the result screen; `None` when
     /// every one of them was removed or none was left behind.
     pub(crate) entries_kept: Option<String>,
+    /// The service's key directory was on this source and is left out of
+    /// the copy (decision 6/E4).
+    pub(crate) key_store_excluded: bool,
 }
 
 /// Apply `req`'s exclusion rules to the source before the copy: the matched
@@ -57,6 +60,27 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
     mut progress: impl FnMut(&BackupProgress) -> Result<()>,
 ) -> Result<VolumeExclusions> {
     let (luks, bitlocker) = (&opened.luks, &opened.bitlocker);
+
+    // The service's key directory on this source is left out of the copy
+    // whatever the job's rules say (decision 6/E4): its rule is added here
+    // even to an empty list, and a copy it cannot be applied to is refused
+    // below instead of being made with the keys in it.
+    let key_store = session.must_exclude_key_store();
+    if key_store && req.all_sectors {
+        return Err(key_store_refusal(
+            &req.source,
+            &tr!("engine_win.skip_sector_mode"),
+        ));
+    }
+    let with_key_store = |list: &Vec<String>| -> Vec<String> {
+        if key_store && list.is_empty() {
+            vec![crate::seal::local::KEY_DIRECTORY_NAME.to_string()]
+        } else {
+            list.clone()
+        }
+    };
+    let patterns = with_key_store(&req.exclusion_patterns);
+    let patterns_linux = with_key_store(&req.exclusion_patterns_linux);
 
     // --- File exclusions (phase 3) ---
     // Both families achieve TRUE removal (like Acronis) — a restored/mounted
@@ -111,7 +135,7 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
         .fat_map
         .as_ref()
         .is_some_and(|f| f.filesystem == "FAT32" || f.filesystem == "exFAT")
-        && !req.exclusion_patterns.is_empty();
+        && !patterns.is_empty();
     // Matched paths for the post-copy true-removal pass (NTFS/ReFS): the FS
     // driver deletes them inside the finished image, so they vanish from the
     // catalog and their space is reclaimed — see `true_removal_win`.
@@ -124,7 +148,7 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
     // the session holds still) and rules written for it.
     let linux_fs = maps.ext_map.is_some() || maps.btrfs_map.is_some() || maps.xfs_map.is_some();
     if let Some(map) = maps.ntfs_map.as_mut() {
-        if !req.exclusion_patterns.is_empty() {
+        if !patterns.is_empty() {
             // Сначала по $MFT: последовательное чтение вместо обхода дерева.
             // На живом C: обход занимает 45 с, внутри образа на SMR — 16 минут;
             // чтение MFT того же образа — 15 с (замеры B0/B1, 2026-08-19). Плюс
@@ -139,11 +163,7 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
             // он идёт через файловую систему и переживает движение под собой.
             let frozen = session.frozen();
             let fast = if frozen {
-                scan_ntfs_exclusions_by_mft::<P::Dev>(
-                    read_path,
-                    &req.exclusion_patterns,
-                    &mut prepare_tick,
-                )
+                scan_ntfs_exclusions_by_mft::<P::Dev>(read_path, &patterns, &mut prepare_tick)
             } else {
                 Err(OwnBackupError::Device(
                     tr!("engine_win.source_not_frozen").into_owned(),
@@ -195,7 +215,7 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
                     match platform.walk_exclusions(
                         read_path,
                         map.cluster_size(),
-                        &req.exclusion_patterns,
+                        &patterns,
                         &mut walk_tick,
                     )? {
                         Some(mut scan) => {
@@ -213,7 +233,7 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
                         // says the rules were not applied rather than "0".
                         None => {
                             warn!(
-                                patterns = req.exclusion_patterns.len(),
+                                patterns = patterns.len(),
                                 reason = %e,
                                 "file exclusions were NOT applied on the source"
                             );
@@ -235,7 +255,7 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
         // Раньше здесь был отказ, а правила применялись потом, внутри готового
         // образа: скан 16 минут, зануление, merge и пересчёт сумм — прогон
         // 2026-08-19 пользователь отменил.
-        if req.exclusion_patterns.is_empty() {
+        if patterns.is_empty() {
             file_scan_skipped = Some(no_patterns());
         } else {
             let mut src = opened.open_source()?;
@@ -259,7 +279,7 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
                         excluded: None,
                     });
                 };
-                crate::ntfs_scan::scan_mft_with(&mut buffered, &req.exclusion_patterns, &mut report)
+                crate::ntfs_scan::scan_mft_with(&mut buffered, &patterns, &mut report)
             };
             match scan_result {
                 Ok(scan) => {
@@ -320,14 +340,14 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
         // разбор FAT читает каталоги прямо из расшифрованного окна — ему, как и
         // NTFS-сканеру, не нужен ни смонтированный том, ни дескриптор файла.
         // Раньше здесь был отказ: ветка исключений знала только NTFS.
-        if req.exclusion_patterns.is_empty() {
+        if patterns.is_empty() {
             file_scan_skipped = Some(no_patterns());
         } else {
             let mut src = opened.open_source()?;
             let mut walk_tick = |n: u64| prepare_tick(n, 0);
             match crate::fat_exclusions::scan_fat_exclusions(
                 src.as_mut(),
-                &req.exclusion_patterns,
+                &patterns,
                 &mut walk_tick,
             ) {
                 Ok(scan) => {
@@ -367,10 +387,9 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
         }
     } else if fat_exclusions {
         let mut dev = P::Dev::open_read(read_path)?;
-        let scan =
-            crate::fat_exclusions::scan_fat_exclusions(&mut dev, &req.exclusion_patterns, |n| {
-                prepare_tick(n, 0)
-            })?;
+        let scan = crate::fat_exclusions::scan_fat_exclusions(&mut dev, &patterns, |n| {
+            prepare_tick(n, 0)
+        })?;
         excluded_files = scan.files_excluded;
         excluded_bytes = scan.bytes_excluded;
         categories = Some(scan.categories);
@@ -388,14 +407,14 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
             // chains so the files vanish instead of remaining zero-filled ghosts.
             meta_patches = scan.patches;
         }
-    } else if linux_fs && !req.exclusion_patterns_linux.is_empty() {
+    } else if linux_fs && !patterns_linux.is_empty() {
         // ext, btrfs, xfs under the Linux rules — the scanners Windows runs on
         // these filesystems inside a whole disk (`partition_prep`), here on a
         // volume the session holds still (only then is there a map at all):
         // the matched files' entries removed where that is safe (Stage 2),
         // their exclusive data zeroed in any case (Stage 1).
         let mut dev = P::Dev::open_read(read_path)?;
-        let patterns = &req.exclusion_patterns_linux;
+        let patterns = &patterns_linux;
         let mut walk_tick = |n: u64| prepare_tick(n, 0);
         let scanned = if maps.ext_map.is_some() {
             crate::ext_exclusions::scan_ext_exclusions(&mut dev, patterns, &mut walk_tick)
@@ -474,7 +493,7 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
             tr!("engine_win.skip_bitlocker_locked").into_owned()
         } else if luks.is_some() {
             tr!("engine_win.skip_luks").into_owned()
-        } else if req.exclusion_patterns.is_empty() {
+        } else if patterns.is_empty() {
             no_patterns()
         } else {
             let fs = maps
@@ -483,9 +502,9 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
                 .unwrap_or_else(|| tr!("engine_win.other_filesystem").into_owned());
             tr!("engine_win.skip_fs_unsupported", fs = fs).into_owned()
         };
-        if !req.exclusion_patterns.is_empty() {
+        if !patterns.is_empty() {
             warn!(
-                patterns = req.exclusion_patterns.len(),
+                patterns = patterns.len(),
                 reason = %reason,
                 "file exclusions were NOT applied on the source"
             );
@@ -501,7 +520,7 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
     let encrypted_source = bitlocker.is_some() || luks.is_some();
     let in_image_exclusions = encrypted_source
         && !pre_copy_exclusions
-        && !req.exclusion_patterns.is_empty()
+        && !patterns.is_empty()
         && !req.all_sectors
         && maps.detected_fs.as_deref() == Some("NTFS");
 
@@ -515,7 +534,27 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
         ));
     }
 
+    if key_store {
+        let unapplied = file_scan_skipped
+            .clone()
+            .or_else(|| {
+                in_image_exclusions.then(|| tr!("engine.key_store_after_copy_only").into_owned())
+            })
+            // Every scan that walked the files says what it saw by type; none
+            // did when this is missing.
+            .or_else(|| {
+                categories
+                    .is_none()
+                    .then(|| tr!("engine.key_store_not_walked").into_owned())
+            });
+        if let Some(why) = unapplied {
+            return Err(key_store_refusal(&req.source, &why));
+        }
+        info!(source = %req.source, "the service key directory is left out of this copy");
+    }
+
     Ok(VolumeExclusions {
+        key_store_excluded: key_store,
         excluded_files,
         excluded_bytes,
         zero_ranges,
@@ -526,6 +565,19 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
         in_image_exclusions,
         entries_kept,
     })
+}
+
+/// The copy of `source` is refused: the service's key directory is on it and
+/// `why` the rule that leaves it out cannot be applied.
+pub(crate) fn key_store_refusal(source: &str, why: &str) -> OwnBackupError {
+    OwnBackupError::Config(
+        tr!(
+            "engine.key_store_not_excluded",
+            source = source,
+            reason = why
+        )
+        .into_owned(),
+    )
 }
 
 /// One Linux filesystem's exclusion scan, in the terms the pipeline uses.

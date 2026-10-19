@@ -87,6 +87,9 @@ pub struct DiskBackupSummary {
     /// behind, 746 paths stayed in that night's copy — and the run was a plain
     /// success, with the reason in the service log only.
     pub excluded_entries_kept: Option<String>,
+    /// The service's key directory was on one of the partitions and is not in
+    /// the copy (decision 6/E4).
+    pub key_store_excluded: bool,
 }
 
 /// Create a differencing CHILD target over `parent_path` for an incremental /

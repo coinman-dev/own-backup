@@ -610,5 +610,17 @@
   "windows_unlock_win.error": {
     "ru": "разблокировка средствами Windows: %{msg}",
     "en": "unlocking through Windows: %{msg}"
+  },
+  "engine.key_store_not_excluded": {
+    "ru": "Копия %{source} не сделана: на этом томе лежит каталог ключей службы, а его нельзя исключить из копии (%{reason}). Этот каталог исключается из любой копии всегда — копия, в которой он остался бы, не делается.",
+    "en": "%{source} was not copied: the service's key directory is on this volume and cannot be left out of the copy (%{reason}). That directory is always left out of every copy — a copy that would still hold it is not made."
+  },
+  "engine.key_store_after_copy_only": {
+    "ru": "исключения на этом томе применяются только внутри готового образа",
+    "en": "exclusions on this volume are applied only inside the finished image"
+  },
+  "engine.key_store_not_walked": {
+    "ru": "файлы тома не были просмотрены",
+    "en": "the volume's files were not walked"
   }
 }
