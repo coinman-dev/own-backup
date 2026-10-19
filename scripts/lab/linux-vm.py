@@ -2,7 +2,7 @@
 """Linux guest for the Linux stand: an Ubuntu 26.04 cloud image under QEMU/KVM.
 
     python3 -I scripts/lab/linux-vm.py prepare      # download + verify the base once
-    python3 -I scripts/lab/linux-vm.py up [--disks N] [--size G] [--bios]
+    python3 -I scripts/lab/linux-vm.py up [--disks N] [--size G] [--bios] [--tpm]
     python3 -I scripts/lab/linux-vm.py ssh -- <command...>   # exit code is the guest's
     python3 -I scripts/lab/linux-vm.py put <host-path> <guest-path>
     python3 -I scripts/lab/linux-vm.py get <guest-path> <host-path>
@@ -18,7 +18,8 @@ Layout (`~/lab/linux/`):
   `ob-data-N`, so `/dev/disk/by-id/virtio-ob-data-N` in the guest), a private
   OVMF VARS copy, the per-run ed25519 key and known_hosts, the cloud-init seed,
   `serial.log`, `qemu.log`, `qmp.sock`, `monitor.sock` (for qemu-monitor.py),
-  `budgets.jsonl` and `evidence/` for scenarios.
+  `budgets.jsonl` and `evidence/` for scenarios; with `--tpm`, the state of the
+  guest's TPM 2.0 (`tpm/`, an `swtpm` emulator the run starts beside QEMU).
 - `evidence/<run-id>/` — what `clean` keeps of a run before deleting it.
 
 The guest is Ubuntu 26.04 on purpose: binaries built on this host need its
@@ -496,6 +497,10 @@ def qemu_argv(cfg: dict, q: Qemu) -> list:
     else:
         argv += ['-drive', f'if=pflash,format=raw,unit=0,readonly=on,file={q.ovmf_code}',
                  '-drive', f"if=pflash,format=raw,unit=1,file={RUN / 'vars.fd'}"]
+    if cfg.get('tpm'):
+        argv += ['-chardev', f"socket,id=chrtpm,path={RUN / 'swtpm.sock'}",
+                 '-tpmdev', 'emulator,id=tpm0,chardev=chrtpm',
+                 '-device', 'tpm-tis,tpmdev=tpm0']
     argv += ['-drive', f"file={RUN / 'root.qcow2'},if=none,id=root,format=qcow2,discard=unmap",
              '-device', 'virtio-blk-pci,drive=root,bootindex=0']
     for n in range(1, cfg['disks'] + 1):
@@ -511,6 +516,28 @@ def qemu_argv(cfg: dict, q: Qemu) -> list:
              '-monitor', f"unix:{RUN / 'monitor.sock'},server=on,wait=off",
              '-device', 'virtio-rng-pci']
     return argv
+
+
+def start_swtpm() -> None:
+    """The guest's TPM 2.0: an `swtpm` emulator on a socket QEMU connects to.
+    Its state lives in the run (`tpm/`), so a key sealed to it survives the
+    run's reboots and goes with `clean`. It ends when QEMU disconnects."""
+    swtpm = shutil.which('swtpm')
+    if swtpm is None:
+        fail('--tpm needs swtpm on this host (apt install swtpm swtpm-tools)')
+    state = RUN / 'tpm'
+    state.mkdir(mode=0o700, exist_ok=True)
+    sock = RUN / 'swtpm.sock'
+    if sock.exists():
+        sock.unlink()
+    subprocess.run([swtpm, 'socket', '--tpm2', '--tpmstate', f'dir={state}',
+                    '--ctrl', f'type=unixio,path={sock}', '--terminate', '--daemon',
+                    '--log', f"file={RUN / 'swtpm.log'}"], check=True)
+    for _ in range(50):
+        if sock.exists():
+            return
+        time.sleep(0.1)
+    fail(f'swtpm did not open {sock} (see {RUN / "swtpm.log"})')
 
 
 def tail(path: Path, lines: int = 25) -> str:
@@ -562,6 +589,11 @@ def cmd_up(args) -> int:
     say('space: ' + show(row))
     if not reuse:
         cfg = create_run(args, q)
+    if args.tpm and not cfg.get('tpm'):
+        # A TPM added to a run later is a new one, and says so to the guest.
+        cfg['tpm'] = True
+    if cfg.get('tpm'):
+        start_swtpm()
 
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), SeedHandler)
     server.files = seed_files(cfg)
@@ -577,6 +609,7 @@ def cmd_up(args) -> int:
         proc = subprocess.Popen(argv, env=q.env, stdin=subprocess.DEVNULL, stdout=log,
                                 stderr=subprocess.STDOUT, start_new_session=True, cwd=RUN)
     say(f"QEMU pid {proc.pid}, {'SeaBIOS' if cfg['bios'] else 'UEFI (OVMF)'}, "
+        f"{'TPM 2.0 (swtpm), ' if cfg.get('tpm') else ''}"
         f"{cfg['disks']} data disk(s) of {cfg['size_gib']} GiB, ssh port {cfg['ssh_port']}")
 
     try:
@@ -757,6 +790,8 @@ def main() -> int:
     up.add_argument('--size', type=int, default=4, help='GiB per data disk (default 4)')
     up.add_argument('--root-size', type=int, default=6, help='GiB of the root overlay (default 6)')
     up.add_argument('--bios', action='store_true', help='SeaBIOS instead of UEFI')
+    up.add_argument('--tpm', action='store_true',
+                    help='a TPM 2.0 for the guest (swtpm on this host; kept with the run)')
     up.add_argument('--mem', type=int, default=2048, help='MiB of RAM (default 2048)')
     up.add_argument('--cpus', type=int, default=2, help='vCPUs (default 2)')
     up.add_argument('--timeout', type=int, default=900, help='seconds to wait for SSH')

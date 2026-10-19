@@ -228,8 +228,16 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
     // copy where an increment was asked for is how a backup plan turns out to
     // be one file.
     let kind = super::copy_options::backup_kind(&args.kind)?;
+    // An encrypted chain is `.obk` whatever --format says; its parent decides
+    // that below.
+    let parent_sealed = args.parent.as_deref().is_some_and(|p| {
+        own_backup_backup::sidecar::detect_container_format(std::path::Path::new(p))
+            .is_ok_and(|c| c == own_backup_backup::seal::obk::OBK_EXTENSION)
+    });
     if kind != own_backup_common::types::BackupType::Full
         && args.format == own_backup_common::types::ImageFormat::Vhdx
+        && !args.encrypt
+        && !parent_sealed
     {
         return Err(OwnBackupError::Config(
             "цепочки VHDX (incremental/differential) на Linux пока не пишутся — \
@@ -455,11 +463,7 @@ fn archive_keys(
                 .into(),
         ));
     }
-    if args.format == own_backup_common::types::ImageFormat::Vhdx {
-        return Err(OwnBackupError::Config(
-            "зашифрованные копии пишутся в .obk поверх qcow2 — уберите --format vhdx".into(),
-        ));
-    }
+    // `.obk` is qcow2 underneath whatever --format says (it defaults to vhdx).
     new_archive_keys().map(Some)
 }
 

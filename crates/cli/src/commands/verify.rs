@@ -6,8 +6,12 @@ pub struct VerifyArgs {
     pub image: String,
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub async fn run(args: VerifyArgs) -> own_backup_common::Result<()> {
+    // The images are read in userspace on both: VHDX, qcow2 and `.obk`.
+    #[cfg(target_os = "linux")]
+    use own_backup_backup::engine_linux::verify_image_with_keys;
+    #[cfg(target_os = "windows")]
     use own_backup_backup::engine_win::verify_image_with_keys;
     use std::io::Write;
 
@@ -55,9 +59,9 @@ pub async fn run(args: VerifyArgs) -> own_backup_common::Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub async fn run(_args: VerifyArgs) -> own_backup_common::Result<()> {
     Err(own_backup_common::OwnBackupError::Config(
-        "The 'verify' command currently requires Windows (VHDX attach).".into(),
+        "The 'verify' command is only available on Windows and Linux.".into(),
     ))
 }

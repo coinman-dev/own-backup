@@ -77,6 +77,9 @@ enum Commands {
     /// Turn archive encryption on for a job (password + recovery key)
     ArchiveKey(commands::archive_key::ArchiveKeyArgs),
 
+    /// Check the service key store in a scratch data directory (Linux stand)
+    KeyStore(commands::key_store::KeyStoreArgs),
+
     /// Mount a VHDX backup image read-only as a disk
     Mount(commands::mount::MountArgs),
 
@@ -199,6 +202,7 @@ async fn main() {
         Commands::Consolidate(args) => commands::consolidate::run(args).await,
         Commands::CleanupSnapshots(args) => commands::cleanup_snapshots::run(args).await,
         Commands::ArchiveKey(args) => commands::archive_key::run(args).await,
+        Commands::KeyStore(args) => commands::key_store::run(args).await,
         Commands::Mount(args) => commands::mount::run(args).await,
         Commands::IscsiServe(args) => commands::iscsi_serve::run(args).await,
         Commands::Driver(args) => commands::driver::run(args).await,

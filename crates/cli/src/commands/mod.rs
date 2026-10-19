@@ -11,6 +11,7 @@ pub mod driver;
 pub mod finalize_boot;
 pub mod iscsi_serve;
 pub mod jobs;
+pub mod key_store;
 pub mod list_backups;
 pub mod list_disks;
 pub mod media;
