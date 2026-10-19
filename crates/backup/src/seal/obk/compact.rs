@@ -323,12 +323,12 @@ mod tests {
             panic!()
         };
         drop(image);
+        // Flip the byte: writing a fixed value left the image unchanged
+        // whenever that byte already held it (1 run in 256).
+        let at = host_offset + crate::seal::cluster::HEADER_LEN as u64;
         let mut file = OpenOptions::new().write(true).open(&child).unwrap();
-        file.seek(SeekFrom::Start(
-            host_offset + crate::seal::cluster::HEADER_LEN as u64,
-        ))
-        .unwrap();
-        file.write_all(&[0]).unwrap();
+        file.seek(SeekFrom::Start(at)).unwrap();
+        file.write_all(&[!before[at as usize]]).unwrap();
         drop(file);
         let corrupt = std::fs::read(&child).unwrap();
         assert_ne!(corrupt, before);

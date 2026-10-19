@@ -113,6 +113,19 @@ pub(crate) fn prepare_partition_map<P: EnginePlatform>(
             None => Box::new(crate::aligned_volume::AlignedVolume::new(dev)),
         })
     };
+    // A platform whose own parsers need a still source (Linux) does not read
+    // the metadata of a partition that may be written meanwhile: a block
+    // allocated after its bitmap was read would be left out. It is copied
+    // whole, and the result says why. Windows parses as before (its constant
+    // is false).
+    if P::METADATA_NEEDS_FROZEN && !frozen {
+        warn!(part = %read_path, "partition not held still — copied whole, metadata not parsed");
+        return Ok(none_because(
+            "unknown",
+            None,
+            &tr!("engine.skip_not_frozen"),
+        ));
+    }
     // NTFS first (only on a plain, non-decrypted volume), then FAT/ext/btrfs/xfs.
     if luks.is_none() {
         if let Ok(mut m) = P::NativeMap::open(read_path, block_size) {

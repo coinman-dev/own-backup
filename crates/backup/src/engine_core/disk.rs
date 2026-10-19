@@ -1100,3 +1100,7 @@ fn backup_disk_inner<P: DiskPlatform>(
         excluded_entries_kept,
     })
 }
+
+#[cfg(test)]
+#[path = "disk_tests.rs"]
+mod tests;

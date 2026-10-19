@@ -1756,7 +1756,20 @@ mod tests {
         assert!(busy.exists(), "a store its run holds stays");
         assert!(image.exists() && lookalike.exists());
         drop(held);
-        assert_eq!(sweep_cow_files(dir.path()), 1);
+        // The lock lives on the open file description, and a process another
+        // test forks at this moment holds a copy of the descriptor until its
+        // exec closes it (O_CLOEXEC): the store is free a moment later, not
+        // necessarily at once. The service's sweep runs again at its next
+        // start; here it is asked again for a while.
+        let mut swept = 0;
+        for _ in 0..100 {
+            swept = sweep_cow_files(dir.path());
+            if swept > 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(swept, 1);
         assert!(!busy.exists());
         // A second store of the same name is never made over one in place.
         let (_p, _f) = create_cow(dir.path(), ID, 4096).unwrap();

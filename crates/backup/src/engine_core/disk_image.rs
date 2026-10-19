@@ -108,7 +108,8 @@ pub(crate) fn container_kind(
 }
 
 /// Short display token for a source device (mirrors core's source_token):
-/// a drive letter, `V`+8 hex of a volume GUID, or `P<disk><offsetHex>`.
+/// a drive letter, `V`+8 hex of a volume GUID, `P<disk><offsetHex>`, or a
+/// Linux device's own token.
 pub(crate) fn disk_source_token(device: &str) -> String {
     let d = device
         .trim_start_matches(r"\\.\")
@@ -121,9 +122,13 @@ pub(crate) fn disk_source_token(device: &str) -> String {
             }
         }
     }
+    // A Linux device, as the job's own token names it (`core::source_token`).
+    if let Some(token) = crate::source_identity::unix_device_token(d) {
+        return token;
+    }
     let bytes = d.as_bytes();
     if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
-        return bytes[0].to_ascii_uppercase().to_string();
+        return char::from(bytes[0].to_ascii_uppercase()).to_string();
     }
     if let Some(pos) = d.find("Volume{") {
         let hex: String = d[pos + 7..].chars().take(8).collect();
@@ -392,12 +397,15 @@ mod tests {
         assert_eq!(container_kind(&ntfs), None);
     }
 
-    // Not pinned here: a drive letter. `disk_source_token("C:")` gives "67" —
-    // the letter's byte value, not "C" as its comment promises — and this
-    // test is not the place to make that Windows output official, nor the
-    // move to change it.
     #[test]
     fn a_source_device_is_listed_under_a_short_token() {
+        // The letter itself — it used to be its byte value ("67").
+        assert_eq!(disk_source_token("C:"), "C");
+        assert_eq!(disk_source_token(r"\\.\d:"), "D");
+        assert_eq!(
+            disk_source_token("/dev/sda2"),
+            crate::source_identity::unix_device_token("/dev/sda2").unwrap()
+        );
         assert_eq!(
             disk_source_token(r"\\?\Volume{1234abcd-0000-0000-0000-000000000000}\"),
             "V1234ABCD"
