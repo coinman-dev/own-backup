@@ -27,7 +27,7 @@ pub struct BackupArgs {
     pub password: Option<String>,
 
     /// Image container format: vhdx (Windows-native mounting, no compression)
-    /// or qcow2 (zstd-compressed, cross-platform; full backups only for now)
+    /// or qcow2 (zstd-compressed, cross-platform)
     #[arg(long, default_value = "vhdx")]
     pub format: own_backup_common::types::ImageFormat,
 
@@ -42,7 +42,7 @@ pub struct BackupArgs {
     pub exclude_defaults: bool,
 
     /// full | incremental | differential. Ребёнок пишется поверх --parent или
-    /// того, что найдёт --parent-auto. Цепочки — только на Windows.
+    /// того, что найдёт --parent-auto. На Linux цепочки — только qcow2.
     #[arg(long, default_value = "full")]
     pub kind: String,
 
@@ -206,13 +206,17 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
     };
     use own_backup_common::OwnBackupError;
 
-    // The Linux engine has no chains yet. Refusing is the honest answer —
-    // quietly writing a full copy where an increment was asked for is how a
-    // backup plan turns out to be one file.
+    // Chains are qcow2 here: a VHDX child made on Linux waits for its Windows
+    // check (CHECKS 12). Refusing is the honest answer — quietly writing a full
+    // copy where an increment was asked for is how a backup plan turns out to
+    // be one file.
     let kind = super::copy_options::backup_kind(&args.kind)?;
-    if kind != own_backup_common::types::BackupType::Full {
+    if kind != own_backup_common::types::BackupType::Full
+        && args.format == own_backup_common::types::ImageFormat::Vhdx
+    {
         return Err(OwnBackupError::Config(
-            "цепочки (incremental/differential) на Linux пока не поддерживаются — только full"
+            "цепочки VHDX (incremental/differential) на Linux пока не пишутся — \
+             используйте --format qcow2"
                 .into(),
         ));
     }
@@ -230,6 +234,15 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         args.block_size_mib * 1024 * 1024
     };
     let image_path = std::path::PathBuf::from(&args.output);
+    // Which version this is and what it is written over: --parent, or the
+    // newest command-line chain beside the output (`copy_options`).
+    let (kind, parent_image) = super::copy_options::resolve_parent(
+        kind,
+        args.parent.as_deref(),
+        args.parent_auto,
+        &image_path,
+        args.format,
+    )?;
     // A point in time to read: an LVM or device-mapper snapshot (its change
     // area beside the output; an opened LUKS container may need --password
     // for that), a short partition held still, or the device itself when
@@ -254,7 +267,7 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         all_sectors: args.all_sectors,
         use_vss: true,
         kind,
-        parent_image: None,
+        parent_image,
         exclusion_patterns: Vec::new(),
         job_id: None,
         passphrase: args.password.clone().map(zeroize::Zeroizing::new),
@@ -270,7 +283,7 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
     };
 
     println!(
-        "Backing up {} -> {} ({})",
+        "Backing up {} -> {} ({}, {kind:?})",
         args.source, args.output, args.format
     );
     // Ctrl+C, SIGTERM or a closed terminal while a partition is frozen or a
@@ -327,6 +340,17 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
             "sector-by-sector"
         },
     );
+    if summary.backup_kind != kind {
+        println!(
+            "The parent could not be continued — a {:?} copy was written instead (see the log).",
+            summary.backup_kind
+        );
+    } else if kind != own_backup_common::types::BackupType::Full {
+        println!(
+            "{:?}: {} blocks written, {} unchanged from the parent",
+            kind, summary.blocks_copied, summary.blocks_unchanged
+        );
+    }
     let v = verify_image(&summary.image_path, |_, _| Ok(()))?;
     println!(
         "Verify: {}",

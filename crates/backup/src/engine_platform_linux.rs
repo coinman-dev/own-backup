@@ -213,6 +213,9 @@ impl EnginePlatform for LinuxPlatform {
 
     const SOURCE_OS: &'static str = "linux";
     const METADATA_NEEDS_FROZEN: bool = true;
+    /// Off until Windows has opened, written and merged a child made here
+    /// (CHECKS 12, decision R2): a VHDX job writes full copies, qcow2 chains.
+    const VHDX_CHAINS: bool = false;
 
     /// Device paths are used as given: a job keeps the stable `/dev/disk/…`
     /// name, and resolving it here would record the unstable one.

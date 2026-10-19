@@ -39,6 +39,45 @@ pub(crate) fn validate_parent(
     Ok(sidecar)
 }
 
+/// Why a child must not be written over a parent that is otherwise fine, or
+/// `None` when it may. The answer is a reason for the log: the engine then
+/// writes a full copy, as for any other unusable chain.
+///
+/// - A qcow2 or `.obk` child writes whole blocks into its clusters, and a
+///   cluster it writes only part of is filled with zeros, not with the
+///   parent's bytes (`qcow2/io.rs`): its blocks must cover whole clusters.
+/// - A VHDX child only where the platform makes children Windows accepts
+///   ([`super::platform::EnginePlatform::VHDX_CHAINS`]), and never over a
+///   parent another system wrote (decision R2): a cross-system VHDX chain has
+///   not been checked on both sides yet.
+pub(crate) fn child_refusal(
+    format: ImageFormat,
+    encrypted: bool,
+    block_size: u32,
+    parent: &Sidecar,
+    source_os: &str,
+    vhdx_chains: bool,
+) -> Option<String> {
+    let cluster = 1u32 << crate::qcow2::DEFAULT_CLUSTER_BITS;
+    match (format, encrypted) {
+        (ImageFormat::Qcow2, _) | (_, true) if !block_size.is_multiple_of(cluster) => {
+            Some(format!(
+                "block size {block_size} does not cover whole {cluster}-byte clusters — \
+             a child would zero-fill the parent's bytes"
+            ))
+        }
+        (ImageFormat::Vhdx, false) if !vhdx_chains => {
+            Some("VHDX chains are not written on this system yet (CHECKS 12)".into())
+        }
+        (ImageFormat::Vhdx, false) if parent.manifest.source_os != source_os => Some(format!(
+            "the parent VHDX was written on '{}', this copy on '{source_os}' — \
+             a VHDX chain does not cross systems (decision R2)",
+            parent.manifest.source_os
+        )),
+        _ => None,
+    }
+}
+
 /// Validate that `parent_image` can serve as the parent of a new whole-disk
 /// child: it exists, is itself a whole-disk image (carries an embedded disk
 /// manifest), uses the same block size and container format. The image-size
@@ -269,6 +308,34 @@ mod tests {
                 Some(&keys)
             )),
             "a chain cannot change container format"
+        );
+    }
+
+    #[test]
+    fn a_child_is_refused_where_it_would_not_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut parent = load_sidecar_with_keys(&volume_copy(dir.path()), None).unwrap();
+        parent.manifest.source_os = "linux".into();
+        let refuse = |format, encrypted, block, chains| {
+            child_refusal(format, encrypted, block, &parent, "linux", chains)
+        };
+        let mib = 1024 * 1024;
+        assert_eq!(refuse(ImageFormat::Qcow2, false, mib, false), None);
+        assert_eq!(refuse(ImageFormat::Qcow2, true, mib, false), None);
+        assert_eq!(refuse(ImageFormat::Qcow2, false, 64 * 1024, false), None);
+        // Part of a cluster: the rest would be zeros, not the parent's bytes.
+        assert!(refuse(ImageFormat::Qcow2, false, 4096, true).is_some());
+        assert!(
+            refuse(ImageFormat::Vhdx, true, 4096, true).is_some(),
+            ".obk is qcow2-based"
+        );
+        // VHDX: only where the platform makes children, never across systems.
+        assert_eq!(refuse(ImageFormat::Vhdx, false, 4096, true), None);
+        assert!(refuse(ImageFormat::Vhdx, false, mib, false).is_some());
+        assert!(child_refusal(ImageFormat::Vhdx, false, mib, &parent, "windows", true).is_some());
+        assert_eq!(
+            child_refusal(ImageFormat::Qcow2, false, mib, &parent, "windows", true),
+            None
         );
     }
 }

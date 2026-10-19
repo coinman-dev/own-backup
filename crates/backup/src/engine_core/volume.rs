@@ -24,7 +24,7 @@ use own_backup_common::types::{
 };
 use own_backup_common::{tr, OwnBackupError, Result};
 
-use super::chain::validate_parent;
+use super::chain::{child_refusal, validate_parent};
 use super::platform::{EnginePlatform, FinishedImage, SourceDevice, SourceSession, VolumeSpan};
 use super::source::VolumeSource;
 use super::target::{
@@ -264,7 +264,24 @@ fn backup_volume_inner<P: EnginePlatform>(
                     volume_len,
                     req.encryption.as_ref(),
                 ) {
-                    Ok(sidecar) => parent = Some((parent_path.clone(), sidecar)),
+                    Ok(sidecar) => match child_refusal(
+                        req.image_format,
+                        req.encryption.is_some(),
+                        req.block_size,
+                        &sidecar,
+                        P::SOURCE_OS,
+                        P::VHDX_CHAINS,
+                    ) {
+                        None => parent = Some((parent_path.clone(), sidecar)),
+                        Some(why) => {
+                            warn!(
+                                parent = %parent_path.display(),
+                                reason = %why,
+                                "not continuing this chain — creating a full backup instead"
+                            );
+                            kind = BackupType::Full;
+                        }
+                    },
                     Err(e) => {
                         warn!(
                             parent = %parent_path.display(),

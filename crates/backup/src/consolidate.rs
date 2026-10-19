@@ -336,7 +336,21 @@ pub(crate) fn ensure_idle(images: &[&Path]) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
+/// Refuse to touch images a mount of this service reads — the image itself
+/// or a child whose chain goes through it (the NBD server reads parents as
+/// it goes, so folding one into its base would change what it serves).
+#[cfg(target_os = "linux")]
+pub(crate) fn ensure_idle(images: &[&Path]) -> Result<()> {
+    match crate::engine_linux::mounted_reading(images) {
+        Some(mounted) => Err(OwnBackupError::Config(format!(
+            "{} is mounted and reads this chain — not consolidating while it is in use",
+            mounted.display()
+        ))),
+        None => Ok(()),
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub(crate) fn ensure_idle(_images: &[&Path]) -> Result<()> {
     Ok(())
 }

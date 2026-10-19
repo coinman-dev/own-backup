@@ -3727,9 +3727,10 @@ async fn perform_disk_backup(
 /// Linux backup driver: each source volume is copied by the shared engine
 /// (`engine_linux::backup_volume`) through the snapshot taken of it here, with
 /// the progress, verification and accounting the Windows driver has
-/// (`backup_run`). What the Linux engine does not do yet — chains, exclusions,
-/// a whole disk — is refused by [`linux_unsupported`] before anything is
-/// touched.
+/// (`backup_run`): chains planned from the folder, retention and consolidation
+/// after a fully successful run. What the Linux engine does not do yet — VHDX
+/// chains, exclusions, a whole disk — is refused by [`linux_unsupported`]
+/// before anything is touched.
 #[cfg(target_os = "linux")]
 async fn perform_backup(
     sink: &Arc<dyn EventSink>,
@@ -3795,7 +3796,7 @@ async fn perform_backup(
     let mut fatal: Option<(String, String)> = None; // (status, message)
 
     for (idx, device) in volumes.iter().enumerate() {
-        // A full: `linux_unsupported` let only the full scheme through.
+        // Full, or the next version of this volume's chain (qcow2).
         let plan = plan_run_for_volume(job, &folder, device);
         let (image_path, full_image_path) =
             output_paths_for(job, &file_token(job, device), plan.kind);
@@ -3999,7 +4000,12 @@ fn release_left_behind(
 #[cfg(target_os = "linux")]
 fn linux_unsupported(job: &Job) -> Option<String> {
     let mut what: Vec<String> = Vec::new();
-    if job.scheme.method != "full" {
+    // qcow2 (and .obk) chains are the shared engine's; a VHDX child made on
+    // Linux waits for its Windows check (CHECKS 12), and quietly writing full
+    // copies where a chain was asked for would be a plan that is not one.
+    if job.scheme.method != "full"
+        && job.image_format == own_backup_common::types::ImageFormat::Vhdx
+    {
         what.push(tr!("lib.linux_unsupported_scheme").into_owned());
     }
     if job.exclusions.enabled
@@ -6250,5 +6256,93 @@ mod linux_run_tests {
         for phase in ["backup", "finalize", "verify"] {
             assert!(shown.iter().any(|p| p == phase), "{phase}: {shown:?}");
         }
+    }
+
+    /// A qcow2 chain job on Linux (plan L2): the first run is a full, the
+    /// next ones increments of it; with a window of two increments the
+    /// oldest is folded into the base, and the newest image still holds the
+    /// source exactly as it is.
+    #[tokio::test]
+    async fn a_qcow2_chain_grows_and_is_consolidated() {
+        use std::os::unix::fs::FileExt;
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("volume.img");
+        let data: Vec<u8> = (0..6u32 << 20).map(|i| (i % 241) as u8).collect();
+        std::fs::write(&src, &data).unwrap();
+        let dest = dir.path().join("backups");
+        std::fs::create_dir(&dest).unwrap();
+        let mut job = Job {
+            id: "linux-chain".into(),
+            name: "linux chain".into(),
+            source: src.to_str().unwrap().into(),
+            dest_folder: dest.to_str().unwrap().into(),
+            image_format: own_backup_common::types::ImageFormat::Qcow2,
+            ..Default::default()
+        };
+        job.scheme.method = "incremental".into();
+        job.scheme.only_incremental = true;
+        job.scheme.rolling_incrementals = Some(2);
+        job.exclusions.enabled = false;
+        let sink: Arc<dyn EventSink> = Arc::new(Phases::default());
+        let passwords: Arc<dyn PasswordResolver> = Arc::new(NoPasswords);
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        let mut kinds = Vec::new();
+        let mut last = None;
+        for n in 0..4u64 {
+            if n > 0 {
+                // Image names carry the second they were made in.
+                std::thread::sleep(std::time::Duration::from_millis(1100));
+                let f = std::fs::OpenOptions::new().write(true).open(&src).unwrap();
+                f.write_all_at(&[n as u8; 1000], n << 20).unwrap();
+            }
+            let run = perform_backup(&sink, &job, &cancel, None, &passwords, None).await;
+            assert_eq!(run.status, "success", "run {n}: {}", run.error);
+            kinds.push(run.backup_kind.clone());
+            if n > 0 {
+                assert_eq!(run.bytes_copied, 1 << 20, "run {n}: one changed block");
+            }
+            last = Some(run);
+        }
+        assert_eq!(kinds, ["full", "incremental", "incremental", "incremental"]);
+        let last = last.unwrap();
+        assert_eq!(last.consolidated_increments, 1, "the window holds two");
+        let files: Vec<String> = std::fs::read_dir(&dest)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(files.len(), 3, "base + two increments: {files:?}");
+
+        // The newest version restores to the source as it is now.
+        let target = dir.path().join("restored.img");
+        std::fs::File::create(&target)
+            .unwrap()
+            .set_len(data.len() as u64)
+            .unwrap();
+        own_backup_backup::engine_linux::restore_volume(
+            &own_backup_backup::engine_linux::LinuxRestoreRequest {
+                image_path: PathBuf::from(&last.image_path),
+                target: target.to_str().unwrap().into(),
+                verify_checksums: true,
+                encryption: None,
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(std::fs::read(&target).unwrap() == std::fs::read(&src).unwrap());
+
+        // A VHDX job asking for a chain is refused, not turned into fulls.
+        job.image_format = own_backup_common::types::ImageFormat::Vhdx;
+        let fresh = dir.path().join("vhdx");
+        std::fs::create_dir(&fresh).unwrap();
+        job.dest_folder = fresh.to_str().unwrap().into();
+        let run = perform_backup(&sink, &job, &cancel, None, &passwords, None).await;
+        assert_eq!(run.status, "error");
+        assert!(
+            run.error.contains(&*tr!("lib.linux_unsupported_scheme")),
+            "{}",
+            run.error
+        );
+        assert_eq!(std::fs::read_dir(&fresh).unwrap().count(), 0);
     }
 }

@@ -217,6 +217,7 @@ impl EnginePlatform for TestPlatform {
 
     const SOURCE_OS: &'static str = "test";
     const METADATA_NEEDS_FROZEN: bool = true;
+    const VHDX_CHAINS: bool = true;
 
     fn normalize_source(&self, source: &str) -> String {
         source.trim().to_string()

@@ -57,12 +57,12 @@ run() { # NAME CMD...: output to $EV/NAME.out, exit code returned
     return "$rc"
 }
 
-loopdev() { # name MiB -> device
-    truncate -s "${2}M" "$WORK/$1.img" || return 1
+loopdev() { # VAR name MiB: a loop device over a new file, its path in VAR
+    truncate -s "${3}M" "$WORK/$2.img" || return 1
     local d
-    d=$(losetup -f --show "$WORK/$1.img") || return 1
+    d=$(losetup -f --show "$WORK/$2.img") || return 1
     LOOPS+=("$d")
-    echo "$d"
+    printf -v "$1" '%s' "$d"
 }
 
 mnt() { # device dir [opts]
@@ -146,7 +146,7 @@ stage_l1() {
     mkdir -p "$out"
     # A filesystem mounted read-only holds still: its metadata is parsed and
     # only the used blocks are copied.
-    src=$(loopdev l1-src 320) && dst=$(loopdev l1-dst 320) || return
+    loopdev src l1-src 320 && loopdev dst l1-dst 320 || return
     mkfs_of ext4 "$src" && mnt "$src" "$WORK/m-l1" && populate "$WORK/m-l1" \
         && hashes "$WORK/m-l1" "$WORK/l1.sums" && mount -o remount,ro "$WORK/m-l1"
     run l1-ro "$CLI" backup "$src" -o "$out/ro.qcow2" --format qcow2 --verify
@@ -173,6 +173,54 @@ stage_l1() {
     [[ -z $(find "$out" -name 'busy*' -o -name '.*' -type f) ]]
     check l1-busy-nothing "$(verdict $?)" "the refusal leaves no file behind"
     umnt "$WORK/m-l1"
+}
+
+# ---------------------------------------------------------------------------
+# L2: qcow2 chains on Linux; VHDX chains are refused until CHECKS 12.
+# ---------------------------------------------------------------------------
+stage_l2() {
+    local src dst out=$WORK/out/l2
+    mkdir -p "$out"
+    loopdev src l2-src 320 && loopdev dst l2-dst 320 || return
+    mkfs_of ext4 "$src" && mnt "$src" "$WORK/m-l2" && populate "$WORK/m-l2" \
+        && hashes "$WORK/m-l2" "$WORK/l2-v1.sums" && mount -o remount,ro "$WORK/m-l2"
+    run l2-full "$CLI" backup "$src" -o "$out/v1.qcow2" --format qcow2
+    check l2-full "$(verdict $?)" "version 1: full qcow2"
+
+    # A small change: one file rewritten, one added.
+    mount -o remount,rw "$WORK/m-l2" && head -c 3M /dev/urandom >"$WORK/m-l2/data/big.bin" \
+        && echo "version 2" >"$WORK/m-l2/data/v2.txt" && sync \
+        && hashes "$WORK/m-l2" "$WORK/l2-v2.sums" && mount -o remount,ro "$WORK/m-l2"
+    run l2-inc "$CLI" backup "$src" -o "$out/v2.qcow2" --format qcow2 --kind incremental \
+        --parent-auto
+    check l2-inc "$(verdict $?)" "version 2: incremental over the chain beside it"
+    grep -q 'Incremental: .* blocks written' "$EV/l2-inc.out"
+    check l2-inc-child "$(verdict $?)" "it is a child, not a full in disguise"
+    local full_size inc_size
+    full_size=$(stat -c %s "$out/v1.qcow2")
+    inc_size=$(stat -c %s "$out/v2.qcow2")
+    [[ $inc_size -lt $((full_size / 2)) ]]
+    check l2-inc-small "$(verdict $?)" "increment $inc_size bytes < half the full $full_size"
+
+    run l2-diff "$CLI" backup "$src" -o "$out/v3.qcow2" --format qcow2 --kind differential \
+        --parent "$out/v1.qcow2"
+    check l2-diff "$(verdict $?)" "differential over the full"
+
+    run l2-vhdx "$CLI" backup "$src" -o "$out/v.avhdx" --format vhdx --kind incremental \
+        --parent "$out/v1.qcow2"
+    [[ $? -ne 0 && ! -e $out/v.avhdx ]]
+    check l2-vhdx-refused "$(verdict $?)" "a VHDX chain is refused on Linux"
+    umnt "$WORK/m-l2"
+
+    restore_and_check l2-v2 "$out/v2.qcow2" "$dst" ext4 "$WORK/l2-v2.sums"
+    restore_and_check l2-v3 "$out/v3.qcow2" "$dst" ext4 "$WORK/l2-v2.sums"
+    restore_and_check l2-v1 "$out/v1.qcow2" "$dst" ext4 "$WORK/l2-v1.sums"
+    if command -v qemu-img >/dev/null; then
+        run l2-qemu qemu-img check "$out/v2.qcow2"
+        check l2-qemu-check "$(verdict $?)" "qemu-img accepts the child and its backing chain"
+    else
+        check l2-qemu-check SKIP "no qemu-img"
+    fi
 }
 
 for stage in "${STAGES[@]}"; do

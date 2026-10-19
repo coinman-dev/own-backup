@@ -474,6 +474,68 @@ pub fn ensure_nbd_loaded() -> Result<()> {
 struct ActiveMount {
     nbd: crate::nbd_linux::NbdAttachment,
     mount_dir: PathBuf,
+    /// Every file the mount reads: the image and the parents behind it.
+    reads: Vec<PathBuf>,
+}
+
+/// The files a read of `image` goes through: the image itself, then each
+/// parent its container names (qcow2 backing file, VHDX parent locator), each
+/// resolved against the folder of the image that names it. Canonical paths,
+/// leaf first; a parent that cannot be read or found ends the walk there.
+fn chain_files(image: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut current = Some(image.to_path_buf());
+    while let Some(path) = current.take() {
+        let here = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if out.contains(&here) || out.len() >= 64 {
+            break;
+        }
+        out.push(here);
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        current = match ext.as_str() {
+            "qcow2" => std::fs::File::open(&path)
+                .ok()
+                .and_then(|f| crate::qcow2::Qcow2Reader::open(f).ok())
+                .and_then(|r| r.backing_file().map(PathBuf::from))
+                .map(|b| match path.parent() {
+                    Some(folder) if b.is_relative() => folder.join(b),
+                    _ => b,
+                }),
+            "vhdx" | "avhdx" => crate::vhdx_bat::vhdx_parent_path(&path).ok().flatten(),
+            _ => None,
+        };
+    }
+    out
+}
+
+/// The mounted image, served by this process, that reads any of `images` —
+/// itself or as one of its parents. Consolidation must not rewrite a file a
+/// mount is reading through (`consolidate::ensure_idle`).
+pub(crate) fn mounted_reading(images: &[&Path]) -> Option<PathBuf> {
+    let mounts = active_mounts().lock().unwrap();
+    first_reading(
+        mounts.iter().map(|(image, m)| (image, &m.reads[..])),
+        images,
+    )
+}
+
+/// Of `mounts` (mounted image, the files it reads), the first that reads any
+/// of `images`.
+fn first_reading<'a>(
+    mut mounts: impl Iterator<Item = (&'a PathBuf, &'a [PathBuf])>,
+    images: &[&Path],
+) -> Option<PathBuf> {
+    let wanted: Vec<PathBuf> = images
+        .iter()
+        .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
+        .collect();
+    mounts
+        .find(|(_, reads)| reads.iter().any(|r| wanted.contains(r)))
+        .map(|(image, _)| image.clone())
 }
 
 /// Mounts served by THIS process — the NBD device dies with the serving
@@ -554,6 +616,7 @@ pub fn mount_image(image_path: &Path, read_write: bool) -> Result<String> {
         ActiveMount {
             nbd,
             mount_dir: mount_dir.clone(),
+            reads: chain_files(image_path),
         },
     );
     Ok(mount_dir.display().to_string())
@@ -1021,6 +1084,162 @@ mod tests {
         assert!(verify_image(&img, |_, _| Ok(())).unwrap().valid());
         let (target, _) = restore_to_blank(&img, sum.source_bytes, None);
         assert!(std::fs::read(&target).unwrap() == std::fs::read(&src).unwrap());
+    }
+
+    /// A mount reads its image and every parent behind it; consolidation
+    /// stays off all of them, and off nothing else.
+    #[test]
+    fn a_mounted_child_holds_its_whole_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.raw");
+        std::fs::write(&src, vec![7u8; 4 * MIB as usize]).unwrap();
+        let snap = file_snapshot(&src, true);
+        let full = dir.path().join("full.qcow2");
+        backup_volume(
+            &request(&src, &full, ImageFormat::Qcow2),
+            &snap,
+            no_progress,
+        )
+        .unwrap();
+        let mut parent = full.clone();
+        let mut chain = vec![full.clone()];
+        for n in 1..=2 {
+            let inc = dir.path().join(format!("inc{n}.qcow2"));
+            backup_volume(
+                &VolumeBackupRequest {
+                    kind: BackupType::Incremental,
+                    parent_image: Some(parent.clone()),
+                    ..request(&src, &inc, ImageFormat::Qcow2)
+                },
+                &snap,
+                no_progress,
+            )
+            .unwrap();
+            chain.push(inc.clone());
+            parent = inc;
+        }
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
+        let reads = chain_files(&chain[2]);
+        assert_eq!(
+            reads,
+            vec![canon(&chain[2]), canon(&chain[1]), canon(&chain[0])]
+        );
+        assert_eq!(chain_files(&chain[0]), vec![canon(&chain[0])]);
+
+        let mounted = chain[1].clone();
+        let mid_reads = chain_files(&mounted);
+        let mounts = || std::iter::once((&mounted, &mid_reads[..]));
+        assert_eq!(first_reading(mounts(), &[&chain[0]]), Some(mounted.clone()));
+        assert_eq!(first_reading(mounts(), &[&chain[1]]), Some(mounted.clone()));
+        // A later child is not read by the mount of its parent.
+        assert_eq!(first_reading(mounts(), &[&chain[2]]), None);
+        assert_eq!(first_reading(std::iter::empty(), &[&chain[0]]), None);
+        // And nothing is mounted by this test process.
+        assert!(crate::consolidate::ensure_idle(&[&chain[0], &chain[2]]).is_ok());
+    }
+
+    /// A qcow2 chain on Linux (plan L2): the increment holds only the blocks
+    /// that changed, and the chain restores to the source as it is now, byte
+    /// for byte. A VHDX job and a block smaller than a qcow2 cluster get a
+    /// full copy instead of a child.
+    #[test]
+    fn a_qcow2_increment_holds_the_changes_and_restores_the_chain() {
+        use std::os::unix::fs::FileExt;
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.raw");
+        let data: Vec<u8> = (0..(8 * MIB) as u32).map(|i| (i % 249) as u8).collect();
+        std::fs::write(&src, &data).unwrap();
+        let snap = file_snapshot(&src, true);
+        let full = dir.path().join("full.qcow2");
+        let first = backup_volume(
+            &request(&src, &full, ImageFormat::Qcow2),
+            &snap,
+            no_progress,
+        )
+        .unwrap();
+        assert_eq!(first.backup_kind, BackupType::Full);
+
+        // Two blocks change: one in the middle, one at the very end.
+        let file = std::fs::OpenOptions::new().write(true).open(&src).unwrap();
+        file.write_all_at(&[0xEE; 4096], 3 * MIB + 100).unwrap();
+        file.write_all_at(&[0x11; 512], 8 * MIB - 512).unwrap();
+        drop(file);
+
+        let inc = dir.path().join("inc.qcow2");
+        let second = backup_volume(
+            &VolumeBackupRequest {
+                kind: BackupType::Incremental,
+                parent_image: Some(full.clone()),
+                ..request(&src, &inc, ImageFormat::Qcow2)
+            },
+            &snap,
+            no_progress,
+        )
+        .unwrap();
+        assert_eq!(second.backup_kind, BackupType::Incremental);
+        assert_eq!(second.blocks_copied, 2);
+        assert_eq!(second.blocks_unchanged, second.used_blocks - 2);
+        let sidecar = read_embedded_sidecar(&inc, "qcow2").unwrap();
+        assert_eq!(
+            sidecar.info.chain_role,
+            crate::sidecar::ChainRole::Incremental
+        );
+        assert_eq!(
+            sidecar.info.parent_image_file_name.as_deref(),
+            Some("full.qcow2")
+        );
+        assert!(verify_image(&inc, |_, _| Ok(())).unwrap().valid());
+        let (target, _) = restore_to_blank(&inc, second.source_bytes, None);
+        assert!(std::fs::read(&target).unwrap() == std::fs::read(&src).unwrap());
+        // The parent still restores to the source as it was.
+        let (target, _) = restore_to_blank(&full, first.source_bytes, None);
+        assert!(std::fs::read(&target).unwrap() == data);
+
+        // VHDX: no child on Linux yet (CHECKS 12) — a full copy.
+        let vfull = dir.path().join("full.vhdx");
+        backup_volume(
+            &request(&src, &vfull, ImageFormat::Vhdx),
+            &snap,
+            no_progress,
+        )
+        .unwrap();
+        let vinc = dir.path().join("inc.avhdx");
+        let v = backup_volume(
+            &VolumeBackupRequest {
+                kind: BackupType::Incremental,
+                parent_image: Some(vfull.clone()),
+                ..request(&src, &vinc, ImageFormat::Vhdx)
+            },
+            &snap,
+            no_progress,
+        )
+        .unwrap();
+        assert_eq!(v.backup_kind, BackupType::Full);
+        assert_eq!(v.blocks_copied, v.used_blocks);
+        assert!(read_embedded_sidecar(&v.image_path, "vhdx")
+            .unwrap()
+            .info
+            .parent_image_file_name
+            .is_none());
+
+        // 4 KiB blocks: a qcow2 child would zero-fill the rest of each
+        // 64 KiB cluster it touches — a full copy instead.
+        let small = |name: &str| VolumeBackupRequest {
+            block_size: 4096,
+            ..request(&src, &dir.path().join(name), ImageFormat::Qcow2)
+        };
+        backup_volume(&small("s-full.qcow2"), &snap, no_progress).unwrap();
+        let s = backup_volume(
+            &VolumeBackupRequest {
+                kind: BackupType::Incremental,
+                parent_image: Some(dir.path().join("s-full.qcow2")),
+                ..small("s-inc.qcow2")
+            },
+            &snap,
+            no_progress,
+        )
+        .unwrap();
+        assert_eq!(s.backup_kind, BackupType::Full);
     }
 
     /// A snapshot that did not hold to the end of the copy: the check comes
