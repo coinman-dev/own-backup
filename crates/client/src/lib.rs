@@ -336,13 +336,21 @@ impl BackupClient {
     }
 
     pub async fn get_queue(&mut self) -> Result<QueueSnapshot> {
+        self.get_queue_with_status().await.map_err(status)
+    }
+
+    /// The same, keeping the gRPC status. Cheap on every platform, which makes
+    /// it the probe for "does the service let this caller in at all"
+    /// (`PermissionDenied` from the socket's peer check).
+    pub async fn get_queue_with_status(
+        &mut self,
+    ) -> std::result::Result<QueueSnapshot, tonic::Status> {
         let reply = self
             .inner
             .get_queue(self.request(proto::Empty {}))
-            .await
-            .map_err(status)?
+            .await?
             .into_inner();
-        parse(&reply.json)
+        serde_json::from_str(&reply.json).map_err(|e| tonic::Status::internal(json_err(e)))
     }
 
     pub async fn list_activity(&mut self) -> Result<Vec<JobRun>> {
@@ -357,11 +365,18 @@ impl BackupClient {
 
     /// Subscribe to orchestration events (progress / queue / finished).
     pub async fn stream_events(&mut self) -> Result<impl Stream<Item = ClientEvent>> {
+        self.stream_events_with_status().await.map_err(status)
+    }
+
+    /// The same, keeping the gRPC status: a caller the service turns away is
+    /// told apart from one that could not reach it.
+    pub async fn stream_events_with_status(
+        &mut self,
+    ) -> std::result::Result<impl Stream<Item = ClientEvent>, tonic::Status> {
         let stream = self
             .inner
             .stream_events(self.request(proto::Empty {}))
-            .await
-            .map_err(status)?
+            .await?
             .into_inner();
         Ok(stream.filter_map(|item| item.ok().map(decode_event)))
     }
@@ -962,11 +977,17 @@ impl BackupClient {
     }
 
     pub async fn service_status_json(&mut self) -> Result<String> {
+        self.service_status_json_with_status().await.map_err(status)
+    }
+
+    /// The same, keeping the gRPC status.
+    pub async fn service_status_json_with_status(
+        &mut self,
+    ) -> std::result::Result<String, tonic::Status> {
         let reply = self
             .inner
             .get_service_status(self.request(proto::Empty {}))
-            .await
-            .map_err(status)?
+            .await?
             .into_inner();
         Ok(reply.json)
     }

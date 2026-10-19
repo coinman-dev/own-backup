@@ -212,18 +212,49 @@ pub(crate) fn check(info: Option<&UdsConnectInfo>) -> Result<(), Status> {
             Ok(())
         }
         Verdict::Refused => {
-            tracing::warn!(
-                target: "security",
-                uid,
-                pid,
-                session = own_session.as_deref().unwrap_or("-"),
-                "socket client outside an active local session rejected"
-            );
+            let session = own_session.as_deref().unwrap_or("-");
+            if first_refusal_in_a_while(uid, session, std::time::Instant::now()) {
+                tracing::warn!(
+                    target: "security",
+                    uid,
+                    pid,
+                    session,
+                    "socket client outside an active local session rejected \
+                     (repeats from it are logged at debug level for ten minutes)"
+                );
+            } else {
+                tracing::debug!(
+                    target: "security",
+                    uid,
+                    pid,
+                    session,
+                    "socket client outside an active local session rejected again"
+                );
+            }
             Err(Status::permission_denied(
                 tr!("peer_access.not_local_session").into_owned(),
             ))
         }
     }
+}
+
+/// Whether a refusal of this caller is worth a WARN: the first one from a
+/// user and session, and again only after ten quiet minutes. A refused window
+/// keeps asking — its event stream reconnecting, a page polling — and every
+/// call wrote the same line, one every two seconds.
+fn first_refusal_in_a_while(uid: u32, session: &str, now: std::time::Instant) -> bool {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    const QUIET: Duration = Duration::from_secs(600);
+    static SEEN: Mutex<Vec<(u32, String, std::time::Instant)>> = Mutex::new(Vec::new());
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    seen.retain(|(_, _, at)| now.saturating_duration_since(*at) < QUIET);
+    if seen.iter().any(|(u, s, _)| *u == uid && s == session) {
+        return false;
+    }
+    seen.push((uid, session.to_string(), now));
+    true
 }
 
 #[cfg(test)]
@@ -373,5 +404,25 @@ mod tests {
 
         let found = read_sessions(dir.path()).unwrap().unwrap();
         assert_eq!(found, vec![parse_session("3", SEAT_SESSION)]);
+    }
+
+    #[test]
+    fn a_refusal_is_warned_about_once_per_caller_and_quiet_spell() {
+        use std::time::{Duration, Instant};
+        // Uids no other test uses: the record is process-wide.
+        let t = Instant::now();
+        assert!(first_refusal_in_a_while(70_001, "s1", t));
+        assert!(!first_refusal_in_a_while(
+            70_001,
+            "s1",
+            t + Duration::from_secs(2)
+        ));
+        assert!(first_refusal_in_a_while(70_001, "s2", t), "another session");
+        assert!(first_refusal_in_a_while(70_002, "s1", t), "another user");
+        assert!(first_refusal_in_a_while(
+            70_001,
+            "s1",
+            t + Duration::from_secs(601)
+        ));
     }
 }

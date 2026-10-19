@@ -228,6 +228,8 @@ export interface ServiceStatus {
   uptime_secs: number;
   active_jobs: number;
   active_mounts: ActiveMount[];
+  /** Running, but refusing this window (`PermissionDenied`). */
+  access_denied?: boolean;
 }
 
 /** Startup health of the backup service (for the "install/start the service" warning). */
@@ -237,6 +239,9 @@ export interface ServiceHealth {
   /** Running from the boot medium: the service is a plain process there, and
    *  there is nowhere to install it to, so `installed: false` is expected. */
   media: boolean;
+  /** Reachable, and refusing this window on every call (`PermissionDenied`):
+   *  on Linux, a window outside the active local session (SSH, say). */
+  access_denied?: boolean;
 }
 
 /** Where the window runs (the `platform_info` command). */

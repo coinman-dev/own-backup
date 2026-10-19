@@ -353,7 +353,9 @@
           {:else}
             <div class="status-offline">
               <span class="status-dot offline"></span>
-              <span>{m.set_service_offline()}</span>
+              <span>
+                {serviceStatus?.access_denied ? m.set_service_refused() : m.set_service_offline()}
+              </span>
             </div>
           {/if}
 

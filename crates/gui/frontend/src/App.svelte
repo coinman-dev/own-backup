@@ -17,6 +17,7 @@
   import type { ViewName } from './lib/types';
   import { m } from './lib/paraglide/messages';
   import { onLocale } from './lib/i18n.svelte';
+  import { ensurePlatform, isWindows } from './lib/platformStore.svelte';
 
   let currentView: ViewName = $state('backup');
   // Warning shown when the backup service isn't running/installed. Everything
@@ -43,18 +44,28 @@
     try {
       const h = await api.serviceHealth();
       setMediaMode(h.media);
-      if (h.media) {
+      await ensurePlatform();
+      // The advice names commands, and those differ: `.exe /install` and the
+      // service manager on Windows, sudo and systemctl on Linux.
+      const win = isWindows();
+      if (h.access_denied) {
+        // There, answering, and refusing every call: said as what it is
+        // rather than as an empty job list and «service not running».
+        serviceWarn = m.app_access_denied;
+      } else if (h.media) {
         // On the boot medium the engine deliberately runs as a plain process:
         // WinPE's registry is in RAM, so there is nothing to install into, and
         // a schedule could not outlive the session anyway. Only losing the
         // engine is worth saying anything about.
-        serviceWarn = h.reachable ? null : m.app_engine_down;
+        serviceWarn = h.reachable ? null : win ? m.app_engine_down : m.app_engine_down_linux;
       } else if (!h.installed) {
         // Not installed is always worth flagging: even if a temporary/foreground
         // instance answers, the scheduler only runs from the installed service.
-        serviceWarn = h.reachable ? m.app_not_installed_temp : m.app_not_installed;
+        serviceWarn = h.reachable
+          ? win ? m.app_not_installed_temp : m.app_not_installed_temp_linux
+          : win ? m.app_not_installed : m.app_not_installed_linux;
       } else if (!h.reachable) {
-        serviceWarn = m.app_stopped;
+        serviceWarn = win ? m.app_stopped : m.app_stopped_linux;
       } else {
         serviceWarn = null;
       }

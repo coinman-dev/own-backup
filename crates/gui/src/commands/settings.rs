@@ -210,6 +210,9 @@ pub struct ServiceStatusDto {
     // `total_backups_completed` was here, always 0 — nothing counted it. The
     // screen showed «Total Completed: 0» next to a job list full of copies.
     pub active_mounts: Vec<own_backup_common::engine_dto::ActiveMountDto>,
+    /// The service is there but refuses this window (`PermissionDenied`): the
+    /// card says that instead of «not running».
+    pub access_denied: bool,
 }
 
 /// Startup health of the backup service, so the GUI can warn the user when it
@@ -224,6 +227,10 @@ pub struct ServiceHealth {
     /// report but the design: WinPE's registry lives in RAM, so there is nowhere
     /// to install a service to, and a schedule would not outlive the session.
     pub media: bool,
+    /// Reachable, and refusing this window every call (`PermissionDenied`):
+    /// on Linux, a window outside the active local session. Without it the
+    /// screens showed an empty job list and «service not running».
+    pub access_denied: bool,
 }
 
 #[tauri::command]
@@ -239,33 +246,47 @@ pub async fn service_health(state: State<'_, GuiState>) -> Result<ServiceHealth,
             .await
             .unwrap_or(false)
     };
-    tracing::info!(reachable, installed, media, "service_health check");
+    // Unix only: Windows turns such a caller away at the pipe, before any
+    // call, and that reads as not reachable.
+    #[cfg(unix)]
+    let access_denied = reachable && state.link.access_refused().await;
+    #[cfg(not(unix))]
+    let access_denied = false;
+    tracing::info!(
+        reachable,
+        installed,
+        media,
+        access_denied,
+        "service_health check"
+    );
     Ok(ServiceHealth {
         reachable,
         installed,
         media,
+        access_denied,
     })
 }
 
 #[tauri::command]
 pub async fn get_service_status(state: State<'_, GuiState>) -> Result<ServiceStatusDto, String> {
-    let disconnected = || ServiceStatusDto {
+    let disconnected = |access_denied: bool| ServiceStatusDto {
         connected: false,
         version: env!("CARGO_PKG_VERSION").into(),
         uptime_secs: 0,
         active_jobs: 0,
         active_mounts: Vec::new(),
+        access_denied,
     };
 
     // Ask the service directly (version / uptime / queue). Failure to reach it is
     // reported as "not connected" rather than an error, so the UI can show state.
     let mut client = match state.link.client().await {
         Ok(c) => c,
-        Err(_) => return Ok(disconnected()),
+        Err(_) => return Ok(disconnected(false)),
     };
-    let json = match client.service_status_json().await {
+    let json = match client.service_status_json_with_status().await {
         Ok(j) => j,
-        Err(_) => return Ok(disconnected()),
+        Err(status) => return Ok(disconnected(status.code() == tonic::Code::PermissionDenied)),
     };
     let v: serde_json::Value = serde_json::from_str(&json).unwrap_or_default();
     let version = v
@@ -291,5 +312,6 @@ pub async fn get_service_status(state: State<'_, GuiState>) -> Result<ServiceSta
         uptime_secs,
         active_jobs,
         active_mounts,
+        access_denied: false,
     })
 }

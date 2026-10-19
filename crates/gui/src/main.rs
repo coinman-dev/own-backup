@@ -690,22 +690,55 @@ fn gui_up_marker_wanted() -> bool {
 /// re-emit each event as the Tauri window event the frontend listens for
 /// (`job-progress` / `queue-changed` / `job-finished`). Reconnects if the stream
 /// ends (e.g. the service restarts).
+///
+/// A failure is logged when it CHANGES — the first «unreachable», the first
+/// refusal — and at debug level while it lasts: a window the service refused
+/// put the same WARN into its log every two seconds, and the service one in
+/// its own. A refusal is also waited out longer (doubling up to 30 s): it
+/// lasts until the person sits down at the session, not for a restart.
 async fn bridge_service_events(app: tauri::AppHandle, link: Arc<ServiceLink>) {
     use own_backup_client::ClientEvent;
+    use std::time::Duration;
     use tauri::Emitter;
     use tokio_stream::StreamExt;
+
+    /// What the last attempt ran into; a WARN is written when it changes.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Trouble {
+        Unreachable,
+        Refused,
+        StreamFailed,
+    }
+    const REFUSED_FIRST: Duration = Duration::from_secs(2);
+    const REFUSED_MOST: Duration = Duration::from_secs(30);
+
+    fn note(last: &mut Option<Trouble>, now: Trouble, error: &str) {
+        if *last == Some(now) {
+            tracing::debug!(?now, error, "event bridge: still failing");
+        } else {
+            tracing::warn!(?now, error, "event bridge: cannot subscribe, retrying");
+            *last = Some(now);
+        }
+    }
+
+    let mut last: Option<Trouble> = None;
+    let mut refused_wait = REFUSED_FIRST;
 
     loop {
         let mut client = match link.client().await {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!(error = %e, "event bridge: service unreachable, retrying");
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                note(&mut last, Trouble::Unreachable, &e);
+                tokio::time::sleep(Duration::from_secs(3)).await;
                 continue;
             }
         };
-        match client.stream_events().await {
+        let wait = match client.stream_events_with_status().await {
             Ok(stream) => {
+                if last.take().is_some() {
+                    tracing::info!("event bridge: subscribed again");
+                }
+                refused_wait = REFUSED_FIRST;
                 let mut stream = Box::pin(stream);
                 while let Some(ev) = stream.next().await {
                     match ev {
@@ -738,11 +771,21 @@ async fn bridge_service_events(app: tauri::AppHandle, link: Arc<ServiceLink>) {
                     }
                 }
                 tracing::info!("service event stream ended; reconnecting");
+                Duration::from_secs(2)
             }
-            Err(e) => tracing::warn!(error = %e, "stream_events failed"),
-        }
+            Err(status) if status.code() == tonic::Code::PermissionDenied => {
+                note(&mut last, Trouble::Refused, status.message());
+                let wait = refused_wait;
+                refused_wait = (refused_wait * 2).min(REFUSED_MOST);
+                wait
+            }
+            Err(status) => {
+                note(&mut last, Trouble::StreamFailed, status.message());
+                Duration::from_secs(2)
+            }
+        };
         // Stream closed — the cached channel may be dead; drop it and retry.
         link.invalidate().await;
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        tokio::time::sleep(wait).await;
     }
 }

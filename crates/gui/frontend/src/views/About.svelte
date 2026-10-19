@@ -70,6 +70,7 @@
   );
   const serviceState = $derived.by(() => {
     if (!health) return m.about_svc_asking();
+    if (health.access_denied) return m.about_svc_refused();
     if (media.active) return m.about_svc_media();
     if (health.reachable)
       return status?.version

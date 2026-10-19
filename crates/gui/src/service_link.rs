@@ -134,6 +134,22 @@ impl ServiceLink {
         *self.client.lock().await = None;
     }
 
+    /// Whether the service, reachable, turns this caller away: the Unix
+    /// socket's peer check answers `PermissionDenied` to anyone outside an
+    /// active local session (an SSH login, a session switched away from).
+    /// The connection itself succeeds then — the check is made per call — so
+    /// only a call can tell; the queue is the cheapest one to ask.
+    #[cfg(unix)]
+    pub async fn access_refused(&self) -> bool {
+        let Some(mut client) = self.cached().await else {
+            return false;
+        };
+        matches!(
+            client.get_queue_with_status().await,
+            Err(status) if status.code() == tonic::Code::PermissionDenied
+        )
+    }
+
     /// Quick probe: can we reach the service right now? Always does a fresh
     /// connect (never trusts a stale cached client) and updates the cache to
     /// match, so the startup health check reflects reality. Does not try to
