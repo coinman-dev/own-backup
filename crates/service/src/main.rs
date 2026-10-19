@@ -9,6 +9,8 @@ mod install;
 mod logind_events;
 #[cfg(unix)]
 mod peer_access;
+#[cfg(target_os = "linux")]
+mod polkit;
 mod scheduled_verification;
 mod scheduler;
 #[cfg(unix)]

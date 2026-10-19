@@ -506,5 +506,13 @@
   "main.shutdown_cancelled": {
     "ru": "Выключение компьютера отменено, когда служба уже останавливалась; служба завершается с ошибкой, чтобы systemd запустил её снова.",
     "en": "The shutdown was called off after the service had begun stopping; the service exits with an error so that systemd starts it again."
+  },
+  "polkit.denied": {
+    "ru": "Отказано: для этого действия (%{action}) нужно подтверждение администратора, а оно не получено. Запрос показывает агент polkit вашего сеанса; от root (sudo own-backup-cli …) подтверждение не нужно.",
+    "en": "Denied: this action (%{action}) needs an administrator's confirmation, and it was not given. Your session's polkit agent shows the request; as root (sudo own-backup-cli …) none is needed."
+  },
+  "polkit.unavailable": {
+    "ru": "Отказано: для этого действия (%{action}) нужно подтверждение администратора, но polkit недоступен (%{error}). Выполните действие от root (sudo own-backup-cli …).",
+    "en": "Denied: this action (%{action}) needs an administrator's confirmation, but polkit is unavailable (%{error}). Run it as root (sudo own-backup-cli …)."
   }
 }

@@ -55,6 +55,14 @@ windows = { version = "0.58", features = [
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# polkit (the destructive operations' administrator check) and logind over
+# D-Bus. The same zbus as own-backup-backup's power_linux.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = "5"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+zbus = { version = "5", features = ["p2p"] }
+
 [dev-dependencies]
 tempfile = "3"
 own-backup-client = { workspace = true }

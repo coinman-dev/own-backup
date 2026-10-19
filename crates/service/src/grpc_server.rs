@@ -923,6 +923,11 @@ impl BackupService for BackupServiceImpl {
         req: Request<DeleteJobRequest>,
     ) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
+        // Deleting the job's images is deleting backups; the job alone is not.
+        #[cfg(target_os = "linux")]
+        if req.get_ref().delete_files {
+            crate::polkit::authorize(&req, crate::polkit::Action::DeleteBackups).await?;
+        }
         let DeleteJobRequest { id, delete_files } = req.into_inner();
 
         // A run in flight is writing into the very files this is about to
@@ -1556,6 +1561,8 @@ impl BackupService for BackupServiceImpl {
         req: Request<JsonRequest>,
     ) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
+        #[cfg(target_os = "linux")]
+        crate::polkit::authorize(&req, crate::polkit::Action::DeleteBackups).await?;
         #[derive(serde::Deserialize)]
         struct In {
             job_id: String,
@@ -2473,6 +2480,9 @@ impl BackupService for BackupServiceImpl {
         req: Request<JsonRequest>,
     ) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
+        // New keys replace the ones the archive opens with.
+        #[cfg(target_os = "linux")]
+        crate::polkit::authorize(&req, crate::polkit::Action::ManageKeys).await?;
         #[derive(serde::Deserialize)]
         struct In {
             job_id: String,
