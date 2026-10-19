@@ -21,7 +21,10 @@
 //!    hold one open without `O_EXCL` — and then the change is applied
 //!    partition by partition with `BLKPG` (delete what changed or vanished,
 //!    add what is new), which only needs the changed partitions to be closed.
-//!    Unchanged partitions are not touched either way.
+//!    Unchanged partitions are not touched either way. The same fallback runs
+//!    when `BLKRRPART` succeeds and the kernel still shows another table (a
+//!    kernel without the parser for the scheme does exactly that), and what
+//!    the kernel shows afterwards is checked against the table.
 //! 4. **Waiting for udev.** Releasing the lock and closing the descriptor makes
 //!    udevd re-probe the disk (it watches block devices for close-after-write).
 //!    The session then waits until the kernel's partitions match the written
@@ -282,7 +285,8 @@ impl HostView {
 pub enum KernelUpdate {
     /// `BLKRRPART` rescanned the whole disk.
     Reread,
-    /// `BLKRRPART` was refused; these `BLKPG` steps applied the difference.
+    /// `BLKRRPART` was refused, or registered something other than the
+    /// table; these `BLKPG` steps applied the difference.
     PerPartition(Vec<BlkpgOp>),
     /// The kernel already showed exactly the written table.
     AlreadyCurrent,
@@ -397,9 +401,20 @@ impl<D: DiskIo> LinuxDiskSession<D> {
         let path = self.io().path().to_string();
         let disk = self.io().kernel_name().to_string();
         match self.io_mut().reread_partitions() {
-            Ok(()) => {
+            // A successful BLKRRPART is not proof: a kernel built without the
+            // parser for this scheme accepts the call and registers nothing.
+            // The partitions it shows are what counts.
+            Ok(()) if self.host.kernel_partitions(&disk) == expected => {
                 info!(disk = %path, "kernel re-read the partition table");
                 return Ok(KernelUpdate::Reread);
+            }
+            Ok(()) => {
+                warn!(
+                    disk = %path,
+                    shown = ?self.host.kernel_partitions(&disk),
+                    ?expected,
+                    "BLKRRPART succeeded but the kernel shows another table — applying it per partition"
+                );
             }
             Err(IoctlError::Busy) => {
                 debug!(disk = %path, "BLKRRPART busy — applying the change per partition");
@@ -435,6 +450,18 @@ impl<D: DiskIo> LinuxDiskSession<D> {
                     .into_owned(),
                 ));
             }
+        }
+        let shown = self.host.kernel_partitions(&disk);
+        if shown != expected {
+            return Err(OwnBackupError::Device(
+                tr!(
+                    "disk_session_linux.kernel_mismatch",
+                    disk = path,
+                    shown = format!("{shown:?}"),
+                    expected = format!("{expected:?}")
+                )
+                .into_owned(),
+            ));
         }
         info!(disk = %path, steps = plan.len(), "kernel updated partition by partition");
         Ok(KernelUpdate::PerPartition(plan))
@@ -671,12 +698,27 @@ mod tests {
         Add(KernelPartition),
     }
 
+    /// A disk with a pretend kernel: re-reading parses the GPT it holds into
+    /// the fake sysfs under `root` (unless `parser` is off, like a kernel built
+    /// without it), and BLKPG edits that sysfs.
     struct FakeDisk {
         data: Vec<u8>,
         sector: u32,
         reread_busy: bool,
+        parser: bool,
+        blkpg_ignored: bool,
         busy_partitions: Vec<u32>,
         calls: Rc<RefCell<Vec<Call>>>,
+        root: PathBuf,
+    }
+
+    impl FakeDisk {
+        fn kernel(&self) -> Vec<KernelPartition> {
+            HostView::rooted(&self.root).kernel_partitions("sdz")
+        }
+        fn show(&self, parts: &[KernelPartition]) {
+            host_with(&self.root, parts, true);
+        }
     }
 
     impl DiskIo for FakeDisk {
@@ -705,21 +747,48 @@ mod tests {
         fn reread_partitions(&mut self) -> std::result::Result<(), IoctlError> {
             self.calls.borrow_mut().push(Call::Reread);
             if self.reread_busy {
-                Err(IoctlError::Busy)
-            } else {
-                Ok(())
+                return Err(IoctlError::Busy);
             }
+            if self.parser {
+                let len = self.data.len() as u64;
+                let parts: Vec<KernelPartition> =
+                    crate::gpt_reader::parse_disk_layout(&self.data, 512, len)
+                        .map(|l| {
+                            l.partitions
+                                .iter()
+                                .map(|p| KernelPartition {
+                                    number: p.index,
+                                    start: p.first_lba,
+                                    size: p.last_lba + 1 - p.first_lba,
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                self.show(&parts);
+            }
+            Ok(())
         }
         fn delete_partition(&mut self, n: u32) -> std::result::Result<(), IoctlError> {
             self.calls.borrow_mut().push(Call::Delete(n));
             if self.busy_partitions.contains(&n) {
-                Err(IoctlError::Busy)
-            } else {
-                Ok(())
+                return Err(IoctlError::Busy);
             }
+            let left: Vec<_> = self
+                .kernel()
+                .into_iter()
+                .filter(|p| p.number != n)
+                .collect();
+            self.show(&left);
+            Ok(())
         }
         fn add_partition(&mut self, p: &KernelPartition) -> std::result::Result<(), IoctlError> {
             self.calls.borrow_mut().push(Call::Add(*p));
+            if self.blkpg_ignored {
+                return Ok(());
+            }
+            let mut now = self.kernel();
+            now.push(*p);
+            self.show(&now);
             Ok(())
         }
         fn kernel_name(&self) -> &str {
@@ -739,16 +808,20 @@ mod tests {
         }
     }
 
-    fn fake(size: u64) -> (FakeOpener, Rc<RefCell<Vec<Call>>>) {
+    fn fake(size: u64) -> (FakeOpener, Rc<RefCell<Vec<Call>>>, tempfile::TempDir) {
+        let root = tempfile::tempdir().unwrap();
         let calls = Rc::new(RefCell::new(Vec::new()));
         let disk = FakeDisk {
             data: vec![0; size as usize],
             sector: 512,
             reread_busy: false,
+            parser: true,
+            blkpg_ignored: false,
             busy_partitions: Vec::new(),
             calls: calls.clone(),
+            root: root.path().to_path_buf(),
         };
-        (FakeOpener(RefCell::new(Some(disk))), calls)
+        (FakeOpener(RefCell::new(Some(disk))), calls, root)
     }
 
     fn gpt_part(index: u32, first: u64, last: u64) -> PartitionSpec {
@@ -825,8 +898,7 @@ mod tests {
     #[test]
     fn a_table_is_written_synced_and_reread_in_that_order() {
         let size = 64 * MIB;
-        let (opener, calls) = fake(size);
-        let root = tempfile::tempdir().unwrap();
+        let (opener, calls, root) = fake(size);
         let host = host_with(root.path(), &[], true);
         let mut s = LinuxDiskSession::open(&opener, "/dev/fake", host).unwrap();
         let spec = gpt_spec(size, vec![gpt_part(1, 2048, 4095)]);
@@ -851,7 +923,7 @@ mod tests {
     #[test]
     fn boot_code_already_on_the_disk_is_kept() {
         let size = 64 * MIB;
-        let (opener, _) = fake(size);
+        let (opener, _, root) = fake(size);
         {
             let mut d = opener.0.borrow_mut();
             let d = d.as_mut().unwrap();
@@ -860,7 +932,6 @@ mod tests {
             d.data[510] = 0x55;
             d.data[511] = 0xAA;
         }
-        let root = tempfile::tempdir().unwrap();
         let mut s = LinuxDiskSession::open(&opener, "/dev/fake", host_with(root.path(), &[], true))
             .unwrap();
         let out = s
@@ -875,9 +946,8 @@ mod tests {
     #[test]
     fn a_busy_reread_falls_back_to_blkpg_for_the_changed_partitions_only() {
         let size = 64 * MIB;
-        let (opener, calls) = fake(size);
+        let (opener, calls, root) = fake(size);
         opener.0.borrow_mut().as_mut().unwrap().reread_busy = true;
-        let root = tempfile::tempdir().unwrap();
         // The kernel has: 1 unchanged, 2 to be resized, 3 to vanish.
         let kept = KernelPartition {
             number: 1,
@@ -923,16 +993,48 @@ mod tests {
     }
 
     #[test]
+    fn a_reread_that_registers_nothing_falls_back_to_blkpg() {
+        // A kernel without the GPT parser: BLKRRPART returns 0 and adds nothing.
+        let size = 64 * MIB;
+        let (opener, calls, root) = fake(size);
+        opener.0.borrow_mut().as_mut().unwrap().parser = false;
+        let host = host_with(root.path(), &[], true);
+        let mut s = LinuxDiskSession::open(&opener, "/dev/fake", host.clone()).unwrap();
+        let out = s
+            .write_partition_table(&gpt_spec(size, vec![gpt_part(1, 2048, 4095)]))
+            .unwrap();
+        assert!(matches!(out.kernel, KernelUpdate::PerPartition(_)));
+        assert!(calls.borrow().contains(&Call::Reread));
+        assert_eq!(host.kernel_partitions("sdz"), out.expected);
+    }
+
+    #[test]
+    fn a_kernel_that_still_disagrees_after_blkpg_is_an_error() {
+        let size = 64 * MIB;
+        let (opener, _, root) = fake(size);
+        {
+            let mut d = opener.0.borrow_mut();
+            let d = d.as_mut().unwrap();
+            d.parser = false;
+            d.blkpg_ignored = true;
+        }
+        let host = host_with(root.path(), &[], true);
+        let mut s = LinuxDiskSession::open(&opener, "/dev/fake", host).unwrap();
+        assert!(s
+            .write_partition_table(&gpt_spec(size, vec![gpt_part(1, 2048, 4095)]))
+            .is_err());
+    }
+
+    #[test]
     fn a_partition_still_in_use_stops_the_fallback_with_its_number() {
         let size = 64 * MIB;
-        let (opener, _) = fake(size);
+        let (opener, _, root) = fake(size);
         {
             let mut d = opener.0.borrow_mut();
             let d = d.as_mut().unwrap();
             d.reread_busy = true;
             d.busy_partitions = vec![2];
         }
-        let root = tempfile::tempdir().unwrap();
         let host = host_with(
             root.path(),
             &[KernelPartition {
@@ -953,8 +1055,7 @@ mod tests {
     #[test]
     fn a_sector_size_mismatch_is_refused_before_anything_is_written() {
         let size = 64 * MIB;
-        let (opener, calls) = fake(size);
-        let root = tempfile::tempdir().unwrap();
+        let (opener, calls, root) = fake(size);
         let mut s = LinuxDiskSession::open(&opener, "/dev/fake", host_with(root.path(), &[], true))
             .unwrap();
         let mut spec = gpt_spec(size, vec![gpt_part(1, 256, 511)]);
@@ -966,8 +1067,7 @@ mod tests {
     #[test]
     fn the_device_length_wins_over_the_plan() {
         let size = 64 * MIB;
-        let (opener, _) = fake(size);
-        let root = tempfile::tempdir().unwrap();
+        let (opener, _, root) = fake(size);
         let mut s = LinuxDiskSession::open(&opener, "/dev/fake", host_with(root.path(), &[], true))
             .unwrap();
         s.write_partition_table(&gpt_spec(size - MIB, vec![gpt_part(1, 2048, 4095)]))
@@ -984,8 +1084,7 @@ mod tests {
     #[test]
     fn finish_waits_until_kernel_and_udev_agree() {
         let size = 64 * MIB;
-        let (opener, _) = fake(size);
-        let root = tempfile::tempdir().unwrap();
+        let (opener, _, root) = fake(size);
         let p1 = KernelPartition {
             number: 1,
             start: 2048,
@@ -1012,8 +1111,7 @@ mod tests {
     #[test]
     fn finish_reports_what_udev_never_finished() {
         let size = 64 * MIB;
-        let (opener, _) = fake(size);
-        let root = tempfile::tempdir().unwrap();
+        let (opener, _, root) = fake(size);
         let p1 = KernelPartition {
             number: 1,
             start: 2048,
@@ -1030,8 +1128,7 @@ mod tests {
 
     #[test]
     fn finish_without_a_write_does_not_wait() {
-        let (opener, _) = fake(MIB);
-        let root = tempfile::tempdir().unwrap();
+        let (opener, _, root) = fake(MIB);
         let s = LinuxDiskSession::open(&opener, "/dev/fake", host_with(root.path(), &[], false))
             .unwrap();
         s.finish(None, Duration::ZERO, |_| panic!("waited"))
@@ -1102,5 +1199,91 @@ mod tests {
             size: 2048,
         };
         assert!(blkpg_plan(&[p], &[p]).is_empty());
+    }
+    /// The real device path on a loop disk with partition scanning: O_EXCL,
+    /// the lock, BLKRRPART, the BLKPG fallback around a partition held open,
+    /// and the refusal while a partition is claimed exclusively. udev is not
+    /// waited for (containers run without it). Needs root:
+    /// `sudo cargo test -p own-backup-backup -- --ignored real_loop_disk`.
+    #[test]
+    #[ignore]
+    fn real_loop_disk_session() {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("disk.img");
+        let size = 64 * MIB;
+        std::fs::File::create(&img).unwrap().set_len(size).unwrap();
+        let out = Command::new("losetup")
+            .args(["-f", "--show", "-P"])
+            .arg(&img)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let lo = String::from_utf8(out.stdout).unwrap().trim().to_string();
+        let name = lo.trim_start_matches("/dev/").to_string();
+        let detach = scopeguard(lo.clone());
+        let host = HostView::default();
+
+        // A fresh table: BLKRRPART succeeds and the kernel shows it.
+        let mut s = LinuxDiskSession::open(&RealOpener, &lo, host.clone()).unwrap();
+        let spec = gpt_spec(
+            size,
+            vec![gpt_part(1, 2048, 20479), gpt_part(2, 20480, 40959)],
+        );
+        let out = s.write_partition_table(&spec).unwrap();
+        // Reread on a kernel with the GPT parser; per partition on one without
+        // it (the cloud sandbox kernel, 2026-10-19).
+        eprintln!("fresh table: {:?}", out.kernel);
+        assert!(matches!(
+            out.kernel,
+            KernelUpdate::Reread | KernelUpdate::PerPartition(_)
+        ));
+        assert_eq!(host.kernel_partitions(&name), out.expected);
+        s.finish(None, Duration::ZERO, |_| {}).unwrap();
+
+        // Partition 1 held open (not exclusively): BLKRRPART is refused and
+        // partition 2 is changed through BLKPG around it.
+        let p1 = format!("{lo}p1");
+        let held = std::fs::File::open(&p1).unwrap();
+        let mut s = LinuxDiskSession::open(&RealOpener, &lo, host.clone()).unwrap();
+        let spec2 = gpt_spec(
+            size,
+            vec![gpt_part(1, 2048, 20479), gpt_part(2, 20480, 61439)],
+        );
+        let out = s.write_partition_table(&spec2).unwrap();
+        assert!(
+            matches!(out.kernel, KernelUpdate::PerPartition(_)),
+            "{:?}",
+            out.kernel
+        );
+        assert_eq!(host.kernel_partitions(&name), out.expected);
+        s.finish(None, Duration::ZERO, |_| {}).unwrap();
+        drop(held);
+
+        // Partition 1 claimed exclusively (what a mount does): no session.
+        let claimed = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_EXCL)
+            .open(&p1)
+            .unwrap();
+        assert!(LinuxDiskSession::open(&RealOpener, &lo, host.clone()).is_err());
+        drop(claimed);
+
+        // A partition is not a disk.
+        assert!(LinuxDiskSession::open(&RealOpener, &p1, host).is_err());
+        drop(detach);
+    }
+
+    struct Detach(String);
+    impl Drop for Detach {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("losetup")
+                .args(["-d", &self.0])
+                .status();
+        }
+    }
+    fn scopeguard(lo: String) -> Detach {
+        Detach(lo)
     }
 }

@@ -518,6 +518,10 @@
     "ru": "ядро не обновило раздел %{number} диска %{disk}: %{error}. Раздел открыт другой программой — закройте её и повторите.",
     "en": "the kernel did not update partition %{number} of disk %{disk}: %{error}. Another program has the partition open — close it and try again."
   },
+  "disk_session_linux.kernel_mismatch": {
+    "ru": "ядро показывает разделы диска %{disk} не такими, как записано в таблице: %{shown} вместо %{expected}",
+    "en": "the kernel shows the partitions of disk %{disk} differently from the written table: %{shown} instead of %{expected}"
+  },
   "disk_session_linux.udev_timeout": {
     "ru": "разделы диска %{disk} не появились за %{seconds} с: %{pending}",
     "en": "the partitions of disk %{disk} did not appear within %{seconds} s: %{pending}"
