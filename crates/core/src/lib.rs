@@ -3609,6 +3609,7 @@ async fn perform_disk_backup(
 
     let request = DiskBackupRequest {
         disk_number: ds.disk_number,
+        disk_device: None,
         disk_model: ds.disk_model.clone(),
         partitions,
         source_disk,

@@ -249,6 +249,7 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
 
     let request = DiskBackupRequest {
         disk_number: args.disk,
+        disk_device: None,
         disk_model: disk.model.clone(),
         partitions: chosen
             .iter()

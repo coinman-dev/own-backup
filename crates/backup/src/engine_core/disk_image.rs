@@ -27,7 +27,12 @@ pub struct DiskPartitionBackup {
 /// Parameters for a whole-disk (bootable) backup into a single image.
 #[derive(Clone)]
 pub struct DiskBackupRequest {
+    /// The disk on Windows (`\\.\PhysicalDriveN`); on Linux the number the
+    /// manifest records, the disk itself being [`Self::disk_device`].
     pub disk_number: u32,
+    /// The disk's stable device on Linux (`/dev/disk/by-id/…`, decision R1);
+    /// `None` on Windows, which names a disk by its number.
+    pub disk_device: Option<String>,
     pub disk_model: String,
     pub partitions: Vec<DiskPartitionBackup>,
     pub image_path: PathBuf,

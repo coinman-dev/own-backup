@@ -272,7 +272,9 @@ pub(crate) struct DiskImagePlan {
     pub(crate) role: ChainRole,
     /// Identity and file name of the parent image, for a child.
     pub(crate) parent: Option<(Uuid, String)>,
-    pub(crate) disk_number: u32,
+    /// Who the disk is, sealed into the container as its source id
+    /// (`DiskPlatform::disk_identity`): `disk<N>` on Windows.
+    pub(crate) source_id: String,
     /// Already resolved: 1–19.
     pub(crate) zstd_level: i32,
 }
@@ -301,7 +303,7 @@ pub(crate) fn create_disk_obk_target(
         virtual_size: disk_size,
         // A whole-disk copy is identified by the disk it came from, the way a
         // volume copy is by its volume.
-        source_id: Some(format!("disk{}", plan.disk_number)),
+        source_id: Some(plan.source_id.clone()),
         consolidated_increments: 0,
         chain_started_at: None,
         compression: crate::seal::obk::ObkCompression::Zstd {
@@ -329,6 +331,8 @@ pub(crate) fn create_disk_obk_target(
 pub(crate) fn whole_disk_image_manifest(
     layout: &own_backup_common::gpt::DiskLayout,
     req: &DiskBackupRequest,
+    source_os: &str,
+    device_id: &str,
     sector_size: u32,
     image_size: u64,
     total_blocks: u64,
@@ -341,9 +345,9 @@ pub(crate) fn whole_disk_image_manifest(
         created_at: chrono::Utc::now().to_rfc3339(),
         backup_type: kind,
         parent_backup_id,
-        source_os: "windows".into(),
+        source_os: source_os.into(),
         source_disk: DiskInfo {
-            device_id: format!(r"\\.\PhysicalDrive{}", req.disk_number),
+            device_id: device_id.into(),
             model: req.disk_model.clone(),
             serial: String::new(),
             size_bytes: image_size,
@@ -554,6 +558,7 @@ mod tests {
     fn disk_request(format: ImageFormat, zstd_level: i32) -> DiskBackupRequest {
         DiskBackupRequest {
             disk_number: 3,
+            disk_device: None,
             disk_model: "Test disk".into(),
             partitions: vec![],
             image_path: PathBuf::from("disk.qcow2"),
@@ -584,6 +589,8 @@ mod tests {
         let m = whole_disk_image_manifest(
             &layout,
             &disk_request(ImageFormat::Qcow2, 0),
+            "windows",
+            r"\\.\PhysicalDrive3",
             512,
             SIZE,
             4,
@@ -609,6 +616,8 @@ mod tests {
         let vhdx = whole_disk_image_manifest(
             &layout,
             &disk_request(ImageFormat::Vhdx, 9),
+            "linux",
+            "/dev/disk/by-id/ata-TEST",
             512,
             SIZE,
             4,
@@ -616,6 +625,8 @@ mod tests {
             BackupType::Full,
             None,
         );
+        assert_eq!(vhdx.source_os, "linux");
+        assert_eq!(vhdx.source_disk.device_id, "/dev/disk/by-id/ata-TEST");
         assert_eq!(vhdx.compression_algo, CompressionAlgo::None);
         assert_eq!(vhdx.compression_level, 0);
     }
@@ -630,7 +641,7 @@ mod tests {
             backup_id,
             role,
             parent,
-            disk_number: 3,
+            source_id: "disk3".into(),
             zstd_level: 3,
         };
 

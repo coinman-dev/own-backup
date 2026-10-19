@@ -461,6 +461,7 @@ mod probe {
         let summary = backup_disk(
             &DiskBackupRequest {
                 disk_number: source_disk,
+                disk_device: None,
                 disk_model: "LAB VIRTUAL DISK".into(),
                 partitions,
                 image_path: image.clone(),
