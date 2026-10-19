@@ -222,14 +222,11 @@ impl EnginePlatform for LinuxPlatform {
     }
 
     fn create_vhdx_child(&self, path: &Path, parent: &Path) -> Result<VhdxWriter> {
-        // TODO(phase V1): `vhdx_format::create_differencing` — the has-parent
-        // bit and a parent locator with the DataWriteGuid linkage — then
-        // `VhdxWriter::open_existing`, as on Windows.
-        Err(OwnBackupError::NotImplemented(format!(
-            "{}: a differencing VHDX over {} cannot be made on Linux yet",
-            path.display(),
-            parent.display()
-        )))
+        // The has-parent bit and a parent locator with the DataWriteGuid
+        // linkage, written in userspace — what CreateVirtualDisk does on
+        // Windows. The engine keeps VHDX chains off on Linux until Windows has
+        // accepted such children (CHECKS 12).
+        VhdxWriter::create_differencing(path, parent)
     }
 
     /// Deleting files inside an image needs a filesystem driver over it (an
@@ -374,10 +371,15 @@ mod tests {
         crate::vhdx_bat::read_vhdx_guest_at(&path, 2 * MIB, &mut back).unwrap();
         assert_eq!(back, [0xA5; 4096]);
 
-        assert!(matches!(
-            p.create_vhdx_child(&dir.path().join("c.avhdx"), &path),
-            Err(OwnBackupError::NotImplemented(_))
-        ));
+        // A child reads as its parent until written.
+        let child = dir.path().join("c.avhdx");
+        p.create_vhdx_child(&child, &path)
+            .unwrap()
+            .finish()
+            .unwrap();
+        crate::vhdx_bat::read_vhdx_guest_at(&child, 2 * MIB, &mut back).unwrap();
+        assert_eq!(back, [0xA5; 4096]);
+        assert!(crate::vhdx_bat::vhdx_parent_linkage_matches(&child, &path).unwrap());
     }
 
     #[test]
