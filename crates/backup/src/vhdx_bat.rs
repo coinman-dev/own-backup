@@ -28,6 +28,7 @@ const META_GUID: &str = "8b7ca206-4790-4b9a-b8fe-575f050f886e";
 const MI_FILE_PARAMS: &str = "caa16737-fa36-4d43-b3b6-33f0aa44e76b";
 const MI_VDISK_SIZE: &str = "2fa54224-cd1b-4876-b211-5dbed83bf4b8";
 const MI_LOG_SECTOR: &str = "8141bf1d-a96f-4709-ba47-f233a8faab5f";
+const MI_PHYS_SECTOR: &str = "cda348c7-445d-4471-9cc9-e9885251c556";
 const MI_PARENT_LOCATOR: &str = "a8d35f2d-b30b-454d-abf7-d3d84834ab0c";
 
 /// BAT payload-block state `SB_BLOCK_NOT_PRESENT` — the only state that means
@@ -66,7 +67,7 @@ fn read_exact_at(file: &mut File, off: u64, buf: &mut [u8]) -> Result<()> {
 /// Windows VHD driver can replay them, and reading past that would hand back a
 /// stale image while claiming it is the current one. Every image we close
 /// normally has `LogGuid = 0` (verified on real backups, 2026-08-21).
-fn ensure_log_is_empty(file: &mut File, path: &Path) -> Result<()> {
+pub(crate) fn ensure_log_is_empty(file: &mut File, path: &Path) -> Result<()> {
     // Headers 1 and 2 at their spec-fixed offsets; the one with the higher
     // sequence number is the active one.
     let mut active: Option<(u64, [u8; 16])> = None;
@@ -659,6 +660,70 @@ pub fn vhdx_parent_path(path: &Path) -> Result<Option<std::path::PathBuf>> {
     let mut file = File::open(path).map_err(|e| bad(format!("open {}: {e}", path.display())))?;
     let meta = read_metadata_region(&mut file)?;
     Ok(parse_parent_locator(&meta).map(|raw| resolve_parent(path, &raw)))
+}
+
+/// The shape of a VHDX image as its metadata region states it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VhdxGeometry {
+    pub virtual_size: u64,
+    /// Payload block size in bytes.
+    pub block_size: u64,
+    pub logical_sector_size: u32,
+    pub physical_sector_size: u32,
+    /// FileParameters.HasParent: a differencing image.
+    pub has_parent: bool,
+}
+
+/// Read the geometry of `path` (MS-VHDX §2.6.2). Refuses an image whose log
+/// still holds entries — its metadata on disk may not be the current one.
+pub fn vhdx_geometry(path: &Path) -> Result<VhdxGeometry> {
+    let mut file = File::open(path).map_err(|e| bad(format!("open {}: {e}", path.display())))?;
+    ensure_log_is_empty(&mut file, path)?;
+    let meta = read_metadata_region(&mut file)?;
+    let mcount = u16::from_le_bytes(meta[10..12].try_into().unwrap()) as usize;
+    let mut g = VhdxGeometry {
+        virtual_size: 0,
+        block_size: 0,
+        logical_sector_size: 0,
+        physical_sector_size: 0,
+        has_parent: false,
+    };
+    let u32_at = |o: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(meta.get(o..o + 4)?.try_into().ok()?))
+    };
+    for slot in 0..mcount.min(2046) {
+        let e = 32 + slot * 32;
+        let Some(guid) = meta.get(e..e + 16) else {
+            break;
+        };
+        let Some(ioff) = u32_at(e + 16).map(|o| o as usize) else {
+            break;
+        };
+        if guid == guid_le(MI_VDISK_SIZE) {
+            if let Some(b) = meta.get(ioff..ioff + 8) {
+                g.virtual_size = u64::from_le_bytes(b.try_into().unwrap());
+            }
+        } else if guid == guid_le(MI_FILE_PARAMS) {
+            g.block_size = u32_at(ioff).unwrap_or(0) as u64;
+            // Bit 0 LeaveBlocksAllocated, bit 1 HasParent.
+            g.has_parent = u32_at(ioff + 4).unwrap_or(0) & 2 != 0;
+        } else if guid == guid_le(MI_LOG_SECTOR) {
+            g.logical_sector_size = u32_at(ioff).unwrap_or(0);
+        } else if guid == guid_le(MI_PHYS_SECTOR) {
+            g.physical_sector_size = u32_at(ioff).unwrap_or(0);
+        }
+    }
+    if g.virtual_size == 0
+        || g.block_size == 0
+        || g.logical_sector_size == 0
+        || g.physical_sector_size == 0
+    {
+        return Err(bad(format!(
+            "{}: metadata is missing the virtual size, block size or a sector size",
+            path.display()
+        )));
+    }
+    Ok(g)
 }
 
 /// Longest accepted parent chain (a loop is corruption, real chains are short).
