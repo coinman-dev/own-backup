@@ -9,6 +9,7 @@
   import type { Job } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
   import { intlLocale } from '../lib/i18n.svelte';
+  import { joinPath } from '../lib/paths';
 
   interface Props {
     job: Job;
@@ -148,7 +149,7 @@
   const destPath = $derived.by(() => {
     const name = progress?.image_file_name;
     if (!name) return job.dest_folder;
-    return job.dest_folder.replace(/[\\/]+$/, '') + '\\' + name;
+    return joinPath(job.dest_folder, name);
   });
 
   // Real data-category breakdown, collected during the backup's file walk.

@@ -9,6 +9,7 @@
   import { formatBytes } from '../lib/format';
   import type { DirEntry } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
+  import { joinPath } from '../lib/paths';
 
   let path = $state('');
   let parent: string | null = $state(null);
@@ -88,8 +89,7 @@
     creating = true;
     error = null;
     try {
-      const sep = path.endsWith('\\') || path.endsWith('/') ? '' : '\\';
-      const made = await api.createDir(`${path}${sep}${name}`);
+      const made = await api.createDir(joinPath(path, name));
       newFolder = '';
       await go(made);
     } catch (e) {

@@ -19,6 +19,7 @@
   import { choiceLabel, newestFirst, severalSources, type VersionChoice } from '../lib/jobVersions';
   import type { ArchiveSecret, EngineProgress, ExportSummary, Job } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
+  import { joinPath } from '../lib/paths';
 
   interface Props {
     job: Job;
@@ -48,8 +49,7 @@
     let name = fileName.trim();
     if (!dir || !name) return '';
     if (!/\.vhdx$/i.test(name)) name += '.vhdx';
-    const sep = dir.includes('\\') || /^[A-Za-z]:/.test(dir) ? '\\' : '/';
-    return dir.endsWith('\\') || dir.endsWith('/') ? dir + name : dir + sep + name;
+    return joinPath(dir, name);
   });
   const ready = $derived(!!chosen && !!target && !badName);
 

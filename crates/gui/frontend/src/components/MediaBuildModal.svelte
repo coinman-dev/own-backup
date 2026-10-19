@@ -18,7 +18,7 @@
     MediaTool,
   } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
-  import { examplePath } from '../lib/paths';
+  import { examplePath, joinPath } from '../lib/paths';
 
   interface Props {
     kind: 'windows' | 'linux';
@@ -148,11 +148,10 @@
     error = null;
     report = null;
     progress = null;
-    const sep = outputDir.endsWith('\\') || outputDir.endsWith('/') ? '' : '\\';
     try {
       report = await api.buildBootMedia({
         base_wim: base?.path ?? '',
-        output_iso: `${outputDir}${sep}OwnBackup.iso`,
+        output_iso: joinPath(outputDir, 'OwnBackup.iso'),
         drivers: includeDrivers ? [...selected] : [],
         extra_drivers: '',
         tools: includeTools ? tools.map((t) => t.id) : [],

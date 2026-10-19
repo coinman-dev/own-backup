@@ -12,7 +12,7 @@
   import ArchiveKeyModal from '../components/ArchiveKeyModal.svelte';
   import type { Job, DiskInfo, PartitionInfo } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
-  import { examplePath } from '../lib/paths';
+  import { examplePath, joinPath } from '../lib/paths';
 
   interface Props {
     mode: 'wizard' | 'edit';
@@ -787,8 +787,7 @@
     if (!folder || job.sources.length === 0) return '';
     const safe = safeFileStem(job.name, 'backup');
     const token = job.disk_source ? `disk${job.disk_source.disk_number}` : sourceToken(job.sources[0]);
-    const sep = folder.endsWith('\\') || folder.endsWith('/') ? '' : '\\';
-    return `${folder}${sep}${safe}_${token}_full_${previewStamp}.${previewExt}`;
+    return joinPath(folder, `${safe}_${token}_full_${previewStamp}.${previewExt}`);
   });
 
   // Universal "folder + file name" field (2-in-1). At rest it shows the full
@@ -803,8 +802,7 @@
     const folder = job.dest_folder.trim();
     const name = job.name.trim();
     if (!folder && !name) return '';
-    const sep = folder && !/[\\/]$/.test(folder) ? '\\' : '';
-    return `${folder}${sep}${name}`;
+    return joinPath(folder, name);
   }
   $effect(() => {
     if (!destFocused) pathText = editablePath();
