@@ -6,7 +6,7 @@
 //!     linux_restore_rpc restore-volume IMG TARGET [--keep]
 //!     linux_restore_rpc restore-disk IMG DEVICE [--keep]
 //!     linux_restore_rpc mount IMG [--keep] | unmount IMG
-//!     linux_restore_rpc plan-disk IMG SOURCE_DISK TARGET_DISK OUT.json [--entries]
+//!     linux_restore_rpc plan-disk IMG TARGET_DISK OUT.json [--entries]
 //!     linux_restore_rpc plan-volume IMG TARGET_DISK PART OUT.json
 //!     linux_restore_rpc dry-run PLAN.json
 //!     linux_restore_rpc apply PLAN.json [--keep]
@@ -14,9 +14,11 @@
 //! A reply is printed as JSON and exits 0. A refusal prints
 //! `{"code", "message", "identity_clashes"}` and exits 3 for
 //! `FAILED_PRECONDITION`, 4 for anything else; `apply` waits for the run and
-//! exits 0 only when it completed. `plan-*` read the partition table of a
-//! disk straight off the device (GPT or primary MBR entries, 512-byte
-//! sectors) — what the window's designer would have shown.
+//! exits 0 only when it completed. `plan-disk` lays the copy's own captured
+//! table out on the target, the way the window's designer starts;
+//! `plan-volume` keeps the target's current table (read straight off the
+//! device: GPT or primary MBR entries, 512-byte sectors) and puts the volume
+//! into one of its partitions.
 use std::io::{Read, Seek, SeekFrom};
 use std::time::Duration;
 
@@ -63,6 +65,13 @@ fn guid(b: &[u8]) -> String {
     let d3 = u16::from_le_bytes(b[6..8].try_into().unwrap());
     let tail: String = b[8..16].iter().map(|x| format!("{x:02X}")).collect();
     format!("{d1:08X}-{d2:04X}-{d3:04X}-{}-{}", &tail[..4], &tail[4..])
+}
+
+/// Length of a disk or file.
+fn read_size(device: &str) -> u64 {
+    std::fs::File::open(device)
+        .and_then(|mut f| f.seek(SeekFrom::End(0)))
+        .unwrap_or_else(|e| failed(format!("{device}: {e}")))
 }
 
 /// The disk's current table, as a plan would write it again.
@@ -187,20 +196,49 @@ async fn main() {
     // Plans are built here, without the service.
     match cmd {
         "plan-disk" => {
-            let [_, image, source, target, out] = pos[..] else {
-                failed("plan-disk IMG SOURCE_DISK TARGET_DISK OUT.json".into())
+            let [_, image, target, out] = pos[..] else {
+                failed("plan-disk IMG TARGET_DISK OUT.json".into())
             };
-            let mut table = read_table(source);
-            table.disk_size_bytes = read_table(target).disk_size_bytes;
+            let sidecar = own_backup_backup::sidecar::read_sidecar_with_keys(
+                std::path::Path::new(image),
+                None,
+            )
+            .unwrap_or_else(|e| failed(format!("{image}: {e}")));
+            let layout = sidecar
+                .disk_manifest
+                .map(|d| d.layout)
+                .unwrap_or_else(|| failed(format!("{image} is not a whole-disk copy")));
+            let table = PartitionTableSpec {
+                scheme: PartitionScheme::Gpt,
+                sector_size: layout.sector_size,
+                disk_size_bytes: read_size(target),
+                disk_id: layout.disk_guid.clone(),
+                entries: layout
+                    .partitions
+                    .iter()
+                    .map(|p| PartitionSpec {
+                        index: p.index,
+                        first_lba: p.first_lba,
+                        last_lba: p.last_lba,
+                        kind: PartitionKind::Gpt {
+                            type_guid: p.type_guid.clone(),
+                            part_guid: p.part_guid.clone(),
+                            attributes: p.attributes,
+                            name: p.name.clone(),
+                        },
+                    })
+                    .collect(),
+            };
             let mut ops = vec![RestoreOp::WritePartitionTable {
                 table: table.clone(),
             }];
             for e in &table.entries {
                 ops.push(restore_op(e.index, part_ref(e)));
             }
-            if let Some(esp) = table.entries.iter().find(
-                |e| matches!(&e.kind, PartitionKind::Gpt { type_guid, .. } if type_guid == ESP),
-            ) {
+            if let Some(esp) = table.entries.iter().find(|e| {
+                matches!(&e.kind, PartitionKind::Gpt { type_guid, .. }
+                    if type_guid.eq_ignore_ascii_case(ESP))
+            }) {
                 ops.push(RestoreOp::EnsureFallbackBootloader { esp: part_ref(esp) });
             }
             if flag("--entries") {

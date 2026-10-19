@@ -3212,6 +3212,7 @@ name = "own-backup-client"
 version = "0.1.5-beta"
 dependencies = [
  "hyper-util",
+ "own-backup-backup",
  "own-backup-common",
  "own-backup-core",
  "prost",
