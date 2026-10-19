@@ -306,8 +306,20 @@ fn is_legacy_generated_unit(text: &str) -> bool {
 /// in force. `Ok(Some(path))` when one was removed.
 #[cfg(not(target_os = "windows"))]
 fn remove_legacy_unit() -> Result<Option<String>, Box<dyn std::error::Error>> {
-    let path = format!("/etc/systemd/system/{}.service", crate::LINUX_UNIT_NAME);
-    let text = match std::fs::read_to_string(&path) {
+    remove_legacy_unit_in(std::path::Path::new("/etc/systemd/system"))
+}
+
+/// [`remove_legacy_unit`] for the unit directory `dir`. The `.wants` links
+/// that the old `systemctl enable` made point at the removed file and go with
+/// it — left behind, they would dangle, and `enable` of the packaged unit
+/// stumbles over a link of the same name.
+#[cfg(not(target_os = "windows"))]
+fn remove_legacy_unit_in(
+    dir: &std::path::Path,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let unit = dir.join(format!("{}.service", crate::LINUX_UNIT_NAME));
+    let path = unit.display().to_string();
+    let text = match std::fs::read_to_string(&unit) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(format!("cannot read {path}: {e}").into()),
@@ -315,7 +327,19 @@ fn remove_legacy_unit() -> Result<Option<String>, Box<dyn std::error::Error>> {
     if !is_legacy_generated_unit(&text) {
         return Ok(None);
     }
-    std::fs::remove_file(&path).map_err(|e| format!("cannot remove {path}: {e}"))?;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if !entry.file_name().to_string_lossy().ends_with(".wants") {
+                continue;
+            }
+            let link = entry.path().join(unit.file_name().unwrap_or_default());
+            if std::fs::read_link(&link).is_ok_and(|target| target == unit) {
+                std::fs::remove_file(&link)
+                    .map_err(|e| format!("cannot remove {}: {e}", link.display()))?;
+            }
+        }
+    }
+    std::fs::remove_file(&unit).map_err(|e| format!("cannot remove {path}: {e}"))?;
     Ok(Some(path))
 }
 
@@ -876,5 +900,48 @@ mod linux_unit_tests {
         assert!(!is_legacy_generated_unit(PACKAGED_UNIT));
         let admins = "[Unit]\nDescription=my own engine\n[Service]\nType=simple\n";
         assert!(!is_legacy_generated_unit(admins));
+    }
+
+    #[test]
+    fn a_legacy_unit_goes_with_its_wants_link_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let unit = dir.path().join("own-backup.service");
+        std::fs::write(
+            &unit,
+            format!(
+                "[Unit]\n{}\n[Service]\nType=simple\nExecStart=/x --run\n\
+                 [Install]\nWantedBy=multi-user.target\n",
+                legacy_unit_description()
+            ),
+        )
+        .unwrap();
+        let wants = dir.path().join("multi-user.target.wants");
+        std::fs::create_dir(&wants).unwrap();
+        std::os::unix::fs::symlink(&unit, wants.join("own-backup.service")).unwrap();
+        // Someone else's link of the same name, to the packaged unit.
+        let other = dir.path().join("graphical.target.wants");
+        std::fs::create_dir(&other).unwrap();
+        std::os::unix::fs::symlink(
+            "/usr/lib/systemd/system/own-backup.service",
+            other.join("own-backup.service"),
+        )
+        .unwrap();
+
+        let removed = remove_legacy_unit_in(dir.path()).unwrap();
+        assert_eq!(removed.as_deref(), Some(unit.to_str().unwrap()));
+        assert!(!unit.exists());
+        assert!(wants.join("own-backup.service").symlink_metadata().is_err());
+        assert!(other.join("own-backup.service").symlink_metadata().is_ok());
+        // Nothing left to remove the second time.
+        assert_eq!(remove_legacy_unit_in(dir.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn an_administrators_unit_in_etc_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let unit = dir.path().join("own-backup.service");
+        std::fs::write(&unit, "[Service]\nType=simple\nExecStart=/mine\n").unwrap();
+        assert_eq!(remove_legacy_unit_in(dir.path()).unwrap(), None);
+        assert!(unit.exists());
     }
 }

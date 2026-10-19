@@ -1,0 +1,14 @@
+#!/bin/sh
+# Own Backup: before the files are removed or replaced.
+set -e
+
+# Stop the engine on removal and before an upgrade replaces its binary. The
+# stop waits for a running operation to wind down — a consolidation may take
+# minutes (TimeoutStopSec=330 in the unit) — so a copy interrupted by an
+# upgrade is cancelled cleanly, never killed mid-write. postinst starts the
+# new engine.
+if [ -d /run/systemd/system ] && { [ "$1" = "remove" ] || [ "$1" = "upgrade" ] || [ "$1" = "deconfigure" ]; }; then
+    deb-systemd-invoke stop own-backup.service >/dev/null || true
+fi
+
+exit 0
