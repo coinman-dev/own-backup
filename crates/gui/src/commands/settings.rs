@@ -19,17 +19,18 @@ use crate::state::GuiState;
 #[tauri::command]
 pub async fn get_config(state: State<'_, GuiState>) -> Result<AppConfig, String> {
     // The service's copy is the one that counts; the window's is what it read
-    // at start, kept for when the service cannot be asked.
+    // at start, kept for when the service cannot be asked. Not started and
+    // waited for: the page has an answer either way.
     #[cfg(not(target_os = "windows"))]
-    match state.link.client().await {
-        Ok(mut client) => match client.get_settings().await {
+    match state.link.connected().await {
+        Some(mut client) => match client.get_settings().await {
             Ok(fresh) => {
                 *state.config.lock().map_err(|e| e.to_string())? = fresh.clone();
                 return Ok(fresh);
             }
-            Err(error) => tracing::warn!(%error, "settings: the service did not answer"),
+            Err(error) => tracing::info!(%error, "settings: the service did not answer"),
         },
-        Err(error) => tracing::debug!(%error, "settings: no service to ask"),
+        None => tracing::debug!("settings: no service to ask"),
     }
     Ok(state.config.lock().map_err(|e| e.to_string())?.clone())
 }

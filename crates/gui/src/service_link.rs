@@ -105,6 +105,20 @@ impl ServiceLink {
             .unwrap_or_else(|_| tr!("service_link.unavailable").into_owned()))
     }
 
+    /// A client if the service answers right now — the cached one or one
+    /// fresh attempt — without starting it and waiting the way
+    /// [`client`](Self::client) does. For reads that have an answer of their
+    /// own to fall back on, where five seconds of «Загрузка…» buy nothing.
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
+    pub async fn connected(&self) -> Option<BackupClient> {
+        if let Some(c) = self.cached().await {
+            return Some(c);
+        }
+        let c = self.connect().await.ok()?;
+        self.store(c.clone()).await;
+        Some(c)
+    }
+
     /// The cached client, if it is still holding the token the service is
     /// currently answering to.
     ///
