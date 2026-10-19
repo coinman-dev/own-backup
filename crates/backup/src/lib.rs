@@ -28,6 +28,7 @@ pub mod fat_map;
 pub mod fs_uuid;
 pub mod gpt_reader;
 pub mod gpt_writer;
+pub mod identity_clash;
 pub mod iscsi;
 pub mod luks;
 pub mod mbr_writer;
