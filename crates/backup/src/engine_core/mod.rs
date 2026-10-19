@@ -15,6 +15,7 @@ pub(crate) mod source;
 pub(crate) mod target;
 pub(crate) mod verify;
 pub(crate) mod volume;
+pub(crate) mod volume_exclusions;
 pub(crate) mod volume_maps;
 
 #[cfg(test)]
