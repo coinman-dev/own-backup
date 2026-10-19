@@ -255,7 +255,40 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         "Backing up {} -> {} ({})",
         args.source, args.output, args.format
     );
-    let copied = backup_volume(&request, |_p| Ok(()));
+    // Ctrl+C, SIGTERM or a closed terminal while a partition is frozen or a
+    // snapshot is held must not leave it that way until the next cleanup: the
+    // copy stops at its next block and the snapshot is released below, as
+    // after any other failure.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = signal(SignalKind::terminate())?;
+        let mut hup = signal(SignalKind::hangup())?;
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = term.recv() => {}
+                _ = hup.recv() => {}
+            }
+            eprintln!("stopping: the copy ends at its next block and the snapshot is released");
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+    let copied = {
+        let stop = stop.clone();
+        tokio::task::spawn_blocking(move || {
+            backup_volume(&request, |_p| {
+                if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    Err(own_backup_common::OwnBackupError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            })
+        })
+        .await
+        .map_err(|e| own_backup_common::OwnBackupError::Config(format!("backup task: {e}")))?
+    };
     let intact = provider.check_intact(&snapshot).await;
     if let Err(e) = provider.release_snapshot(&snapshot).await {
         eprintln!("warning: snapshot release failed: {e}");
