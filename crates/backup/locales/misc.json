@@ -1,5 +1,13 @@
 {
   "_version": 2,
+  "regf.bad_hive": {
+    "ru": "файл куста реестра повреждён или не поддерживается: %{reason}",
+    "en": "the registry hive file is damaged or not supported: %{reason}"
+  },
+  "regf.dirty": {
+    "ru": "куст реестра записан не до конца (номера последовательности %{primary} и %{secondary}): часть данных осталась в журналах .LOG1/.LOG2, которые мы не применяем. Загрузите эту Windows один раз или откройте хранилище через bcdedit, чтобы оно было сведено.",
+    "en": "the registry hive was not completely written (sequence numbers %{primary} and %{secondary}): part of its data is still in the .LOG1/.LOG2 logs, which we do not replay. Boot this Windows once or open the store with bcdedit so that it is consolidated."
+  },
   "file_restore_win.verify_listing_diff": {
     "ru": "Содержимое каталога или тип/размер элемента не совпадает: %{path}",
     "en": "Directory contents or entry type/size differs: %{path}"
