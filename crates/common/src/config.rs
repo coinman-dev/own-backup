@@ -42,7 +42,7 @@ pub struct AppConfig {
     #[serde(default)]
     pub remembered_backups: Vec<String>,
     /// `ru` or `en` — the language the window speaks, written by it (the
-    /// window resolves «Как в Windows» itself). Empty in a config from before
+    /// window resolves «Как в системе» itself). Empty in a config from before
     /// the setting: Russian. The service follows it while running
     /// ([`crate::lang`]).
     #[serde(default)]

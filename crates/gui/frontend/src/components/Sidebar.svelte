@@ -172,12 +172,12 @@
         <span>{layout.code}</span>
       </div>
     {/if}
-    <!-- Quick switch; the three-way choice («Как в Windows» too) is in
+    <!-- Quick switch; the three-way choice («Как в системе» too) is in
          «Параметры → Оформление». -->
     <!-- A press on the half that is already lit changes nothing — and must
-         not be remembered either. In «Как в Windows» one of the two is lit
+         not be remembered either. In «Как в системе» one of the two is lit
          by the system, and saving that press as a choice quietly turned
-         «Как в Windows» into «Тёмная» for good: the window looked the same
+         «Как в системе» into «Тёмная» for good: the window looked the same
          and stopped following Windows. -->
     <div class="theme-switch" role="group" aria-label={m.nav_theme_group()}>
       <button

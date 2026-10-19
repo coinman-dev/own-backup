@@ -23,6 +23,7 @@ import type {
   DryRunResult,
   RestoreRunState,
   ServiceHealth,
+  PlatformInfo,
   KeyboardLayout,
   KeyboardState,
   DirEntry,
@@ -205,6 +206,8 @@ export const api = {
   // Windows' own iSCSI initiator / the in-tree NBD module on Linux) ---
   // --- как загружается машина (переменные прошивки UEFI) ---
   // Живут в материнской плате, а не на диске: копия разделов их не сохраняет.
+  /** Rejects with a `CodedError`: `unimplemented` where the service does not
+   *  read boot entries on its platform (Linux, for now). */
   bootStatus: () => invoke<BootStatus>('boot_status'),
   bootAction: (action: Record<string, unknown>) =>
     invoke<BootActionResult>('boot_action', { action }),
@@ -219,6 +222,8 @@ export const api = {
    *  through the config, the service's. */
   setUiLanguage: (lang: string) => invoke<void>('set_ui_language', { lang }),
   serviceHealth: () => invoke<ServiceHealth>('service_health'),
+  /** Which system the window runs on, its service channel and log folders. */
+  platformInfo: () => invoke<PlatformInfo>('platform_info'),
   /** Active keyboard layout; null where it cannot be told (non-Windows). */
   keyboardLayout: () => invoke<KeyboardLayout | null>('keyboard_layout'),
   /** Layout and Caps Lock for a password field, taskbar or not. */
@@ -237,3 +242,20 @@ export const api = {
    */
   guiReady: () => invoke<void>('gui_ready'),
 };
+
+/** The kind of a failed command, when it says one (`CodedError`); `null` for a
+ *  plain-text failure. Screens branch on this, never on the words. */
+export function errorCode(e: unknown): string | null {
+  if (e && typeof e === 'object' && 'code' in e && typeof (e as { code: unknown }).code === 'string') {
+    return (e as { code: string }).code;
+  }
+  return null;
+}
+
+/** The words of a failed command, whichever shape it came in. */
+export function errorText(e: unknown): string {
+  if (e && typeof e === 'object' && 'message' in e) {
+    return String((e as { message: unknown }).message);
+  }
+  return String(e);
+}

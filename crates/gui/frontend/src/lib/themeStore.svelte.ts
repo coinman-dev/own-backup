@@ -1,6 +1,6 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
 
-/** «Светлая», «Тёмная» or «Как в Windows» — the last follows the system's
+/** «Светлая», «Тёмная» or «Как в системе» — the last follows the system's
  *  «Режим приложения» and switches along with it. */
 export type ThemeMode = 'light' | 'dark' | 'system';
 
@@ -23,7 +23,7 @@ function loadMode(): ThemeMode {
 
 export const theme = $state({
   mode: loadMode(),
-  /** What Windows says right now; read only in «Как в Windows». */
+  /** What Windows says right now; read only in «Как в системе». */
   systemDark: darkQuery.matches,
 });
 
@@ -38,7 +38,7 @@ function apply() {
 
 /** The title bar is Windows', not ours: it follows the system unless told
  *  otherwise. Telling it also tells the WebView — `prefers-color-scheme` then
- *  answers what was set, not what the system says — so «Как в Windows» hands
+ *  answers what was set, not what the system says — so «Как в системе» hands
  *  both back (`null`) and reads the real answer again once that is done. */
 async function applyWindow() {
   const mode = theme.mode;

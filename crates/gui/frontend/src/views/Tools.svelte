@@ -14,6 +14,8 @@
   } from '../lib/engineStore.svelte';
   import type { ActiveMount, ArchiveSecret } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
+  import { isWindows } from '../lib/platformStore.svelte';
+  import { examplePath } from '../lib/paths';
 
   // --- Opening an encrypted copy (§7.4) ---
   // A manual mount or check never borrows the service's key: whoever is at the
@@ -279,7 +281,7 @@
       <input
         type="text"
         bind:value={toolsState.mountPath}
-        placeholder="D:\OwnBackup\disk_C_20260702.vhdx"
+        placeholder={examplePath('image')}
         spellcheck="false"
         disabled={mountBusy}
       />
@@ -316,7 +318,7 @@
       <div class="actions-right">
         <label class="rw-checkbox">
           <input type="checkbox" bind:checked={toolsState.rwMode} disabled={mountBusy || isCurrentPathMounted} />
-          RW Mode
+          {m.tools_rw_mode()}
         </label>
         <button class="btn primary" onclick={mount} disabled={mountBusy || !toolsState.mountPath || isCurrentPathMounted}>
           {m.tools_mount_btn()}
@@ -346,7 +348,7 @@
       <input
         type="text"
         bind:value={toolsState.verifyPath}
-        placeholder="D:\OwnBackup\disk_C_20260702.vhdx"
+        placeholder={examplePath('image')}
         spellcheck="false"
         disabled={verifyBusy}
       />
@@ -364,7 +366,11 @@
     {#if verifyErr}<div class="banner err">{verifyErr()}</div>{/if}
   </div>
 
-  <HiddenVolumesCard />
+  <!-- Drive letters are a Windows thing; elsewhere the service has no such
+       list and would only answer that it has not. -->
+  {#if isWindows()}
+    <HiddenVolumesCard />
+  {/if}
 
   <BootMediaCard />
 </div>

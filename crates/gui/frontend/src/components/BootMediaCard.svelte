@@ -12,11 +12,16 @@
   import { pickPath } from '../lib/pickPath.svelte';
   import type { BaseImage } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
+  import { isWindows, ensurePlatform } from '../lib/platformStore.svelte';
 
   let bases: BaseImage[] = $state([]);
   let searching = $state(true);
   let searchError: string | null = $state(null);
-  let tab: 'windows' | 'linux' = $state('windows');
+  // The system the window runs on comes first. The Windows medium is built
+  // from Windows' own files with DISM, so on Linux its tab only says so.
+  let tab: 'windows' | 'linux' = $state(isWindows() ? 'windows' : 'linux');
+  /** The Windows medium can be built here at all. */
+  const canBuildWindows = $derived(isWindows());
   let open: 'windows' | 'linux' | null = $state(null);
   // A Winre.wim the user pointed at — taken from an installation ISO, say —
   // goes before anything the search found. The service reads it first; a file
@@ -28,9 +33,13 @@
   const windowsBase = $derived(chosen ?? bases[0] ?? null);
 
   onMount(async () => {
-    await ensureMediaMode();
+    await Promise.all([ensureMediaMode(), ensurePlatform()]);
+    // The first draw went by the webview's guess; the backend's answer wins.
+    if (!isWindows()) tab = 'linux';
     // Nothing to look for when running from the medium: it cannot build one.
-    if (!media.active) search();
+    // Nor on Linux: there is no Winre.wim to find, and the service says only
+    // that it does not look.
+    if (!media.active && isWindows()) search();
     else searching = false;
   });
 
@@ -62,7 +71,7 @@
 
   function openDialog() {
     if (media.active) return;
-    if (tab === 'windows' && !windowsBase) return; // nothing to build on
+    if (tab === 'windows' && (!canBuildWindows || !windowsBase)) return; // nothing to build on
     open = tab;
   }
 </script>
@@ -100,7 +109,7 @@
   </div>
 
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-  <div class="panel" class:disabled={media.active || (tab === 'windows' && !windowsBase)}
+  <div class="panel" class:disabled={media.active || (tab === 'windows' && (!canBuildWindows || !windowsBase))}
        onclick={openDialog} role="button" tabindex="0">
     {#if media.active}
       <!-- Building from the medium failed at DISM halfway through, which
@@ -109,6 +118,9 @@
         {m.bmc_on_media()} <code>X:</code> {m.bmc_on_media_ramdisk()}
       </div>
       <div class="p-meta soon">{m.bmc_on_media_hint()}</div>
+    {:else if tab === 'windows' && !canBuildWindows}
+      <div class="p-desc">{m.bmc_windows_desc()}</div>
+      <div class="p-meta soon">{m.bmc_windows_needs_windows()}</div>
     {:else if tab === 'windows'}
       <div class="p-desc">{m.bmc_windows_desc()}</div>
       {#if searching}

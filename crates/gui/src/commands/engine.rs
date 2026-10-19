@@ -821,8 +821,12 @@ pub async fn unmount_backup(state: State<'_, GuiState>, image_path: String) -> R
 /// (`SeSystemEnvironmentPrivilege`) belongs to a process, and this one is not
 /// elevated.
 #[tauri::command]
-pub async fn boot_status(state: State<'_, GuiState>) -> Result<serde_json::Value, String> {
-    state.link.client().await?.boot_status().await
+pub async fn boot_status(
+    state: State<'_, GuiState>,
+) -> Result<serde_json::Value, super::CodedError> {
+    // Coded: on Linux the service does not read the entries yet and says so
+    // with `Unimplemented`, which the screen shows as a state of its own.
+    Ok(state.link.client().await?.boot_status_with_status().await?)
 }
 
 /// Change one thing about it. The service takes a copy of the whole

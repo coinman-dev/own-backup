@@ -1,7 +1,7 @@
 import { overwriteGetLocale, type Locale } from './paraglide/runtime';
 
-/** «Русский», «English» or «Как в Windows» — the last takes the language of
- *  the Windows interface: Russian for a Russian one, English for any other. */
+/** «Русский», «English» or «Как в системе» — the last takes the language of
+ *  the system's interface: Russian for a Russian one, English for any other. */
 export type LangMode = Locale | 'system';
 
 /** The window's own choice, kept next to the theme in the WebView's storage.
@@ -9,8 +9,8 @@ export type LangMode = Locale | 'system';
 const KEY = 'ownbackup.lang';
 
 /** WebView2 reports the language of the Windows interface (it is not told
- *  otherwise). The boot medium is built on an en-US recovery environment, so
- *  «Как в Windows» is English there. */
+ *  otherwise), WebKitGTK the session's locale. The boot medium is built on an
+ *  en-US recovery environment, so «Как в системе» is English there. */
 function systemLocale(): Locale {
   const tags = navigator.languages?.length ? navigator.languages : [navigator.language];
   return tags.some((t) => t?.toLowerCase().startsWith('ru')) ? 'ru' : 'en';
@@ -93,7 +93,7 @@ export function initI18n() {
   if (started) return;
   started = true;
   // The Windows interface language changes only with a sign-out, but the
-  // WebView says so when it does; «Как в Windows» follows.
+  // WebView says so when it does; «Как в системе» follows.
   window.addEventListener('languagechange', () => {
     if (lang.mode === 'system') apply();
   });

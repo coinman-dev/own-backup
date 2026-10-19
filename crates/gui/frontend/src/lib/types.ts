@@ -239,6 +239,25 @@ export interface ServiceHealth {
   media: boolean;
 }
 
+/** Where the window runs (the `platform_info` command). */
+export interface PlatformInfo {
+  /** `windows` or `linux`. */
+  os: string;
+  /** The service channel: the named pipe on Windows, the Unix socket elsewhere. */
+  channel: string;
+  /** The folder this window logs to, when it could open one. */
+  ui_log_dir: string | null;
+  /** The service's log folder where it is fixed (Linux); null on Windows. */
+  service_log_dir: string | null;
+}
+
+/** A command failure with a kind to act on (`CodedError` in the GUI crate):
+ *  `code` is decided on, `message` is only shown. */
+export interface CodedError {
+  code: 'unimplemented' | 'permission_denied' | 'unavailable' | 'other';
+  message: string;
+}
+
 /** The keyboard layout the focused window is typing in (boot medium only). */
 export interface KeyboardLayout {
   /** Short tag for the indicator: "RU", "EN", … */

@@ -18,6 +18,7 @@
     MediaTool,
   } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
+  import { examplePath } from '../lib/paths';
 
   interface Props {
     kind: 'windows' | 'linux';
@@ -401,7 +402,7 @@
          list above grows. -->
     <div class="dest">
       <span class="lbl">{m.mb_dest()}</span>
-      <input type="text" bind:value={outputDir} placeholder="D:\OwnBackup"
+      <input type="text" bind:value={outputDir} placeholder={examplePath('folder')}
              spellcheck="false" disabled={building || finished} />
       <button class="btn outline" onclick={chooseFolder} disabled={building || finished}>
         {m.common_browse()}

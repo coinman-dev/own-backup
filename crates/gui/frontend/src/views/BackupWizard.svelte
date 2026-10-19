@@ -12,6 +12,7 @@
   import ArchiveKeyModal from '../components/ArchiveKeyModal.svelte';
   import type { Job, DiskInfo, PartitionInfo } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
+  import { examplePath } from '../lib/paths';
 
   interface Props {
     mode: 'wizard' | 'edit';
@@ -1678,7 +1679,7 @@
                 oninput={onDestInput}
                 onfocus={() => (destFocused = true)}
                 onblur={() => (destFocused = false)}
-                placeholder="D:\OwnBackup"
+                placeholder={examplePath('folder')}
                 spellcheck="false"
                 title={destDisplay}
               />

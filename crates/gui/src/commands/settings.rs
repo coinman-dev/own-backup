@@ -130,6 +130,44 @@ pub async fn set_ui_language(state: State<'_, GuiState>, lang: String) -> Result
     }
 }
 
+/// Where the window runs, for the parts of the screen that differ by system.
+/// Decided here, from what this build is, rather than guessed in the page.
+#[derive(serde::Serialize)]
+pub struct PlatformInfo {
+    /// `windows` or `linux` (`std::env::consts::OS`).
+    pub os: &'static str,
+    /// How the window reaches the service in production: the named pipe on
+    /// Windows, the Unix socket elsewhere.
+    pub channel: String,
+    /// The folder this window logs to, when it could open one.
+    pub ui_log_dir: Option<String>,
+    /// The service's log folder where it is fixed (Linux: `/var/log/own-backup`).
+    /// `None` on Windows, where it is `Logs` beside the program.
+    pub service_log_dir: Option<String>,
+}
+
+#[tauri::command]
+pub fn platform_info() -> PlatformInfo {
+    #[cfg(target_os = "windows")]
+    let (channel, service_log_dir) = (own_backup_common::windows_pipe_path(), None);
+    #[cfg(target_os = "linux")]
+    let (channel, service_log_dir) = (
+        own_backup_common::unix_socket_path().display().to_string(),
+        Some(own_backup_common::log_files::LINUX_SYSTEM_LOG_DIR.to_string()),
+    );
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    let (channel, service_log_dir) = (
+        own_backup_common::unix_socket_path().display().to_string(),
+        None,
+    );
+    PlatformInfo {
+        os: std::env::consts::OS,
+        channel,
+        ui_log_dir: crate::ui_log_dir().map(|d| d.display().to_string()),
+        service_log_dir,
+    }
+}
+
 /// Whether this person keeps the icon in the notification area. `None` where
 /// there is no such thing to offer — the boot medium, and anything that is not
 /// Windows — so the settings page leaves the switch out instead of showing one

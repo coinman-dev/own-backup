@@ -625,17 +625,23 @@ impl BackupClient {
         Ok(())
     }
 
-    /// What mounting an image needs on the service's machine, and whether it
-    /// is in place (JSON: { platform, iscsi | linux }).
     /// Everything about how this machine boots, in one answer.
     pub async fn boot_status(&mut self) -> Result<serde_json::Value> {
+        self.boot_status_with_status().await.map_err(status)
+    }
+
+    /// The same, keeping the gRPC status: a service that cannot read the
+    /// boot entries on its platform answers `Unimplemented`, and the screen
+    /// says so instead of waiting for entries that will never come.
+    pub async fn boot_status_with_status(
+        &mut self,
+    ) -> std::result::Result<serde_json::Value, tonic::Status> {
         let reply = self
             .inner
             .boot_status(self.request(proto::Empty {}))
-            .await
-            .map_err(status)?
+            .await?
             .into_inner();
-        parse(&reply.json)
+        serde_json::from_str(&reply.json).map_err(|e| tonic::Status::internal(json_err(e)))
     }
 
     /// Change one thing about it. The service takes the safety copy.
@@ -651,6 +657,8 @@ impl BackupClient {
         parse(&reply.json)
     }
 
+    /// What mounting an image needs on the service's machine, and whether it
+    /// is in place (JSON: { platform, iscsi | linux }).
     pub async fn mount_backend_status(&mut self) -> Result<serde_json::Value> {
         let reply = self
             .inner

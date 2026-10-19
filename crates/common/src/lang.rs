@@ -65,7 +65,7 @@ pub fn configured(path: &Path) -> String {
 }
 
 /// The language of the Windows interface, decided the way the window decides
-/// «Как в Windows»: Russian for a Russian interface, English for any other.
+/// «Как в системе»: Russian for a Russian interface, English for any other.
 pub fn system() -> &'static str {
     #[cfg(windows)]
     {
@@ -88,7 +88,7 @@ fn from_langid(id: u16) -> &'static str {
 }
 
 /// The config's language, or the Windows interface's when the config has
-/// none yet — what the window would choose with its default «Как в Windows».
+/// none yet — what the window would choose with its default «Как в системе».
 fn configured_or_system(path: &Path) -> String {
     let configured = configured(path);
     if configured.trim().is_empty() {
@@ -103,7 +103,7 @@ fn configured_or_system(path: &Path) -> String {
 ///
 /// The medium boots with no config at all, so the taskbar used to come up in
 /// Russian and turn English a few seconds later, once the window had resolved
-/// «Как в Windows» on an English recovery environment and written it down
+/// «Как в системе» on an English recovery environment and written it down
 /// (2026-10-15). Deciding the same way from the start leaves nothing to switch.
 pub fn follow_config_or_system(path: PathBuf) {
     set(&configured_or_system(&path));

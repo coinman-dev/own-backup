@@ -5,6 +5,7 @@
   import { theme, setTheme, type ThemeMode } from '../lib/themeStore.svelte';
   import { lang, setLanguage, type LangMode } from '../lib/i18n.svelte';
   import { m } from '../lib/paraglide/messages';
+  import { examplePath } from '../lib/paths';
 
   /** The config as it was loaded, kept whole. Saving edits a copy of it rather
    *  than building a fresh object out of the fields this page shows — which is
@@ -258,7 +259,7 @@
               id="log-mirror"
               type="text"
               class="form-input"
-              placeholder={m.set_log_mirror_placeholder()}
+              placeholder={m.set_log_mirror_placeholder({ example: examplePath('drive') })}
               bind:value={logMirrorDir}
             />
             <button class="btn btn-secondary" onclick={pickMirrorDir}>{m.common_browse()}</button>

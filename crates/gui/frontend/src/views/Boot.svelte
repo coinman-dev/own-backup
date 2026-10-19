@@ -11,7 +11,7 @@
   // Копия всей конфигурации снимается службой перед каждым изменением, без
   // спроса: у правки в прошивке нет своей отмены.
   import { onMount } from 'svelte';
-  import { api } from '../lib/api';
+  import { api, errorCode, errorText } from '../lib/api';
   import { engine, refreshVolumes } from '../lib/engineStore.svelte';
   import type { BootStatus, BootEntry, DiskInfo, Esp, EspLoader } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
@@ -45,13 +45,20 @@
     )
   );
 
+  // The service answers `unimplemented` where it does not read the entries
+  // (Linux, for now). That is a state of the page, not an error to retry:
+  // without it the page sat on «Читаем…» under a red line for good.
+  let unavailable = $state(false);
+
   async function refresh() {
     busy = true;
     err = null;
     try {
       status = await api.bootStatus();
+      unavailable = false;
     } catch (e) {
-      err = String(e);
+      if (errorCode(e) === 'unimplemented') unavailable = true;
+      else err = errorText(e);
     } finally {
       busy = false;
     }
@@ -149,7 +156,11 @@
     {#if msg}<div class="banner ok">{msg}</div>{/if}
     {#if warn}<div class="banner warn">{warn()}</div>{/if}
 
-    {#if status && !status.uefi}
+    {#if unavailable}
+      <div class="card">
+        <div class="muted">{m.boot_unavailable_linux()}</div>
+      </div>
+    {:else if status && !status.uefi}
       <div class="card">
         <div class="muted">{status.message ?? m.boot_not_uefi()}</div>
       </div>
@@ -304,7 +315,9 @@
           </div>
         {/each}
       </div>
-    {:else}
+    {:else if busy || !err}
+      <!-- A failed read is said by the banner above; «Читаем…» under it would
+           promise an answer that is not coming. -->
       <div class="card"><div class="muted">{m.boot_reading()}</div></div>
     {/if}
   </div>

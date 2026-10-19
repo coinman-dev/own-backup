@@ -29,12 +29,21 @@ use state::GuiState;
 /// build date sent a diagnosis down the wrong path (2026-08-07).
 const BUILD_TAG: &str = "boot-parts-and-scheme-reset";
 
+/// The folder this window's log went to, once [`open_log`] found one — for
+/// the help page, which names it.
+static UI_LOG_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+pub(crate) fn ui_log_dir() -> Option<&'static PathBuf> {
+    UI_LOG_DIR.get()
+}
+
 /// Today's interface log, in the shared `Logs` folder beside the exe — or the
 /// first fallback, because that folder can be read-only (a network / WSL /
 /// Program Files path). Sweeping old ones is the service's job.
 fn open_log() -> Option<(own_backup_common::log_files::DailyLog, PathBuf)> {
     let data_dir = own_backup_common::config::AppConfig::default().data_dir;
     let dir = own_backup_common::log_files::log_dir(&data_dir)?;
+    let _ = UI_LOG_DIR.set(dir.clone());
     let log = own_backup_common::log_files::DailyLog::new(dir, "own-backup-gui");
     let path = log.path();
     Some((log, path))
@@ -457,6 +466,7 @@ fn main() {
             // msSmartScreenProtection) are replaced, not extended — whoever sets
             // the variable must include everything wanted.
             let (width, height, min_width, min_height) = window_size(app);
+            #[cfg_attr(not(windows), allow(unused_mut))]
             let mut window =
                 tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
                     .title("Own Backup")
@@ -484,7 +494,10 @@ fn main() {
             // Same checks the medium's launcher runs, for the same reason and
             // with the same words: a missing WebView2 must read as «WebView2 не
             // найден, искал там-то», not as a bare wry HRESULT. On an ordinary
-            // Windows this is the only place they run at all.
+            // Windows this is the only place they run at all. Windows only:
+            // elsewhere the page is drawn by WebKitGTK, and the WebView2
+            // search only filled the log with an ERROR at every start.
+            #[cfg(target_os = "windows")]
             let checks = {
                 use own_backup_backup::media_preflight_win as pf;
                 let dir = std::env::current_exe()
@@ -522,11 +535,16 @@ fn main() {
             let built = match window.build() {
                 Ok(built) => built,
                 Err(error) => {
-                    tracing::error!(%error, checks = ?checks, "GUI window could not be created");
                     #[cfg(target_os = "windows")]
-                    show_window_start_error(&error, &checks);
+                    {
+                        tracing::error!(%error, checks = ?checks, "GUI window could not be created");
+                        show_window_start_error(&error, &checks);
+                    }
                     #[cfg(not(target_os = "windows"))]
-                    eprintln!("Own Backup: {error}");
+                    {
+                        tracing::error!(%error, "GUI window could not be created");
+                        eprintln!("Own Backup: {error}");
+                    }
                     std::process::exit(1);
                 }
             };
@@ -535,7 +553,7 @@ fn main() {
             // A stale marker from an earlier run of this session would answer
             // for a window that is not this one. Take it away before the new
             // window has a chance to earn it.
-            {
+            if gui_up_marker_wanted() {
                 let marker = own_backup_backup::media_preflight_win::gui_up_marker();
                 if marker.exists() {
                     match std::fs::remove_file(&marker) {
@@ -621,6 +639,7 @@ fn main() {
             commands::settings::service_health,
             commands::settings::tray_icon_enabled,
             commands::settings::set_tray_icon_enabled,
+            commands::settings::platform_info,
             // The boot medium has no taskbar to say which layout is active.
             commands::keyboard::keyboard_layout,
             // …and every password field says it too, beside its eye.
@@ -650,10 +669,21 @@ fn main() {
 /// доживает до своего срока и объясняет человеку, что произошло.
 #[tauri::command]
 fn gui_ready() -> Result<(), String> {
+    if !gui_up_marker_wanted() {
+        return Ok(());
+    }
     let marker = own_backup_backup::media_preflight_win::gui_up_marker();
     std::fs::write(&marker, std::process::id().to_string()).map_err(|e| e.to_string())?;
     tracing::info!(marker = %marker.display(), "gui is up: the frontend has drawn");
     Ok(())
+}
+
+/// Whether anything waits for the «interface is up» marker. On Windows it is
+/// written as it always was. On Linux only the boot medium's launcher waits
+/// for it; anywhere else it was a stray `/tmp/own-backup-gui-up` in a folder
+/// every user shares.
+fn gui_up_marker_wanted() -> bool {
+    cfg!(target_os = "windows") || own_backup_common::media_mode::is_media_mode()
 }
 
 /// Long-lived task: subscribe to the service's orchestration event stream and
