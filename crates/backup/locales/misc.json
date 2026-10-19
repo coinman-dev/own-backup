@@ -323,5 +323,21 @@
   "restore_map.partition_smaller_than_header": {
     "ru": "раздел (%{window} Б) меньше заголовка своего контейнера (%{header} Б)",
     "en": "the partition (%{window} B) is smaller than its container's header (%{header} B)"
+  },
+  "seal_local_linux.no_machine_key": {
+    "ru": "Хранилище ключей службы недоступно: машинный ключ нельзя защитить через systemd-creds (%{error}). Без него зашифрованные задания и запомненные пароли томов на этой машине не работают — открытого ключа на диске не будет.",
+    "en": "The service key store is unavailable: the machine key cannot be protected with systemd-creds (%{error}). Without it encrypted jobs and remembered volume passwords do not work on this machine — no unprotected key is ever written to disk."
+  },
+  "seal_local_linux.root_only": {
+    "ru": "Хранилище ключей доступно только установленной службе (root).",
+    "en": "The key store is available only to the installed service (root)."
+  },
+  "seal_local_linux.machine_key_missing": {
+    "ru": "Машинного ключа службы нет (каталог ключей создан заново или восстановлен без него) — то, что было им защищено, на этой машине больше не открывается.",
+    "en": "The service's machine key is missing (the key directory was recreated or restored without it) — what it protected can no longer be opened on this machine."
+  },
+  "seal_local_linux.unsafe_directory": {
+    "ru": "Каталог «%{what}» доступен не только службе (нужен владелец root и права без записи для других; каталог ключей — ровно 0700); существующий каталог не исправляется молча.",
+    "en": "The directory “%{what}” is not reserved for the service (it must be owned by root and not writable by others; the key directory must be exactly 0700); an existing directory is not silently adjusted."
   }
 }

@@ -827,7 +827,32 @@ pub async fn run_main_loop(
             }
         });
     }
-    #[cfg(not(target_os = "windows"))]
+    // The installed Linux service keeps remembered volume passwords (an
+    // opened LUKS mapping's among them) in its root-only key directory —
+    // which the engine leaves out of every copy — sealed by the key store's
+    // machine key (`systemd-creds`). Passwords an older build sealed with
+    // `secret.key` beside the public data move there first.
+    #[cfg(target_os = "linux")]
+    let passwords = if installed_service {
+        let guard = own_backup_backup::seal::local::PrivateSecretDatabase::new(&config.data_dir)?;
+        let store = own_backup_core::PasswordStore::new_private_sealed(
+            config.db_path(),
+            guard.path().to_path_buf(),
+            guard.secret_store(),
+        );
+        let moved = store.migrate_legacy(&config.db_path())?;
+        guard.validate_files()?;
+        if moved > 0 {
+            info!(
+                moved,
+                "legacy volume passwords migrated to the private database"
+            );
+        }
+        std::sync::Arc::new(store)
+    } else {
+        std::sync::Arc::new(own_backup_core::PasswordStore::new(config.db_path()))
+    };
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     let passwords = std::sync::Arc::new(own_backup_core::PasswordStore::new(config.db_path()));
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let verification_worker = scheduled_verification::spawn(

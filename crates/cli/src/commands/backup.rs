@@ -257,8 +257,8 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => std::path::PathBuf::from("."),
     };
-    let provider = own_backup_snapshot::LinuxSnapshotProvider::with_cow_dir(out_dir)
-        .container_key({
+    let provider =
+        own_backup_snapshot::LinuxSnapshotProvider::with_cow_dir(out_dir).container_key({
             let passphrase = passphrase.clone();
             move |device: &std::path::Path| match passphrase.get_or_ask()? {
                 Some(p) => own_backup_backup::engine_linux::luks_volume_key(device, &p).map(Some),

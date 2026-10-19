@@ -11,9 +11,11 @@
 //!   not prevent another local user with the blob from decrypting it: the
 //!   service stores blobs only in its SYSTEM-only private directory. The
 //!   app-specific entropy value is defense in depth, not an access boundary.
-//! - **Linux**: not implemented yet; the methods return an error rather than
-//!   ever writing plaintext. A libsecret / root-only key-file backend will land
-//!   with Linux support.
+//! - **Linux**: the installed service seals them under the machine key of its
+//!   key store (`seal::local::PrivateSecretDatabase`: a root-only directory
+//!   excluded from every copy, the key wrapped by `systemd-creds`, TPM2 when
+//!   present). [`KeyfileSecretStore`] remains for a foreground (development)
+//!   instance and for reading what older builds sealed with it.
 
 use std::path::Path;
 
@@ -31,13 +33,13 @@ pub trait SecretStore {
 /// The platform's default secret store. Windows uses DPAPI (machine scope);
 /// other systems use a machine-local key file at `key_path` (AES-256-GCM).
 #[cfg(target_os = "windows")]
-pub fn default_store(_key_path: &Path) -> Box<dyn SecretStore> {
+pub fn default_store(_key_path: &Path) -> Box<dyn SecretStore + Send + Sync> {
     Box::new(DpapiSecretStore)
 }
 
 /// The platform's default secret store — see the Windows variant.
 #[cfg(not(target_os = "windows"))]
-pub fn default_store(key_path: &Path) -> Box<dyn SecretStore> {
+pub fn default_store(key_path: &Path) -> Box<dyn SecretStore + Send + Sync> {
     Box::new(KeyfileSecretStore::new(key_path))
 }
 
@@ -185,7 +187,13 @@ mod keyfile {
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound && create => {
                     if let Some(dir) = self.key_path.parent() {
-                        std::fs::create_dir_all(dir)?;
+                        use std::os::unix::fs::DirBuilderExt;
+                        // Owner-only when made here; an existing one is
+                        // left as its owner set it.
+                        std::fs::DirBuilder::new()
+                            .recursive(true)
+                            .mode(0o700)
+                            .create(dir)?;
                     }
                     let mut k = Zeroizing::new([0u8; 32]);
                     getrandom::getrandom(&mut k[..]).map_err(|e| err(format!("OS RNG: {e}")))?;
@@ -249,10 +257,10 @@ mod keyfile {
         let linked = written.and_then(|()| match std::fs::hard_link(&tmp, path) {
             Ok(()) => Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
-            // A filesystem without hard links (FAT): a rename does replace,
-            // so look first. The window is the call-to-call gap, not the
-            // write that used to be unprotected.
-            Err(_) if !path.exists() => std::fs::rename(&tmp, path).map(|()| true),
+            // A filesystem without hard links (FAT) used to fall back to
+            // "look, then rename" — and a rename replaces: two first calls
+            // could still both win, one key over the other. A key that can
+            // only be published racily is not published at all.
             Err(e) => Err(e),
         });
         let _ = std::fs::remove_file(&tmp);

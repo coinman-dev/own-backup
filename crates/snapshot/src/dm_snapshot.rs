@@ -443,11 +443,7 @@ pub(crate) fn dense_store_size(full: u64, free: u64) -> u64 {
 /// the origin (one chunk per chunk of it at most), or [`dense_store_size`]
 /// where the filesystem allocates what a file is extended to — then its size
 /// is returned too.
-fn create_cow(
-    dir: &Path,
-    id: &str,
-    origin_bytes: u64,
-) -> io::Result<(PathBuf, File, Option<u64>)> {
+fn create_cow(dir: &Path, id: &str, origin_bytes: u64) -> io::Result<(PathBuf, File, Option<u64>)> {
     let path = dir.join(cow_file_name(id));
     let file = OpenOptions::new()
         .read(true)

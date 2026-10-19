@@ -1,8 +1,10 @@
 //! Local authorization for unattended encrypted jobs.
 //!
-//! This store contains DPAPI-protected PRIVATE job keys, never passwords. Its
-//! files must not be exported or included in backup images. Portable password
-//! and recovery slots remain in keypair.rs.
+//! This store contains PRIVATE job keys, never passwords: DPAPI-protected on
+//! Windows, sealed under a `systemd-creds`-wrapped machine key on Linux. Its
+//! files must not be exported or included in backup images (the engine
+//! excludes the directory from every copy). Portable password and recovery
+//! slots remain in keypair.rs.
 //!
 //! New authorizations are immutable. Save + flush + reopen succeeds before the
 //! caller commits a job referring to the new key. A failed commit removes only
@@ -23,8 +25,15 @@ use super::{bad, SCHEME};
 #[path = "local_windows.rs"]
 mod platform;
 
-#[cfg(target_os = "windows")]
+#[cfg(target_os = "linux")]
+#[path = "local_linux.rs"]
+mod platform;
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub use platform::PrivateSecretDatabase;
+
+#[cfg(target_os = "linux")]
+pub use platform::{KeyProtection, MACHINE_KEY_FILE};
 
 pub const KEY_DIRECTORY_NAME: &str = ".own-backup-service-keys";
 pub(super) const MAX_LOCAL_BLOB: usize = 16 * 1024;
@@ -44,7 +53,8 @@ impl LocalKeyRef {
     }
 }
 
-/// Platform-independent transaction logic; the real backend is Windows-only.
+/// Platform-independent transaction logic; the real backends are Windows
+/// (DPAPI) and Linux (`systemd-creds`).
 pub struct ServiceKeyStore {
     backend: Box<dyn Backend>,
     transaction: Mutex<()>,
@@ -75,7 +85,14 @@ impl ServiceKeyStore {
                 transaction: Mutex::new(()),
             })
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
+        {
+            Ok(Self {
+                backend: Box::new(platform::LinuxBackend::new(data_dir)?),
+                transaction: Mutex::new(()),
+            })
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
             let _ = data_dir;
             Err(OwnBackupError::NotImplemented(
@@ -86,6 +103,31 @@ impl ServiceKeyStore {
 
     pub fn directory(&self) -> PathBuf {
         self.backend.directory().to_path_buf()
+    }
+
+    /// What keeps this store's keys on this machine, for the window and the
+    /// log: `dpapi` on Windows; `tpm2` or `host` on Linux (`systemd-creds`).
+    /// An error says why there is no store.
+    pub fn protection(data_dir: &Path) -> Result<&'static str> {
+        if own_backup_common::media_mode::is_media_mode() {
+            return Err(bad(tr!("seal_local.media_keeps_no_access")));
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let _ = data_dir;
+            Ok("dpapi")
+        }
+        #[cfg(target_os = "linux")]
+        {
+            platform::protection(data_dir).map(KeyProtection::as_str)
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        {
+            let _ = data_dir;
+            Err(OwnBackupError::NotImplemented(
+                tr!("seal_local.store_windows_only").into_owned(),
+            ))
+        }
     }
 
     /// The caller has already unlocked/created the portable key, and must have
@@ -439,5 +481,50 @@ mod tests {
     #[test]
     fn no_unprotected_non_windows_fallback() {
         assert!(ServiceKeyStore::new(Path::new("unused")).is_err());
+    }
+
+    /// The whole transaction over the real Linux backend (with a stand-in for
+    /// `systemd-creds`): authorize, reopen from disk with no password, refuse
+    /// another machine's key, revoke, sweep.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_linux_backend_carries_the_whole_transaction() {
+        use super::platform::tests::{backend, data_dir, FakeCreds};
+        let data = data_dir();
+        let creds = FakeCreds::new(1);
+        let open = |creds: &Arc<FakeCreds>| ServiceKeyStore {
+            backend: Box::new(backend(data.path(), creds)),
+            transaction: Mutex::new(()),
+        };
+        let (pair, _, key) = portable();
+        let keys = open(&creds);
+        let reference = keys
+            .authorize_and_commit("job", &key, &pair.private, Ok)
+            .unwrap();
+        let failed: Result<()> =
+            keys.authorize_and_commit("job", &key, &pair.private, |_| Err(bad("job write failed")));
+        assert!(failed.is_err());
+        assert_eq!(keys.backend.list_ids().unwrap(), vec![reference.id]);
+
+        let reopened = open(&creds);
+        assert_eq!(
+            reopened.open("job", &key, &reference).unwrap().public(),
+            key.public_key().unwrap()
+        );
+        assert!(open(&FakeCreds::new(2))
+            .open("job", &key, &reference)
+            .is_err());
+        assert!(reopened.open("other-job", &key, &reference).is_err());
+        let on_disk = std::fs::read(
+            data.path()
+                .join(KEY_DIRECTORY_NAME)
+                .join(format!("{}.key", reference.id)),
+        )
+        .unwrap();
+        assert!(!on_disk
+            .windows(32)
+            .any(|w| w == pair.private.storage_bytes()));
+        assert!(reopened.retain(&Default::default()).unwrap() == vec![reference.id]);
+        assert!(reopened.open("job", &key, &reference).is_err());
     }
 }

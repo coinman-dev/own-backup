@@ -1527,8 +1527,14 @@ pub struct PasswordStore {
     cache: std::sync::Mutex<std::collections::HashMap<String, zeroize::Zeroizing<String>>>,
     db_path: PathBuf,
     private: bool,
-    /// Key-file path for the OS secret store (used only off Windows).
+    /// Key-file path for the OS secret store (used only off Windows): on
+    /// Linux only the legacy key a private store migrates away from, and the
+    /// key of a foreground (development) instance.
     key_path: PathBuf,
+    /// What seals the private database's passwords when it is not the
+    /// platform default: on Linux the machine key of the service's key store
+    /// (`systemd-creds`). `None` on Windows (DPAPI, as before).
+    sealer: Option<Arc<dyn own_backup_backup::secrets::SecretStore + Send + Sync>>,
 }
 
 impl PasswordStore {
@@ -1542,6 +1548,7 @@ impl PasswordStore {
             db_path,
             private: false,
             key_path,
+            sealer: None,
         }
     }
 
@@ -1557,6 +1564,30 @@ impl PasswordStore {
             db_path: private_db_path,
             private: true,
             key_path,
+            sealer: None,
+        }
+    }
+
+    /// The Linux service's private database (in its root-only key directory,
+    /// excluded from every copy), its passwords sealed by `sealer` — the key
+    /// store's machine key. Legacy passwords sealed by `secret.key` beside the
+    /// public database are re-sealed by [`Self::migrate_legacy`].
+    pub fn new_private_sealed(
+        public_db_path: PathBuf,
+        private_db_path: PathBuf,
+        sealer: Arc<dyn own_backup_backup::secrets::SecretStore + Send + Sync>,
+    ) -> Self {
+        Self {
+            sealer: Some(sealer),
+            ..Self::new_private(public_db_path, private_db_path)
+        }
+    }
+
+    /// Seals and opens what this store persists.
+    fn store(&self) -> Arc<dyn own_backup_backup::secrets::SecretStore + Send + Sync> {
+        match &self.sealer {
+            Some(s) => s.clone(),
+            None => Arc::from(own_backup_backup::secrets::default_store(&self.key_path)),
         }
     }
 
@@ -1583,17 +1614,25 @@ impl PasswordStore {
             return Ok(0);
         }
         own_backup_metadata::mark_volume_secret_migration_pending(&private)?;
+        // Legacy rows were sealed by the platform default; private ones by
+        // this store's own sealer. The same thing on Windows (DPAPI), where a
+        // row moves as it is; on Linux a row is re-sealed under the machine
+        // key on its way.
         let os_store = own_backup_backup::secrets::default_store(&self.key_path);
+        let private_store = self.store();
         let mut moved = 0;
         for (key, blob) in legacy {
             let old_plain = os_store.unprotect(&blob)?;
             if let Some(existing) = own_backup_metadata::get_volume_secret(&private, &key)? {
-                let existing_plain = os_store.unprotect(&existing)?;
+                let existing_plain = private_store.unprotect(&existing)?;
                 if existing_plain.as_slice() != old_plain.as_slice() {
                     return Err(own_backup_common::OwnBackupError::Encryption(format!(
                         "conflicting private and legacy passwords for volume {key}"
                     )));
                 }
+            } else if self.sealer.is_some() {
+                let resealed = private_store.protect(&old_plain)?;
+                own_backup_metadata::upsert_volume_secret(&private, &key, &resealed)?;
             } else {
                 own_backup_metadata::upsert_volume_secret(&private, &key, &blob)?;
             }
@@ -1604,7 +1643,7 @@ impl PasswordStore {
                         "private password for volume {key} was not committed"
                     ))
                 })?;
-            if os_store.unprotect(&persisted)?.as_slice() != old_plain.as_slice() {
+            if private_store.unprotect(&persisted)?.as_slice() != old_plain.as_slice() {
                 return Err(own_backup_common::OwnBackupError::Encryption(format!(
                     "private password verification failed for volume {key}"
                 )));
@@ -1616,6 +1655,15 @@ impl PasswordStore {
         own_backup_metadata::purge_legacy_volume_secret_remnants(&public)?;
         own_backup_metadata::clear_volume_secret_migration_pending(&private)?;
         own_backup_metadata::mark_volume_secret_migration_done(&private)?;
+        // Nothing sealed by the legacy key is left, and the key itself sits
+        // beside the public data — inside every copy of that volume. Gone.
+        if self.sealer.is_some() {
+            match std::fs::remove_file(&self.key_path) {
+                Ok(()) => info!("legacy volume-password key removed"),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => warn!(error = %e, "legacy volume-password key could not be removed"),
+            }
+        }
         Ok(moved)
     }
 
@@ -1635,8 +1683,7 @@ impl PasswordStore {
                     "only the installed service can persist volume passwords".into(),
                 ));
             }
-            let blob = own_backup_backup::secrets::default_store(&self.key_path)
-                .protect(password.as_bytes())?;
+            let blob = self.store().protect(password.as_bytes())?;
             let conn = if self.private {
                 own_backup_metadata::open_volume_secret_database(&self.db_path)?
             } else {
@@ -1692,9 +1739,7 @@ impl PasswordResolver for PasswordStore {
             own_backup_metadata::open_database(&self.db_path).ok()?
         };
         let blob = own_backup_metadata::get_volume_secret(&conn, volume_token).ok()??;
-        let plain = own_backup_backup::secrets::default_store(&self.key_path)
-            .unprotect(&blob)
-            .ok()?;
+        let plain = self.store().unprotect(&blob).ok()?;
         Some(zeroize::Zeroizing::new(
             String::from_utf8(plain.to_vec()).ok()?,
         ))
@@ -5020,6 +5065,67 @@ mod tests {
 
         store.forget("V123").unwrap();
         assert!(!PasswordStore::new(db).has("V123"));
+    }
+
+    /// The Linux service: legacy passwords sealed by `secret.key` beside the
+    /// public database move into the private one re-sealed by the key store's
+    /// sealer, and the legacy key — inside every copy of that volume — goes.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn sealed_private_store_reseals_legacy_passwords_and_drops_the_old_key() {
+        struct Flip;
+        impl own_backup_backup::secrets::SecretStore for Flip {
+            fn protect(&self, p: &[u8]) -> own_backup_common::Result<Vec<u8>> {
+                Ok(p.iter().map(|b| b ^ 0x5a).chain([0xEE]).collect())
+            }
+            fn unprotect(
+                &self,
+                b: &[u8],
+            ) -> own_backup_common::Result<zeroize::Zeroizing<Vec<u8>>> {
+                match b.split_last() {
+                    Some((0xEE, body)) => Ok(zeroize::Zeroizing::new(
+                        body.iter().map(|b| b ^ 0x5a).collect(),
+                    )),
+                    _ => Err(own_backup_common::OwnBackupError::Encryption(
+                        "not ours".into(),
+                    )),
+                }
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let public_path = dir.path().join("metadata.db");
+        let private_path = dir.path().join("private").join("volume-secrets.db");
+        std::fs::create_dir(private_path.parent().unwrap()).unwrap();
+        let legacy_key = dir.path().join("secret.key");
+        let legacy = own_backup_backup::secrets::default_store(&legacy_key);
+        let public = own_backup_metadata::open_database(&public_path).unwrap();
+        own_backup_metadata::upsert_volume_secret(
+            &public,
+            "V1",
+            &legacy.protect(b"luks words").unwrap(),
+        )
+        .unwrap();
+        drop(public);
+
+        let store = PasswordStore::new_private_sealed(
+            public_path.clone(),
+            private_path.clone(),
+            Arc::new(Flip),
+        );
+        assert_eq!(store.migrate_legacy(&public_path).unwrap(), 1);
+        assert!(!legacy_key.exists(), "the legacy key is gone");
+        assert_eq!(store.resolve("V1").unwrap().as_str(), "luks words");
+        let private = own_backup_metadata::open_volume_secret_database(&private_path).unwrap();
+        let row = own_backup_metadata::get_volume_secret(&private, "V1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.last(), Some(&0xEE), "re-sealed by the store's sealer");
+        drop(private);
+
+        store.remember("V2", "second".into(), true).unwrap();
+        let cold = PasswordStore::new_private_sealed(public_path, private_path, Arc::new(Flip));
+        assert_eq!(cold.resolve("V2").unwrap().as_str(), "second");
+        assert!(!legacy_key.exists(), "and no new legacy key is made");
     }
 
     #[cfg(not(target_os = "windows"))]
