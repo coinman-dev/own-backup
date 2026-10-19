@@ -3,6 +3,7 @@
 rust_i18n::i18n!("locales", fallback = "ru");
 
 pub mod aligned_volume;
+pub mod bcd;
 pub mod bitlocker;
 pub mod block_reader;
 pub mod block_source;

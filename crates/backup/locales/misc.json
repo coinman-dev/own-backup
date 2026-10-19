@@ -1,5 +1,9 @@
 {
   "_version": 2,
+  "bcd.bad_store": {
+    "ru": "хранилище загрузки Windows (BCD) не распознано: %{reason}",
+    "en": "the Windows boot configuration store (BCD) was not recognised: %{reason}"
+  },
   "regf.bad_hive": {
     "ru": "файл куста реестра повреждён или не поддерживается: %{reason}",
     "en": "the registry hive file is damaged or not supported: %{reason}"
