@@ -13,6 +13,9 @@
   import type { Job, DiskInfo, PartitionInfo } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
   import { examplePath, joinPath } from '../lib/paths';
+  import { caps, ensureCapabilities, dropUnsupported } from '../lib/capabilitiesStore.svelte';
+  import { isWindows } from '../lib/platformStore.svelte';
+  import type { DestinationCheck } from '../lib/types';
 
   interface Props {
     mode: 'wizard' | 'edit';
@@ -28,6 +31,19 @@
   let { mode, job, onCancel, onDone, startEncrypted = false }: Props = $props();
 
   let step = $state(0);
+  // What the service's engine carries out: anything else is not offered, since
+  // a job holding it is refused at run time (Linux, for now — see
+  // `capabilities.rs` in the service).
+  $effect(() => {
+    void ensureCapabilities();
+  });
+  const cap = $derived(caps.value);
+  // A new draft (template or clone) starts as a job this engine runs: the
+  // template turns exclusions on, a clone may carry a chain. A saved job is
+  // left as it is until it is saved again (`finish`).
+  $effect(() => {
+    if (mode === 'wizard') dropUnsupported(job, cap);
+  });
   // A function, not a string: the text is drawn in whatever language the
   // window speaks when it is drawn. The service's own errors are wrapped as is.
   let error: (() => string) | null = $state(null);
@@ -134,12 +150,15 @@
   ];
 
   // Event triggers for kind='event'. Third field = badge text ('' = works).
-  const eventTriggers: [string, () => string, string][] = [
+  // Only those the service's scheduler fires: logon/logoff come from the
+  // Windows service control handler and do not exist on Linux.
+  const allEventTriggers: [string, () => string, string][] = [
     ['dest_connected', m.wiz_evt_dest_connected, ''],
     ['logon', m.wiz_evt_logon, ''],
     ['logoff', m.wiz_evt_logoff, ''],
     ['startup', m.wiz_evt_startup, ''],
   ];
+  const eventTriggers = $derived(allEventTriggers.filter(([v]) => cap.schedule_events.includes(v)));
 
   // «После подключения внешнего устройства» (usb_connect) was never wired;
   // what it was for — the backup drive being plugged in — is dest_connected.
@@ -498,6 +517,12 @@
    *  partition out of such an image (`RestoreOp::RestorePartition`).
    */
   function captureDiskSource(d: DiskInfo) {
+    // An engine without whole-disk copies writes one image per volume; a
+    // `disk_source` would only get the job refused.
+    if (!cap.whole_disk) {
+      job.disk_source = null;
+      return;
+    }
     job.disk_source = {
       disk_number: diskNumber(d),
       disk_model: d.model || d.device_id,
@@ -671,6 +696,7 @@
    *  survives the switch being flicked twice. */
   function toggleBootableCopy(d: DiskInfo) {
     if (sourceReadonly) return; // fixed source on the "Параметры" screen
+    if (!cap.whole_disk) return; // a bootable copy IS a whole-disk copy
     if (!isBootableDisk(d)) return; // nothing on this disk boots
     if (isBootableCopy(d)) {
       bootCopyOn = bootCopyOn.filter((id) => id !== d.device_id);
@@ -705,7 +731,31 @@
   // Exclusions — two OS-specific lists behind a Windows / Linux tab. The engine
   // applies Windows masks to NTFS/ReFS/FAT partitions and Linux masks to
   // ext/btrfs/xfs ones (Linux-FS enforcement is a follow-up).
-  let exclTab = $state<'windows' | 'linux'>('windows');
+  let exclTab = $state<'windows' | 'linux'>(isWindows() ? 'windows' : 'linux');
+  /** The user picked a tab: stop choosing it for them. */
+  let exclTabPicked = $state(false);
+  function pickExclTab(t: 'windows' | 'linux') {
+    exclTab = t;
+    exclTabPicked = true;
+  }
+  /** The tab whose masks apply to what is being copied: Linux for ext/XFS/
+   *  btrfs sources, Windows for NTFS/FAT ones; the window's own system when
+   *  the sources say nothing (or both). */
+  function preferredExclTab(): 'windows' | 'linux' {
+    const fss = job.sources.map((dev) => {
+      const p = findPart(dev);
+      if (!p) return '';
+      return decryptedFs(p) || fsName(p);
+    });
+    const linux = fss.some((f) => LINUX_FS.has(f));
+    const windows = fss.some((f) => ['ntfs', 're_fs', 'fat32', 'ex_fat'].includes(f));
+    if (linux && !windows) return 'linux';
+    if (windows && !linux) return 'windows';
+    return isWindows() ? 'windows' : 'linux';
+  }
+  $effect(() => {
+    if (stepKey === 'exclusions' && !exclTabPicked) exclTab = preferredExclTab();
+  });
   let newPattern = $state('');
   // Old jobs deserialize without patterns_linux — keep it an array defensively.
   function exclList(): string[] {
@@ -749,6 +799,38 @@
     }
     return null;
   });
+
+  // The service's own answer to "is the destination on a source?" — the check
+  // the save makes, by the ranges volumes occupy, so a letterless source and a
+  // Linux mount are seen too. Asked as the folder is typed, a moment after the
+  // last key.
+  let destCheck = $state<DestinationCheck | null>(null);
+  let destCheckSerial = 0;
+  $effect(() => {
+    const sources = [...job.sources];
+    const folder = job.dest_folder.trim();
+    const serial = ++destCheckSerial;
+    if (sources.length === 0 || !folder) {
+      destCheck = null;
+      return;
+    }
+    const timer = setTimeout(() => {
+      api.checkDestination(sources, folder).then(
+        (r) => {
+          if (serial === destCheckSerial) destCheck = r;
+        },
+        () => {
+          // An older service without the check: the save still makes it.
+          if (serial === destCheckSerial) destCheck = null;
+        },
+      );
+    }, 400);
+    return () => clearTimeout(timer);
+  });
+  /** The source the destination sits on, as the service named it. */
+  const destOnSource = $derived(
+    destCheck?.placement === 'on_source' && !collisionLetter ? destCheck.source : null,
+  );
 
   // Representative timestamp for the file-name preview (fixed at open — the
   // real one is stamped when the backup actually runs).
@@ -838,6 +920,17 @@
       const letter = collisionLetter;
       error = () => m.wiz_err_same_disk({ letter });
       step = 0;
+      return false;
+    }
+    if (destOnSource) {
+      const source = destOnSource;
+      error = () => m.wiz_dest_on_source({ source });
+      step = 0;
+      return false;
+    }
+    if (job.schedule.kind === 'event' && !cap.schedule_events.includes(job.schedule.event_trigger)) {
+      error = m.wiz_err_event_unsupported;
+      goToStep('schedule');
       return false;
     }
     error = null;
@@ -1151,7 +1244,7 @@
   // The source step is complete: a source is chosen, any encrypted volume is
   // unlocked, and a destination folder is set. "Далее" stays disabled until then.
   function canLeaveSource(): boolean {
-    return job.sources.length > 0 && allEncryptedDecrypted() && !!job.dest_folder.trim();
+    return job.sources.length > 0 && allEncryptedDecrypted() && !!job.dest_folder.trim() && !destOnSource;
   }
   function nextHint(): (() => string) | null {
     // The hint names the question the screen is actually asking: at stage 1 it
@@ -1172,10 +1265,18 @@
         : () => m.wiz_hint_enter_pw({ label });
     }
     if (!job.dest_folder.trim()) return m.wiz_hint_pick_dest;
+    if (destOnSource) {
+      const source = destOnSource;
+      return () => m.wiz_dest_on_source({ source });
+    }
     return null;
   }
 
   async function finish(run: boolean) {
+    // What this engine would refuse the job for goes before it is saved: the
+    // steps do not offer it, but a cloned or older job can still carry it.
+    dropUnsupported(job, cap);
+    if (!cap.archive_encryption && !alreadyEncrypted) wantEncryption = false;
     if (!validate()) return;
     // A run needs every encrypted source unlocked first — the password is
     // stored (and verified) when the user clicks "Расшифровать".
@@ -1535,6 +1636,7 @@
                     <span class="disk-model">{d.model || d.device_id}</span>
                     <span class="disk-head-right">
                       {#if isBootableCopy(d)}<span class="whole-badge">{m.wiz_badge_bootable()}</span>{/if}
+                      {#if cap.whole_disk}
                       <label
                         class="boot-toggle"
                         class:disabled={!isBootableDisk(d)}
@@ -1550,6 +1652,7 @@
                         />
                         <span>{m.wiz_boot_toggle()}</span>
                       </label>
+                      {/if}
                       <span class="disk-meta">{formatBytes(d.size_bytes)} · {tableLabel(d.partition_table)}</span>
                     </span>
                   </div>
@@ -1686,6 +1789,13 @@
           </div>
           {#if collisionLetter}
             <div class="warn-note"><svg class="ico-inline" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--error)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M9 9l6 6M15 9l-6 6"/></svg> {m.wiz_dest_collision({ letter: collisionLetter ?? '' })}</div>
+          {:else if destOnSource}
+            <div class="warn-note"><svg class="ico-inline" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--error)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M9 9l6 6M15 9l-6 6"/></svg> {m.wiz_dest_on_source({ source: destOnSource })}</div>
+          {:else if destCheck?.placement === 'cannot_tell'}
+            <div class="note">{m.wiz_dest_cannot_tell({ reason: destCheck.reason })}</div>
+          {/if}
+          {#if !cap.whole_disk && !sourceReadonly && job.sources.length > 1}
+            <div class="note">{m.wiz_volumes_separate()}</div>
           {/if}
           {/if}
         </div>
@@ -1760,7 +1870,7 @@
                переход в спящий режим» убраны (2026-09-26): первое не нужно,
                второе больше не выбор — во время копии компьютер не засыпает
                никогда. -->
-          {#if job.schedule.kind === 'daily' || job.schedule.kind === 'weekly' || job.schedule.kind === 'monthly'}
+          {#if cap.wake_to_run && (job.schedule.kind === 'daily' || job.schedule.kind === 'weekly' || job.schedule.kind === 'monthly')}
             <label class="chk"><input type="checkbox" bind:checked={job.schedule.wake_to_run} /> {m.wiz_sched_wake()}</label>
             {#if job.schedule.wake_to_run}
               <div class="note sub">
@@ -1790,9 +1900,11 @@
           class="wide"
           disabled={formatLocked}
         >
-          <option value="vhdx">{m.wiz_format_vhdx()}</option>
+          <option value="vhdx">{isWindows() ? m.wiz_format_vhdx() : m.wiz_format_vhdx_plain()}</option>
           <option value="qcow2">{m.wiz_format_qcow2()}</option>
-          <option value="obk">{m.wiz_format_obk()}</option>
+          {#if cap.archive_encryption || alreadyEncrypted || wantEncryption}
+            <option value="obk">{m.wiz_format_obk()}</option>
+          {/if}
         </select>
         {#if alreadyEncrypted}
           <div class="note">
@@ -1836,7 +1948,7 @@
         {:else if job.image_format === 'qcow2' && !wantEncryption}
           <div class="note">{m.wiz_qcow2_note()}</div>
         {:else if !wantEncryption}
-          <div class="note">{m.wiz_vhdx_note()}</div>
+          <div class="note">{isWindows() ? m.wiz_vhdx_note() : m.wiz_vhdx_note_linux()}</div>
         {/if}
 
         {#if wantEncryption || job.image_format === 'qcow2'}
@@ -1863,10 +1975,16 @@
         <div class="field-label mt">{m.wiz_method()}</div>
         <select bind:value={job.scheme.method} onchange={onMethodChange} class="wide">
           <option value="full">{m.wiz_method_full()}</option>
-          <option value="incremental">{m.wiz_method_incremental()}</option>
-          <option value="differential">{m.wiz_method_differential()}</option>
+          {#if cap.methods.includes('incremental') || job.scheme.method === 'incremental'}
+            <option value="incremental">{m.wiz_method_incremental()}</option>
+          {/if}
+          {#if cap.methods.includes('differential') || job.scheme.method === 'differential'}
+            <option value="differential">{m.wiz_method_differential()}</option>
+          {/if}
         </select>
-        {#if job.scheme.method === 'full'}
+        {#if !cap.methods.includes('incremental') && !cap.methods.includes('differential')}
+          <div class="note">{m.wiz_method_full_note()} {m.wiz_method_only_full()}</div>
+        {:else if job.scheme.method === 'full'}
           <div class="note">{m.wiz_method_full_note()}</div>
         {:else if job.scheme.method === 'incremental'}
           <div class="note">{m.wiz_method_inc_note()}</div>
@@ -1925,13 +2043,16 @@
 
       <!-- exclusions -->
       {#if stepKey === 'exclusions'}
-        <label class="chk"><input type="checkbox" bind:checked={job.exclusions.enabled} /> {m.wiz_excl_enable()}</label>
+        {#if !cap.exclusions}
+          <div class="note warn">{m.wiz_excl_unavailable()}</div>
+        {/if}
+        <label class="chk" class:dim={!cap.exclusions}><input type="checkbox" bind:checked={job.exclusions.enabled} disabled={!cap.exclusions && !job.exclusions.enabled} /> {m.wiz_excl_enable()}</label>
         <div class="note">{@html m.wiz_excl_note_masks()}<br />{@html m.wiz_excl_note_removal()}</div>
 
         <!-- Windows / Linux списки: движок применяет их по типу ФС раздела. -->
         <div class="excl-tabs">
-          <button class="excl-tab" class:active={exclTab === 'windows'} onclick={() => (exclTab = 'windows')}>Windows</button>
-          <button class="excl-tab" class:active={exclTab === 'linux'} onclick={() => (exclTab = 'linux')}>Linux</button>
+          <button class="excl-tab" class:active={exclTab === 'windows'} onclick={() => pickExclTab('windows')}>Windows</button>
+          <button class="excl-tab" class:active={exclTab === 'linux'} onclick={() => pickExclTab('linux')}>Linux</button>
         </div>
         {#if exclTab === 'windows'}
           <div class="note sub">{m.wiz_excl_windows_note()}</div>
@@ -2016,7 +2137,9 @@
                     </select> {m.wiz_min()}
                   </label>
                 {/if}
-                <label class="chk"><input type="checkbox" bind:checked={job.verification.schedule.wake_to_run} /> {m.wiz_sched_wake()}</label>
+                {#if cap.wake_to_run}
+                  <label class="chk"><input type="checkbox" bind:checked={job.verification.schedule.wake_to_run} /> {m.wiz_sched_wake()}</label>
+                {/if}
               {/if}
             </div>
           {/if}
@@ -2030,6 +2153,8 @@
                 <svg class="ico-inline" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="2.2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg> {alreadyEncrypted ? m.wiz_adv_enc_on_set() : m.wiz_adv_enc_on_pw()}
                 <button class="link" onclick={() => goToStep('scheme')}>{m.wiz_scheme_link()}</button>.
               </div>
+            {:else if !cap.archive_encryption}
+              <div class="note">{m.wiz_adv_enc_unavailable()}</div>
             {:else}
               <div class="note">
                 {m.wiz_adv_enc_off()}
@@ -2067,7 +2192,7 @@
               {m.wiz_adv_retry_hint()}
             </div>
           </div>
-          {#if !media.active}
+          {#if !media.active && (cap.after_backup || job.advanced.after_backup !== 'none')}
             <div class="adv-group">
               <div class="adv-title">{m.wiz_adv_after()}</div>
               <select class="wide" bind:value={job.advanced.after_backup}>
@@ -2085,8 +2210,10 @@
               {/if}
             </div>
           {/if}
+          {#if cap.low_priority || cap.speed_limit || job.advanced.low_priority || job.advanced.speed_limit_mbps > 0}
           <div class="adv-group">
             <div class="adv-title">{m.wiz_adv_performance()}</div>
+            {#if cap.low_priority || job.advanced.low_priority}
             <label class="chk">
               <input type="checkbox" bind:checked={job.advanced.low_priority} />
               {m.wiz_adv_low_priority()}
@@ -2094,6 +2221,8 @@
             <div class="adv-hint">
               {m.wiz_adv_low_priority_hint()}
             </div>
+            {/if}
+            {#if cap.speed_limit || job.advanced.speed_limit_mbps > 0}
             <label class="chk">
               <input
                 type="checkbox"
@@ -2115,8 +2244,15 @@
               />
               {m.wiz_mb_s()}
             </label>
+            {/if}
           </div>
-          <div class="note">{m.wiz_adv_no_sleep()}</div>
+          {/if}
+          {#if !cap.after_backup || !cap.low_priority || !cap.speed_limit}
+            <div class="note">{m.wiz_adv_unavailable()}</div>
+          {/if}
+          {#if cap.keeps_awake}
+            <div class="note">{m.wiz_adv_no_sleep()}</div>
+          {/if}
         </div>
       {/if}
     </div>
@@ -2346,6 +2482,7 @@
   .sub-chk { margin: 8px 0 0 26px; }
   .sub-hint { margin: 4px 0 0 52px; font-size: 12.5px; line-height: 1.45; color: var(--text-muted); }
   .sub-chk.dim, .sub-hint.dim { opacity: 0.45; cursor: default; }
+  .chk.dim { opacity: 0.55; }
   .field-label { font-size: 15px; font-weight: 600; color: var(--head); margin-bottom: 10px; }
   .field-label.mt { margin-top: 26px; }
   .num { width: 60px; padding: 5px 8px; border: 1px solid var(--border-strong); border-radius: 6px; margin: 0 4px; background: var(--input-bg); color: var(--text); }
