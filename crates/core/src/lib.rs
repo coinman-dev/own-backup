@@ -6175,3 +6175,80 @@ mod tests {
         assert!(job_verify_targets(&store, &job, true).is_err());
     }
 }
+
+/// The Linux driver end to end, on what an unprivileged test can hold: an
+/// image file as the source (read as it is — nobody vouched it holds still),
+/// copied by the shared engine, published, read back and recorded.
+#[cfg(all(test, target_os = "linux"))]
+mod linux_run_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct Phases(Mutex<Vec<String>>);
+    impl EventSink for Phases {
+        fn job_progress(&self, p: JobProgress) {
+            self.0.lock().unwrap().push(p.phase);
+        }
+        fn queue_changed(&self, _: QueueSnapshot) {}
+        fn job_finished(&self, _: JobRun) {}
+    }
+
+    #[tokio::test]
+    async fn a_file_source_is_copied_published_verified_and_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("volume.img");
+        let data: Vec<u8> = (0..6u32 << 20).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&src, &data).unwrap();
+        let dest = dir.path().join("backups");
+        std::fs::create_dir(&dest).unwrap();
+        let mut job = Job {
+            id: "linux-run".into(),
+            name: "linux run".into(),
+            source: src.to_str().unwrap().into(),
+            dest_folder: dest.to_str().unwrap().into(),
+            image_format: own_backup_common::types::ImageFormat::Qcow2,
+            ..Default::default()
+        };
+        job.advanced.validate_after = true;
+        // A new job's default rules; Linux refuses them until L3.
+        job.exclusions.enabled = false;
+        let phases = Arc::new(Phases::default());
+        let sink: Arc<dyn EventSink> = phases.clone();
+        let passwords: Arc<dyn PasswordResolver> = Arc::new(NoPasswords);
+
+        let run = perform_backup(
+            &sink,
+            &job,
+            &Arc::new(AtomicBool::new(false)),
+            None,
+            &passwords,
+            None,
+        )
+        .await;
+
+        assert_eq!(run.status, "success", "{}", run.error);
+        assert_eq!(run.backup_kind, "full");
+        assert_eq!(run.images.len(), 1);
+        let image = PathBuf::from(&run.images[0].image_path);
+        assert_eq!(run.image_path, run.images[0].image_path);
+        let name = image.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with("linux_run_") && name.contains("_full_") && name.ends_with(".qcow2"),
+            "{name}"
+        );
+        // The only file in the folder: nothing private is left beside it.
+        assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 1);
+        // Not vouched for: copied whole, and the record says why.
+        assert!(!run.smart_mode && !run.vss_used);
+        assert_eq!(run.used_blocks, run.total_blocks);
+        assert_eq!(run.source_bytes, data.len() as u64);
+        assert!(!run.file_scan_skipped.is_empty());
+        let sidecar = own_backup_backup::sidecar::read_image_sidecar(&image).unwrap();
+        assert_eq!(sidecar.manifest.source_disk.device_id, job.source);
+        assert_eq!(sidecar.info.job_id.as_deref(), Some("linux-run"));
+        let shown = phases.0.lock().unwrap().clone();
+        for phase in ["backup", "finalize", "verify"] {
+            assert!(shown.iter().any(|p| p == phase), "{phase}: {shown:?}");
+        }
+    }
+}
