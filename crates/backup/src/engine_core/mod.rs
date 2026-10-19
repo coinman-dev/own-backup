@@ -15,4 +15,6 @@ pub(crate) mod target;
 pub(crate) mod verify;
 
 #[cfg(test)]
+pub(crate) mod test_platform;
+#[cfg(test)]
 pub(crate) mod testkit;
