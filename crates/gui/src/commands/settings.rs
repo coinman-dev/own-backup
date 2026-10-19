@@ -170,16 +170,19 @@ pub fn platform_info() -> PlatformInfo {
 }
 
 /// Whether this person keeps the icon in the notification area. `None` where
-/// there is no such thing to offer — the boot medium, and anything that is not
-/// Windows — so the settings page leaves the switch out instead of showing one
-/// that does nothing.
+/// there is no such thing to offer — the boot medium — so the settings page
+/// leaves the switch out instead of showing one that does nothing.
 #[tauri::command]
 pub fn tray_icon_enabled() -> Option<bool> {
     #[cfg(target_os = "windows")]
     {
         (!own_backup_common::media_mode::is_media_mode()).then(crate::tray::enabled)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        (!own_backup_common::media_mode::is_media_mode()).then(crate::tray_linux::enabled)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         None
     }
@@ -193,7 +196,11 @@ pub fn set_tray_icon_enabled(enabled: bool) -> Result<(), String> {
     {
         crate::tray::set_enabled(enabled)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        crate::tray_linux::set_enabled(enabled)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = enabled;
         Ok(())

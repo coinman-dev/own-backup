@@ -8,11 +8,15 @@ rust_i18n::i18n!("locales", fallback = "ru");
 mod commands;
 #[cfg(target_os = "linux")]
 mod device_watch;
+#[cfg(target_os = "linux")]
+mod instance_linux;
 mod jobs;
 mod service_link;
 mod state;
 #[cfg(target_os = "windows")]
 mod tray;
+#[cfg(target_os = "linux")]
+mod tray_linux;
 #[cfg(unix)]
 mod unix_group;
 
@@ -233,6 +237,31 @@ fn enforce_single_instance() {
     std::mem::forget(handle);
 }
 
+/// Linux: the window's name in the person's runtime directory
+/// (`instance_linux`). A second window hands the first a «show» and leaves; if
+/// the first does not answer — still starting — it says so on its terminal
+/// and leaves all the same. A name that cannot be checked at all (no private
+/// runtime folder) lets the window run: refusing to start is worse.
+#[cfg(target_os = "linux")]
+fn enforce_single_instance() -> Option<instance_linux::Instance> {
+    match instance_linux::claim("gui") {
+        Ok(instance_linux::Claim::Ours(instance)) => Some(instance),
+        Ok(instance_linux::Claim::Taken) => {
+            if !instance_linux::tell("gui", "show") {
+                own_backup_common::lang::set(&own_backup_common::lang::configured(
+                    &AppConfig::default_path(),
+                ));
+                eprintln!("{}", own_backup_common::tr!("main.already_running"));
+            }
+            std::process::exit(0);
+        }
+        Err(error) => {
+            eprintln!("Own Backup: single-instance check failed: {error}");
+            None
+        }
+    }
+}
+
 /// A WebView failure occurs before the frontend exists, so it needs a native
 /// dialog. In particular, a machine without WebView2 must see the preflight
 /// explanation instead of Tauri's bare "Error" window or a panic.
@@ -414,17 +443,19 @@ fn main() {
         tray::run();
         return;
     }
-    // The package's autostart entry (/etc/xdg/autostart) starts `--tray` at
-    // every login. There is no Linux icon yet (plan §6, stage 5), and opening
-    // the whole window at login instead is not what that entry asks for.
-    #[cfg(not(target_os = "windows"))]
+    // The package's autostart entry (/etc/xdg/autostart) starts it at every
+    // login.
+    #[cfg(target_os = "linux")]
     if std::env::args().any(|arg| arg == "--tray") {
+        tray_linux::run();
         return;
     }
 
-    // Only one GUI at a time (Windows).
+    // Only one GUI at a time.
     #[cfg(target_os = "windows")]
     enforce_single_instance();
+    #[cfg(target_os = "linux")]
+    let instance = enforce_single_instance();
 
     // No UAC elevation at startup: backups, disk enumeration and passwords all
     // run in the privileged service (LocalSystem), which the GUI reaches over
@@ -438,8 +469,13 @@ fn main() {
     let config_path = AppConfig::default_path();
     let config = AppConfig::load_or_default();
     // This process's own messages, until the window says which language it
-    // resolved (`set_ui_language`, sent as soon as it starts).
-    own_backup_common::lang::set(&config.ui_language);
+    // resolved (`set_ui_language`, sent as soon as it starts). Never chosen
+    // yet: the system's, as the window's «Как в системе» will decide.
+    own_backup_common::lang::set(if config.ui_language.trim().is_empty() {
+        own_backup_common::lang::system()
+    } else {
+        &config.ui_language
+    });
 
     // Ensure data directory exists (config.toml is written here). Windows
     // only: on Linux it is root's, made by the service, which also writes
@@ -452,6 +488,10 @@ fn main() {
     #[cfg(target_os = "windows")]
     if !own_backup_common::media_mode::is_media_mode() {
         tray::apply();
+    }
+    #[cfg(target_os = "linux")]
+    if !own_backup_common::media_mode::is_media_mode() {
+        tray_linux::apply();
     }
 
     // The orchestrator (job store, queue, scheduler, backup worker) lives in the
@@ -560,6 +600,25 @@ fn main() {
                 }
             };
             shrink_if_the_screen_is_scaled_hard(app, &built);
+
+            // A second start (the menu, the icon) asks this window to come
+            // forward. On Wayland the compositor may only flash it in the
+            // task bar: taking the focus is its decision there.
+            #[cfg(target_os = "linux")]
+            if let Some(instance) = instance {
+                let handle = app.handle().clone();
+                instance.listen(move |message| {
+                    use tauri::Manager;
+                    if message != "show" {
+                        return;
+                    }
+                    if let Some(window) = handle.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.unminimize();
+                        let _ = window.set_focus();
+                    }
+                });
+            }
 
             // A stale marker from an earlier run of this session would answer
             // for a window that is not this one. Take it away before the new

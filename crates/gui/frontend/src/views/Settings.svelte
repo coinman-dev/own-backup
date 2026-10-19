@@ -6,6 +6,7 @@
   import { lang, setLanguage, type LangMode } from '../lib/i18n.svelte';
   import { m } from '../lib/paraglide/messages';
   import { examplePath } from '../lib/paths';
+  import { isWindows } from '../lib/platformStore.svelte';
 
   /** The config as it was loaded, kept whole. Saving edits a copy of it rather
    *  than building a fresh object out of the fields this page shows — which is
@@ -368,7 +369,7 @@
               />
               {m.set_tray()}
             </label>
-            <p class="help-text">{m.set_tray_help()}</p>
+            <p class="help-text">{isWindows() ? m.set_tray_help() : m.set_tray_help_linux()}</p>
           {/if}
         </div>
       </div>

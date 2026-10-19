@@ -64,8 +64,10 @@ pub fn configured(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// The language of the Windows interface, decided the way the window decides
+/// The language of the system's interface, decided the way the window decides
 /// «Как в системе»: Russian for a Russian interface, English for any other.
+/// Windows: the user's UI language. Elsewhere: the session's locale, read
+/// the way GLib (and so the window's WebKitGTK) reads it.
 pub fn system() -> &'static str {
     #[cfg(windows)]
     {
@@ -74,7 +76,34 @@ pub fn system() -> &'static str {
     }
     #[cfg(not(windows))]
     {
+        let var = |name: &str| std::env::var(name).ok();
+        from_posix_locale([
+            var("LANGUAGE"),
+            var("LC_ALL"),
+            var("LC_MESSAGES"),
+            var("LANG"),
+        ])
+    }
+}
+
+/// The first of `LANGUAGE`, `LC_ALL`, `LC_MESSAGES`, `LANG` that is set, as
+/// GLib's `g_get_language_names` takes it: a `:`-separated list of tags
+/// (`ru_RU.UTF-8`, `en_US:ru`). Russian when any of them is, as the window's
+/// `navigator.languages` check is; English for `C`, `POSIX` and nothing.
+#[cfg_attr(windows, allow(dead_code))]
+fn from_posix_locale(values: [Option<String>; 4]) -> &'static str {
+    let first = values
+        .into_iter()
+        .flatten()
+        .find(|v| !v.trim().is_empty())
+        .unwrap_or_default();
+    let russian = first
+        .split(':')
+        .any(|tag| tag.trim().to_ascii_lowercase().starts_with("ru"));
+    if russian {
         "ru"
+    } else {
+        "en"
     }
 }
 
@@ -154,6 +183,34 @@ mod tests {
 
     // The global itself is never switched in a test: tests run in parallel,
     // and every other one expects the Russian texts.
+    #[test]
+    fn the_session_locale_decides_like_glib() {
+        let some = |v: &str| Some(v.to_string());
+        assert_eq!(
+            from_posix_locale([None, None, None, some("ru_RU.UTF-8")]),
+            "ru"
+        );
+        assert_eq!(
+            from_posix_locale([None, None, None, some("en_US.UTF-8")]),
+            "en"
+        );
+        // LANGUAGE first, and any Russian tag in it.
+        assert_eq!(
+            from_posix_locale([some("en_US:ru"), None, None, some("C.UTF-8")]),
+            "ru"
+        );
+        // LC_ALL over LANG; an empty variable is not set.
+        assert_eq!(
+            from_posix_locale([some(""), some("C"), None, some("ru_RU.UTF-8")]),
+            "en"
+        );
+        assert_eq!(
+            from_posix_locale([None, None, some("ru_UA.UTF-8"), some("en_GB.UTF-8")]),
+            "ru"
+        );
+        assert_eq!(from_posix_locale([None, None, None, None]), "en");
+    }
+
     #[test]
     fn russian_unless_told_english() {
         assert_eq!(code(), "ru");

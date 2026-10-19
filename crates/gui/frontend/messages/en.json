@@ -97,6 +97,7 @@
   "set_service_refused": "The service is running but refuses this window: only windows from the active local session (at this computer) or run as root are accepted.",
   "set_tray": "Icon in the notification area",
   "set_tray_help": "The icon next to the clock is shown while the service is running and appears when you sign in to Windows. Clicking it opens this window.",
+  "set_tray_help_linux": "The icon in the notification area is shown while the service is running and appears when you log in. Its menu has «Open Own Backup». GNOME shows such icons only with the AppIndicator extension (enabled in Ubuntu).",
   "set_mount_no_nbd": "the NBD module is not loaded",
   "set_mount_ready_nbd": "ready (NBD, NTFS: {backend})",
   "set_mount_no_ntfs": "ready, but NTFS is not supported — ntfs-3g is needed",

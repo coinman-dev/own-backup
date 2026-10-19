@@ -3270,6 +3270,7 @@ version = "0.1.5-beta"
 dependencies = [
  "chrono",
  "glib",
+ "gtk",
  "libc",
  "own-backup-backup",
  "own-backup-client",
@@ -3279,6 +3280,7 @@ dependencies = [
  "own-backup-metadata",
  "own-backup-restore",
  "own-backup-scheduler",
+ "png 0.17.16",
  "prost",
  "prost-build",
  "rusqlite",
@@ -3297,6 +3299,7 @@ dependencies = [
  "tonic-build",
  "tracing",
  "tracing-subscriber",
+ "tray-icon",
  "uuid",
  "windows 0.58.0",
 ]
