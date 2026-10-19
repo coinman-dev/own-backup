@@ -3397,13 +3397,10 @@ async fn perform_backup(
     };
 
     // Aggregates across all volumes of this run.
-    let mut protected: Vec<(String, PathBuf)> = Vec::new();
+    let mut totals = backup_run::VolumeTotals::new(volumes.len());
     // (source device, image path) per success — used to build the whole-disk
     // restore manifest, joining images to GPT partitions by device.
     let mut run_images: Vec<(String, PathBuf)> = Vec::new();
-    let mut kinds: Vec<&'static str> = Vec::new();
-    let mut total_dur = 0.0f64;
-    let mut all_smart = true;
     let mut fatal: Option<(String, String)> = None; // (status, message)
 
     for (idx, device) in volumes.iter().enumerate() {
@@ -3509,86 +3506,8 @@ async fn perform_backup(
 
         match result {
             Ok(Ok((summary, verify_cancelled))) => {
-                use own_backup_common::types::BackupType as BT;
-                // The name the engine published: a fallback to a full renames
-                // the planned child.
-                let image_path = summary.image_path.clone();
-                run.source_bytes += summary.source_bytes;
-                run.bytes_copied += summary.bytes_copied;
-                run.used_blocks += summary.used_blocks;
-                run.total_blocks += summary.total_blocks;
-                run.blocks_unchanged += summary.blocks_unchanged;
-                run.excluded_files += summary.excluded_files;
-                run.excluded_bytes += summary.excluded_bytes;
-                total_dur += summary.duration.as_secs_f64();
-                all_smart &= summary.smart_mode;
-                run.vss_used |= summary.vss_used;
-                run.categories = merge_categories(run.categories.take(), summary.categories);
-                // One line per volume that went unwalked; a run over three
-                // volumes must not report the reason of whichever came last.
-                if let Some(why) = summary.file_scan_skipped {
-                    let line = if volumes.len() > 1 {
-                        format!("{device}: {why}")
-                    } else {
-                        why
-                    };
-                    if !run.file_scan_skipped.is_empty() {
-                        run.file_scan_skipped.push_str("; ");
-                    }
-                    run.file_scan_skipped.push_str(&line);
-                }
-                if let Some(why) = summary.excluded_entries_kept {
-                    let line = if volumes.len() > 1 {
-                        format!("{device}: {why}")
-                    } else {
-                        why
-                    };
-                    if !run.excluded_entries_kept.is_empty() {
-                        run.excluded_entries_kept.push_str("; ");
-                    }
-                    run.excluded_entries_kept.push_str(&line);
-                }
-
-                let actual_kind = match summary.backup_kind {
-                    BT::Full => "full",
-                    BT::Incremental => "incremental",
-                    _ => "differential",
-                };
-                kinds.push(actual_kind);
-
-                // Where this volume's copy went, and which chain it joined.
-                // Computed for EVERY volume: the two single-value fields below
-                // describe the first one only, and for years that was the whole
-                // record of a multi-volume run (audit AUD-09).
-                let base_of_this_volume = match summary.backup_kind {
-                    BT::Full => image_path.display().to_string(),
-                    _ => plan
-                        .base_image
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default(),
-                };
-                run.images.push(RunImage {
-                    source: device.clone(),
-                    image_path: image_path.display().to_string(),
-                    base_image_path: base_of_this_volume.clone(),
-                    kind: actual_kind.into(),
-                });
-
-                // The primary (first) volume drives the single-value dashboard
-                // fields (image to open, chain base, increment index).
-                if idx == 0 {
-                    run.image_path = image_path.display().to_string();
-                    run.base_image_path = base_of_this_volume;
-                    run.increment_index = match summary.backup_kind {
-                        BT::Full => 0,
-                        _ => plan.increment_index,
-                    };
-                }
-                // Retention matches images by their file-name token (label for
-                // encrypted volumes), not the device password key.
-                run_images.push((device.clone(), image_path.clone()));
-                protected.push((file_token(job, device), image_path));
+                let image_path = totals.record(&mut run, job, &plan, idx, device, summary);
+                run_images.push((device.clone(), image_path));
 
                 // Everything above is recorded first, so the finished image is
                 // findable in the history; then the run stops short of success
@@ -3622,35 +3541,7 @@ async fn perform_backup(
         }
     }
 
-    run.finished_at = chrono::Utc::now().to_rfc3339();
-    run.duration_secs = total_dur;
-    run.smart_mode = !protected.is_empty() && all_smart;
-
-    // A single volume failure fails the whole run; images already written stay
-    // on disk (never fake success), and retention does not run on a partial set.
-    if let Some((status, msg)) = fatal {
-        run.status = status;
-        run.error = msg;
-        return run;
-    }
-
-    run.status = "success".into();
-    // Combined kind: the shared kind if every volume agreed, else "mixed".
-    run.backup_kind = match kinds.first() {
-        Some(first) if kinds.iter().all(|k| k == first) => (*first).into(),
-        Some(_) => "mixed".into(),
-        None => "full".into(),
-    };
-
-    // (Whole-disk bootable copies never reach here — they take the single
-    // whole-disk-image path above, which embeds the restore manifest.)
-
-    // Retention runs after a fully successful backup, independently per volume.
-    // Its failures are logged, never surfaced as a run failure.
-    apply_retention(job, &protected);
-    run.consolidated_increments = apply_consolidation(job, &protected, keys.as_ref());
-
-    run
+    totals.finish(run, fatal, job, keys.as_ref())
 }
 
 /// Back up a whole disk (bootable copy) into ONE image with the real GPT and
@@ -3812,50 +3703,10 @@ async fn perform_disk_backup(
     // consistent (see `snapshot_wanted` in the engine).
     run.vss_used = !own_backup_common::media_mode::is_media_mode();
 
+    let disk_token = format!("disk{}", ds.disk_number);
     match result {
         Ok(Ok((summary, verify_cancelled))) => {
-            // The name the engine published: a fallback to a full renames the
-            // planned child.
-            let image_path = summary.image_path.clone();
-            run.image_path = image_path.display().to_string();
-            run.base_image_path = run.image_path.clone();
-            run.status = "success".into();
-            run.bytes_copied = summary.bytes_copied;
-            run.used_blocks = summary.blocks_copied;
-            run.blocks_unchanged = summary.blocks_unchanged;
-            run.excluded_files = summary.excluded_files;
-            run.excluded_bytes = summary.excluded_bytes;
-            run.categories = summary.categories;
-            run.file_scan_skipped = summary.file_scan_skipped.unwrap_or_default();
-            run.excluded_entries_kept = summary.excluded_entries_kept.unwrap_or_default();
-            run.duration_secs = summary.duration.as_secs_f64();
-            // Record what was ACTUALLY produced (the engine may have fallen back
-            // to a full when the parent chain was unusable) so the next run plans
-            // correctly off the history.
-            let (kind_str, is_child) = match summary.backup_kind {
-                BackupType::Incremental => ("incremental", true),
-                BackupType::Differential => ("differential", true),
-                _ => ("full", false),
-            };
-            run.backup_kind = kind_str.into();
-            if is_child {
-                if let Some(base) = &plan.base_image {
-                    run.base_image_path = base.display().to_string();
-                }
-                run.increment_index = plan.increment_index;
-            }
-            // One image for the whole disk, but the list is filled in all the
-            // same: "everything this job wrote" must be answerable the same way
-            // whatever the job's shape (audit AUD-09).
-            run.images.push(RunImage {
-                source: format!("disk{}", ds.disk_number),
-                image_path: run.image_path.clone(),
-                base_image_path: run.base_image_path.clone(),
-                kind: kind_str.into(),
-            });
-            info!(job = %job.name, image = %image_path.display(), kind = kind_str,
-                partitions = summary.partitions, unchanged = summary.blocks_unchanged,
-                "Whole-disk backup complete");
+            let image_path = backup_run::record_disk(&mut run, job, &plan, &disk_token, summary);
             // A check the user stopped is not a reason to delete older versions
             // — and the image below is NOT removed, unlike a cancelled copy.
             if verify_cancelled {
@@ -3863,9 +3714,8 @@ async fn perform_disk_backup(
                 run.error = verify_cancelled_message();
                 return run;
             }
-            let protected = [(format!("disk{}", ds.disk_number), image_path)];
-            apply_retention(job, &protected);
-            run.consolidated_increments = apply_consolidation(job, &protected, keys.as_ref());
+            let protected = [(disk_token, image_path)];
+            backup_run::retain_and_consolidate(&mut run, job, &protected, keys.as_ref());
         }
         Ok(Err(OwnBackupError::Cancelled)) => {
             run.status = "cancelled".into();

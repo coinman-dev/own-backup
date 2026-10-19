@@ -1,12 +1,16 @@
 //! The run around a backup engine, whatever the engine copied.
 //!
 //! The engine copies; the run around it turns the engine's progress into the
-//! screen's and reads the finished image back when the job asks for it. The
+//! screen's, reads the finished image back when the job asks for it, adds
+//! what the copy produced to the run's record and ends the run. The
 //! per-volume and the whole-disk drivers each carried their own, nearly
 //! identical copy of these steps, and the Linux driver needs the same ones —
 //! so they are here, once.
+//!
+//! What reads an engine's summary is Windows-only while the summary types
+//! live in `engine_win`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -19,7 +23,10 @@ use own_backup_common::progress::BackupProgress;
 use own_backup_common::{tr, OwnBackupError};
 
 use crate::engine_watch::EngineWatch;
-use crate::{backup_callback_checkpoint, EventSink, Job, JobProgress, Pace, VerifyRate};
+use crate::{
+    apply_consolidation, apply_retention, backup_callback_checkpoint, EventSink, Job, JobProgress,
+    JobRun, Pace, VerifyRate,
+};
 
 /// The run a progress report belongs to and where it goes — the same for the
 /// copy and for the check that reads the copy back.
@@ -249,4 +256,237 @@ pub(crate) fn verify_copy(
         Err(e) => return Err(e),
     }
     Ok(verify_cancelled)
+}
+
+/// What a run over volumes adds up as each of them finishes, for the end of
+/// the run.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) struct VolumeTotals {
+    /// Each finished copy by its file-name token: the chains retention and
+    /// consolidation must leave alone.
+    pub(crate) protected: Vec<(String, PathBuf)>,
+    kinds: Vec<&'static str>,
+    total_dur: f64,
+    all_smart: bool,
+    volume_count: usize,
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+impl VolumeTotals {
+    pub(crate) fn new(volume_count: usize) -> Self {
+        Self {
+            protected: Vec::new(),
+            kinds: Vec::new(),
+            total_dur: 0.0,
+            all_smart: true,
+            volume_count,
+        }
+    }
+
+    /// Add one finished volume to the run's record; returns the image the
+    /// engine published.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn record(
+        &mut self,
+        run: &mut JobRun,
+        job: &Job,
+        plan: &crate::RunPlan,
+        idx: usize,
+        device: &str,
+        summary: own_backup_backup::engine_win::VolumeBackupSummary,
+    ) -> PathBuf {
+        use crate::{file_token, merge_categories, RunImage};
+        use own_backup_common::types::BackupType as BT;
+        // The name the engine published: a fallback to a full renames
+        // the planned child.
+        let image_path = summary.image_path.clone();
+        run.source_bytes += summary.source_bytes;
+        run.bytes_copied += summary.bytes_copied;
+        run.used_blocks += summary.used_blocks;
+        run.total_blocks += summary.total_blocks;
+        run.blocks_unchanged += summary.blocks_unchanged;
+        run.excluded_files += summary.excluded_files;
+        run.excluded_bytes += summary.excluded_bytes;
+        self.total_dur += summary.duration.as_secs_f64();
+        self.all_smart &= summary.smart_mode;
+        run.vss_used |= summary.vss_used;
+        run.categories = merge_categories(run.categories.take(), summary.categories);
+        // One line per volume that went unwalked; a run over three
+        // volumes must not report the reason of whichever came last.
+        if let Some(why) = summary.file_scan_skipped {
+            let line = if self.volume_count > 1 {
+                format!("{device}: {why}")
+            } else {
+                why
+            };
+            if !run.file_scan_skipped.is_empty() {
+                run.file_scan_skipped.push_str("; ");
+            }
+            run.file_scan_skipped.push_str(&line);
+        }
+        if let Some(why) = summary.excluded_entries_kept {
+            let line = if self.volume_count > 1 {
+                format!("{device}: {why}")
+            } else {
+                why
+            };
+            if !run.excluded_entries_kept.is_empty() {
+                run.excluded_entries_kept.push_str("; ");
+            }
+            run.excluded_entries_kept.push_str(&line);
+        }
+
+        let actual_kind = match summary.backup_kind {
+            BT::Full => "full",
+            BT::Incremental => "incremental",
+            _ => "differential",
+        };
+        self.kinds.push(actual_kind);
+
+        // Where this volume's copy went, and which chain it joined.
+        // Computed for EVERY volume: the two single-value fields below
+        // describe the first one only, and for years that was the whole
+        // record of a multi-volume run (audit AUD-09).
+        let base_of_this_volume = match summary.backup_kind {
+            BT::Full => image_path.display().to_string(),
+            _ => plan
+                .base_image
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+        };
+        run.images.push(RunImage {
+            source: device.to_string(),
+            image_path: image_path.display().to_string(),
+            base_image_path: base_of_this_volume.clone(),
+            kind: actual_kind.into(),
+        });
+
+        // The primary (first) volume drives the single-value dashboard
+        // fields (image to open, chain base, increment index).
+        if idx == 0 {
+            run.image_path = image_path.display().to_string();
+            run.base_image_path = base_of_this_volume;
+            run.increment_index = match summary.backup_kind {
+                BT::Full => 0,
+                _ => plan.increment_index,
+            };
+        }
+        // Retention matches images by their file-name token (label for
+        // encrypted volumes), not the device password key.
+        self.protected
+            .push((file_token(job, device), image_path.clone()));
+        image_path
+    }
+
+    /// End the run once every volume has finished or one of them stopped it.
+    pub(crate) fn finish(
+        self,
+        mut run: JobRun,
+        fatal: Option<(String, String)>,
+        job: &Job,
+        keys: Option<&ArchiveKeys>,
+    ) -> JobRun {
+        run.finished_at = chrono::Utc::now().to_rfc3339();
+        run.duration_secs = self.total_dur;
+        run.smart_mode = !self.protected.is_empty() && self.all_smart;
+
+        // A single volume failure fails the whole run; images already written stay
+        // on disk (never fake success), and retention does not run on a partial set.
+        if let Some((status, msg)) = fatal {
+            run.status = status;
+            run.error = msg;
+            return run;
+        }
+
+        run.status = "success".into();
+        // Combined kind: the shared kind if every volume agreed, else "mixed".
+        run.backup_kind = match self.kinds.first() {
+            Some(first) if self.kinds.iter().all(|k| k == first) => (*first).into(),
+            Some(_) => "mixed".into(),
+            None => "full".into(),
+        };
+
+        // (Whole-disk bootable copies never reach here — they take the single
+        // whole-disk-image path, which embeds the restore manifest.)
+
+        // Retention runs after a fully successful backup, independently per volume.
+        // Its failures are logged, never surfaced as a run failure.
+        retain_and_consolidate(&mut run, job, &self.protected, keys);
+
+        run
+    }
+}
+
+/// Record a finished whole-disk copy in its run; returns the image the
+/// engine published. `disk_token` is the disk's file-name token (`disk<N>`).
+#[cfg(target_os = "windows")]
+pub(crate) fn record_disk(
+    run: &mut JobRun,
+    job: &Job,
+    plan: &crate::RunPlan,
+    disk_token: &str,
+    summary: own_backup_backup::engine_win::DiskBackupSummary,
+) -> PathBuf {
+    use crate::RunImage;
+    use own_backup_common::types::BackupType;
+    use tracing::info;
+
+    // The name the engine published: a fallback to a full renames the
+    // planned child.
+    let image_path = summary.image_path.clone();
+    run.image_path = image_path.display().to_string();
+    run.base_image_path = run.image_path.clone();
+    run.status = "success".into();
+    run.bytes_copied = summary.bytes_copied;
+    run.used_blocks = summary.blocks_copied;
+    run.blocks_unchanged = summary.blocks_unchanged;
+    run.excluded_files = summary.excluded_files;
+    run.excluded_bytes = summary.excluded_bytes;
+    run.categories = summary.categories;
+    run.file_scan_skipped = summary.file_scan_skipped.unwrap_or_default();
+    run.excluded_entries_kept = summary.excluded_entries_kept.unwrap_or_default();
+    run.duration_secs = summary.duration.as_secs_f64();
+    // Record what was ACTUALLY produced (the engine may have fallen back
+    // to a full when the parent chain was unusable) so the next run plans
+    // correctly off the history.
+    let (kind_str, is_child) = match summary.backup_kind {
+        BackupType::Incremental => ("incremental", true),
+        BackupType::Differential => ("differential", true),
+        _ => ("full", false),
+    };
+    run.backup_kind = kind_str.into();
+    if is_child {
+        if let Some(base) = &plan.base_image {
+            run.base_image_path = base.display().to_string();
+        }
+        run.increment_index = plan.increment_index;
+    }
+    // One image for the whole disk, but the list is filled in all the
+    // same: "everything this job wrote" must be answerable the same way
+    // whatever the job's shape (audit AUD-09).
+    run.images.push(RunImage {
+        source: disk_token.to_string(),
+        image_path: run.image_path.clone(),
+        base_image_path: run.base_image_path.clone(),
+        kind: kind_str.into(),
+    });
+    info!(job = %job.name, image = %image_path.display(), kind = kind_str,
+        partitions = summary.partitions, unchanged = summary.blocks_unchanged,
+        "Whole-disk backup complete");
+    image_path
+}
+
+/// After a fully successful run: retention first, then consolidation (see
+/// [`apply_consolidation`] for why in that order). `protected` holds the
+/// images the run just wrote, by file-name token.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn retain_and_consolidate(
+    run: &mut JobRun,
+    job: &Job,
+    protected: &[(String, PathBuf)],
+    keys: Option<&ArchiveKeys>,
+) {
+    apply_retention(job, protected);
+    run.consolidated_increments = apply_consolidation(job, protected, keys);
 }
