@@ -17,7 +17,7 @@
 #
 # Not covered here: suspend and the RTC wake-up (the guest would have to be
 # resumed from the host), and the polkit password dialog (needs a desktop
-# session with an agent) — see handoff/REPORT-cloud-packaging.md.
+# session with an agent) — those are checked by hand on a desktop machine.
 set -uo pipefail
 
 # ---------------------------------------------------------------------------

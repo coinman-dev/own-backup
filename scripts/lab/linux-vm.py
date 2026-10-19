@@ -66,7 +66,7 @@ MAX_RUN = 20 * GIB
 MAX_LAB = 65 * GIB
 MAX_TARGET = 30 * GIB
 PACKAGES = ['lvm2', 'thin-provisioning-tools', 'cryptsetup', 'btrfs-progs', 'xfsprogs',
-            'dosfstools', 'ntfs-3g']
+            'dosfstools', 'ntfs-3g', 'qemu-utils']
 USER = 'lab'
 
 
