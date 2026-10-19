@@ -227,7 +227,7 @@ stage_k3() {
     check k3-setup "$(verdict $?)" "ext4 mounted read-only as the data directory, a key store in it"
     # The engine finds the key directory through the configured data directory.
     OWN_BACKUP_DATA_DIR=$data run k3-copy "$CLI" backup "$src" -o "$out/data_full.qcow2" --format qcow2
-    check k3-copy "$(verdict $?)" "copied with no exclusion rules at all (the volume is in use)"
+    check k3-copy "$(verdict $?)" "copied with no exclusion rules at all (mounted, the data directory)"
     grep -q 'Excluded:' "$EV/k3-copy.out" && ! grep -q 'Exclusions not applied' "$EV/k3-copy.out"
     check k3-said "$(verdict $?)" "the copy says what it left out"
     ! grep -qa "$marker" "$out/data_full.qcow2"

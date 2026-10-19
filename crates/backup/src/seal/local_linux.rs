@@ -276,14 +276,95 @@ impl LinuxBackend {
     }
 
     /// Create `name` with `bytes`, never over anything, complete or not at
-    /// all: a private temporary file is written and synced, then linked into
-    /// place (a link refuses an existing name), then the directory is synced.
-    /// `Ok(false)`: `name` already existed and is left as it was.
+    /// all: the bytes go to a file with no name yet (`O_TMPFILE`), are
+    /// synced, and the file is linked into place — a link refuses an
+    /// existing name — then the directory is synced. `Ok(false)`: `name`
+    /// already existed and is left as it was.
+    ///
+    /// The file has one name from the moment it has any, so a reader at that
+    /// moment never meets the second link a named temporary file would have
+    /// (and which [`check_file`] refuses). A filesystem or a kernel without
+    /// `O_TMPFILE`, or no `/proc`, gets the named temporary file instead.
     fn publish(&self, name: &str, bytes: &[u8]) -> Result<bool> {
         self.check_context()?;
+        let name_c = c_name(name)?;
+        match self.publish_unnamed(&name_c, bytes)? {
+            Some(created) => Ok(created),
+            None => self.publish_named(name, &name_c, bytes),
+        }
+    }
+
+    /// `None`: this filesystem cannot make a file without a name.
+    fn publish_unnamed(&self, name_c: &CString, bytes: &[u8]) -> Result<Option<bool>> {
+        let dot = c_name(".")?;
+        // SAFETY: openat on our pinned directory with a valid C string.
+        let fd = unsafe {
+            libc::openat(
+                self.dir.as_raw_fd(),
+                dot.as_ptr(),
+                libc::O_TMPFILE | libc::O_WRONLY | libc::O_CLOEXEC,
+                0o600 as libc::c_uint,
+            )
+        };
+        if fd < 0 {
+            let e = std::io::Error::last_os_error();
+            return match e.raw_os_error() {
+                Some(libc::EOPNOTSUPP | libc::EISDIR | libc::EINVAL) => Ok(None),
+                _ => Err(e.into()),
+            };
+        }
+        // SAFETY: a descriptor we just created and now own.
+        let mut file = unsafe { File::from_raw_fd(fd) };
+        self.fill(&mut file, bytes)?;
+        let proc_path = CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))
+            .map_err(|_| bad("NUL in descriptor path"))?;
+        // SAFETY: linkat from our own descriptor's /proc name into the pinned
+        // directory, valid C strings.
+        let linked = unsafe {
+            libc::linkat(
+                libc::AT_FDCWD,
+                proc_path.as_ptr(),
+                self.dir.as_raw_fd(),
+                name_c.as_ptr(),
+                libc::AT_SYMLINK_FOLLOW,
+            )
+        };
+        if linked != 0 {
+            let e = std::io::Error::last_os_error();
+            return match e.raw_os_error() {
+                Some(libc::EEXIST) => Ok(Some(false)),
+                // No /proc to link through.
+                Some(libc::ENOENT) => Ok(None),
+                _ => Err(OwnBackupError::Encryption(format!(
+                    "Linux key store: link: {e}"
+                ))),
+            };
+        }
+        self.dir.sync_all()?;
+        Ok(Some(true))
+    }
+
+    fn fill(&self, file: &mut File, bytes: &[u8]) -> Result<()> {
+        // The umask can only take bits away; say exactly what it is.
+        // SAFETY: fchmod on our own descriptor.
+        if unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } != 0 {
+            return Err(os("chmod"));
+        }
+        let st = stat(file)?;
+        if st.st_uid != self.owner || st.st_mode & 0o077 != 0 {
+            return Err(bad("unexpected owner or access of a new key file"));
+        }
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Ok(())
+    }
+
+    /// The same with a private temporary name, linked to `name` and then
+    /// removed. For the moment between the two the file has two names, and a
+    /// reader then refuses it; nothing is lost — it reads again.
+    fn publish_named(&self, name: &str, name_c: &CString, bytes: &[u8]) -> Result<bool> {
         let tmp = format!(".{name}.{}.tmp", Uuid::new_v4().simple());
         let tmp_c = c_name(&tmp)?;
-        let name_c = c_name(name)?;
         // SAFETY: openat on our pinned directory with a valid C string.
         let fd = unsafe {
             libc::openat(
@@ -307,18 +388,7 @@ impl LinuxBackend {
             // SAFETY: unlinkat on our pinned directory with a valid C string.
             unsafe { libc::unlinkat(self.dir.as_raw_fd(), tmp_c.as_ptr(), 0) };
         };
-        let written = (|| -> Result<()> {
-            // The umask can only take bits away; say exactly what it is.
-            // SAFETY: fchmod on our own descriptor.
-            if unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } != 0 {
-                return Err(os("chmod"));
-            }
-            check_file(&file, self.owner)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            Ok(())
-        })();
-        if let Err(e) = written {
+        if let Err(e) = self.fill(&mut file, bytes) {
             unlink_tmp();
             return Err(e);
         }
@@ -951,6 +1021,24 @@ pub(super) mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, vec![MACHINE_KEY_FILE.to_string()]);
+    }
+
+    /// The fallback for a filesystem without `O_TMPFILE` publishes the same
+    /// way: once, never over a key, nothing left behind.
+    #[test]
+    fn the_named_fallback_publishes_once_and_cleans_up() {
+        let data = data_dir();
+        let b = backend(data.path(), &FakeCreds::new(1));
+        let name = c_name("fallback.key").unwrap();
+        assert!(b.publish_named("fallback.key", &name, b"first").unwrap());
+        assert!(!b.publish_named("fallback.key", &name, b"second").unwrap());
+        assert_eq!(b.read_name("fallback.key").unwrap(), b"first");
+        let names: Vec<_> = std::fs::read_dir(data.path().join(KEY_DIRECTORY_NAME))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["fallback.key".to_string()]);
     }
 
     #[test]
