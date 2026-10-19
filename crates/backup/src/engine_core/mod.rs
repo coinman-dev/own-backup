@@ -13,6 +13,7 @@ pub(crate) mod platform;
 pub(crate) mod read;
 pub(crate) mod target;
 pub(crate) mod verify;
+pub(crate) mod volume;
 
 #[cfg(test)]
 pub(crate) mod test_platform;
