@@ -71,7 +71,6 @@ pub fn update_sealed_metadata(path: &Path, chain: &ChainKey, metadata: &[u8]) ->
 /// Finalize a newly written image before its backup run is published. There
 /// is no previous restore point at this path to preserve, and this avoids a
 /// second full-size copy on every ordinary encrypted backup.
-#[cfg(any(target_os = "windows", test))]
 pub(crate) fn update_unpublished_sealed_metadata(
     path: &Path,
     chain: &ChainKey,
