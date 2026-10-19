@@ -72,6 +72,8 @@ pub mod disk_session_linux;
 pub mod efivars_linux;
 #[cfg(target_os = "linux")]
 pub mod engine_linux;
+#[cfg(target_os = "linux")]
+pub mod identity_check_linux;
 // The engine's Linux platform: the volume pipeline runs on it.
 #[cfg(target_os = "linux")]
 mod engine_platform_linux;
@@ -79,6 +81,8 @@ mod engine_platform_linux;
 pub mod linux_device;
 #[cfg(target_os = "linux")]
 pub mod nbd_linux;
+#[cfg(target_os = "linux")]
+pub mod udev_hold_linux;
 pub mod vhdx_format;
 
 pub mod attach_win;

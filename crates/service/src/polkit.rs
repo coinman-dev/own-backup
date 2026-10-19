@@ -26,13 +26,12 @@ use zbus::zvariant::Value;
 /// The polkit actions of `com.ownbackup.policy` that the engine checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Action {
-    /// Restore and the boot configuration have no Linux implementation yet
-    /// (their RPCs answer `unimplemented`): the check goes in front of them
-    /// when they get one (plan §6, stage 3), not before a refusal.
-    #[allow(dead_code)]
+    /// Overwriting a volume or a disk (restore RPCs, plan §6 stage 3).
     Restore,
     DeleteBackups,
     ManageKeys,
+    /// The boot configuration has no Linux RPC yet; a plan's boot steps are
+    /// covered by `Restore`.
     #[allow(dead_code)]
     BootConfig,
 }

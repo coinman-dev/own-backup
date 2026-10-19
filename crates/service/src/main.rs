@@ -826,6 +826,11 @@ pub async fn run_main_loop(
                 info!(removed, "snapshots left by interrupted runs removed");
             }
         });
+        // A udev hold a killed restore left behind keeps udisks, LVM, md and
+        // systemd away from that disk until the next reboot.
+        own_backup_backup::udev_hold_linux::sweep_stale_holds(std::path::Path::new(
+            own_backup_backup::udev_hold_linux::RULES_DIR,
+        ));
     }
     // The installed Linux service keeps remembered volume passwords (an
     // opened LUKS mapping's among them) in its root-only key directory —

@@ -17,9 +17,20 @@ use tracing::info;
 
 use crate::app_state::AppState;
 
+/// The engine of this system: verification is the shared one on both.
+#[cfg(target_os = "linux")]
+use own_backup_backup::engine_linux as platform_engine;
+#[cfg(target_os = "windows")]
+use own_backup_backup::engine_win as platform_engine;
+
 pub mod proto {
     tonic::include_proto!("ownbackup");
 }
+
+/// Restore and verify on Linux: the handlers' Linux halves (PLAN §6, stage 3).
+#[cfg(target_os = "linux")]
+#[path = "restore_linux.rs"]
+mod restore_linux;
 
 use proto::backup_service_server::{BackupService, BackupServiceServer};
 use proto::*;
@@ -639,7 +650,7 @@ struct ManualSecret {
 /// Slow: opening the envelope is Argon2id at the production profile, seconds.
 /// [`manual_keys_off_thread`] is what callers use, so that the machine's single
 /// busy slot is not held for the length of a key derivation.
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn manual_keys(
     image: &std::path::Path,
     secret: &ManualSecret,
@@ -682,7 +693,7 @@ fn manual_keys(
 /// The key file reports it as a `Config` error, whose `Display` puts an English
 /// «Configuration error:» in front — and that is what the unlock dialog showed
 /// under a mistyped password.
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn refused_secret(e: own_backup_common::OwnBackupError) -> Status {
     match e {
         own_backup_common::OwnBackupError::Config(m) => Status::permission_denied(m),
@@ -700,15 +711,15 @@ async fn manual_keys_off_thread(
     image: std::path::PathBuf,
     secret: ManualSecret,
 ) -> Result<Option<own_backup_backup::seal::context::ArchiveKeys>, Status> {
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     {
         tokio::task::spawn_blocking(move || manual_keys(&image, &secret))
             .await
             .map_err(|e| Status::internal(format!("key task panicked: {e}")))?
     }
-    // The engine itself is Windows-only, so nothing here can use a key anyway;
-    // the operation that follows refuses with its own message.
-    #[cfg(not(target_os = "windows"))]
+    // No engine here, so nothing can use a key anyway; the operation that
+    // follows refuses with its own message.
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = (image, secret);
         Ok(None)
@@ -1518,7 +1529,11 @@ impl BackupService for BackupServiceImpl {
                 duration_secs: summary.duration.as_secs_f64(),
             })
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
+        {
+            self.restore_volume_linux(req).await
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
             let _ = req;
             Err(Status::unimplemented(engine_msg()))
@@ -1527,10 +1542,10 @@ impl BackupService for BackupServiceImpl {
 
     async fn verify_image(&self, req: Request<JsonRequest>) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         {
-            use own_backup_backup::engine_win::verify_image_with_keys;
             use own_backup_common::engine_dto::{EngineProgress, VerifySummaryDto};
+            use platform_engine::verify_image_with_keys;
 
             #[derive(serde::Deserialize)]
             struct In {
@@ -1596,7 +1611,7 @@ impl BackupService for BackupServiceImpl {
                 duration_secs: summary.duration.as_secs_f64(),
             })
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
             let _ = req;
             Err(Status::unimplemented(engine_msg()))
@@ -1677,12 +1692,12 @@ impl BackupService for BackupServiceImpl {
     /// «Проверить последнюю версию» / «проверить все версии» of a job.
     async fn verify_job(&self, req: Request<JsonRequest>) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         {
-            use own_backup_backup::engine_win::{verify_image_scoped, VerifyScope};
             use own_backup_common::engine_dto::{
                 JobVerifyImage, JobVerifyProgress, JobVerifySummary,
             };
+            use platform_engine::{verify_image_scoped, VerifyScope};
 
             #[derive(serde::Deserialize)]
             struct In {
@@ -1810,7 +1825,7 @@ impl BackupService for BackupServiceImpl {
             })?;
             json_reply(&summary)
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
             let _ = req;
             Err(Status::unimplemented(engine_msg()))

@@ -302,3 +302,52 @@ pub struct MediaProgressDto {
 pub struct MediaCleanupDto {
     pub bytes_freed: u64,
 }
+
+// --- duplicate identities (Linux restore and mount) ------------------------
+
+/// An identity the restored or mounted copy carries that a device of this
+/// machine already has (`backup::identity_clash`): a filesystem, LUKS, LVM or
+/// md UUID, an LVM volume group name, a GPT partition GUID.
+///
+/// Every field is structured: the window decides from `severity` and `kind`,
+/// never from translated text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentityClashDto {
+    /// `ext`, `xfs`, `btrfs`, `luks`, `lvm_pv`, `lvm_vg`, `lvm_vg_name`, `md`,
+    /// `partuuid`.
+    pub kind: String,
+    /// The value as the subsystem's own tools print it.
+    pub value: String,
+    /// Which source partition of the copy carries it (`None` for a volume copy).
+    #[serde(default)]
+    pub part_index: Option<u32>,
+    /// Kernel names of the devices that already carry it.
+    pub already_on: Vec<String>,
+    /// `ambiguous` (names may resolve to either), `mount` (the second mount is
+    /// refused as is), `critical` (a volume manager or the kernel may merge or
+    /// confuse the two).
+    pub severity: String,
+    /// The command that gives the restored copy a new identity, with `<device>`
+    /// for the restored device; empty when none is offered (a PARTUUID).
+    #[serde(default)]
+    pub change_command: String,
+    /// Mount option that lets the copy be mounted beside the original
+    /// (`nouuid` for XFS), empty when none is needed.
+    #[serde(default)]
+    pub mount_hint: String,
+}
+
+/// What to do about duplicate identities, said explicitly by the person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityChoice {
+    /// Restore or mount the copy as it is; the duplicates stay.
+    Keep,
+    /// Give the restored copy new identities (and edit its fstab, crypttab
+    /// and boot configuration to match).
+    Change,
+}
+
+/// Key of the JSON object carried in the details of the `FAILED_PRECONDITION`
+/// status that asks for an [`IdentityChoice`]: `{"identity_clashes": [...]}`.
+pub const IDENTITY_CLASHES_DETAIL: &str = "identity_clashes";
