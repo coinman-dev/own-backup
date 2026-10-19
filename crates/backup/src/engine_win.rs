@@ -53,6 +53,7 @@ use crate::raw_copy::copy_used_blocks;
 #[cfg(target_os = "windows")]
 use crate::sidecar::{read_embedded_sidecar, read_sidecar, write_sidecar};
 use crate::sidecar::{sidecar_path_for, ChainRole, Sidecar, SidecarInfo};
+#[cfg(target_os = "windows")]
 use crate::used_sectors::{AllUsedMap, UsedSectorMap};
 #[cfg(target_os = "windows")]
 use crate::used_sectors_win::NtfsUsedSectorMap;
@@ -103,6 +104,7 @@ pub use crate::engine_core::verify::{
     verify_image, verify_image_scoped, verify_image_with_keys, VerifyScope, VerifySummary,
 };
 pub use crate::engine_core::volume::{VolumeBackupRequest, VolumeBackupSummary};
+use crate::engine_core::volume_maps::VolumeMaps;
 #[cfg(target_os = "windows")]
 use crate::engine_platform_win::WinPlatform;
 
@@ -386,154 +388,7 @@ fn backup_volume_inner<P: EnginePlatform>(
     );
     let published_path: &Path = &published;
 
-    // --- Used-sector map: NTFS → FAT32/exFAT → ext → btrfs → xfs → full copy ---
-    let mut ntfs_map: Option<P::NativeMap> = None;
-    let mut fat_map: Option<crate::fat_map::FatUsedMap> = None;
-    let mut ext_map: Option<crate::ext_map::ExtUsedMap> = None;
-    let mut btrfs_map: Option<crate::btrfs_map::BtrfsUsedMap> = None;
-    let mut xfs_map: Option<crate::xfs_map::XfsUsedMap> = None;
-    // For an encrypted source the map is built over the decrypting view and
-    // returned boxed directly (no exclusions apply to a Linux volume).
-    let mut luks_used: Option<Box<dyn UsedSectorMap>> = None;
-    // NTFS внутри LUKS/BitLocker: карта держится типизированной, пока не
-    // решится вопрос исключений — их вычитание перестраивает её.
-    let mut enc_ntfs_map: Option<crate::ntfs_map::NtfsUsedMap> = None;
-    // FAT/exFAT внутри контейнера — то же самое (BitLocker To Go на флешке
-    // обычно именно exFAT, и таких носителей больше, чем ReFS-томов).
-    let mut enc_fat_map: Option<crate::fat_map::FatUsedMap> = None;
-    // The filesystem actually found inside the volume. For a LUKS/BitLocker
-    // source this is what is INSIDE the container, because that is what the
-    // image holds — the partition table outside still says "unknown", and a
-    // restore screen reading only that would show a padlock over a plain
-    // btrfs (D14, R8).
-    let mut detected_fs: Option<String> = None;
-    let smart_mode = if req.all_sectors {
-        info!("Sector-by-sector mode requested; copying all blocks");
-        false
-    } else if luks.is_some() || bitlocker.is_some() {
-        // A decrypted volume: only the RawVolume-based parsers apply. The NTFS
-        // one among them — a BitLocker volume holds NTFS, and its $Bitmap is
-        // inside the ciphertext, so Windows' own FSCTL cannot reach it while
-        // the volume is locked. The reader below can.
-        let mut src = opened.open_source()?;
-        let map: Option<Box<dyn UsedSectorMap>> = if let Ok(m) =
-            crate::ntfs_map::build_ntfs_used_map(src.as_mut(), req.block_size)
-        {
-            info!(fs = "NTFS", "Using NTFS map over decrypted volume");
-            detected_fs = Some("NTFS".into());
-            // НЕ боксим: NTFS внутри контейнера умеет исключения ДО копии
-            // (план exclusions-before-copy, B3), а для этого карту надо
-            // будет перестроить без исключённых кластеров.
-            enc_ntfs_map = Some(m);
-            None
-        } else if let Ok(m) = crate::fat_map::build_fat_used_map(src.as_mut(), req.block_size) {
-            info!(fs = m.filesystem, "Using FAT map over decrypted volume");
-            detected_fs = Some(m.filesystem.to_string());
-            // Как и NTFS, держим типизированной: исключения перестроят её
-            // без исключённых кластеров (этап B4).
-            enc_fat_map = Some(m);
-            None
-        } else if let Ok(m) = crate::ext_map::build_ext_used_map(src.as_mut(), req.block_size) {
-            info!(fs = "ext4", "Using ext map over decrypted volume");
-            detected_fs = Some("ext4".into());
-            Some(Box::new(m))
-        } else if let Ok(m) = crate::btrfs_map::build_btrfs_used_map(src.as_mut(), req.block_size) {
-            info!(fs = "btrfs", "Using btrfs map over decrypted volume");
-            detected_fs = Some("btrfs".into());
-            Some(Box::new(m))
-        } else if let Ok(m) = crate::xfs_map::build_xfs_used_map(src.as_mut(), req.block_size) {
-            info!(fs = "xfs", "Using xfs map over decrypted volume");
-            detected_fs = Some("xfs".into());
-            Some(Box::new(m))
-        } else {
-            warn!("no used-block map for the decrypted volume — sector-by-sector");
-            None
-        };
-        let smart = map.is_some() || enc_ntfs_map.is_some() || enc_fat_map.is_some();
-        luks_used = map;
-        smart
-    } else {
-        match P::NativeMap::open(&read_path, req.block_size) {
-            Ok(map) => {
-                ntfs_map = Some(map);
-                detected_fs = Some("NTFS".into());
-                true
-            }
-            Err(ntfs_err) => {
-                // Not NTFS — try parsing FAT32/exFAT, then ext2/3/4, structures
-                // directly (each on its own device handle).
-                let fat_attempt = P::Dev::open_read(&read_path).and_then(|mut dev| {
-                    crate::fat_map::build_fat_used_map(&mut dev, req.block_size)
-                });
-                match fat_attempt {
-                    Ok(map) => {
-                        info!(fs = map.filesystem, "Using FAT used-cluster map");
-                        detected_fs = Some(map.filesystem.to_string());
-                        fat_map = Some(map);
-                        true
-                    }
-                    Err(fat_err) => {
-                        let ext_attempt = P::Dev::open_read(&read_path).and_then(|mut dev| {
-                            crate::ext_map::build_ext_used_map(&mut dev, req.block_size)
-                        });
-                        match ext_attempt {
-                            Ok(map) => {
-                                info!(fs = "ext4", "Using ext used-block map");
-                                detected_fs = Some("ext4".into());
-                                ext_map = Some(map);
-                                true
-                            }
-                            Err(ext_err) => {
-                                let btrfs_attempt =
-                                    P::Dev::open_read(&read_path).and_then(|mut dev| {
-                                        crate::btrfs_map::build_btrfs_used_map(
-                                            &mut dev,
-                                            req.block_size,
-                                        )
-                                    });
-                                match btrfs_attempt {
-                                    Ok(map) => {
-                                        info!(fs = "btrfs", "Using btrfs used-block map");
-                                        detected_fs = Some("btrfs".into());
-                                        btrfs_map = Some(map);
-                                        true
-                                    }
-                                    Err(btrfs_err) => {
-                                        let xfs_attempt =
-                                            P::Dev::open_read(&read_path).and_then(|mut dev| {
-                                                crate::xfs_map::build_xfs_used_map(
-                                                    &mut dev,
-                                                    req.block_size,
-                                                )
-                                            });
-                                        match xfs_attempt {
-                                            Ok(map) => {
-                                                info!(fs = "xfs", "Using xfs used-block map");
-                                                detected_fs = Some("xfs".into());
-                                                xfs_map = Some(map);
-                                                true
-                                            }
-                                            Err(xfs_err) => {
-                                                warn!(
-                                                    ntfs = %ntfs_err,
-                                                    fat = %fat_err,
-                                                    ext = %ext_err,
-                                                    btrfs = %btrfs_err,
-                                                    xfs = %xfs_err,
-                                                    "no used-block map available, falling back to sector-by-sector"
-                                                );
-                                                false
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    };
+    let mut maps = VolumeMaps::build(&opened, &read_path, req)?;
 
     // --- File exclusions (phase 3) ---
     // Both families achieve TRUE removal (like Acronis) — a restored/mounted
@@ -584,7 +439,8 @@ fn backup_volume_inner<P: EnginePlatform>(
     // produces BOTH the exclusions and the by-type breakdown, so one sentence
     // accounts for both being missing.
     let mut file_scan_skipped: Option<String> = None;
-    let fat_exclusions = fat_map
+    let fat_exclusions = maps
+        .fat_map
         .as_ref()
         .is_some_and(|f| f.filesystem == "FAT32" || f.filesystem == "exFAT")
         && !req.exclusion_patterns.is_empty();
@@ -595,7 +451,7 @@ fn backup_volume_inner<P: EnginePlatform>(
     // Исключения решены ДО копии по $MFT — проход внутри образа не нужен:
     // исключённых данных в образе нет, осталось убрать записи из каталога.
     let mut pre_copy_exclusions = false;
-    if let Some(map) = ntfs_map.as_mut() {
+    if let Some(map) = maps.ntfs_map.as_mut() {
         if !req.exclusion_patterns.is_empty() {
             // Сначала по $MFT: последовательное чтение вместо обхода дерева.
             // На живом C: обход занимает 45 с, внутри образа на SMR — 16 минут;
@@ -699,7 +555,7 @@ fn backup_volume_inner<P: EnginePlatform>(
             file_scan_skipped = Some(no_patterns());
         }
         map.release_bitmap();
-    } else if let Some(map) = enc_ntfs_map.as_mut() {
+    } else if let Some(map) = maps.enc_ntfs_map.as_mut() {
         // NTFS внутри контейнера, который Windows не смонтировала. Файлы в нём
         // всё равно перечислимы — по $MFT, прямо через расшифрованное окно
         // (`ntfs_scan`), и это решает исключения ДО копирования: экстенты
@@ -787,7 +643,7 @@ fn backup_volume_inner<P: EnginePlatform>(
                 }
             }
         }
-    } else if let Some(map) = enc_fat_map.as_mut() {
+    } else if let Some(map) = maps.enc_fat_map.as_mut() {
         // FAT/exFAT внутри контейнера, который Windows не смонтировала. Свой
         // разбор FAT читает каталоги прямо из расшифрованного окна — ему, как и
         // NTFS-сканеру, не нужен ни смонтированный том, ни дескриптор файла.
@@ -854,7 +710,7 @@ fn backup_volume_inner<P: EnginePlatform>(
                 req.block_size,
                 Some(&scan.ranges),
             )?;
-            fat_map = Some(rebuilt);
+            maps.fat_map = Some(rebuilt);
             zero_ranges = Some(scan.ranges);
             // Metadata patches: delete the directory entries + free the FAT
             // chains so the files vanish instead of remaining zero-filled ghosts.
@@ -876,7 +732,8 @@ fn backup_volume_inner<P: EnginePlatform>(
         } else if req.exclusion_patterns.is_empty() {
             no_patterns()
         } else {
-            let fs = detected_fs
+            let fs = maps
+                .detected_fs
                 .clone()
                 .unwrap_or_else(|| tr!("engine_win.other_filesystem").into_owned());
             tr!("engine_win.skip_fs_unsupported", fs = fs).into_owned()
@@ -901,7 +758,7 @@ fn backup_volume_inner<P: EnginePlatform>(
         && !pre_copy_exclusions
         && !req.exclusion_patterns.is_empty()
         && !req.all_sectors
-        && detected_fs.as_deref() == Some("NTFS");
+        && maps.detected_fs.as_deref() == Some("NTFS");
 
     if in_image_exclusions && req.encryption.is_some() {
         // The fallback pass mounts the finished image and deletes inside it,
@@ -913,22 +770,9 @@ fn backup_volume_inner<P: EnginePlatform>(
         ));
     }
 
-    let used: Box<dyn UsedSectorMap> = if let Some(map) = enc_ntfs_map {
-        Box::new(map)
-    } else if let Some(map) = enc_fat_map {
-        Box::new(map)
-    } else if let Some(map) = luks_used {
-        map
-    } else {
-        match (ntfs_map, fat_map, ext_map, btrfs_map, xfs_map) {
-            (Some(map), ..) => Box::new(map),
-            (None, Some(map), ..) => Box::new(map),
-            (None, None, Some(map), ..) => Box::new(map),
-            (None, None, None, Some(map), _) => Box::new(map),
-            (None, None, None, None, Some(map)) => Box::new(map),
-            (None, None, None, None, None) => Box::new(AllUsedMap::new(total_blocks)),
-        }
-    };
+    let smart_mode = maps.smart_mode;
+    let detected_fs = maps.detected_fs.take();
+    let used = maps.into_used(total_blocks);
     let used_blocks = used.used_block_count();
 
     // --- Create the image target (and attach it, for VHDX) ---
