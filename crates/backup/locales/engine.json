@@ -80,6 +80,14 @@
     "ru": "файлы не перечислены: MFT не прочитана (%{error}), а обойти каталоги тома здесь нечем — правила исключений не применялись",
     "en": "files were not listed: the MFT could not be read (%{error}), and there is no way to walk the volume's directories here — exclusion rules were not applied"
   },
+  "engine.skip_not_frozen": {
+    "ru": "источник не был неподвижен, пока его читали, — файловая система не разбиралась, том скопирован посекторно, правила исключений не применялись",
+    "en": "the source was not held still while it was read — its file system was not parsed, the volume was copied sector by sector and exclusion rules were not applied"
+  },
+  "engine.source_became_busy": {
+    "ru": "%{volume}: пока готовилась копия, устройство занял кто-то другой (его смонтировали или открыли монопольно) — читать его без снимка нельзя",
+    "en": "%{volume}: while the backup was being prepared, something else took the device (it was mounted or opened exclusively) — it cannot be read without a snapshot"
+  },
   "engine_win.skip_mft_failed": {
     "ru": "перечисление по MFT не удалось: %{error}",
     "en": "listing files from the MFT failed: %{error}"

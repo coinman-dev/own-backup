@@ -394,6 +394,85 @@ fn fat32_exclusions_remove_the_entries_and_leave_the_data_out() {
     }
 }
 
+/// A platform whose parsers need a frozen source, given one that is not: the
+/// FAT32 the frozen run above copies by its map — and excludes from — is
+/// copied whole here, its metadata never read and its rules not applied, and
+/// the result says why.
+#[test]
+fn a_source_not_held_still_is_copied_whole_and_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let fat = Fat32::build();
+    let source = unique_path("live-fat32");
+    register_device(&source, fat.image.clone(), 512);
+    let platform = TestPlatform::new().source(&source, TestSource::Direct { frozen: false });
+    let image = dir.path().join("full.qcow2");
+
+    let summary = run(
+        &platform,
+        &VolumeBackupRequest {
+            exclusion_patterns: vec!["*.tmp".into()],
+            ..request(&source, &image, ImageFormat::Qcow2)
+        },
+    );
+
+    let blocks = blocks_of(&fat.image, BS);
+    assert!(!summary.smart_mode);
+    assert_eq!(summary.used_blocks, blocks);
+    assert_eq!(summary.blocks_copied, blocks);
+    assert_eq!(summary.excluded_files, 0);
+    assert!(summary.categories.is_none());
+    assert_eq!(
+        summary.file_scan_skipped.as_deref(),
+        Some(&*own_backup_common::tr!("engine.skip_not_frozen"))
+    );
+    assert_same(
+        &volume_in(&image, fat.image.len()),
+        &fat.image,
+        "copied as it is",
+    );
+    assert_verifies(&image, blocks);
+    let sidecar = load_sidecar_of(&image).unwrap();
+    assert_eq!(
+        sidecar.manifest.backup_mode,
+        own_backup_common::types::BackupMode::SectorBySector
+    );
+    assert_eq!(sidecar.info.filesystem, None, "nothing parsed it");
+}
+
+/// A dirty XFS log is taken as covered only when the filesystem was frozen as
+/// it was captured. A device that merely holds still may carry the log of a
+/// crash, whose btrees are behind: that one is copied whole.
+#[test]
+fn a_dirty_xfs_log_is_trusted_only_from_a_quiesced_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let volume = crate::xfs_map::tests::tiny_xfs_image(true);
+    let blocks = blocks_of(&volume, BS);
+
+    let origin = unique_path("xfs-origin");
+    let snap = unique_path("xfs-snap");
+    register_device(&origin, vec![0; volume.len()], 512);
+    register_device(&snap, volume.clone(), 512);
+    let platform = TestPlatform::new().source(&origin, TestSource::Snapshot { read_path: snap });
+    let image = dir.path().join("snapshot.qcow2");
+    let summary = run(&platform, &request(&origin, &image, ImageFormat::Qcow2));
+    assert!(summary.smart_mode, "a snapshot's dirty log is covered");
+    assert!(summary.used_blocks < blocks);
+    let sidecar = load_sidecar_of(&image).unwrap();
+    assert_eq!(sidecar.info.filesystem.as_deref(), Some("xfs"));
+
+    let idle = unique_path("xfs-idle");
+    register_device(&idle, volume.clone(), 512);
+    let platform = TestPlatform::new().source(&idle, TestSource::Direct { frozen: true });
+    let image = dir.path().join("idle.qcow2");
+    let summary = run(&platform, &request(&idle, &image, ImageFormat::Qcow2));
+    assert!(
+        !summary.smart_mode,
+        "held still, never frozen: the log may be a crash's"
+    );
+    assert_eq!(summary.used_blocks, blocks);
+    assert_same(&volume_in(&image, volume.len()), &volume, "copied whole");
+}
+
 #[test]
 fn a_source_the_platform_does_not_hold_is_refused() {
     let dir = tempfile::tempdir().unwrap();

@@ -353,7 +353,7 @@ fn build_map(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     struct MemVolume(Vec<u8>);
@@ -422,6 +422,30 @@ mod tests {
         put_u32(&mut img, bt + 24, 40); // rec1 startblock
         put_u32(&mut img, bt + 28, 20); // rec1 count
         MemVolume(img)
+    }
+
+    /// [`tiny_xfs`] as bytes, for the engine's tests. `dirty_log`: the log's
+    /// newest record is not an unmount record, as a frozen — or a crashed —
+    /// XFS leaves it.
+    pub(crate) fn tiny_xfs_image(dirty_log: bool) -> Vec<u8> {
+        let mut img = tiny_xfs().0;
+        if dirty_log {
+            let head = 50 * 512; // the log's first block
+            put_u32(&mut img, head, 0xFEED_BABE); // record header magic
+            put_u64(&mut img, head + 0x10, 1); // lsn
+            put_u32(&mut img, head + 0x28, 2); // two log ops: not an unmount
+        }
+        img
+    }
+
+    #[test]
+    fn a_dirty_log_is_trusted_only_for_a_frozen_capture() {
+        let mut dirty = MemVolume(tiny_xfs_image(true));
+        assert!(build_xfs_used_map(&mut dirty, 512).is_err());
+        let map = build_xfs_used_map_frozen(&mut dirty, 512).unwrap();
+        assert_eq!(map.used_block_count(), 64 - 30);
+        let mut clean = MemVolume(tiny_xfs_image(false));
+        assert!(build_xfs_used_map(&mut clean, 512).is_ok());
     }
 
     #[test]

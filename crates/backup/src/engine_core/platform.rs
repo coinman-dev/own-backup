@@ -82,6 +82,16 @@ pub(crate) trait SourceSession {
     /// parsed (CLAUDE.md: MFT only from a frozen source).
     fn frozen(&self) -> bool;
 
+    /// The filesystem itself was frozen when the data was captured — a
+    /// snapshot, a partition frozen or remounted read-only for its copy: what
+    /// it had cached was written back first, so a journal that still reads as
+    /// dirty covers only what is already in place
+    /// ([`crate::xfs_map::build_xfs_used_map_frozen`]). Implies
+    /// [`Self::frozen`], not the other way round: an idle device holds still,
+    /// but a filesystem that crashed on it may have a log the btrees are
+    /// behind.
+    fn quiesced(&self) -> bool;
+
     /// The copy is done: tell the snapshot machinery and let go of it. `None`
     /// when there was nothing to complete; an error only means the snapshot
     /// could not be released cleanly — the data is already copied.
@@ -99,6 +109,8 @@ pub(crate) struct DiskWindow {
 }
 
 /// A finished image a removal pass works on, and how it was written.
+// Read by the Windows passes; Linux has none yet (plan N1).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) struct FinishedImage<'a> {
     pub(crate) path: &'a Path,
     pub(crate) format: ImageFormat,
@@ -147,9 +159,8 @@ pub(crate) trait EnginePlatform {
     /// FAT, ext, btrfs and xfs) need a frozen session as much as the MFT scan
     /// does. On Windows they read volumes Windows does not mount, which nothing
     /// writes; on Linux they read what the session gives, and only a frozen
-    /// session holds still.
-    // Asked by the Linux volume path (L1/L3); Windows has no use for it.
-    #[allow(dead_code)]
+    /// session holds still. Where this is true, an unfrozen session's volume
+    /// is copied whole, its metadata never parsed.
     const METADATA_NEEDS_FROZEN: bool;
 
     /// The canonical form of a source path, before anything opens it.

@@ -167,6 +167,12 @@ impl SourceSession for TestSession {
         self.frozen
     }
 
+    /// A snapshot is taken with its filesystem frozen; a device read directly
+    /// is at most held still.
+    fn quiesced(&self) -> bool {
+        self.snapshot
+    }
+
     fn complete(&mut self) -> Option<Result<()>> {
         if !self.snapshot || self.completed {
             return None;

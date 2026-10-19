@@ -3,8 +3,10 @@
 //!
 //! Linux has no VSS and no filesystem driver the engine could ask about a
 //! volume. A source is read through the snapshot its caller prepared
-//! (`own_backup_snapshot::linux`) — never a device nobody vouched for; the NTFS
-//! used map comes from the engine's own `$Bitmap` reader; VHDX images are made
+//! (`own_backup_snapshot::linux`) — never a device nobody vouched for; an idle
+//! device is claimed exclusively for the length of the copy, so that it stays
+//! idle; the NTFS used map comes from the engine's own `$Bitmap` reader; VHDX
+//! images are made
 //! in userspace with the geometry Windows gives them; and nothing deletes the
 //! names of excluded files inside a finished image yet, which the engine then
 //! says in so many words.
@@ -43,7 +45,8 @@ impl LinuxPlatform {
     /// Each source is read through its snapshot as the caller took it
     /// (`LinuxSnapshotProvider::create_snapshot`); a source without one is
     /// refused. The caller keeps the snapshots: it checks they are still whole
-    /// before an image is published and releases them afterwards.
+    /// before an image is published and releases them afterwards
+    /// (`engine_linux::backup_volume`).
     pub(crate) fn new(snapshots: impl IntoIterator<Item = Snapshot>) -> Self {
         Self {
             snapshots: snapshots
@@ -59,14 +62,47 @@ impl LinuxPlatform {
                 "{source}: no snapshot was prepared for this source, and it is not read without one"
             ))
         })?;
+        let read_path = snapshot.snapshot_device_path.clone();
+        let mode = snapshot.metadata.get("mode").map(String::as_str);
+        // An idle device holds still only while nobody else can take it:
+        // claimed exclusively, it cannot be mounted (or claimed by mkfs,
+        // device-mapper, md) until the session lets go (decision R5). Readers
+        // without the claim — ours included — still read it.
+        let hold = match mode {
+            Some("idle") => Some(hold_exclusively(&read_path)?),
+            _ => None,
+        };
         Ok(LinuxSession {
-            read_path: snapshot.snapshot_device_path.clone(),
-            snapshot: matches!(
-                snapshot.metadata.get("mode").map(String::as_str),
-                Some("lvm" | "dm")
-            ),
-            frozen: own_backup_snapshot::linux::taken_frozen(snapshot),
+            read_path,
+            snapshot: matches!(mode, Some("lvm" | "dm")),
+            frozen: own_backup_snapshot::linux::is_frozen(snapshot),
+            quiesced: own_backup_snapshot::linux::taken_frozen(snapshot),
+            _hold: hold,
         })
+    }
+}
+
+/// Claim the idle device at `path` for the length of a copy (`O_EXCL` on a
+/// block device: the kernel's exclusive open, the one `mount` takes).
+fn hold_exclusively(path: &str) -> Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_EXCL)
+        .open(path)
+        .map_err(|e| hold_error(path, e))
+}
+
+/// `EBUSY`: between the assessment and the copy the device was mounted or
+/// claimed — it is no longer idle, and read without a snapshot it would not
+/// be one point in time. Anything else is the error it is.
+fn hold_error(path: &str, e: std::io::Error) -> OwnBackupError {
+    if e.raw_os_error() == Some(libc::EBUSY) {
+        OwnBackupError::NoSnapshotProvider(
+            tr!("engine.source_became_busy", volume = path).into_owned(),
+        )
+    } else {
+        OwnBackupError::Device(format!("{path}: {e}"))
     }
 }
 
@@ -75,6 +111,9 @@ pub(crate) struct LinuxSession {
     read_path: String,
     snapshot: bool,
     frozen: bool,
+    quiesced: bool,
+    /// The exclusive claim on an idle device, held until the session ends.
+    _hold: Option<std::fs::File>,
 }
 
 impl SourceSession for LinuxSession {
@@ -87,12 +126,23 @@ impl SourceSession for LinuxSession {
         self.snapshot
     }
 
-    /// Taken with the filesystem frozen (LVM, device-mapper).
+    /// What the session reads holds still while it is read
+    /// (`own_backup_snapshot::linux::is_frozen`): a snapshot, a partition held
+    /// still, a device only mounted read-only, an idle device this session
+    /// claimed, a file its caller vouched for.
     fn frozen(&self) -> bool {
         self.frozen
     }
 
+    /// Taken with the filesystem frozen: an LVM or device-mapper snapshot, a
+    /// partition frozen or remounted read-only for its copy.
+    fn quiesced(&self) -> bool {
+        self.quiesced
+    }
+
     /// Nothing to do here: the snapshot is the caller's to check and release.
+    /// The claim on an idle device lasts until the session is dropped, after
+    /// the engine's last read of the source.
     fn complete(&mut self) -> Option<Result<()>> {
         None
     }
@@ -387,10 +437,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let data: Vec<u8> = (0..3000u32).map(|i| i as u8).collect();
         let file = file_with(dir.path(), "src.img", &data);
+        let vouched = file_with(dir.path(), "vouched.img", &data);
+        let mut vouched_snap = snapshot(&vouched, &vouched, "file");
+        own_backup_snapshot::linux::assert_file_frozen(&mut vouched_snap);
+        // An idle "device" that is a file: the exclusive claim is the
+        // kernel's for block devices only, a file opens all the same.
+        let idle = file_with(dir.path(), "idle.img", &data);
         let p = LinuxPlatform::new([
             snapshot(&file, &file, "file"),
+            vouched_snap,
             snapshot("/dev/vg/root", "/dev/vg/obk-snap-1", "lvm"),
-            snapshot("/dev/sdz1", "/dev/sdz1", "idle"),
+            snapshot("/dev/sdz9", "/dev/sdz9", "idle"),
+            snapshot(&idle, &idle, "idle"),
+            snapshot("/dev/sdy1", "/dev/sdy1", "freeze"),
         ]);
 
         assert!(matches!(
@@ -402,16 +461,30 @@ mod tests {
         // A file is read as it is: no snapshot, and nothing vouches it holds still.
         let mut s = p.open_volume_session(&file, false).unwrap();
         assert_eq!(s.read_path(), file);
-        assert!(!s.snapshot_used() && !s.frozen());
+        assert!(!s.snapshot_used() && !s.frozen() && !s.quiesced());
         assert!(s.complete().is_none(), "the caller releases its snapshot");
+        // Unless its caller vouches for it — and even then nobody froze it.
+        let s = p.open_volume_session(&vouched, false).unwrap();
+        assert!(!s.snapshot_used() && s.frozen() && !s.quiesced());
 
         let s = p.open_volume_session("/dev/vg/root", true).unwrap();
         assert_eq!(s.read_path(), "/dev/vg/obk-snap-1");
-        assert!(s.snapshot_used() && s.frozen());
+        assert!(s.snapshot_used() && s.frozen() && s.quiesced());
 
-        // Idle: read directly, and not taken with a freeze.
-        let s = p.open_partition_session("/dev/sdz1").unwrap();
-        assert!(!s.snapshot_used() && !s.frozen());
+        // A partition held still for its copy: the device itself, frozen.
+        let s = p.open_volume_session("/dev/sdy1", true).unwrap();
+        assert!(!s.snapshot_used() && s.frozen() && s.quiesced());
+
+        // Idle: read directly and held still by the session's own claim —
+        // which must be had, or there is no session at all.
+        let s = p.open_partition_session(&idle).unwrap();
+        assert_eq!(s.read_path(), idle);
+        assert!(!s.snapshot_used() && s.frozen() && !s.quiesced());
+        assert!(s._hold.is_some(), "the idle device is claimed");
+        assert!(matches!(
+            p.open_volume_session("/dev/sdz9", true),
+            Err(OwnBackupError::Device(_))
+        ));
 
         let mut reader = p.block_reader(&file, 1024).unwrap();
         assert_eq!(reader.total_blocks(), 3);
@@ -426,6 +499,21 @@ mod tests {
         );
         assert_eq!(p.normalize_source("/dev/disk/by-id/x"), "/dev/disk/by-id/x");
         assert_eq!(<LinuxPlatform as EnginePlatform>::SOURCE_OS, "linux");
+    }
+
+    /// A device someone mounted after it was found idle is refused in words,
+    /// as a snapshot refusal; any other failure to claim it stays what it is.
+    #[test]
+    fn a_device_taken_since_it_was_found_idle_is_refused() {
+        let busy = hold_error("/dev/sdz1", std::io::Error::from_raw_os_error(libc::EBUSY));
+        let OwnBackupError::NoSnapshotProvider(text) = busy else {
+            panic!("EBUSY must be a snapshot refusal: {busy:?}");
+        };
+        assert!(text.contains("/dev/sdz1") && !text.contains("engine.source_became_busy"));
+        assert!(matches!(
+            hold_error("/dev/sdz1", std::io::Error::from_raw_os_error(libc::EACCES)),
+            OwnBackupError::Device(_)
+        ));
     }
 
     #[test]

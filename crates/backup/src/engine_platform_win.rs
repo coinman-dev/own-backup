@@ -75,6 +75,12 @@ impl SourceSession for WinSession {
         self.shadow || own_backup_common::media_mode::is_media_mode()
     }
 
+    /// VSS flushes and freezes the volume for the instant it is taken. Asked
+    /// only where `METADATA_NEEDS_FROZEN` holds, which is not here.
+    fn quiesced(&self) -> bool {
+        self.shadow
+    }
+
     /// VSS BackupComplete, then the shadow copy is released.
     fn complete(&mut self) -> Option<Result<()>> {
         self.vss.take().map(VssSnapshotSession::complete)

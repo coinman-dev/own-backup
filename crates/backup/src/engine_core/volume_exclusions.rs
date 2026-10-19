@@ -384,6 +384,10 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
         // the words the result screen will repeat back to the user.
         let reason = if req.all_sectors {
             tr!("engine_win.skip_sector_mode").into_owned()
+        } else if P::METADATA_NEEDS_FROZEN && !session.frozen() {
+            // No map was built either (`VolumeMaps::build`): the same reason
+            // the copy is sector by sector.
+            tr!("engine.skip_not_frozen").into_owned()
         } else if bitlocker.is_some() {
             // `FSCTL_GET_RETRIEVAL_POINTERS` needs a mounted filesystem, and a
             // locked volume has none. Copying the data and deleting only the

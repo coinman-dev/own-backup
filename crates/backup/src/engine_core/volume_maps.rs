@@ -2,13 +2,15 @@
 //!
 //! The map the system answers for comes first, then the engine's own parsers
 //! — FAT32/exFAT, ext, btrfs, xfs; NTFS too inside an unlocked container —
-//! and every block is copied when none of them knows the volume.
+//! and every block is copied when none of them knows the volume, or when the
+//! platform's parsers need a frozen source and this one is not
+//! ([`EnginePlatform::METADATA_NEEDS_FROZEN`]).
 
 use tracing::{info, warn};
 
 use own_backup_common::Result;
 
-use super::platform::{EnginePlatform, NativeUsedMap, SourceDevice};
+use super::platform::{EnginePlatform, NativeUsedMap, SourceDevice, SourceSession};
 use super::source::VolumeSource;
 use super::volume::VolumeBackupRequest;
 use crate::used_sectors::{AllUsedMap, UsedSectorMap};
@@ -34,14 +36,31 @@ pub(crate) struct VolumeMaps<P: EnginePlatform> {
 }
 
 impl<P: EnginePlatform> VolumeMaps<P> {
-    /// Find the used-block map of the volume at `read_path`, opened as
+    /// Find the used-block map of the volume `session` reads, opened as
     /// `opened`.
     pub(crate) fn build(
         opened: &VolumeSource<P>,
-        read_path: &str,
+        session: &P::Session,
         req: &VolumeBackupRequest,
     ) -> Result<Self> {
         let (luks, bitlocker) = (&opened.luks, &opened.bitlocker);
+        let read_path = session.read_path();
+        // Metadata read from a source that may be written meanwhile describes
+        // no point in time: a block allocated after its bitmap was read would
+        // be left out of the copy.
+        let unfrozen = P::METADATA_NEEDS_FROZEN && !session.frozen();
+        // An XFS log that is dirty only because the filesystem was frozen, not
+        // because it crashed (see `build_xfs_used_map_frozen`). Never by
+        // `frozen()` alone: on Windows that is true on the boot medium, and an
+        // idle Linux device holds still without having been frozen.
+        let xfs_quiesced = P::METADATA_NEEDS_FROZEN && session.quiesced();
+        let parse_xfs = |src: &mut dyn crate::fat_map::RawVolume| {
+            if xfs_quiesced {
+                crate::xfs_map::build_xfs_used_map_frozen(src, req.block_size)
+            } else {
+                crate::xfs_map::build_xfs_used_map(src, req.block_size)
+            }
+        };
 
         // --- Used-sector map: NTFS → FAT32/exFAT → ext → btrfs → xfs → full copy ---
         let mut ntfs_map: Option<P::NativeMap> = None;
@@ -66,6 +85,13 @@ impl<P: EnginePlatform> VolumeMaps<P> {
         let mut detected_fs: Option<String> = None;
         let smart_mode = if req.all_sectors {
             info!("Sector-by-sector mode requested; copying all blocks");
+            false
+        } else if unfrozen {
+            warn!(
+                source = %read_path,
+                "the source is not held still while it is read — its filesystem \
+                 metadata is not parsed and every block is copied"
+            );
             false
         } else if luks.is_some() || bitlocker.is_some() {
             // A decrypted volume: only the RawVolume-based parsers apply. The NTFS
@@ -100,7 +126,7 @@ impl<P: EnginePlatform> VolumeMaps<P> {
                 info!(fs = "btrfs", "Using btrfs map over decrypted volume");
                 detected_fs = Some("btrfs".into());
                 Some(Box::new(m))
-            } else if let Ok(m) = crate::xfs_map::build_xfs_used_map(src.as_mut(), req.block_size) {
+            } else if let Ok(m) = parse_xfs(src.as_mut()) {
                 info!(fs = "xfs", "Using xfs map over decrypted volume");
                 detected_fs = Some("xfs".into());
                 Some(Box::new(m))
@@ -159,12 +185,7 @@ impl<P: EnginePlatform> VolumeMaps<P> {
                                         }
                                         Err(btrfs_err) => {
                                             let xfs_attempt = P::Dev::open_read(read_path)
-                                                .and_then(|mut dev| {
-                                                    crate::xfs_map::build_xfs_used_map(
-                                                        &mut dev,
-                                                        req.block_size,
-                                                    )
-                                                });
+                                                .and_then(|mut dev| parse_xfs(&mut dev));
                                             match xfs_attempt {
                                                 Ok(map) => {
                                                     info!(fs = "xfs", "Using xfs used-block map");

@@ -43,7 +43,10 @@ use crate::sidecar::{sidecar_path_for, ChainRole, Sidecar, SidecarInfo};
 /// Parameters for a volume backup.
 #[derive(Clone)]
 pub struct VolumeBackupRequest {
-    /// Source volume: `C:`, `\\.\C:` or a VSS snapshot device path.
+    /// Source volume: `C:`, `\\.\C:` or a VSS snapshot device path; on Linux
+    /// the device the job names (`/dev/…`), never the snapshot of it — the
+    /// platform's session reads that, and the image's identity comes from
+    /// this.
     pub source: String,
     /// Output image path (`.vhdx`/`.avhdx`). Must not exist yet.
     pub image_path: PathBuf,
@@ -58,7 +61,8 @@ pub struct VolumeBackupRequest {
     pub all_sectors: bool,
     /// Take a VSS shadow copy of the volume and read from it (consistent
     /// backup of a live volume). Falls back to reading the live volume with a
-    /// warning if VSS fails. Ignored for non-volume sources.
+    /// warning if VSS fails. Ignored for non-volume sources, and on Linux,
+    /// where the caller prepared the snapshot before the run.
     pub use_vss: bool,
     /// Full / Incremental / Differential (phase 5). Non-full kinds need
     /// `parent_image`; if the chain turns out unusable (parent missing,
@@ -306,7 +310,7 @@ fn backup_volume_inner<P: EnginePlatform>(
     );
     let published_path: &Path = &published;
 
-    let mut maps = VolumeMaps::build(&opened, &read_path, req)?;
+    let mut maps = VolumeMaps::build(&opened, &session, req)?;
     let VolumeExclusions {
         mut excluded_files,
         mut excluded_bytes,
