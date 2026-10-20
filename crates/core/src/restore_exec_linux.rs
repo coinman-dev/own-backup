@@ -224,7 +224,11 @@ pub fn execute_plan(
         .collect();
     if !hit.is_empty() {
         return Err(OwnBackupError::RestoreIncompatible(
-            tr!("restore_exec.touches_live_system", parts = hit.join(", ")).into_owned(),
+            tr!(
+                "restore_exec_linux.touches_live_system",
+                parts = hit.join(", ")
+            )
+            .into_owned(),
         ));
     }
     let live_disk = !guard.parts.is_empty();

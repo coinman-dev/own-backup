@@ -102,6 +102,9 @@ pub struct Imported {
     pub skipped_removable: usize,
     /// Entries left out because they name a partition this machine lacks.
     pub skipped_orphaned: Vec<String>,
+    /// The entry this machine booted from (`BootCurrent`), when the copy would
+    /// have replaced it and it was kept instead.
+    pub kept_current: Option<u16>,
 }
 
 /// The efivarfs directory of a system.
@@ -438,14 +441,29 @@ impl Efivarfs {
     /// outside it is refused, as on Windows: firmware that cannot find the
     /// partition falls back to booting `bootx64.efi` off whatever device it
     /// sees. An empty set means "unknown" and the check is skipped.
+    ///
+    /// `keep_current`: the machine runs from an installed system, so the entry
+    /// it booted from (`BootCurrent`) is not replaced — the copy's entry under
+    /// that number may be hidden or point elsewhere — and stays in the written
+    /// `BootOrder`, at the end when the copy's order lacks it. The rule
+    /// [`Self::apply_action`] enforces for a single change; on the boot medium
+    /// the entry booted from is the medium's and nothing needs keeping.
     pub fn apply_import(
         &self,
         backup: &BootBackup,
         partitions_here: &std::collections::HashSet<String>,
+        keep_current: bool,
     ) -> Result<Imported> {
         self.ready()?;
         let plan = self.plan_import(backup)?;
         let unchanged = |name: &str| plan.iter().any(|(n, c)| n == name && *c == Change::Same);
+        let current = if keep_current {
+            self.read_u16("BootCurrent")
+                .filter(|n| matches!(self.read_entry(*n), Ok(Some(_))))
+        } else {
+            None
+        };
+        let current_name = current.map(efivars::entry_name);
         let mut done = Imported::default();
         let mut order_last = None;
         for v in &backup.variables {
@@ -455,6 +473,12 @@ impl Efivarfs {
             }
             if efivars::names_removable_device(v) {
                 done.skipped_removable += 1;
+                continue;
+            }
+            if current_name.as_deref() == Some(v.name.as_str()) {
+                if !unchanged(&v.name) {
+                    done.kept_current = current;
+                }
                 continue;
             }
             let guid = v
@@ -477,10 +501,30 @@ impl Efivarfs {
             done.written += 1;
         }
         if let Some(v) = order_last {
-            if !unchanged(&v.name) {
-                self.write_var(&v.name, &v.bytes()?, v.attributes)?;
+            let mut bytes = v.bytes()?;
+            let order_now = self.read_var("BootOrder")?;
+            // Kept where it is in the menu now; an entry started once from
+            // the firmware's menu and never in the order is not added.
+            let in_order_now = |n: u16| {
+                order_now
+                    .as_deref()
+                    .is_some_and(|b| efivars::parse_boot_order(b).contains(&n))
+            };
+            if let Some(n) = current.filter(|n| in_order_now(*n)) {
+                let mut order = efivars::parse_boot_order(&bytes);
+                if !order.contains(&n) {
+                    order.push(n);
+                    bytes = efivars::serialize_boot_order(&order);
+                    done.kept_current = current;
+                }
+            }
+            if order_now.as_deref() != Some(bytes.as_slice()) {
+                self.write_var(&v.name, &bytes, v.attributes)?;
                 done.written += 1;
             }
+        }
+        if let Some(n) = done.kept_current {
+            info!(entry = %efivars::entry_name(n), "efivars: the entry booted from was kept");
         }
         if !done.skipped_orphaned.is_empty() {
             warn!(
@@ -1006,14 +1050,58 @@ mod tests {
 
         // Nothing changed: nothing is written.
         let here = [ESP_GUID.to_uppercase()].into_iter().collect();
-        assert_eq!(fs.apply_import(&copy, &here).unwrap().written, 0);
+        assert_eq!(fs.apply_import(&copy, &here, false).unwrap().written, 0);
 
         // Lose an entry and scramble the order; the copy brings both back.
         fs.delete_var("Boot0001").unwrap();
         fs.set_order(&[0]).unwrap();
-        let done = fs.apply_import(&copy, &here).unwrap();
+        let done = fs.apply_import(&copy, &here, false).unwrap();
         assert_eq!(done.written, 2);
         assert_eq!(fs.read_config().unwrap().order, vec![0, 1]);
+    }
+
+    #[test]
+    fn an_installed_system_keeps_the_entry_it_booted_from() {
+        let (_root, fs) = fake();
+        // The copy: entry 0 hidden, 1 first, and an order without 2.
+        entry(&fs, 0, "debian");
+        fs.set_active(0, false).unwrap();
+        entry(&fs, 1, "Windows Boot Manager");
+        put(&fs, "BootOrder", 7, &efivars::serialize_boot_order(&[1, 0]));
+        let copy = fs.export("host").unwrap();
+
+        // This machine booted from 0 (active now), and also has 2.
+        entry(&fs, 0, "debian");
+        entry(&fs, 2, "ubuntu");
+        put(&fs, "BootOrder", 7, &efivars::serialize_boot_order(&[0, 2]));
+        put(&fs, "BootCurrent", 6, &0u16.to_le_bytes());
+        let here = [ESP_GUID.to_uppercase()].into_iter().collect();
+        let before = fs.read_var("Boot0000").unwrap();
+
+        let done = fs.apply_import(&copy, &here, true).unwrap();
+        assert_eq!(done.kept_current, Some(0));
+        assert_eq!(fs.read_var("Boot0000").unwrap(), before, "not overwritten");
+        assert!(fs.read_entry(0).unwrap().unwrap().attributes & efivars::LOAD_OPTION_ACTIVE != 0);
+        assert_eq!(fs.read_config().unwrap().order, vec![1, 0]);
+
+        // The copy's order without the entry booted from: it is appended.
+        put(&fs, "BootOrder", 7, &efivars::serialize_boot_order(&[0, 2]));
+        let mut no_current = copy.clone();
+        for v in no_current
+            .variables
+            .iter_mut()
+            .filter(|v| v.name == "BootOrder")
+        {
+            *v = SavedVar::new("BootOrder", 7, &efivars::serialize_boot_order(&[1]));
+        }
+        let done = fs.apply_import(&no_current, &here, true).unwrap();
+        assert_eq!(done.kept_current, Some(0));
+        assert_eq!(fs.read_config().unwrap().order, vec![1, 0]);
+
+        // On the boot medium the copy is put back as it is.
+        let done = fs.apply_import(&copy, &here, false).unwrap();
+        assert_eq!(done.kept_current, None);
+        assert!(fs.read_entry(0).unwrap().unwrap().attributes & efivars::LOAD_OPTION_ACTIVE == 0);
     }
 
     #[test]
@@ -1025,12 +1113,12 @@ mod tests {
         let elsewhere = ["AAAAAAAA-0000-0000-0000-000000000000".to_string()]
             .into_iter()
             .collect();
-        let done = fs.apply_import(&copy, &elsewhere).unwrap();
+        let done = fs.apply_import(&copy, &elsewhere, false).unwrap();
         assert_eq!(done.written, 0);
         assert_eq!(done.skipped_orphaned.len(), 1);
         assert!(!fs.path_of("Boot0000").exists());
         // Unknown (empty) set: written.
-        let done = fs.apply_import(&copy, &Default::default()).unwrap();
+        let done = fs.apply_import(&copy, &Default::default(), false).unwrap();
         assert_eq!(done.written, 1);
     }
 

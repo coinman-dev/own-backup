@@ -127,16 +127,64 @@ impl Drop for TempMount {
     }
 }
 
-fn node_of(device: &str, part: PartRef) -> Result<String> {
-    partition_node(device, part.index).ok_or_else(|| {
+/// The node of a partition a boot step mounts read-write.
+///
+/// Found by number, so the number must still name the stretch of disk the
+/// plan was checked against; and the partition must not be one the running
+/// system stands on (its ESP, anything mounted or held), unless this plan
+/// restored that partition — a restored ESP may well carry the running ESP's
+/// PARTUUID, and is still ours to finish.
+fn node_of(plan: &RestorePlan, device: &str, part: PartRef) -> Result<String> {
+    let node = partition_node(device, part.index).ok_or_else(|| {
         OwnBackupError::Device(
             tr!("restore_exec_linux.no_partition_node", part = part.index).into_owned(),
         )
-    })
+    })?;
+    super::linux::check_partition_slot(&node, part)?;
+    if !restores(plan, part.index) {
+        boot_target_allowed(
+            part.index,
+            &node,
+            &own_backup_restore::protection_of_device(device),
+        )?;
+    }
+    Ok(node)
 }
 
-fn mount_esp(device: &str, esp: PartRef) -> Result<TempMount> {
-    TempMount::mount(&node_of(device, esp)?, &[("vfat", "rw")])
+/// Does the plan write partition `index`'s data?
+fn restores(plan: &RestorePlan, index: u32) -> bool {
+    plan.ops
+        .iter()
+        .any(|op| matches!(op, RestoreOp::RestorePartition { dst, .. } if dst.index == index))
+}
+
+/// Refuse a boot step on a partition the running system uses, or when that
+/// cannot be told.
+fn boot_target_allowed(
+    index: u32,
+    node: &str,
+    guard: &own_backup_restore::Protection,
+) -> Result<()> {
+    if let Some(why) = &guard.cannot_tell {
+        return Err(OwnBackupError::RestoreIncompatible(
+            tr!("restore_exec.cannot_tell_live_system", why = why).into_owned(),
+        ));
+    }
+    if guard.parts.contains(&index) {
+        return Err(OwnBackupError::RestoreIncompatible(
+            tr!(
+                "restore_boot_linux.boot_step_on_live_partition",
+                part = index,
+                node = node
+            )
+            .into_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn mount_esp(plan: &RestorePlan, device: &str, esp: PartRef) -> Result<TempMount> {
+    TempMount::mount(&node_of(plan, device, esp)?, &[("vfat", "rw")])
 }
 
 /// Filesystem UUIDs of the partitions the plan wrote, read off the disk.
@@ -164,7 +212,7 @@ fn restored_uuids(plan: &RestorePlan, device: &str) -> Vec<String> {
 }
 
 fn ensure_fallback(plan: &RestorePlan, device: &str, esp: PartRef) -> Result<BootNote> {
-    let mount = mount_esp(device, esp)?;
+    let mount = mount_esp(plan, device, esp)?;
     let outcome = own_backup_backup::esp_fallback_tree::ensure_at_root(
         mount.path(),
         &restored_uuids(plan, device),
@@ -232,8 +280,20 @@ fn restore_boot_entries(
     let here_parts = own_backup_backup::efivars_linux::partition_guids_here(Path::new(
         own_backup_common::linux_block::SYS_CLASS_BLOCK,
     ));
-    match efi.apply_import(&saved, &here_parts) {
+    // Outside the boot medium the system running now booted from one of
+    // these entries; the copy's version of it does not replace it.
+    let keep_current = !own_backup_restore::is_boot_media();
+    match efi.apply_import(&saved, &here_parts, keep_current) {
         Ok(done) => {
+            if let Some(n) = done.kept_current {
+                note.follow_ups.push(
+                    tr!(
+                        "restore_boot_linux.entries_kept_current",
+                        entry = format!("{n:04X}")
+                    )
+                    .into_owned(),
+                );
+            }
             info!(written = done.written, machine = %saved.machine, "restore: boot entries written");
             note.message = tr!(
                 "restore_exec.entries_restored",
@@ -369,7 +429,7 @@ fn finalize_windows(
     // The boot status first: of the three it is the one a restart cannot
     // repair by itself.
     let cleared = match TempMount::mount(
-        &node_of(device, windows_part)?,
+        &node_of(plan, device, windows_part)?,
         &[("ntfs3", "rw"), ("ntfs-3g", "rw")],
     ) {
         Ok(m) => match remove_boot_status(m.path()) {
@@ -387,7 +447,7 @@ fn finalize_windows(
         }
     };
 
-    let esp_mount = mount_esp(device, esp)?;
+    let esp_mount = mount_esp(plan, device, esp)?;
     let loader = BOOTMGFW
         .split('\\')
         .filter(|c| !c.is_empty())
@@ -490,6 +550,45 @@ mod tests {
             attributes: 0,
             name: String::new(),
         }
+    }
+
+    #[test]
+    fn a_boot_step_is_refused_on_a_partition_the_running_system_uses() {
+        use own_backup_restore::Protection;
+        let live = Protection {
+            parts: vec![1, 2],
+            cannot_tell: None,
+        };
+        assert!(boot_target_allowed(3, "/dev/sdz3", &live).is_ok());
+        let err = boot_target_allowed(1, "/dev/sdz1", &live).unwrap_err();
+        assert!(matches!(err, OwnBackupError::RestoreIncompatible(_)));
+        assert!(err.to_string().contains("/dev/sdz1"), "{err}");
+        let unsure = Protection {
+            parts: Vec::new(),
+            cannot_tell: Some("mountinfo".into()),
+        };
+        assert!(boot_target_allowed(3, "/dev/sdz3", &unsure).is_err());
+
+        // Only a partition the plan itself restores is exempt.
+        let esp = PartRef {
+            index: 1,
+            offset: 1 << 20,
+            size: 100 << 20,
+        };
+        let mut plan = RestorePlan::new(
+            0,
+            "/tmp/copy.qcow2".into(),
+            vec![RestoreOp::EnsureFallbackBootloader { esp }],
+        );
+        assert!(!restores(&plan, 1));
+        plan.ops.push(RestoreOp::RestorePartition {
+            src_index: 1,
+            dst: esp,
+            mode: own_backup_common::restore_plan::RestoreMode::Sectors,
+            wipe_free_space: false,
+            reencrypt: false,
+        });
+        assert!(restores(&plan, 1));
     }
 
     #[test]

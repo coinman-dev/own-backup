@@ -650,6 +650,11 @@ impl RestorePlan {
     /// are absent from the new layout, which is a deletion and just as
     /// destructive.
     ///
+    /// On Linux the partitions the boot steps write into count too
+    /// ([`Self::boot_step_partitions`]): there they are mounted read-write
+    /// through their own nodes after the disk is let go, so a step aimed at
+    /// the running system's ESP would change it under the system's feet.
+    ///
     /// `current` is the target disk's partition indices as they are now; pass an
     /// empty slice when they are not known and only the written ones count.
     pub fn touched_partitions_with(&self, current: &[u32]) -> Vec<u32> {
@@ -662,6 +667,9 @@ impl RestorePlan {
                 _ => None,
             })
             .collect();
+        if cfg!(target_os = "linux") {
+            out.extend(self.boot_step_partitions());
+        }
         if let Some(t) = self.table() {
             for &i in current {
                 if !t.entries.iter().any(|e| e.index == i) {
@@ -669,6 +677,28 @@ impl RestorePlan {
                 }
             }
         }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Partitions the plan's boot steps write into after the data is copied:
+    /// the ESP that receives the fallback loader, and the Windows partition and
+    /// ESP that finishing Windows' boot changes.
+    pub fn boot_step_partitions(&self) -> Vec<u32> {
+        let mut out: Vec<u32> = self
+            .ops
+            .iter()
+            .flat_map(|op| match op {
+                RestoreOp::EnsureFallbackBootloader { esp } => vec![esp.index],
+                RestoreOp::FinalizeBoot {
+                    windows_part, esp, ..
+                } => std::iter::once(windows_part.index)
+                    .chain(esp.map(|e| e.index))
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect();
         out.sort_unstable();
         out.dedup();
         out
@@ -1068,5 +1098,35 @@ mod tests {
     fn the_boot_menu_step_is_not_hidden_as_housekeeping() {
         assert!(!RestoreOp::RestoreBootEntries.is_housekeeping());
         assert!(!RestoreOp::RestoreBootEntries.title().is_empty());
+    }
+
+    #[test]
+    fn boot_steps_count_as_touching_their_partitions_on_linux_only() {
+        let plan = RestorePlan::new(
+            0,
+            PathBuf::from("/x.qcow2"),
+            vec![
+                RestoreOp::RestorePartition {
+                    src_index: 1,
+                    dst: part(3, 300),
+                    mode: RestoreMode::Sectors,
+                    wipe_free_space: false,
+                    reencrypt: false,
+                },
+                RestoreOp::EnsureFallbackBootloader { esp: part(1, 100) },
+                RestoreOp::FinalizeBoot {
+                    windows_part: part(4, 400),
+                    esp: Some(part(1, 100)),
+                    uefi: true,
+                },
+                RestoreOp::RestoreBootEntries,
+            ],
+        );
+        assert_eq!(plan.boot_step_partitions(), vec![1, 4]);
+        if cfg!(target_os = "linux") {
+            assert_eq!(plan.touched_partitions(), vec![1, 3, 4]);
+        } else {
+            assert_eq!(plan.touched_partitions(), vec![3]);
+        }
     }
 }

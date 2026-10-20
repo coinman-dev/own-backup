@@ -960,6 +960,11 @@ fn check_live_system(
             }
         }
     }
+    // Linux mounts the partitions the boot steps change and writes into them
+    // after the restore (see `RestorePlan::touched_partitions_with`).
+    if cfg!(target_os = "linux") {
+        touched.extend(plan.boot_step_partitions());
+    }
     touched.sort_unstable();
     touched.dedup();
 
@@ -2023,6 +2028,37 @@ mod tests {
             assert!(errors(&results).is_empty(), "{results:#?}");
             assert!(codes(&results).contains(&CheckCode::LiveSystemDiskLayout));
         }
+    }
+
+    #[test]
+    fn the_fallback_loader_on_the_live_esp_is_shown_as_touching_it_on_linux() {
+        // Partition 1 is the ESP the machine booted through; the plan only
+        // restores partition 8, but its fallback step writes into 1.
+        let t = table(vec![entry(1, 1, 100), entry(8, 101, 200)]);
+        let (p1, p8) = (part_ref(&t, 1), part_ref(&t, 8));
+        let mut plan = plan_with(
+            t,
+            vec![
+                RestoreOp::RestorePartition {
+                    src_index: 1,
+                    dst: p8,
+                    mode: RestoreMode::Sectors,
+                    wipe_free_space: false,
+                    reencrypt: false,
+                },
+                RestoreOp::EnsureFallbackBootloader { esp: p1 },
+            ],
+        );
+        plan.ops
+            .retain(|op| !matches!(op, RestoreOp::WritePartitionTable { .. }));
+        let mut c = ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]);
+        c.protected_parts = vec![1];
+        let mut results = Vec::new();
+        check_live_system(&plan, None, &c, &mut results);
+        let refused = results
+            .iter()
+            .any(|r| r.code == CheckCode::TargetIsLiveSystemPartition && r.part_index == Some(1));
+        assert_eq!(refused, cfg!(target_os = "linux"), "{results:#?}");
     }
 
     #[test]

@@ -24,6 +24,10 @@
     "ru": "Работающая система использует разделы диска %{disk}, поэтому его разметку менять нельзя. Восстановите в существующий свободный раздел или с загрузочного носителя.",
     "en": "The running system uses partitions of disk %{disk}, so its partition table cannot be changed. Restore into an existing unused partition, or from the bootable media."
   },
+  "restore_exec_linux.touches_live_system": {
+    "ru": "план затрагивает разделы, которыми пользуется работающая система: %{parts}. Загрузитесь с загрузочного носителя и повторите.",
+    "en": "the plan touches partitions the running system uses: %{parts}. Boot from the bootable media and try again."
+  },
   "restore_exec_linux.udev_not_settled": {
     "ru": "Данные записаны и проверены, но система не успела показать новые разделы (%{error}). Если их не видно, переподключите диск или перезагрузитесь.",
     "en": "The data is written and checked, but the system did not finish showing the new partitions (%{error}). If they are not visible, reconnect the disk or restart."
@@ -43,6 +47,14 @@
   "restore_boot_linux.mount_failed": {
     "ru": "Не удалось смонтировать %{node} для загрузочного шага: %{tried}.",
     "en": "Could not mount %{node} for the boot step: %{tried}."
+  },
+  "restore_boot_linux.boot_step_on_live_partition": {
+    "ru": "Загрузочный шаг не выполнен: раздел %{part} (%{node}) использует работающая система (например, это раздел EFI, с которого она загрузилась), а план его не восстанавливает.",
+    "en": "The boot step was not run: the running system uses partition %{part} (%{node}) (for example, it is the EFI partition it booted from), and the plan does not restore it."
+  },
+  "restore_boot_linux.entries_kept_current": {
+    "ru": "Запись Boot%{entry}, с которой загружена эта система, оставлена как есть и сохранена в порядке загрузки.",
+    "en": "Entry Boot%{entry}, which this system booted from, was left as it is and kept in the boot order."
   },
   "restore_boot_linux.entries_orphaned": {
     "ru": "Не записаны записи, указывающие на разделы, которых на этой машине нет: %{entries}.",
