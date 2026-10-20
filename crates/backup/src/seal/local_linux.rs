@@ -873,9 +873,13 @@ pub(super) mod tests {
     }
 
     /// A data directory as the package makes it: owned by us, not writable
-    /// by group or others (a tempdir is 0700 already).
+    /// by group or others. Set explicitly: a tempdir follows the umask
+    /// (0775 under the common desktop umask 002).
     pub(crate) fn data_dir() -> tempfile::TempDir {
-        tempfile::tempdir().unwrap()
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        dir
     }
 
     pub(crate) fn backend(dir: &Path, creds: &Arc<FakeCreds>) -> LinuxBackend {
