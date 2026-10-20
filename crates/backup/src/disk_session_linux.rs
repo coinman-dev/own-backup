@@ -595,6 +595,15 @@ pub struct RealDisk {
 }
 
 impl RealDisk {
+    /// `(major, minor)` of the device this descriptor has open: who it is,
+    /// whatever its name resolves to by now.
+    pub fn device_number(&self) -> std::io::Result<(u32, u32)> {
+        use std::os::unix::fs::MetadataExt;
+        Ok(own_backup_common::linux_block::split_dev(
+            self.fd.metadata()?.rdev(),
+        ))
+    }
+
     fn ioctl_blkpg(&self, op: libc::c_int, p: &mut BlkpgPartition) -> std::io::Result<()> {
         use std::os::unix::io::AsRawFd;
         let mut arg = BlkpgIoctlArg {

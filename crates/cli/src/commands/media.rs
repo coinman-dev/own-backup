@@ -163,10 +163,40 @@ pub async fn run(args: MediaArgs) -> Result<()> {
             }
         }
         MediaCommand::WriteStick(w) => {
+            // Которую флешку стирать — по списку службы: имя `/dev/sdX`
+            // переходит к другому диску, если флешки переставили. Служба
+            // сверяет модель, серийный номер, объём и номер устройства с тем,
+            // что откроет для записи.
+            let sticks = client.list_media_sticks().await.map_err(cfg)?;
+            let wanted = std::fs::canonicalize(&w.device)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| w.device.clone());
+            let Some(stick) = sticks.iter().find(|s| s.device == wanted) else {
+                return Err(cfg(format!(
+                    "{} нет в списке флешек (media sticks): записывается только USB-диск, SD-карта или съёмный диск",
+                    w.device
+                )));
+            };
+            println!(
+                "Стирается: {} — {} {} МиБ{}",
+                stick.device,
+                if stick.model.is_empty() {
+                    "?"
+                } else {
+                    &stick.model
+                },
+                stick.size_bytes >> 20,
+                if stick.serial.is_empty() {
+                    String::new()
+                } else {
+                    format!(", серийный номер {}", stick.serial)
+                }
+            );
             let report = client
                 .write_media_stick(&own_backup_common::engine_dto::MediaStickWriteDto {
                     iso_path: w.iso.clone(),
-                    device: w.device.clone(),
+                    device: stick.device.clone(),
+                    expect: Some(stick.identity()),
                 })
                 .await
                 .map_err(cfg)?;

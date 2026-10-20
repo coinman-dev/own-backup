@@ -1197,11 +1197,25 @@ export interface MediaStick {
   transport: string;
   /** Mount points now; a mounted stick is not written. */
   mounted: string[];
+  /** Serial number from sysfs; may be empty. */
+  serial: string;
+  /** Device number `major:minor`. */
+  dev: string;
+}
+
+/** Which stick a write means, as listed (`MediaStickIdentityDto`). */
+export interface MediaStickIdentity {
+  model: string;
+  serial: string;
+  size_bytes: number;
+  dev: string;
 }
 
 export interface MediaStickWrite {
   iso_path: string;
   device: string;
+  /** The service writes only if the opened device is still this stick. */
+  expect: MediaStickIdentity;
 }
 
 export interface MediaStickReport {

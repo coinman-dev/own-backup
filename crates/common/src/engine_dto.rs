@@ -319,6 +319,36 @@ pub struct MediaStickDto {
     /// the window says to eject it in the file manager first.
     #[serde(default)]
     pub mounted: Vec<String>,
+    /// Serial number as sysfs gives it (the USB device's, the card's); may be
+    /// empty.
+    #[serde(default)]
+    pub serial: String,
+    /// Device number `major:minor` — a name like `/dev/sdb` passes to
+    /// another disk when one is unplugged and another plugged in.
+    #[serde(default)]
+    pub dev: String,
+}
+
+impl MediaStickDto {
+    /// What a write request carries to say which stick it means.
+    pub fn identity(&self) -> MediaStickIdentityDto {
+        MediaStickIdentityDto {
+            model: self.model.clone(),
+            serial: self.serial.clone(),
+            size_bytes: self.size_bytes,
+            dev: self.dev.clone(),
+        }
+    }
+}
+
+/// Which stick a write means, as it was listed: the device opened for the
+/// write must still be this one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MediaStickIdentityDto {
+    pub model: String,
+    pub serial: String,
+    pub size_bytes: u64,
+    pub dev: String,
 }
 
 /// What to write where.
@@ -326,6 +356,11 @@ pub struct MediaStickDto {
 pub struct MediaStickWriteDto {
     pub iso_path: String,
     pub device: String,
+    /// The stick as the list showed it. Required by the service: a request
+    /// without it (an older window or CLI) is refused with "list the sticks
+    /// again" rather than erasing whatever the name means now.
+    #[serde(default)]
+    pub expect: Option<MediaStickIdentityDto>,
 }
 
 /// What the write did. Progress arrives as `media` engine events, as for a

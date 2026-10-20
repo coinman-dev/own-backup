@@ -80,6 +80,18 @@
     "ru": "образ (%{need_mib} МиБ) не помещается на %{device} (%{have_mib} МиБ)",
     "en": "the image (%{need_mib} MiB) does not fit on %{device} (%{have_mib} MiB)"
   },
+  "media_stick.changed": {
+    "ru": "под именем %{device} теперь другое устройство (%{found}), а не выбранная флешка (%{expected}) — ничего не записано. Обновите список флешек и выберите снова",
+    "en": "%{device} is now another device (%{found}), not the chosen stick (%{expected}) — nothing was written. Refresh the list of sticks and choose again"
+  },
+  "media_stick.failed_wiped": {
+    "ru": "запись на %{device} не удалась: %{error}. Начало флешки стёрто — до новой записи она не загружается",
+    "en": "writing onto %{device} failed: %{error}. The stick's start was wiped — it does not boot until written again"
+  },
+  "media_stick.failed_not_wiped": {
+    "ru": "запись на %{device} не удалась: %{error}. Стереть начало флешки тоже не удалось (%{wipe_error}) — не загружайтесь с неё, запишите заново",
+    "en": "writing onto %{device} failed: %{error}. Wiping the stick's start failed too (%{wipe_error}) — do not boot from it; write it again"
+  },
   "media_stick.verify_mismatch": {
     "ru": "флешка %{device} вернула не те данные со смещения %{offset} — она неисправна или её настоящий объём меньше заявленного",
     "en": "the stick %{device} returned different data at offset %{offset} — it is faulty or smaller than it claims"

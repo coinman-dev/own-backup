@@ -12,7 +12,7 @@
   import { api, errorText } from '../lib/api';
   import { pickPath } from '../lib/pickPath.svelte';
   import { formatBytes } from '../lib/format';
-  import type { MediaProgress, MediaStick, MediaStickReport } from '../lib/types';
+  import type { MediaProgress, MediaStick, MediaStickIdentity, MediaStickReport } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
 
   interface Props {
@@ -42,14 +42,27 @@
     return () => { un.then((f) => f()); };
   });
 
+  function identity(s: MediaStick): MediaStickIdentity {
+    return { model: s.model, serial: s.serial, size_bytes: s.size_bytes, dev: s.dev };
+  }
+
+  function sameStick(a: MediaStick, b: MediaStick): boolean {
+    return a.model === b.model && a.serial === b.serial && a.size_bytes === b.size_bytes && a.dev === b.dev;
+  }
+
   async function refresh() {
     loading = true;
     listError = null;
+    const before = chosen;
     try {
       sticks = await api.listMediaSticks();
-      // A stick that went away takes its tick with it.
-      if (!sticks.some((s) => s.device === device)) {
+      const now = sticks.find((s) => s.device === device);
+      // A stick that went away takes its tick with it; so does another
+      // stick that took its name.
+      if (!now) {
         device = sticks.length === 1 ? sticks[0].device : '';
+        confirmed = false;
+      } else if (before && !sameStick(before, now)) {
         confirmed = false;
       }
     } catch (e) {
@@ -86,7 +99,12 @@
     error = null;
     progress = null;
     try {
-      report = await api.writeMediaStick({ iso_path: iso.trim(), device: chosen.device });
+      // The service writes only if the device it opens is still this stick.
+      report = await api.writeMediaStick({
+        iso_path: iso.trim(),
+        device: chosen.device,
+        expect: identity(chosen),
+      });
     } catch (e) {
       error = errorText(e);
       // What the stick holds now is not what the list said.

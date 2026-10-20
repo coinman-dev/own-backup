@@ -4,8 +4,15 @@
 //! Only a USB, card-reader or removable disk is offered and accepted: the
 //! write erases the whole device, and the one rule that keeps an internal
 //! disk out of reach without asking anyone to read device names is "not on
-//! this bus". The restore guard (`guard_target_disk_device`) is asked as
-//! well, by the service, before this runs.
+//! this bus". On the MMC bus only an SD card counts: eMMC is the same bus
+//! soldered onto the board, the system disk of many small machines. The
+//! restore guard (`guard_target_disk_device`) is asked as well, by the
+//! service, before this runs.
+//!
+//! A name like `/dev/sdb` is not a stick: unplug one and plug another, and
+//! the name moves. The list gives each stick's model, serial, size and device
+//! number; the write request carries them back, and the device the write
+//! actually opened is compared with them before its first byte is written.
 //!
 //! The device is held the way a restore holds its target
 //! ([`crate::disk_session_linux`]): `O_EXCL` (a mounted stick is refused, not
@@ -18,7 +25,7 @@ use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
 use own_backup_common::cancel::CancelToken;
-use own_backup_common::engine_dto::MediaStickDto;
+use own_backup_common::engine_dto::{MediaStickDto, MediaStickIdentityDto};
 use own_backup_common::linux_block as lb;
 use own_backup_common::{tr, OwnBackupError, Result};
 use tracing::{info, warn};
@@ -35,6 +42,9 @@ const CHUNK: usize = 4 << 20;
 
 /// Where sysfs lists whole disks (partitions are not here).
 const SYS_BLOCK: &str = "/sys/block";
+
+/// Where sysfs lists block devices by device number.
+const SYS_DEV_BLOCK: &str = "/sys/dev/block";
 
 /// The stages a write reports, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,21 +137,107 @@ pub fn sticks_in(sys_block: &Path, mounted: impl Fn(&str) -> Vec<String>) -> Vec
         let Some(transport) = transport_of(&real, read("removable") == "1") else {
             continue;
         };
-        let model = [read("device/vendor"), read("device/model")]
-            .into_iter()
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
+        // An SD card, not eMMC (`MMC`, the board's own storage) nor an SDIO
+        // function.
+        if transport == "mmc" && read("device/type") != "SD" {
+            continue;
+        }
+        let id = identity_at(&real, sectors * 512, read("dev"));
         out.push(MediaStickDto {
             device: format!("/dev/{name}"),
-            model,
-            size_bytes: sectors * 512,
+            model: id.model,
+            size_bytes: id.size_bytes,
             transport: transport.into(),
             mounted: mounted(&name),
+            serial: id.serial,
+            dev: id.dev,
         });
     }
     out.sort_by(|a, b| a.device.cmp(&b.device));
     out
+}
+
+/// Who the disk whose sysfs directory really is `real` is: vendor and model,
+/// and a serial number — the device's own (`device/serial`: an SD card, an
+/// NVMe disk) or that of the nearest parent device that has one (the USB
+/// device a USB disk sits on).
+fn identity_at(real: &Path, size_bytes: u64, dev: String) -> MediaStickIdentityDto {
+    let read = |p: &Path| {
+        std::fs::read_to_string(p)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    };
+    let model = [
+        read(&real.join("device/vendor")),
+        read(&real.join("device/model")),
+    ]
+    .into_iter()
+    .filter(|s| !s.is_empty())
+    .collect::<Vec<_>>()
+    .join(" ");
+    let mut serial = read(&real.join("device/serial"));
+    let mut dir = real.parent();
+    while serial.is_empty() {
+        let Some(d) = dir else { break };
+        if d.file_name().is_none_or(|n| n == "devices") {
+            break;
+        }
+        serial = read(&d.join("serial"));
+        dir = d.parent();
+    }
+    MediaStickIdentityDto {
+        model,
+        serial,
+        size_bytes,
+        dev,
+    }
+}
+
+/// Who the disk with device number `major:minor` is, through
+/// `sys_dev_block` (`/sys/dev/block`); `size_bytes` as the open device says.
+fn identity_of_number(
+    sys_dev_block: &Path,
+    (major, minor): (u32, u32),
+    size_bytes: u64,
+) -> MediaStickIdentityDto {
+    let dev = format!("{major}:{minor}");
+    let real = std::fs::canonicalize(sys_dev_block.join(&dev)).unwrap_or_default();
+    identity_at(&real, size_bytes, dev)
+}
+
+fn describe(id: &MediaStickIdentityDto) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !id.model.is_empty() {
+        parts.push(id.model.clone());
+    }
+    if !id.serial.is_empty() {
+        parts.push(id.serial.clone());
+    }
+    parts.push(format!("{} MiB", id.size_bytes >> 20));
+    parts.push(id.dev.clone());
+    parts.join(", ")
+}
+
+/// Refuse unless `found` is the stick `expected` names. Every field counts:
+/// two sticks of one model and size differ in their serial or their number.
+fn same_stick(
+    device: &str,
+    expected: &MediaStickIdentityDto,
+    found: &MediaStickIdentityDto,
+) -> Result<()> {
+    if expected == found {
+        return Ok(());
+    }
+    warn!(device, ?expected, ?found, "not the stick that was listed");
+    Err(OwnBackupError::RestoreIncompatible(
+        tr!(
+            "media_stick.changed",
+            device = device,
+            expected = describe(expected),
+            found = describe(found)
+        )
+        .into_owned(),
+    ))
 }
 
 /// Mount points of disk `name` and of its partitions, now.
@@ -197,16 +293,19 @@ pub fn check_stick(device: &str) -> Result<MediaStickDto> {
     Ok(stick)
 }
 
-/// Write the ISO at `iso` onto the stick at `device`. `progress` gets the
+/// Write the ISO at `iso` onto the stick at `device`, which must still be
+/// the stick `expect` describes (from [`list_sticks`]). `progress` gets the
 /// stage and its percentage.
 pub fn write_stick(
     iso: &Path,
     device: &str,
+    expect: &MediaStickIdentityDto,
     cancel: &CancelToken,
     progress: &mut dyn FnMut(StickStage, u64),
 ) -> Result<StickReport> {
     let stick = check_stick(device)?;
-    write_image(iso, &stick.device, cancel, progress)
+    same_stick(device, expect, &stick.identity())?;
+    write_image(iso, &stick.device, Some(expect), cancel, progress)
 }
 
 fn mkfs_vfat() -> Option<PathBuf> {
@@ -218,10 +317,13 @@ fn mkfs_vfat() -> Option<PathBuf> {
 }
 
 /// The write itself, on any whole disk: [`write_stick`] decides which disks
-/// may get here (tests use a loop device).
+/// may get here (tests use a loop device). With `expect`, the device opened
+/// must be that stick (compared by what the open descriptor is, not by its
+/// name) before anything is written.
 pub fn write_image(
     iso: &Path,
     device: &str,
+    expect: Option<&MediaStickIdentityDto>,
     cancel: &CancelToken,
     progress: &mut dyn FnMut(StickStage, u64),
 ) -> Result<StickReport> {
@@ -254,6 +356,11 @@ pub fn write_image(
         .map_err(|e| warn!(error = %e, "udev hold not installed"))
         .ok();
     let mut session = open_disk(device)?;
+    if let Some(expect) = expect {
+        let number = session.device_mut().device_number()?;
+        let found = identity_of_number(Path::new(SYS_DEV_BLOCK), number, session.length());
+        same_stick(device, expect, &found)?;
+    }
     if session.length() < len {
         return Err(OwnBackupError::RestoreIncompatible(
             tr!(
@@ -267,62 +374,38 @@ pub fn write_image(
     }
     info!(iso = %iso.display(), bytes = len, volume = %iso_info.volume_id, device, "writing the medium onto a stick");
 
-    let mut buf = vec![0u8; CHUNK];
-    let mut done = 0u64;
-    let mut last = u64::MAX;
-    let mut report = |stage: StickStage, done: u64, last: &mut u64| {
-        let pct = done * 100 / len.max(1);
-        if pct != *last {
-            *last = pct;
-            progress(stage, pct);
-        }
-    };
     // Half an ISO with the full one's MBR and volume descriptor would look
     // bootable and fail somewhere in the middle of the boot; an unverified one
-    // is not known to be better.
-    let abandon = |mut session: crate::restore_disk_linux::DiskSession, done: u64| {
+    // is not known to be better. Whatever stops the copy or its check —
+    // cancel, a write or read error, a mismatch — the stick's start is wiped.
+    if let Err(e) = copy_and_verify(&file, &mut session, len, device, cancel, progress) {
         let wipe = vec![0u8; (1 << 20).min(len as usize)];
-        let _ = session.device_mut().write_at(0, &wipe);
-        let _ = session.device_mut().flush();
-        warn!(device, done, "write cancelled; the stick's start was wiped");
+        let wiped = session
+            .device_mut()
+            .write_at(0, &wipe)
+            .and_then(|()| session.device_mut().flush());
+        match &wiped {
+            Ok(()) => warn!(device, error = %e, "write abandoned; the stick's start was wiped"),
+            Err(w) => {
+                warn!(device, error = %e, wipe_error = %w, "write abandoned; wiping the stick's start failed too")
+            }
+        }
         let _ = session.finish(None, UDEV_TIMEOUT, std::thread::sleep);
-        OwnBackupError::Cancelled
-    };
-    while done < len {
-        if cancel.is_cancelled() {
-            return Err(abandon(session, done));
-        }
-        let n = CHUNK.min((len - done) as usize);
-        file.read_exact_at(&mut buf[..n], done)?;
-        session.device_mut().write_at(done, &buf[..n])?;
-        done += n as u64;
-        report(StickStage::Write, done, &mut last);
-    }
-    session.device_mut().flush()?;
-    session.device_mut().drop_cache()?;
-
-    let mut back = vec![0u8; CHUNK];
-    done = 0;
-    last = u64::MAX;
-    while done < len {
-        if cancel.is_cancelled() {
-            return Err(abandon(session, done));
-        }
-        let n = CHUNK.min((len - done) as usize);
-        file.read_exact_at(&mut buf[..n], done)?;
-        session.device_mut().read_at(done, &mut back[..n])?;
-        if let Some(at) = (0..n).find(|&i| buf[i] != back[i]) {
-            return Err(OwnBackupError::Device(
+        return Err(match (e, wiped) {
+            (OwnBackupError::Cancelled, Ok(())) => OwnBackupError::Cancelled,
+            (e, Ok(())) => OwnBackupError::Device(
+                tr!("media_stick.failed_wiped", device = device, error = e).into_owned(),
+            ),
+            (e, Err(w)) => OwnBackupError::Device(
                 tr!(
-                    "media_stick.verify_mismatch",
+                    "media_stick.failed_not_wiped",
                     device = device,
-                    offset = done + at as u64
+                    error = e,
+                    wipe_error = w
                 )
                 .into_owned(),
-            ));
-        }
-        done += n as u64;
-        report(StickStage::Verify, done, &mut last);
+            ),
+        });
     }
     info!(
         device,
@@ -388,6 +471,57 @@ pub fn write_image(
     })
 }
 
+/// Copy `len` bytes of the image onto the stick, flush, and read every byte
+/// back against the image.
+fn copy_and_verify(
+    file: &std::fs::File,
+    session: &mut crate::restore_disk_linux::DiskSession,
+    len: u64,
+    device: &str,
+    cancel: &CancelToken,
+    progress: &mut dyn FnMut(StickStage, u64),
+) -> Result<()> {
+    let mut buf = vec![0u8; CHUNK];
+    let mut back = vec![0u8; CHUNK];
+    for stage in [StickStage::Write, StickStage::Verify] {
+        let mut done = 0u64;
+        let mut last = u64::MAX;
+        while done < len {
+            if cancel.is_cancelled() {
+                return Err(OwnBackupError::Cancelled);
+            }
+            let n = CHUNK.min((len - done) as usize);
+            file.read_exact_at(&mut buf[..n], done)?;
+            if stage == StickStage::Write {
+                session.device_mut().write_at(done, &buf[..n])?;
+            } else {
+                session.device_mut().read_at(done, &mut back[..n])?;
+                if let Some(at) = (0..n).find(|&i| buf[i] != back[i]) {
+                    return Err(OwnBackupError::Device(
+                        tr!(
+                            "media_stick.verify_mismatch",
+                            device = device,
+                            offset = done + at as u64
+                        )
+                        .into_owned(),
+                    ));
+                }
+            }
+            done += n as u64;
+            let pct = done * 100 / len.max(1);
+            if pct != last {
+                last = pct;
+                progress(stage, pct);
+            }
+        }
+        if stage == StickStage::Write {
+            session.device_mut().flush()?;
+            session.device_mut().drop_cache()?;
+        }
+    }
+    Ok(())
+}
+
 /// The image's own table, for the kernel: a stick that still shows its old
 /// partitions until it is unplugged would be mounted by its old names.
 fn reread_only<D: DiskIo>(
@@ -439,9 +573,15 @@ mod tests {
             std::fs::write(real.join("size"), size.to_string()).unwrap();
             std::fs::write(real.join("device/vendor"), "SanDisk ").unwrap();
             std::fs::write(real.join("device/model"), "Ultra\n").unwrap();
+            std::fs::write(real.join("dev"), "8:16\n").unwrap();
             symlink(&real, block.join(name)).unwrap();
         }
         block
+    }
+
+    /// The real sysfs directory of `name` in a [`fake_sys`] tree.
+    fn real_dir(block: &Path, name: &str) -> PathBuf {
+        std::fs::canonicalize(block.join(name)).unwrap()
     }
 
     #[test]
@@ -488,6 +628,7 @@ mod tests {
                 ("loop0", "virtual", "0", "0", 1000),
             ],
         );
+        std::fs::write(real_dir(&block, "mmcblk0").join("device/type"), "SD\n").unwrap();
         let sticks = sticks_in(&block, |n| {
             if n == "sdb" {
                 vec!["/media/u/STICK".into()]
@@ -511,6 +652,95 @@ mod tests {
         assert_eq!(sticks[1].model, "SanDisk Ultra");
         assert_eq!(sticks[1].size_bytes, 30_000_000 * 512);
         assert_eq!(sticks[1].mounted, vec!["/media/u/STICK".to_string()]);
+    }
+
+    /// eMMC sits on the same bus as an SD card reader but is the board's own
+    /// storage; an SDIO function or a card of unknown type is not a card
+    /// either.
+    #[test]
+    fn on_the_mmc_bus_only_an_sd_card_is_offered() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = |n: u32| format!("platform/mmc_host/mmc{n}/mmc{n}:0001");
+        let block = fake_sys(
+            dir.path(),
+            &[
+                ("mmcblk0", &host(0), "0", "0", 60_000_000),
+                ("mmcblk1", &host(1), "0", "0", 60_000_000),
+                ("mmcblk2", &host(2), "0", "0", 60_000_000),
+                ("mmcblk3", &host(3), "1", "0", 60_000_000),
+            ],
+        );
+        for (name, kind) in [("mmcblk0", "MMC"), ("mmcblk1", "SD"), ("mmcblk2", "SDIO")] {
+            std::fs::write(real_dir(&block, name).join("device/type"), kind).unwrap();
+        }
+        let got: Vec<String> = sticks_in(&block, |_| vec![])
+            .into_iter()
+            .map(|s| s.device)
+            .collect();
+        assert_eq!(got, vec!["/dev/mmcblk1".to_string()]);
+    }
+
+    /// The serial is the device's own, or the USB device's above it; the
+    /// device number comes along; and a write is refused when the device it
+    /// opened is not the listed one in any of them.
+    #[test]
+    fn a_stick_is_known_by_model_serial_size_and_number() {
+        let dir = tempfile::tempdir().unwrap();
+        let usb = "pci0000:00/0000:00:14.0/usb2/2-1/2-1:1.0/host6/target6:0:0/6:0:0:0";
+        let block = fake_sys(
+            dir.path(),
+            &[
+                ("sdb", usb, "1", "0", 30_000_000),
+                (
+                    "mmcblk0",
+                    "platform/mmc_host/mmc0/mmc0:0001",
+                    "1",
+                    "0",
+                    1000,
+                ),
+            ],
+        );
+        let usb_dev = dir.path().join("devices/pci0000:00/0000:00:14.0/usb2/2-1");
+        std::fs::write(usb_dev.join("serial"), "4C530001\n").unwrap();
+        // The root hub has a serial too; the nearer device wins.
+        std::fs::write(usb_dev.parent().unwrap().join("serial"), "0000:00:14.0").unwrap();
+        let card = real_dir(&block, "mmcblk0");
+        std::fs::write(card.join("device/type"), "SD").unwrap();
+        std::fs::write(card.join("device/serial"), "0x1234abcd").unwrap();
+
+        let sticks = sticks_in(&block, |_| vec![]);
+        assert_eq!(sticks[0].serial, "0x1234abcd");
+        assert_eq!(sticks[1].serial, "4C530001");
+        assert_eq!(sticks[1].dev, "8:16");
+        let listed = sticks[1].identity();
+        assert_eq!(
+            listed,
+            MediaStickIdentityDto {
+                model: "SanDisk Ultra".into(),
+                serial: "4C530001".into(),
+                size_bytes: 30_000_000 * 512,
+                dev: "8:16".into(),
+            }
+        );
+
+        // Opened by number, as the write does.
+        let by_number = dir.path().join("dev-block");
+        std::fs::create_dir_all(&by_number).unwrap();
+        symlink(real_dir(&block, "sdb"), by_number.join("8:16")).unwrap();
+        let opened = identity_of_number(&by_number, (8, 16), 30_000_000 * 512);
+        assert!(same_stick("/dev/sdb", &listed, &opened).is_ok());
+
+        let other = |f: &dyn Fn(&mut MediaStickIdentityDto)| {
+            let mut o = listed.clone();
+            f(&mut o);
+            same_stick("/dev/sdb", &listed, &o)
+        };
+        assert!(other(&|o| o.serial = "4C530002".into()).is_err());
+        assert!(other(&|o| o.size_bytes += 512).is_err());
+        assert!(other(&|o| o.dev = "8:32".into()).is_err());
+        assert!(other(&|o| o.model = "Kingston".into()).is_err());
+        let gone = identity_of_number(&by_number, (8, 32), 30_000_000 * 512);
+        assert!(same_stick("/dev/sdb", &listed, &gone).is_err());
     }
 
     #[test]
@@ -632,7 +862,7 @@ mod tests {
         let dev = stick.0.clone();
 
         let mut stages = Vec::new();
-        let report = write_image(&iso, &dev, &CancelToken::default(), &mut |s, p| {
+        let report = write_image(&iso, &dev, None, &CancelToken::default(), &mut |s, p| {
             stages.push((s, p))
         })
         .unwrap();
@@ -700,7 +930,7 @@ mod tests {
         let stick = LoopStick::new(dir.path());
         let cancel = CancelToken::default();
         cancel.cancel();
-        let r = write_image(&iso, &stick.0, &cancel, &mut |_, _| {});
+        let r = write_image(&iso, &stick.0, None, &cancel, &mut |_, _| {});
         assert!(matches!(r, Err(OwnBackupError::Cancelled)), "{r:?}");
         let mut head = vec![0xFFu8; 1 << 20];
         std::fs::File::open(&stick.0)

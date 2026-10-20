@@ -2480,6 +2480,12 @@ impl BackupService for BackupServiceImpl {
             crate::polkit::authorize(&req, crate::polkit::Action::Restore).await?;
             let p: MediaStickWriteDto = serde_json::from_str(&req.into_inner().json)
                 .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+            // Which stick the person chose, as listed: without it a name like
+            // /dev/sdb may mean a disk plugged in since. An older client does
+            // not send it; it is refused, not trusted.
+            let expect = p.expect.clone().ok_or_else(|| {
+                Status::failed_precondition(tr!("grpc_server.media_stick_list_again").into_owned())
+            })?;
             // The stick's own refusals first ("not a stick", "eject it"): the
             // guard would call a mounted stick part of the running system.
             let device = p.device.clone();
@@ -2524,6 +2530,7 @@ impl BackupService for BackupServiceImpl {
                 write_stick(
                     std::path::Path::new(&p.iso_path),
                     &p.device,
+                    &expect,
                     &cancel,
                     &mut emit,
                 )

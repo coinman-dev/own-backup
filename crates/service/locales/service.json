@@ -210,6 +210,10 @@
     "ru": "запись отменена; начало флешки стёрто — до новой записи она не загружается",
     "en": "the write was cancelled; the stick's start was wiped — it does not boot until written again"
   },
+  "grpc_server.media_stick_list_again": {
+    "ru": "в запросе нет описания выбранной флешки (модель, серийный номер, объём) — без него нельзя проверить, что под этим именем всё ещё она. Обновите список флешек и выберите снова (окно или own-backup-cli этой же версии)",
+    "en": "the request does not describe the chosen stick (model, serial, size) — without that it cannot be checked that the name still means it. Refresh the list of sticks and choose again (in the window or own-backup-cli of this version)"
+  },
   "grpc_server.media_stick_linux_only": {
     "ru": "запись носителя Linux на флешку есть только в Linux-версии",
     "en": "writing the Linux medium onto a stick is available in the Linux version only"
