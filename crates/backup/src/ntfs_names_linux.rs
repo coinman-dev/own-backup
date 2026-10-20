@@ -355,9 +355,9 @@ fn sweep_stale_mounts(base: &Path) {
             continue;
         }
         let path = entry.path();
-        if is_mount_point(&path) {
-            let _ = umount(&path, libc::MNT_DETACH);
-        }
+        // Not asked first: a mount whose ntfs-3g is gone answers ENOTCONN to
+        // a stat, and a directory that is no mount point just refuses this.
+        let _ = umount(&path, libc::MNT_DETACH);
         match std::fs::remove_dir(&path) {
             Ok(()) => info!(dir = %path.display(), "NTFS name removal: a stale mount was cleared"),
             Err(e) => debug!(dir = %path.display(), error = %e, "stale mount directory stays"),
@@ -998,6 +998,22 @@ mod tests {
         sweep_stale_mounts(base);
         assert!(!base.join("4294967-0").exists());
         assert!(mine.exists() && base.join("unrelated").exists());
+
+        // A real one: its ntfs-3g killed, the mount answering ENOTCONN.
+        let vol = tmp.path().join("v.ntfs");
+        if ntfs_volume(&vol, 16 << 20).is_none() {
+            return;
+        }
+        let dead = base.join("4294968-0");
+        std::fs::create_dir(&dead).unwrap();
+        let mut m = Ntfs3gMount::mount(&ntfs3g().unwrap(), vol.to_str().unwrap(), &dead).unwrap();
+        let mut child = m.child.take().unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        std::mem::forget(m);
+        assert!(std::fs::symlink_metadata(&dead).is_err(), "ENOTCONN");
+        sweep_stale_mounts(base);
+        assert!(!dead.exists() && std::fs::symlink_metadata(&dead).is_err());
     }
 }
 
