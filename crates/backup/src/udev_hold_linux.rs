@@ -332,6 +332,13 @@ fn reannounce(names: &[&str], run: &mut dyn FnMut(&[&str])) {
             &format!("--sysname-match={}", partition_pattern(name)),
         ]);
     }
+    // The links the hold kept away (by-id, by-uuid, …) come back only when
+    // udev has handled these events: whoever looks the disk up next by its
+    // persistent name must find it (stand 20.10: the next plan failed on a
+    // missing /dev/disk/by-id link).
+    if !names.is_empty() {
+        run(&["settle", "--timeout=30"]);
+    }
 }
 
 /// The kernel names a rules file written by [`rules_text`] holds: the exact
@@ -557,6 +564,8 @@ mod tests {
                     "--sysname-match=sdc",
                     "--sysname-match=sdc[0-9]*"
                 ],
+                // …and waits for udev, so the links are back on return.
+                vec!["settle", "--timeout=30"],
             ]
         );
 
