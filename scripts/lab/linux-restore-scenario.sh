@@ -340,8 +340,9 @@ stage_fs() {
     command -v mkntfs >/dev/null && types+=(ntfs)
     wipefs -aq "$TARGET"
     local args=(-o) i=1
-    for t in "${types[@]}"; do args+=(-n "$i:0:+384M"); i=$((i + 1)); done
-    for t in "${types[@]}"; do args+=(-n "$i:0:+768M"); i=$((i + 1)); done
+    # 4 + 4 partitions on the stand's 4 GiB disk; XFS needs 300 MiB at least.
+    for t in "${types[@]}"; do args+=(-n "$i:0:+320M"); i=$((i + 1)); done
+    for t in "${types[@]}"; do args+=(-n "$i:0:+640M"); i=$((i + 1)); done
     sgdisk "${args[@]}" "$TARGET" >"$EV/fs-sgdisk.out" 2>&1
     reread "$TARGET"
     n=1
@@ -458,8 +459,19 @@ stage_stack() {
     pv_old=$(pvs --noheadings -o pv_uuid "$l2" | tr -d ' ')
     md_old=$(mdadm --examine --export "$l3" | sed -n 's/^MD_UUID=//p')
     mdfs_old=$(blkid -p -o value -s UUID /dev/md/obkstack)
+    # A disk whose containers are open is refused (nothing holds it still):
+    # copy it closed, as from the boot medium, then open it again — the
+    # restore below must meet the machine's own LUKS, VG and array active.
+    umount /dev/mapper/obkstack /dev/obkstack/data /dev/md/obkstack 2>/dev/null
+    cryptsetup close obkstack && vgchange -q -an obkstack >/dev/null && mdadm --stop /dev/md/obkstack >/dev/null 2>&1
+    udevadm settle
     run st-copy "$CLI" backup-disk --device "$STACK_LOOP" -o "$copy" --format qcow2
     check st-copy "$(verdict $?)" "whole-disk copy of the stack's disk (containers as they are on disk)"
+    {
+        printf '%s' "$STACK_PW" | cryptsetup open --key-file=- "$l1" obkstack \
+            && vgchange -q -ay obkstack && mdadm --assemble /dev/md/obkstack "$l3" "$l4"
+    } >>"$EV/st-make.out" 2>&1
+    udevadm settle
 
     wipefs -aq "$TARGET"
     reread "$TARGET"
