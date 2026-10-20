@@ -99,6 +99,13 @@ fn add_extras(mnt: &Path) -> Extras {
         b"STREAM-SECRET-abcdef",
     );
     gone.push(temp.join("small.tmp"));
+    // The same with a separate 8.3 short name, as Windows gives a long name
+    // on a volume that keeps short names: ntfs-3g counts it as a second link,
+    // the scan as no name of its own — the content is cleared all the same.
+    let long = temp.join("Long resident name.tmp");
+    std::fs::write(&long, b"SHORTNAME-SECRET-0123456789").unwrap();
+    crate::exclusion_corpus::setxattr(&long, "system.ntfs_dos_name", b"LONGRE~1.TMP");
+    gone.push(long);
     // Under `cache/`, which goes as a whole: the name goes, the file lives on
     // under its kept twin with its content.
     std::fs::create_dir_all(mnt.join("cache")).unwrap();
@@ -232,7 +239,11 @@ fn ntfsfix_clean(file: &Path, tag: &str) {
 fn judge(file: &Path, mnt: &Path, corpus: &Corpus, extras: &Extras, tag: &str) {
     let data = std::fs::read(file).unwrap();
     assert!(!holds_run(&data, 0xAB), "{tag}: excluded content survived");
-    for secret in [&b"RESIDENT-SECRET"[..], b"STREAM-SECRET"] {
+    for secret in [
+        &b"RESIDENT-SECRET"[..],
+        b"STREAM-SECRET",
+        b"SHORTNAME-SECRET",
+    ] {
         assert!(
             !data.windows(secret.len()).any(|w| w == secret),
             "{tag}: resident content of an excluded file survived: {}",

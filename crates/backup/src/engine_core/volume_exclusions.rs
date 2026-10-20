@@ -185,6 +185,7 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
                             rel: p.rel.clone(),
                             is_dir: p.is_dir,
                             is_reparse: p.is_reparse,
+                            whole_records: p.whole_records.clone(),
                         })
                         .collect();
                     info!(
@@ -307,6 +308,7 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
                             rel: p.rel.clone(),
                             is_dir: p.is_dir,
                             is_reparse: p.is_reparse,
+                            whole_records: p.whole_records.clone(),
                         })
                         .collect();
                     info!(

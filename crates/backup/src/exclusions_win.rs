@@ -214,6 +214,7 @@ fn collect_excluded_ranges_inner(
                         rel: rel_path.to_string(),
                         is_dir,
                         is_reparse,
+                        whole_records: Vec::new(),
                     }),
                     _ => {
                         warn!(path = %child.display(), "matched path outside the scan root — not recorded for removal")

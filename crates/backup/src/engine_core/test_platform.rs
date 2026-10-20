@@ -370,7 +370,7 @@ impl DiskPlatform for TestPlatform {
         &self,
         _image: &FinishedImage<'_>,
         _image_size: u64,
-        _partitions: &[(u64, Vec<ExcludedPath>)],
+        _partitions: &[(u64, u64, Vec<ExcludedPath>)],
         _checksums: &mut Vec<BlockChecksum>,
         _tick: &mut dyn FnMut(u64, u64),
     ) -> Result<Option<u64>> {
@@ -568,6 +568,7 @@ mod tests {
             rel: r"Temp\a.tmp".into(),
             is_dir: false,
             is_reparse: false,
+            whole_records: Vec::new(),
         };
         let removed = p
             .remove_from_image(
@@ -583,7 +584,7 @@ mod tests {
             .remove_from_disk_image(
                 &image,
                 16 * MIB,
-                &[(MIB, vec![path])],
+                &[(MIB, 8 * MIB, vec![path])],
                 &mut checksums,
                 &mut tick,
             )

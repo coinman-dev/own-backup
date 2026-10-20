@@ -558,12 +558,18 @@ impl<R: BlockReader> BlockReader for ZeroingBlockReader<R> {
 /// is one record — its contents are implied). Fed to the mount-&-delete pass
 /// ([`crate::true_removal_win`]) that truly removes NTFS/ReFS exclusions from
 /// the finished image.
+#[derive(Debug, Clone, Default)]
 pub struct ExcludedPath {
     /// Path relative to the volume root, original case, `\`-separated.
     pub rel: String,
     pub is_dir: bool,
     /// Junction/symlink: delete the reparse entry itself, never its target.
     pub is_reparse: bool,
+    /// From the `$MFT` scan, sorted: the MFT records at or under this path
+    /// every name of which is excluded, so the deletion takes the whole file
+    /// (`ntfs_scan::MatchedPath::whole_records`). Linux clears the resident
+    /// content of these only; empty where no scan said so.
+    pub whole_records: Vec<u64>,
 }
 
 /// Why something a scan matched (or could not look at) is still in the copy.

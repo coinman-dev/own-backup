@@ -929,10 +929,16 @@ fn backup_disk_inner<P: DiskPlatform>(
     //     (valid backup), only a post-merge failure fails the run — cannot break
     //     a working backup. The content is already zeroed either way, so no
     //     excluded data leaks even when this pass is skipped.
-    let removal: Vec<(u64, Vec<crate::exclusions::ExcludedPath>)> = prepared
+    let removal: Vec<(u64, u64, Vec<crate::exclusions::ExcludedPath>)> = prepared
         .iter_mut()
         .filter(|p| !p.removal_paths.is_empty())
-        .map(|p| (p.part_offset, std::mem::take(&mut p.removal_paths)))
+        .map(|p| {
+            (
+                p.part_offset,
+                p.volume_len,
+                std::mem::take(&mut p.removal_paths),
+            )
+        })
         .collect();
     let mut excluded_entries_kept: Option<String> = None;
     if !removal.is_empty() {

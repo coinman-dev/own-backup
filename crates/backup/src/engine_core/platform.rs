@@ -294,13 +294,13 @@ pub(crate) trait DiskPlatform: EnginePlatform {
     fn export_boot_entries(&self) -> Result<BootBackup>;
 
     /// Delete the catalog entries of each partition's `paths` (partition
-    /// offset, paths) from the finished whole-disk image. Same answer as
-    /// [`EnginePlatform::remove_from_image`].
+    /// offset, the length of its volume, paths) from the finished whole-disk
+    /// image. Same answer as [`EnginePlatform::remove_from_image`].
     fn remove_from_disk_image(
         &self,
         image: &FinishedImage<'_>,
         image_size: u64,
-        partitions: &[(u64, Vec<ExcludedPath>)],
+        partitions: &[(u64, u64, Vec<ExcludedPath>)],
         checksums: &mut Vec<BlockChecksum>,
         tick: &mut dyn FnMut(u64, u64),
     ) -> Result<Option<u64>>;

@@ -118,6 +118,7 @@ pub(crate) fn prepare_encrypted_partition_map(
                 rel: p.rel.clone(),
                 is_dir: p.is_dir,
                 is_reparse: p.is_reparse,
+                whole_records: p.whole_records.clone(),
             })
             .collect();
         out.zero_ranges = scan.ranges;

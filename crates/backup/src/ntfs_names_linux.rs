@@ -16,8 +16,9 @@
 //!    its writes), the recorded paths are deleted through the mount without
 //!    ever following a link, the volume is unmounted, the device flushed,
 //!    `ntfsfix -n` reads it back;
-//!    a file whose only name goes has its resident content — the data of a
-//!    small file and its short named streams, kept inside its MFT record —
+//!    a file the scan saw go under every name it has (its 8.3 short name is
+//!    no name of its own) has its resident content — the data of a small
+//!    file and its short named streams, kept inside its MFT record —
 //!    overwritten with zeros through the mount first: deleting a file frees
 //!    its record but does not clear it, here or on Windows;
 //! 4. every cluster the deletions freed is erased — `$Bitmap` before and
@@ -105,9 +106,18 @@ impl VolumeExposer for NbdExposer {
 pub(crate) struct NamedVolume<'a> {
     /// Where it starts in the image.
     pub(crate) offset: u64,
-    /// Its length, when the caller knows it; otherwise the boot sector says.
-    pub(crate) len: Option<u64>,
+    pub(crate) len: VolumeLen,
     pub(crate) paths: &'a [ExcludedPath],
+}
+
+/// How long a [`NamedVolume`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VolumeLen {
+    /// Exactly this long: the image is the volume.
+    Exact(u64),
+    /// As long as its boot sector says, inside a partition this long: a
+    /// volume that claims more than its partition is not one to write to.
+    WithinPartition(u64),
 }
 
 /// Delete the catalog entries of `volumes` from the finished image. The
@@ -139,8 +149,10 @@ pub(crate) fn remove_names(
         for v in volumes {
             let size = scratch.lock().unwrap().size();
             let len = match v.len {
-                Some(len) => Some(len),
-                None => ntfs_volume_len(&scratch, v.offset, size),
+                VolumeLen::Exact(len) => Some(len),
+                VolumeLen::WithinPartition(part) => {
+                    ntfs_volume_len(&scratch, v.offset, size.min(v.offset.saturating_add(part)))
+                }
             };
             let Some(len) = len.filter(|&l| l > 0 && v.offset + l <= size) else {
                 warn!(
@@ -245,13 +257,20 @@ fn erase_freed(window: &mut ScratchWindow, before: &crate::ntfs_map::NtfsFreeMap
 
 /// The length of the NTFS volume at `offset`, from its boot sector: the
 /// sectors it declares plus the one behind them that holds the backup boot
-/// sector. `None` when no NTFS boot sector is there.
-fn ntfs_volume_len(scratch: &SharedScratch, offset: u64, size: u64) -> Option<u64> {
-    if offset + 512 > size {
+/// sector, within `end` (the end of its partition). `None` when no NTFS boot
+/// sector is there, or it declares more sectors than fit before `end`.
+fn ntfs_volume_len(scratch: &SharedScratch, offset: u64, end: u64) -> Option<u64> {
+    let mut boot = [0u8; 512];
+    if offset.checked_add(512)? > end {
         return None;
     }
-    let mut boot = [0u8; 512];
     scratch.lock().unwrap().read_at(offset, &mut boot).ok()?;
+    boot_sector_len(&boot, end - offset)
+}
+
+/// [`ntfs_volume_len`] of the boot sector `boot` of a volume with `room`
+/// bytes to its partition's end.
+fn boot_sector_len(boot: &[u8; 512], room: u64) -> Option<u64> {
     if &boot[3..11] != b"NTFS    " || boot[510..512] != [0x55, 0xAA] {
         return None;
     }
@@ -260,8 +279,17 @@ fn ntfs_volume_len(scratch: &SharedScratch, offset: u64, size: u64) -> Option<u6
     if !(256..=4096).contains(&sector) || !sector.is_power_of_two() || sectors == 0 {
         return None;
     }
-    let len = sectors.checked_add(1)?.checked_mul(sector)?;
-    Some(len.min(size - offset))
+    let declared = sectors.checked_mul(sector)?;
+    if declared > room {
+        warn!(
+            declared,
+            room, "NTFS name removal: the boot sector claims more than its partition holds"
+        );
+        return None;
+    }
+    // The backup boot sector behind the declared ones, where the partition
+    // has room for it.
+    Some(declared.checked_add(sector)?.min(room))
 }
 
 /// The ntfs-3g binary, wherever the distribution put it.
@@ -488,8 +516,15 @@ impl Ntfs3gMount {
         let mut child = self.child.take().expect("mounted");
         let deadline = Instant::now() + EXIT_TIMEOUT;
         let status = loop {
-            if let Some(status) = child.try_wait()? {
-                break status;
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => {}
+                // Not left running, nor unreaped: it may still be writing.
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(dev(format!("cannot wait for ntfs-3g: {e}")));
+                }
             }
             if Instant::now() > deadline {
                 let _ = child.kill();
@@ -587,11 +622,12 @@ pub(crate) fn delete_paths(
     for (i, p) in paths.iter().enumerate() {
         match under(root, &p.rel) {
             Ok(path) if ancestors_are_directories(root, &path) => {
+                let whole = &p.whole_records;
                 if crate::exclusions::recreated_by_windows(&p.rel) {
                     // As on Windows: the folder stays, its contents go.
-                    delete_children(&path, &mut deleted, &mut failed);
+                    delete_children(&path, whole, &mut deleted, &mut failed);
                 } else {
-                    delete_tree(&path, p.is_reparse, &mut deleted, &mut failed);
+                    delete_tree(&path, p.is_reparse, whole, &mut deleted, &mut failed);
                 }
             }
             Ok(_) => {
@@ -608,12 +644,12 @@ pub(crate) fn delete_paths(
     (deleted, failed)
 }
 
-fn delete_children(dir: &Path, deleted: &mut u64, failed: &mut u64) {
+fn delete_children(dir: &Path, whole: &[u64], deleted: &mut u64, failed: &mut u64) {
     match std::fs::read_dir(dir) {
         Ok(entries) => {
             for entry in entries {
                 match entry {
-                    Ok(e) => delete_tree(&e.path(), false, deleted, failed),
+                    Ok(e) => delete_tree(&e.path(), false, whole, deleted, failed),
                     Err(e) => {
                         warn!(dir = %dir.display(), error = %e, "NTFS name removal: cannot list");
                         *failed += 1;
@@ -626,6 +662,16 @@ fn delete_children(dir: &Path, deleted: &mut u64, failed: &mut u64) {
             *failed += 1;
         }
     }
+}
+
+/// Whether the content of the file `meta` describes is cleared before its
+/// name goes: only when the scan saw every name of its record excluded. Not
+/// by its link count: ntfs-3g counts a separate 8.3 short name as a link, so
+/// a long-named file Windows made would never be cleared; and a file with a
+/// name outside the exclusion lives on under it — only the name goes, the
+/// content is not ours to clear.
+fn clears_content(meta: &std::fs::Metadata, whole: &[u64]) -> bool {
+    meta.file_type().is_file() && whole.binary_search(&meta.ino()).is_ok()
 }
 
 /// What can live inside an MFT record (1 KiB, minus its headers): a value
@@ -722,8 +768,10 @@ fn set_xattr(path: &Path, name: &std::ffi::CStr, value: &[u8]) -> std::io::Resul
 
 /// Delete `path` and, if it is a real directory, everything in it first. A
 /// link — a symlink or junction as ntfs-3g shows it, or an entry the scan saw
-/// as a reparse point — is removed itself, never what it leads to.
-fn delete_tree(path: &Path, is_reparse: bool, deleted: &mut u64, failed: &mut u64) {
+/// as a reparse point — is removed itself, never what it leads to. `whole`:
+/// the MFT records the scan saw go under every name (ntfs-3g gives the record
+/// number as the inode number).
+fn delete_tree(path: &Path, is_reparse: bool, whole: &[u64], deleted: &mut u64, failed: &mut u64) {
     let meta = match std::fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) => {
@@ -734,13 +782,11 @@ fn delete_tree(path: &Path, is_reparse: bool, deleted: &mut u64, failed: &mut u6
     };
     let result = if meta.file_type().is_dir() {
         if !is_reparse {
-            delete_children(path, deleted, failed);
+            delete_children(path, whole, deleted, failed);
         }
         std::fs::remove_dir(path)
     } else {
-        // A file with a name outside the exclusion lives on under it: only
-        // the name goes, the content is not ours to clear.
-        if meta.file_type().is_file() && meta.nlink() == 1 {
+        if clears_content(&meta, whole) {
             wipe_resident(path, meta.len());
         }
         std::fs::remove_file(path)
@@ -798,7 +844,7 @@ mod tests {
         ExcludedPath {
             rel: rel.into(),
             is_dir,
-            is_reparse: false,
+            ..Default::default()
         }
     }
 
@@ -855,6 +901,7 @@ mod tests {
                 rel: "junction".into(),
                 is_dir: true,
                 is_reparse: true,
+                ..Default::default()
             },
             // Through the junction: must not reach `outside/precious`.
             path("junction\\precious", false),
@@ -960,6 +1007,187 @@ mod tests {
         );
         m.unmount().unwrap();
         check_volume(vol.to_str().unwrap()).unwrap();
+    }
+
+    /// Whose content is cleared before the name goes is the scan's word,
+    /// not the link count. Plain directories stand in for the mount, a hard
+    /// link outside for what is left of a file after its names are gone: a
+    /// record the scan saw go whole is cleared even with a second link (what
+    /// ntfs-3g makes of an 8.3 short name), inside an excluded directory too;
+    /// one it did not list keeps its content for the name that stays.
+    #[test]
+    fn content_is_cleared_by_the_scans_word_not_by_the_link_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("mnt");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(root.join("cache")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let ino = |p: &Path| std::fs::symlink_metadata(p).unwrap().ino();
+        std::fs::write(root.join("Long name.tmp"), b"SHORT-NAMED-SECRET").unwrap();
+        std::fs::hard_link(root.join("Long name.tmp"), outside.join("LONGNA~1.TMP")).unwrap();
+        std::fs::write(root.join("cache/inner.tmp"), b"INNER-SECRET").unwrap();
+        std::fs::hard_link(root.join("cache/inner.tmp"), outside.join("inner")).unwrap();
+        std::fs::write(root.join("twin.tmp"), b"KEPT-TWIN").unwrap();
+        std::fs::hard_link(root.join("twin.tmp"), outside.join("twin.txt")).unwrap();
+        let paths = [
+            ExcludedPath {
+                rel: "Long name.tmp".into(),
+                whole_records: vec![ino(&root.join("Long name.tmp"))],
+                ..Default::default()
+            },
+            ExcludedPath {
+                rel: "cache".into(),
+                is_dir: true,
+                whole_records: vec![ino(&root.join("cache/inner.tmp"))],
+                ..Default::default()
+            },
+            path("twin.tmp", false),
+        ];
+        let (deleted, failed) = delete_paths(&root, &paths, &mut |_| {});
+        assert_eq!((deleted, failed), (4, 0));
+        assert_eq!(
+            std::fs::read(outside.join("LONGNA~1.TMP")).unwrap(),
+            [0u8; 18]
+        );
+        assert_eq!(std::fs::read(outside.join("inner")).unwrap(), [0u8; 12]);
+        assert_eq!(
+            std::fs::read(outside.join("twin.txt")).unwrap(),
+            b"KEPT-TWIN"
+        );
+    }
+
+    /// A volume of a disk is as long as its boot sector says, plus the backup
+    /// boot sector where the partition has room for it — and one that claims
+    /// more than its partition is no volume to write to.
+    #[test]
+    fn a_boot_sector_is_believed_only_within_its_partition() {
+        let mut boot = [0u8; 512];
+        boot[3..11].copy_from_slice(b"NTFS    ");
+        boot[0x0B..0x0D].copy_from_slice(&512u16.to_le_bytes());
+        boot[0x28..0x30].copy_from_slice(&2047u64.to_le_bytes());
+        boot[510..512].copy_from_slice(&[0x55, 0xAA]);
+        assert_eq!(boot_sector_len(&boot, 1 << 20), Some(1 << 20));
+        assert_eq!(boot_sector_len(&boot, 4 << 20), Some(1 << 20));
+        assert_eq!(boot_sector_len(&boot, 2047 * 512), Some(2047 * 512));
+        assert_eq!(boot_sector_len(&boot, 2046 * 512), None, "claims more");
+        boot[0x28..0x30].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(boot_sector_len(&boot, u64::MAX), None);
+        boot[3] = b'X';
+        assert_eq!(boot_sector_len(&boot, 4 << 20), None, "not NTFS");
+    }
+
+    /// An NTFS volume of `size` bytes in `file` and a mount of it that
+    /// ntfs-3g lets this user make (its setuid build mounts a file the user
+    /// owns); `None` — said why — where that is not possible.
+    fn user_ntfs_volume(file: &Path, mnt: &Path, size: u64) -> Option<Ntfs3gMount> {
+        let Ok(binary) = ntfs3g() else {
+            eprintln!("skipped: ntfs-3g is not installed");
+            return None;
+        };
+        std::fs::File::create(file).unwrap().set_len(size).unwrap();
+        match Command::new("mkntfs")
+            .args(["-F", "-Q", "-q"])
+            .arg(file)
+            .output()
+        {
+            Ok(out) if out.status.success() => {}
+            _ => {
+                eprintln!("skipped: mkntfs is missing or failed");
+                return None;
+            }
+        }
+        std::fs::create_dir_all(mnt).unwrap();
+        match Ntfs3gMount::mount(&binary, file.to_str().unwrap(), mnt) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                eprintln!("skipped: ntfs-3g cannot mount here: {e}");
+                None
+            }
+        }
+    }
+
+    /// Unmount a mount this user made, as FUSE lets a user (`umount2` is
+    /// root's), and wait for its ntfs-3g to have written everything and exited.
+    fn user_unmount(m: &mut Ntfs3gMount) {
+        let out = Command::new("fusermount3")
+            .arg("-u")
+            .arg(&m.dir)
+            .output()
+            .or_else(|_| Command::new("fusermount").arg("-u").arg(&m.dir).output())
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let status = m.child.take().unwrap().wait().unwrap();
+        assert!(status.success(), "ntfs-3g: {status}: {}", m.stderr_text());
+    }
+
+    /// The case ntfs-3g's link count got wrong, end to end: a long-named
+    /// small file with a separate 8.3 short name — what Windows makes on a
+    /// volume with short names — shows two links, yet the scan sees one name
+    /// and its resident content is cleared before the record is freed. A
+    /// small file with a hard link that stays keeps its content.
+    #[test]
+    fn a_long_named_file_with_a_short_name_loses_its_resident_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vol = tmp.path().join("v.ntfs");
+        let mnt = tmp.path().join("m");
+        let Some(mut m) = user_ntfs_volume(&vol, &mnt, 16 << 20) else {
+            return;
+        };
+        let long = mnt.join("Long secret name.tmp");
+        std::fs::write(&long, b"SHORT-NAMED-SECRET-0123456789").unwrap();
+        crate::exclusion_corpus::setxattr(&long, "system.ntfs_dos_name", b"LONGSE~1.TMP");
+        std::fs::write(mnt.join("twin.tmp"), b"TWIN-KEPT-CONTENT").unwrap();
+        // The kept name in a directory: the excluded one, in the root, is
+        // the record's first name, the one the scan matches by.
+        std::fs::create_dir(mnt.join("keep")).unwrap();
+        std::fs::hard_link(mnt.join("twin.tmp"), mnt.join("keep/twin.bin")).unwrap();
+        user_unmount(&mut m);
+
+        let scan = crate::ntfs_scan::scan_mft(
+            &mut std::fs::File::open(&vol).unwrap(),
+            &["*.tmp".to_string()],
+        )
+        .unwrap();
+        let paths: Vec<ExcludedPath> = scan
+            .paths
+            .iter()
+            .map(|p| ExcludedPath {
+                rel: p.rel.clone(),
+                is_dir: p.is_dir,
+                is_reparse: p.is_reparse,
+                whole_records: p.whole_records.clone(),
+            })
+            .collect();
+        assert_eq!(paths.len(), 2, "{paths:?}");
+        // `delete_on_volume`, with the unmount a user may make.
+        let mut m = Ntfs3gMount::mount(&ntfs3g().unwrap(), vol.to_str().unwrap(), &mnt).unwrap();
+        let shown = std::fs::metadata(&long).unwrap();
+        assert_eq!(shown.nlink(), 2, "ntfs-3g counts the short name as a link");
+        assert!(scan.paths.iter().any(|p| p.whole_records == [shown.ino()]));
+        assert_eq!(delete_paths(&mnt, &paths, &mut |_| {}), (2, 0));
+        user_unmount(&mut m);
+        check_volume(vol.to_str().unwrap()).unwrap();
+
+        let data = std::fs::read(&vol).unwrap();
+        let has = |needle: &[u8]| data.windows(needle.len()).any(|w| w == needle);
+        assert!(
+            !has(b"SHORT-NAMED-SECRET"),
+            "the freed record kept the content"
+        );
+        assert!(has(b"TWIN-KEPT-CONTENT"));
+        drop(data);
+        let mut m = Ntfs3gMount::mount(&ntfs3g().unwrap(), vol.to_str().unwrap(), &mnt).unwrap();
+        assert!(std::fs::symlink_metadata(&long).is_err());
+        assert!(std::fs::symlink_metadata(mnt.join("twin.tmp")).is_err());
+        assert_eq!(
+            std::fs::read(mnt.join("keep/twin.bin")).unwrap(),
+            b"TWIN-KEPT-CONTENT"
+        );
+        user_unmount(&mut m);
     }
 
     /// Not NTFS: ntfs-3g refuses, nothing is written, and the error says so.

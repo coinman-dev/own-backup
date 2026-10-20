@@ -334,10 +334,17 @@ impl DiskPlatform for WinPlatform {
         &self,
         image: &FinishedImage<'_>,
         image_size: u64,
-        partitions: &[(u64, Vec<ExcludedPath>)],
+        partitions: &[(u64, u64, Vec<ExcludedPath>)],
         checksums: &mut Vec<BlockChecksum>,
         tick: &mut dyn FnMut(u64, u64),
     ) -> Result<Option<u64>> {
+        // Windows finds each volume through the attached disk itself; the
+        // length the engine knows is not needed there.
+        let partitions: Vec<(u64, Vec<ExcludedPath>)> = partitions
+            .iter()
+            .map(|(offset, _, paths)| (*offset, paths.clone()))
+            .collect();
+        let partitions = partitions.as_slice();
         Ok(match (image.encryption, image.format) {
             // Encrypted: the same mount-and-delete, over a sealed scratch, with
             // the container rebuilt around whatever the driver changed. A

@@ -29,7 +29,7 @@ use crate::engine_core::platform::{
 use crate::exclusions::{ByteRanges, ExcludedPath, ExclusionScan};
 use crate::linux_device::LinuxRawDevice;
 use crate::ntfs_map::NtfsUsedMap;
-use crate::ntfs_names_linux::{NamedVolume, NbdExposer, VolumeExposer};
+use crate::ntfs_names_linux::{NamedVolume, NbdExposer, VolumeExposer, VolumeLen};
 use crate::removal_types::InsideRemoval;
 use crate::sidecar::BlockChecksum;
 use crate::used_sectors::UsedSectorMap;
@@ -334,7 +334,7 @@ impl EnginePlatform for LinuxPlatform {
     ) -> Result<Option<u64>> {
         let volume = NamedVolume {
             offset: span.data_offset,
-            len: Some(span.volume_len),
+            len: VolumeLen::Exact(span.volume_len),
             paths,
         };
         crate::ntfs_names_linux::remove_names(
@@ -412,21 +412,21 @@ impl DiskPlatform for LinuxPlatform {
         crate::efivars_linux::Efivarfs::default().export(&machine)
     }
 
-    /// Each partition's volume is sized by its own boot sector; a whole-disk
-    /// image is checksummed from its first byte.
+    /// Each partition's volume is sized by its own boot sector, within its
+    /// partition; a whole-disk image is checksummed from its first byte.
     fn remove_from_disk_image(
         &self,
         image: &FinishedImage<'_>,
         image_size: u64,
-        partitions: &[(u64, Vec<ExcludedPath>)],
+        partitions: &[(u64, u64, Vec<ExcludedPath>)],
         checksums: &mut Vec<BlockChecksum>,
         tick: &mut dyn FnMut(u64, u64),
     ) -> Result<Option<u64>> {
         let volumes: Vec<NamedVolume<'_>> = partitions
             .iter()
-            .map(|(offset, paths)| NamedVolume {
+            .map(|(offset, len, paths)| NamedVolume {
                 offset: *offset,
-                len: None,
+                len: VolumeLen::WithinPartition(*len),
                 paths,
             })
             .collect();

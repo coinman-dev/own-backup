@@ -128,6 +128,12 @@ pub struct MatchedPath {
     pub is_dir: bool,
     /// Junction/symlink: удалять саму точку, никогда не цель.
     pub is_reparse: bool,
+    /// MFT records of the files at or under this path every name of which
+    /// is excluded (an 8.3 short name is an alias, not a name), sorted: the
+    /// deletion takes the whole file, and only these may have their content
+    /// cleared first. A record not listed may live on under a name that stays
+    /// — or the scan could not tell.
+    pub whole_records: Vec<u64>,
 }
 
 /// Одно имя файла в MFT.
@@ -154,6 +160,10 @@ struct Entry {
     resident_data: bool,
     /// Разбор атрибутов упёрся в ошибку — доверять экстентам нельзя.
     broken: bool,
+    /// Every `$FILE_NAME` of the record was read: it has no attribute list
+    /// (whose extension records may hold more names) and no attribute failed
+    /// to parse.
+    names_complete: bool,
 }
 
 /// Пройти MFT тома `fs` и собрать всё, что подпадает под `patterns`.
@@ -360,6 +370,7 @@ where
                 compressed_or_sparse,
                 resident_data,
                 broken,
+                names_complete: !broken && !attr_list_present,
             },
         );
     }
@@ -449,6 +460,10 @@ fn decide(
     }
 
     let mut unresolved = 0u64;
+    // Which recorded path each top match point is, and the files whose whole
+    // record goes with the entry of their top match point.
+    let mut path_index: HashMap<u64, usize> = HashMap::new();
+    let mut whole: Vec<(u64, u64)> = Vec::new();
     for (&n, e) in entries {
         if n < FIRST_USER_RECORD {
             continue; // служебные файлы тома неприкосновенны
@@ -475,16 +490,30 @@ fn decide(
         // потому, что лежит внутри исключённого каталога, отдельной записи не
         // получает — каталог унесёт его с собой.
         if !inherited {
+            path_index.insert(n, scan.paths.len());
             scan.paths.push(MatchedPath {
                 rel: rel.clone(),
                 is_dir: e.is_dir,
                 is_reparse: e.is_reparse,
+                whole_records: Vec::new(),
             });
         }
         if e.is_dir {
             continue;
         }
         let rel_for_bytes = rel.clone();
+        let every_name_excluded = e.names.len() == 1
+            || all_names_excluded(e, entries, &mut path_cache, &matches, &excluded_dirs);
+        if every_name_excluded && e.names_complete {
+            let top = if inherited {
+                top_excluded_dir(n, entries, &excluded_dirs)
+            } else {
+                Some(n)
+            };
+            if let Some(top) = top {
+                whole.push((top, n));
+            }
+        }
 
         // Данные остаются в копии, если...
         let reason = if e.broken {
@@ -493,9 +522,7 @@ fn decide(
             Some(KeptReason::Reparse)
         } else if e.resident_data {
             Some(KeptReason::Resident)
-        } else if e.names.len() > 1
-            && !all_names_excluded(e, &entries, &mut path_cache, &matches, &excluded_dirs)
-        {
+        } else if !every_name_excluded {
             Some(KeptReason::OtherNameKept)
         } else if e.data_size > 0 && e.allocated == 0 {
             // Файл не пуст, а экстентов нет: run list не прочитан (за
@@ -526,6 +553,14 @@ fn decide(
                 scan.file_bytes.push((rel_for_bytes, e.allocated));
             }
         }
+    }
+    for (top, n) in whole {
+        if let Some(&i) = path_index.get(&top) {
+            scan.paths[i].whole_records.push(n);
+        }
+    }
+    for p in &mut scan.paths {
+        p.whole_records.sort_unstable();
     }
     if unresolved > 0 {
         warn!(
@@ -582,6 +617,28 @@ fn under_excluded(
         cur = name.parent;
     }
     false
+}
+
+/// The highest excluded directory above `n` along its first name: the top
+/// match point an entry inside an excluded directory is recorded under.
+fn top_excluded_dir(
+    n: u64,
+    entries: &HashMap<u64, Entry>,
+    excluded: &std::collections::HashSet<u64>,
+) -> Option<u64> {
+    let mut top = None;
+    let mut cur = n;
+    for _ in 0..128 {
+        let name = entries.get(&cur)?.names.first()?;
+        if name.parent == cur || name.parent == ROOT_RECORD {
+            return top;
+        }
+        if excluded.contains(&name.parent) {
+            top = Some(name.parent);
+        }
+        cur = name.parent;
+    }
+    None
 }
 
 /// Все ли имена файла попадают под исключения. Данные общие: пока живо хоть
@@ -1092,6 +1149,7 @@ mod rules_tests {
             compressed_or_sparse: false,
             resident_data: false,
             broken: false,
+            names_complete: true,
         }
     }
 
@@ -1110,6 +1168,7 @@ mod rules_tests {
             compressed_or_sparse: false,
             resident_data: false,
             broken: false,
+            names_complete: true,
         }
     }
 
@@ -1140,6 +1199,7 @@ mod rules_tests {
             compressed_or_sparse: e.compressed_or_sparse,
             resident_data: e.resident_data,
             broken: e.broken,
+            names_complete: e.names_complete,
         }
     }
 
@@ -1309,5 +1369,61 @@ mod rules_tests {
         assert_eq!(scan.files_excluded, 0);
         assert!(scan.paths.is_empty());
         assert!(scan.ranges.is_empty());
+    }
+
+    /// The records whose content the deletion may clear: a file is whole
+    /// when every name it has is excluded — a short 8.3 alias is not a name
+    /// (the scan never records it), a hard link that stays is. Files inside
+    /// an excluded directory are listed under that directory's entry; a
+    /// record whose names may not all have been read is never listed.
+    #[test]
+    fn whole_records_are_those_every_name_of_which_goes() {
+        let mut twin = file(21, "twin.bin", 300, 1);
+        twin.names.push(Name {
+            parent: ROOT_RECORD,
+            name: "kept.bin".into(),
+        });
+        let mut both = file(20, "a.bin", 400, 1);
+        both.names.push(Name {
+            parent: ROOT_RECORD,
+            name: "b.tmp".into(),
+        });
+        let mut listed = file(21, "listed.bin", 500, 1);
+        listed.names_complete = false;
+        let mut small = file(ROOT_RECORD, "Long resident name.tmp", 0, 0);
+        small.resident_data = true;
+        small.data_size = 30;
+        small.extents.clear();
+        small.allocated = 0;
+        let mut shared = file(ROOT_RECORD, "shared.tmp", 600, 1);
+        shared.names.push(Name {
+            parent: ROOT_RECORD,
+            name: "keep-me.bin".into(),
+        });
+        let scan = run(
+            &[
+                (20, dir(ROOT_RECORD, "Temp")),
+                (21, dir(20, "nested")),
+                (30, file(21, "x.bin", 100, 1)),
+                (31, twin),
+                (32, both),
+                (33, listed),
+                (40, small),
+                (41, shared),
+            ],
+            &["Temp", "*.tmp"],
+        );
+        let whole = |rel: &str| {
+            scan.paths
+                .iter()
+                .find(|p| p.rel == rel)
+                .unwrap_or_else(|| panic!("{rel} recorded"))
+                .whole_records
+                .clone()
+        };
+        assert_eq!(whole("Temp"), vec![30, 32], "under the directory");
+        assert_eq!(whole("Long resident name.tmp"), vec![40]);
+        assert!(whole("shared.tmp").is_empty(), "its other name stays");
+        assert_eq!(scan.paths.len(), 3);
     }
 }
