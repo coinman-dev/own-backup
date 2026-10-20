@@ -416,9 +416,6 @@ impl VolumeTotals {
     }
 }
 
-/// Record a finished whole-disk copy in its run; returns the image the
-/// engine published. `disk_token` is the disk's file-name token
-/// ([`crate::DiskSourceSpec::file_tag`]).
 /// The service's key directory is not in this copy — not one of the job's
 /// rules, so the summary says it (decision 6/E4). Once per run.
 fn note_key_store_excluded(run: &mut JobRun) {
@@ -428,6 +425,9 @@ fn note_key_store_excluded(run: &mut JobRun) {
     }
 }
 
+/// Record a finished whole-disk copy in its run; returns the image the
+/// engine published. `disk_token` is the disk's file-name token
+/// ([`crate::DiskSourceSpec::file_tag`]).
 pub(crate) fn record_disk(
     run: &mut JobRun,
     job: &Job,

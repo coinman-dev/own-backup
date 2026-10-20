@@ -843,21 +843,42 @@ pub async fn run_main_loop(
     own_backup_backup::seal::local::register_data_dir(&config.data_dir);
     #[cfg(target_os = "linux")]
     let passwords = if installed_service {
-        let guard = own_backup_backup::seal::local::PrivateSecretDatabase::new(&config.data_dir)?;
-        let store = own_backup_core::PasswordStore::new_private_sealed(
-            config.db_path(),
-            guard.path().to_path_buf(),
-            guard.secret_store(),
-        );
-        let moved = store.migrate_legacy(&config.db_path())?;
-        guard.validate_files()?;
-        if moved > 0 {
-            info!(
-                moved,
-                "legacy volume passwords migrated to the private database"
-            );
+        // A key store that cannot be opened (a data directory others may
+        // write, no systemd-creds, a sealing failure) costs the remembered
+        // passwords, not the service: plain copies keep running, and the
+        // window does not offer encryption (`with_key_store`).
+        let opened = own_backup_backup::seal::local::PrivateSecretDatabase::new(&config.data_dir)
+            .and_then(|guard| {
+                let store = own_backup_core::PasswordStore::new_private_sealed(
+                    config.db_path(),
+                    guard.path().to_path_buf(),
+                    guard.secret_store(),
+                );
+                // Rows that cannot move yet stay where they are and are
+                // tried again at the next start.
+                match store.migrate_legacy(&config.db_path()) {
+                    Ok(0) => {}
+                    Ok(moved) => info!(
+                        moved,
+                        "legacy volume passwords migrated to the private database"
+                    ),
+                    Err(e) => warn!(error = %e, "legacy volume passwords not migrated yet"),
+                }
+                guard.validate_files()?;
+                Ok(store)
+            });
+        match opened {
+            Ok(store) => std::sync::Arc::new(store),
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "service key store unavailable: volume passwords are kept for this run only"
+                );
+                std::sync::Arc::new(own_backup_core::PasswordStore::memory_only(
+                    config.db_path(),
+                ))
+            }
         }
-        std::sync::Arc::new(store)
     } else {
         std::sync::Arc::new(own_backup_core::PasswordStore::new(config.db_path()))
     };

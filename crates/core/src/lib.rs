@@ -1535,6 +1535,9 @@ pub struct PasswordStore {
     /// platform default: on Linux the machine key of the service's key store
     /// (`systemd-creds`). `None` on Windows (DPAPI, as before).
     sealer: Option<Arc<dyn own_backup_backup::secrets::SecretStore + Send + Sync>>,
+    /// `false` when nothing may be persisted: the Linux service whose key
+    /// store could not be opened keeps passwords for this run only.
+    persist: bool,
 }
 
 impl PasswordStore {
@@ -1549,6 +1552,7 @@ impl PasswordStore {
             private: false,
             key_path,
             sealer: None,
+            persist: true,
         }
     }
 
@@ -1565,6 +1569,7 @@ impl PasswordStore {
             private: true,
             key_path,
             sealer: None,
+            persist: true,
         }
     }
 
@@ -1580,6 +1585,16 @@ impl PasswordStore {
         Self {
             sealer: Some(sealer),
             ..Self::new_private(public_db_path, private_db_path)
+        }
+    }
+
+    /// A store that remembers passwords for this run only: what the
+    /// installed Linux service falls back to when its key store cannot be
+    /// opened, instead of not starting (or keeping them beside public data).
+    pub fn memory_only(db_path: PathBuf) -> Self {
+        Self {
+            persist: false,
+            ..Self::new(db_path)
         }
     }
 
@@ -1611,6 +1626,9 @@ impl PasswordStore {
             && !own_backup_metadata::volume_secret_migration_pending(&private)?
             && own_backup_metadata::volume_secret_migration_done(&private)?
         {
+            // A run that died between the marker and the removal below, or
+            // whose removal failed, leaves the key: it goes now.
+            self.remove_legacy_key();
             return Ok(0);
         }
         own_backup_metadata::mark_volume_secret_migration_pending(&private)?;
@@ -1655,8 +1673,14 @@ impl PasswordStore {
         own_backup_metadata::purge_legacy_volume_secret_remnants(&public)?;
         own_backup_metadata::clear_volume_secret_migration_pending(&private)?;
         own_backup_metadata::mark_volume_secret_migration_done(&private)?;
-        // Nothing sealed by the legacy key is left, and the key itself sits
-        // beside the public data — inside every copy of that volume. Gone.
+        self.remove_legacy_key();
+        Ok(moved)
+    }
+
+    /// Nothing sealed by the legacy key is left once the migration is done,
+    /// and the key itself sits beside the public data — inside every copy of
+    /// that volume. Gone, when this store has a sealer of its own.
+    fn remove_legacy_key(&self) {
         if self.sealer.is_some() {
             match std::fs::remove_file(&self.key_path) {
                 Ok(()) => info!("legacy volume-password key removed"),
@@ -1664,7 +1688,6 @@ impl PasswordStore {
                 Err(e) => warn!(error = %e, "legacy volume-password key could not be removed"),
             }
         }
-        Ok(moved)
     }
 
     /// Record a password for `volume_token` (as computed by [`source_token`]).
@@ -1677,6 +1700,12 @@ impl PasswordStore {
         remember: bool,
     ) -> own_backup_common::Result<()> {
         if remember {
+            if !self.persist {
+                return Err(own_backup_common::OwnBackupError::Encryption(
+                    "the service key store is unavailable: volume passwords cannot be remembered"
+                        .into(),
+                ));
+            }
             #[cfg(target_os = "windows")]
             if !self.private {
                 return Err(own_backup_common::OwnBackupError::Encryption(
@@ -1701,6 +1730,9 @@ impl PasswordStore {
     /// Forget a password (in-memory and persisted).
     pub fn forget(&self, volume_token: &str) -> own_backup_common::Result<()> {
         self.cache.lock().unwrap().remove(volume_token);
+        if !self.persist {
+            return Ok(());
+        }
         #[cfg(target_os = "windows")]
         if !self.private {
             return Err(own_backup_common::OwnBackupError::Encryption(
@@ -1727,6 +1759,9 @@ impl PasswordResolver for PasswordStore {
     fn resolve(&self, volume_token: &str) -> Option<zeroize::Zeroizing<String>> {
         if let Some(p) = self.cache.lock().unwrap().get(volume_token) {
             return Some(p.clone());
+        }
+        if !self.persist {
+            return None;
         }
         #[cfg(target_os = "windows")]
         if !self.private {
@@ -3950,7 +3985,9 @@ async fn perform_backup(
         run.finished_at = chrono::Utc::now().to_rfc3339();
         run.status = "error".into();
         run.error = tr!("lib.linux_dest_on_source", source = source).into_owned();
-        run.refused = true;
+        // Not `refused`: a destination disk not mounted yet puts the folder
+        // on the root filesystem until it is, and the retry is what then
+        // makes the copy. The retries are counted, so a real mistake ends.
         return run;
     }
     // A whole disk → one image with its GPT and restore manifest.
@@ -5068,6 +5105,31 @@ mod tests {
 
         store.forget("V123").unwrap();
         assert!(!PasswordStore::new(db).has("V123"));
+    }
+
+    /// Without its key store the service keeps a password for the run only:
+    /// "remember" is refused, nothing reaches the database, and a password
+    /// persisted earlier is not read back.
+    #[test]
+    fn a_memory_only_store_persists_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("metadata.db");
+        PasswordStore::new(db.clone())
+            .remember("OLD", "earlier".into(), true)
+            .unwrap();
+
+        let store = PasswordStore::memory_only(db.clone());
+        assert!(store.remember("V1", "secret".into(), true).is_err());
+        store.remember("V2", "for-now".into(), false).unwrap();
+        assert_eq!(
+            store.resolve("V2").map(|z| z.to_string()),
+            Some("for-now".into())
+        );
+        assert!(!store.has("OLD"));
+        store.forget("V2").unwrap();
+        assert!(!store.has("V2"));
+        assert!(!PasswordStore::new(db.clone()).has("V1"));
+        assert!(PasswordStore::new(db).has("OLD"));
     }
 
     /// The Linux service: legacy passwords sealed by `secret.key` beside the
