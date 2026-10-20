@@ -117,28 +117,61 @@ impl Drop for UdevHold {
             return;
         }
         if self.reannounce {
-            udevadm(&["control", "--reload"]);
-            for name in &self.names {
-                // The disk and every partition on it, so udisks and the
-                // volume managers see them as they now are.
-                udevadm(&[
-                    "trigger",
-                    "--action=change",
-                    &format!("--sysname-match={name}*"),
-                ]);
-            }
+            let names: Vec<&str> = self.names.iter().map(String::as_str).collect();
+            reannounce(&names, &mut udevadm);
         }
         debug!(rules = %self.path.display(), "udev hold released");
     }
 }
 
-/// Remove holds left by a process that no longer exists (a killed service).
+/// After holds are removed: reload the rules and announce every held device
+/// again — the disk and every partition on it — so udisks and the volume
+/// managers see them as they now are.
+fn reannounce(names: &[&str], run: &mut dyn FnMut(&[&str])) {
+    run(&["control", "--reload"]);
+    for name in names {
+        run(&[
+            "trigger",
+            "--action=change",
+            &format!("--sysname-match={name}"),
+            &format!("--sysname-match={}", partition_pattern(name)),
+        ]);
+    }
+}
+
+/// The kernel names a rules file written by [`rules_text`] holds: the exact
+/// `KERNEL==` matches, not the partition patterns derived from them.
+fn held_names(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = text
+        .lines()
+        .filter_map(|line| {
+            let rest = &line[line.find("KERNEL==\"")? + "KERNEL==\"".len()..];
+            let name = &rest[..rest.find('"')?];
+            let plain = !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'));
+            plain.then(|| name.to_string())
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Remove holds left by a process that no longer exists (a killed service),
+/// and announce the devices they held again, as releasing a hold does.
 /// Returns the files removed.
 pub fn sweep_stale_holds(dir: &Path) -> Vec<PathBuf> {
+    sweep_with(dir, &mut udevadm)
+}
+
+fn sweep_with(dir: &Path, run: &mut dyn FnMut(&[&str])) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
     let mut removed = Vec::new();
+    let mut names: Vec<String> = Vec::new();
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
         let Some(rest) = name
@@ -149,13 +182,24 @@ pub fn sweep_stale_holds(dir: &Path) -> Vec<PathBuf> {
         };
         let pid: Option<u32> = rest.rsplit('-').next().and_then(|p| p.parse().ok());
         let alive = pid.is_some_and(|p| Path::new(&format!("/proc/{p}")).exists());
-        if pid != Some(std::process::id()) && !alive && std::fs::remove_file(e.path()).is_ok() {
+        if pid == Some(std::process::id()) || alive {
+            continue;
+        }
+        // Read before removing: the file is the only record of what it held.
+        let held = std::fs::read_to_string(e.path())
+            .map(|t| held_names(&t))
+            .unwrap_or_default();
+        if std::fs::remove_file(e.path()).is_ok() {
             removed.push(e.path());
+            names.extend(held);
         }
     }
     if !removed.is_empty() {
-        udevadm(&["control", "--reload"]);
-        info!(files = ?removed, "stale udev holds removed");
+        names.sort();
+        names.dedup();
+        let held: Vec<&str> = names.iter().map(String::as_str).collect();
+        reannounce(&held, run);
+        info!(files = ?removed, devices = ?names, "stale udev holds removed");
     }
     removed
 }
@@ -211,6 +255,55 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_hold_is_swept_and_its_devices_announced_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let dead = dir
+            .path()
+            .join(format!("{PREFIX}sdc-nvme0n1-999999999.rules"));
+        std::fs::write(&dead, rules_text(&["sdc", "nvme0n1"])).unwrap();
+        let mut calls: Vec<Vec<String>> = Vec::new();
+        let removed = sweep_with(dir.path(), &mut |args| {
+            calls.push(args.iter().map(|a| a.to_string()).collect())
+        });
+        assert_eq!(removed, vec![dead.clone()]);
+        assert!(!dead.exists());
+        assert_eq!(calls[0], ["control", "--reload"]);
+        assert_eq!(
+            calls[1..],
+            [
+                vec![
+                    "trigger",
+                    "--action=change",
+                    "--sysname-match=nvme0n1",
+                    "--sysname-match=nvme0n1p[0-9]*"
+                ],
+                vec![
+                    "trigger",
+                    "--action=change",
+                    "--sysname-match=sdc",
+                    "--sysname-match=sdc[0-9]*"
+                ],
+            ]
+        );
+
+        // Nothing stale: nothing run.
+        calls.clear();
+        assert!(sweep_with(dir.path(), &mut |args| calls
+            .push(args.iter().map(|a| a.to_string()).collect()))
+        .is_empty());
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn held_names_are_the_exact_matches_of_a_rules_file() {
+        assert_eq!(
+            held_names(&rules_text(&["dm-0", "sdb3", "loop0"])),
+            vec!["dm-0", "loop0", "sdb3"]
+        );
+        assert!(held_names("# nothing\nKERNEL==\"sd*\"\n").is_empty());
+    }
+
+    #[test]
     fn only_holds_of_dead_processes_are_swept() {
         let dir = tempfile::tempdir().unwrap();
         // A pid far above any pid_max names no process.
@@ -219,7 +312,7 @@ mod tests {
         let ours = UdevHold::install_in(dir.path(), &["sdd"], false).unwrap();
         let foreign = dir.path().join("70-someone-else.rules");
         std::fs::write(&foreign, "x").unwrap();
-        let removed = sweep_stale_holds(dir.path());
+        let removed = sweep_with(dir.path(), &mut |_| {});
         assert_eq!(removed, vec![dead.clone()]);
         assert!(!dead.exists());
         assert!(ours.path().exists());

@@ -140,13 +140,14 @@ impl BackupServiceImpl {
                 let was = plan.target_disk_id.clone().unwrap_or_default();
                 tracing::warn!(
                     disk = plan.target_disk,
+                    device = ?plan.target_device,
                     expected = ?was,
                     found = ?now,
                     "the target disk is not the one the plan was made for"
                 );
                 return Ok(vec![tr!(
                     "grpc_server.target_disk_changed",
-                    disk = plan.target_disk,
+                    disk = plan_disk_name(plan),
                     was_serial = was.serial,
                     was_size = was.size_bytes,
                     now_serial = now.serial,
@@ -798,6 +799,19 @@ fn correct_disk_size(plan: &mut own_backup_common::restore_plan::RestorePlan) {
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = plan;
+    }
+}
+
+/// How a message names a plan's target disk: by number on Windows, by its
+/// device on Linux, where `target_disk` carries no meaning (always 0).
+fn plan_disk_name(plan: &own_backup_common::restore_plan::RestorePlan) -> String {
+    if cfg!(target_os = "linux") {
+        plan.target_device
+            .clone()
+            .filter(|d| !d.trim().is_empty())
+            .unwrap_or_else(|| plan.target_disk.to_string())
+    } else {
+        plan.target_disk.to_string()
     }
 }
 
@@ -2966,7 +2980,7 @@ impl BackupService for BackupServiceImpl {
         // that arrives late cannot hit the run that started after it (D18).
         let slot = self.reserve_with_id(
             &tr!("grpc_server.busy_restore"),
-            &tr!("grpc_server.busy_which_disk", disk = plan.target_disk),
+            &tr!("grpc_server.busy_which_disk", disk = plan_disk_name(&plan)),
             plan.id,
         )?;
         let cancel = slot.cancel();
@@ -3415,6 +3429,20 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_plans_disk_is_named_by_its_device_on_linux() {
+        let mut plan =
+            own_backup_common::restore_plan::RestorePlan::new(3, "/x.qcow2".into(), Vec::new());
+        assert_eq!(plan_disk_name(&plan), "3");
+        plan.target_device = Some("/dev/disk/by-id/usb-Disk".into());
+        let want = if cfg!(target_os = "linux") {
+            "/dev/disk/by-id/usb-Disk"
+        } else {
+            "3"
+        };
+        assert_eq!(plan_disk_name(&plan), want);
+    }
 
     fn make_service(dir: &std::path::Path) -> BackupServiceImpl {
         let (_, shutdown) = crate::shutdown::create_shutdown_channel();
