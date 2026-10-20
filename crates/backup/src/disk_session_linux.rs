@@ -384,9 +384,11 @@ impl<D: DiskIo> LinuxDiskSession<D> {
             spec.disk_size_bytes = self.io().length();
         }
 
-        let mut lba0 = vec![0u8; device_sector.max(512) as usize];
-        self.io().read_at(0, &mut lba0)?;
-        let (ops, boot_code) = partition_table_write_ops_keeping_boot_code(&spec, &lba0)?;
+        let sector_len = device_sector.max(512) as usize;
+        let mut head = vec![0u8; 2 * sector_len];
+        self.io().read_at(0, &mut head)?;
+        let (lba0, lba1) = head.split_at(sector_len);
+        let (ops, boot_code) = partition_table_write_ops_keeping_boot_code(&spec, lba0, lba1)?;
         info!(disk = %path, ?boot_code, "BIOS boot code in LBA 0");
 
         let total: usize = ops.iter().map(|o| o.bytes.len()).sum();
