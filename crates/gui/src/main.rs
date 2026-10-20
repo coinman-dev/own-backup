@@ -473,6 +473,12 @@ fn main() {
     // How WebKitGTK draws, while this is still one thread (`set_var`).
     #[cfg(target_os = "linux")]
     let render = linux_display::prepare();
+    // The desktop finds the window's name and icon by the .desktop file named
+    // like its app id (Wayland) or class (X11) — both the program name, which
+    // would be the binary's, `own-backup-gui`, not the package's
+    // `own-backup.desktop` (KDE showed a generic icon, 20.10).
+    #[cfg(target_os = "linux")]
+    glib::set_prgname(Some("own-backup"));
 
     // Only one GUI at a time.
     #[cfg(target_os = "windows")]

@@ -11,4 +11,4 @@ Terminal=false
 Categories=Utility;Archiving;
 Keywords=backup;restore;image;disk;partition;
 Keywords[ru]=резервная копия;восстановление;образ;диск;раздел;
-StartupWMClass=own-backup-gui
+StartupWMClass=own-backup
