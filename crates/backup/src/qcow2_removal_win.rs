@@ -150,6 +150,8 @@ pub fn exclude_inside_qcow2(
     {
         let mut ov = overlay.lock().unwrap();
         let mut merge = Qcow2InPlaceMerge::open(image_path, zstd_level)?;
+        // The clusters being replaced hold what was removed.
+        merge.erase_replaced_on_commit();
         for &c in &touched {
             let data = ov.read_cluster(c)?;
             merge.write_cluster(c, &data)?;
@@ -310,6 +312,8 @@ pub fn remove_excluded_from_qcow2(
     {
         let mut ov = overlay.lock().unwrap();
         let mut merge = Qcow2InPlaceMerge::open(image_path, zstd_level)?;
+        // The clusters being replaced hold what was removed.
+        merge.erase_replaced_on_commit();
         for &c in &touched {
             let data = ov.read_cluster(c)?;
             merge.write_cluster(c, &data)?;
@@ -421,6 +425,8 @@ pub fn remove_excluded_from_disk_image_qcow2(
     {
         let mut ov = overlay.lock().unwrap();
         let mut merge = Qcow2InPlaceMerge::open(image_path, zstd_level)?;
+        // The clusters being replaced hold what was removed.
+        merge.erase_replaced_on_commit();
         for &c in &touched {
             let data = ov.read_cluster(c)?;
             merge.write_cluster(c, &data)?;

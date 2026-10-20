@@ -8,7 +8,8 @@
 //! the touched clusters go back by the container's own rules:
 //!
 //! - **qcow2** — [`Qcow2InPlaceMerge`]: new clusters appended, L2 entries
-//!   repointed, the header last. A child of a chain gets whole clusters read
+//!   repointed, the header last, then the old bytes of the replaced clusters
+//!   zeroed. A child of a chain gets whole clusters read
 //!   through the chain, so the parent's bytes in a cluster the driver touched
 //!   only in part are seeded, never lost;
 //! - **OBK** — [`crate::seal::obk::apply_changed_with`]: new records, the old
@@ -17,6 +18,11 @@
 //!   copy;
 //! - **VHDX** — [`VhdxWriter::open_existing`]: blocks written in place, a new
 //!   block in a child seeded from its parent (the writer's own rule).
+//!
+//! What the change replaced does not survive in the file: qcow2 zeroes the
+//! old host bytes after its commit, OBK zeroes the old records (each to the
+//! exact length of its own framing), and VHDX overwrites a present block
+//! where it is.
 //!
 //! Same contract as the Windows passes: a failure before the fold leaves the
 //! image exactly as checksummed and is answered `Ok(None)`; a failure during
@@ -316,6 +322,8 @@ pub(crate) fn change_through_scratch(
         }
         Container::Qcow2 { zstd_level } => {
             let mut merge = Qcow2InPlaceMerge::open(image.path, Some(*zstd_level))?;
+            // The clusters being replaced hold what was removed.
+            merge.erase_replaced_on_commit();
             for &c in &touched {
                 merge.write_cluster(c, &read_cluster(c)?)?;
             }
