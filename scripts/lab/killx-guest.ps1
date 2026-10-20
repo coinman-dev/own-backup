@@ -426,11 +426,12 @@ function StallCancel([string]$id) {
 }
 
 # --- The history cannot be written (format 'history') -----------------------
-function Ask([string]$name, [string]$action) {
+function Ask([string]$name, [string]$action, [switch]$Stopped) {
     [IO.File]::WriteAllText("$work\kill.request", (ConvertTo-Json -Compress @{ name = $name; action = $action }))
     for ($i = 0; $i -lt 1200 -and -not (Test-Path "$work\$name.json"); $i++) { Start-Sleep -Milliseconds 500 }
     Check (Test-Path "$work\$name.json") "the SYSTEM half did $action"
-    WaitService
+    # -Stopped: the request was to stop the service.
+    if (-not $Stopped) { WaitService }
 }
 # Mode 'media': a hand-chosen Winre.wim judged by the service (InspectBaseImage),
 # a build refused for a file that is no recovery image, then the medium built
@@ -681,6 +682,143 @@ function DeleteJob {
     shutdown.exe /s /t 5 | Out-Null
 }
 
+# Mode 'fatx': a FAT32 volume copied with *.tmp excluded. The files are gone
+# from the copy, not zeroed; the freed clusters are counted free in FSInfo
+# (Windows takes the free space of a FAT32 volume from there) and chkdsk finds
+# nothing to fix.
+function FatX {
+    Ask 'fvol' 'fvol'
+    $src = Get-Content "$work\fvol.json" -Raw | ConvertFrom-Json
+    Check ($src.filesystem -eq 'FAT32') "the source is FAT32 ($($src.filesystem), cluster $($src.cluster))"
+    $freed = 0; foreach ($len in @($src.tmp)) { $freed += [math]::Ceiling($len / $src.cluster) * $src.cluster }
+    $job = Rpc 'create' @{ op = 'create'; encrypted = $false; job = @{ name = $jobName; source = 'F:'; sources = @('F:'); dest_folder = $store
+        image_format = 'vhdx'; schedule = @{ kind = 'none' }
+        scheme = @{ method = 'incremental'; only_incremental = $false; full_every_n = 1; keep_chains = 1 }
+        exclusions = @{ enabled = $true; patterns = @('*.tmp'); patterns_linux = @() }
+        advanced = @{ validate_after = $false; retry_attempts = 0; after_backup = 'none' } } }
+    $run = Rpc 'run1' @{ op = 'run'; id = $job.id; timeout_secs = 1800 }
+    Report 'run1' $run
+    Check ($run.status -eq 'success') "the copy of F: succeeded ($($run.error))"
+    $null = Rpc 'mount1' @{ op = 'mount'; image = $run.image_path }
+    try {
+        $root = $null
+        for ($i = 0; $i -lt 60 -and -not $root; $i++) {
+            $root = Get-Volume | Where-Object { $_.DriveLetter -and $_.DriveLetter -notin @('C', 'F', 'P', 'S') } |
+                ForEach-Object { "$($_.DriveLetter):\" } | Where-Object { Test-Path (Join-Path $_ 'fat-marker.txt') } | Select-Object -First 1
+            if (-not $root) { Start-Sleep -Seconds 1 }
+        }
+        Check ([bool]$root) "the copy is mounted at $root"
+        $left = @(Get-ChildItem $root -Recurse -File -Filter '*.tmp' | ForEach-Object { $_.FullName })
+        Check ($left.Count -eq 0) "no excluded file is left in the copy ($($left -join ', '))"
+        foreach ($p in $src.kept.PSObject.Properties) {
+            Check ((Get-FileHash -LiteralPath (Join-Path $root $p.Name)).Hash -eq $p.Value) "kept $($p.Name) is intact"
+        }
+        $vol = Get-Volume -DriveLetter $root.Substring(0, 1)
+        $want = $src.free + $freed
+        Say "KILLX-NOTE free source=$($src.free) freed=$freed copy=$($vol.SizeRemaining) want=$want"
+        Check ($vol.SizeRemaining -eq $want) "the copy counts the freed clusters free (FSInfo): $($vol.SizeRemaining) = $want"
+        $chk = [string[]]@(& chkdsk.exe $root.TrimEnd('\') 2>&1 | ForEach-Object { "$_" })
+        $code = $LASTEXITCODE
+        Report 'chkdsk' @{ exit = $code; output = $chk }
+        Check ($code -eq 0) "chkdsk of the copy finds nothing to fix (exit $code)"
+    } finally {
+        try { $null = Rpc 'unmount1' @{ op = 'unmount'; image = $run.image_path } } catch { Say "KILLX-NOTE unmount: $($_.Exception.Message)" }
+    }
+    Ask 'fvol-detach' 'fvol-detach'
+    [IO.File]::WriteAllText("$work\kills.done", 'done')
+    [IO.File]::WriteAllText("$work\passed.txt", 'pass')
+    Report 'result' @{ pass = $true; image = $run.image_path; freed = $freed }
+    Say "KILLX-PASS format=$format"
+    shutdown.exe /s /t 5 | Out-Null
+}
+
+# Mode 'settings6a' (PLAN 6a): config.toml is the service's. A file a user
+# owned is taken over at start and its mirror folder dropped unless it is
+# theirs; the user can no longer write the file; through the service a folder
+# of SYSTEM's or a path through a junction is refused, one's own is used; and
+# a folder swapped for a junction afterwards gets nothing.
+function SettingsRefused([string]$name, $patch) {
+    $null = Rpc $name @{ op = 'save-settings'; expect_error = $true; patch = $patch }
+    return (Get-Content "$work\$name.request.result.json" -Raw -Encoding UTF8 | ConvertFrom-Json).error
+}
+function Settings6a {
+    $planted = 'C:\Windows\Temp\obk-planted'
+    $cfg = 'C:\ProgramData\OwnBackup\config.toml'
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $elevated = ([Security.Principal.WindowsPrincipal]$me).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    Say "KILLX-NOTE user=$($me.User.Value) elevated=$elevated"
+    Ask 'plant' 'plant'
+    $p = Get-Content "$work\plant.json" -Raw | ConvertFrom-Json
+    Check ($p.owner_before -eq $me.User.Value) "the planted config.toml was the user's ($($p.owner_before))"
+    # SYSTEM's files are owned by the Administrators group by default.
+    Check ($p.owner_after -in @('S-1-5-18', 'S-1-5-32-544')) "the service took config.toml over at start ($($p.owner_after))"
+    $s = Rpc 'get1' @{ op = 'get-settings' }
+    Check ($s.log_mirror_dir -eq '') "the planted mirror folder was switched off ('$($s.log_mirror_dir)')"
+    Check ($s.log_level -eq 'debug') "the rest of the planted file was kept ($($s.log_level))"
+    Check (-not (Test-Path "$planted\own-backup-service.log")) 'nothing was written into the planted folder'
+    $denied = $false
+    try { [IO.File]::AppendAllText($cfg, "`r`n# x") } catch { $denied = $true }
+    Check $denied 'the user can no longer write config.toml'
+
+    $why = SettingsRefused 'sys-dir' @{ log_mirror_dir = $planted }
+    if ($elevated) { Check (-not $why) "an elevated administrator may name any folder ($why)" }
+    else { Check ([bool]$why) "a folder of SYSTEM's is refused: $why" }
+    $mine = "$env:USERPROFILE\obk-mirror"
+    # What an earlier attempt left: the junction goes as a link only
+    # (Remove-Item -Recurse on one empties its target in PowerShell 5.1).
+    foreach ($d in @($mine, "$mine-real")) {
+        $item = Get-Item -LiteralPath $d -Force -ErrorAction SilentlyContinue
+        if (-not $item) { continue }
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { [IO.Directory]::Delete($d, $false) } else { Remove-Item -LiteralPath $d -Recurse -Force }
+    }
+    New-Item -ItemType Directory -Force $mine | Out-Null
+    # Probe: does a stop leave the process behind after a log level change
+    # alone (no mirror)?
+    $null = Rpc 'level' @{ op = 'save-settings'; patch = @{ log_level = 'info' } }
+    Start-Sleep -Seconds 5
+    Ask 'svc-stop-level' 'svc-stop' -Stopped
+    $probe = Get-Content "$work\svc-stop-level.json" -Raw | ConvertFrom-Json
+    Say "KILLX-NOTE after a level change: status=$($probe.status_after_stop) alive=$(@($probe.alive_after_stop) -join ',') exit=$($probe.exit_code)"
+    if (@($probe.alive_after_stop).Count) { Get-Process own-backup-service -ErrorAction SilentlyContinue | Wait-Process -Timeout 120 -ErrorAction SilentlyContinue }
+    Ask 'svc-start-level' 'svc-start'
+    $s = Rpc 'save-mine' @{ op = 'save-settings'; patch = @{ log_mirror_dir = $mine } }
+    Check ($s.log_mirror_dir -eq $mine) "a folder of one's own is accepted ($($s.log_mirror_dir))"
+    $log = "$mine\own-backup-service.log"
+    for ($i = 0; $i -lt 30 -and -not (Test-Path $log); $i++) { $null = Rpc 'poke' @{ op = 'status' } -Quiet; Start-Sleep -Seconds 1 }
+    Check (Test-Path $log) 'the service writes its log mirror into it'
+
+    # The folder swapped for a junction while the service is down: at its
+    # next start the path leads to SYSTEM's folder, and nothing is written.
+    Ask 'svc-stop' 'svc-stop' -Stopped
+    $stop = Get-Content "$work\svc-stop.json" -Raw | ConvertFrom-Json
+    Report 'svc-stop-state' $stop
+    Say "KILLX-NOTE with the mirror on: status=$($stop.status_after_stop) alive=$(@($stop.alive_after_stop) -join ',') exit=$($stop.exit_code)"
+    if (@($stop.alive_after_stop).Count) { Get-Process own-backup-service -ErrorAction SilentlyContinue | Wait-Process -Timeout 120 -ErrorAction SilentlyContinue }
+    $late = @(Get-Process own-backup-service -ErrorAction SilentlyContinue).Count
+    Check (@($probe.alive_after_stop).Count -eq 0 -and @($stop.alive_after_stop).Count -eq 0) "the service process ends with its stop (level probe alive=$(@($probe.alive_after_stop).Count), mirror alive=$(@($stop.alive_after_stop).Count), still alive 2 min later=$late)"
+    Rename-Item $mine "$mine-real"
+    # mklink: New-Item -ItemType Junction (PowerShell 5.1) wants to read the
+    # target, which is SYSTEM's; a junction itself needs no such right.
+    & cmd.exe /c mklink /J "$mine" "$planted" | Out-Null
+    Check ((Get-Item -LiteralPath $mine -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) "the folder is now a junction to $planted"
+    Ask 'svc-start' 'svc-start'
+    for ($i = 0; $i -lt 8; $i++) { $null = Rpc 'poke2' @{ op = 'status' } -Quiet; Start-Sleep -Seconds 1 }
+    $leaked = @(Get-ChildItem $planted -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+    Check ($leaked.Count -eq 0) "through a junction the service writes nothing ($($leaked -join ', '))"
+    $why = SettingsRefused 'junction' @{ log_mirror_dir = $mine }
+    Check ([bool]$why) "a path through a junction is refused: $why"
+    $s = Rpc 'off' @{ op = 'save-settings'; patch = @{ log_mirror_dir = '' } }
+    Check ($s.log_mirror_dir -eq '') 'the mirror is switched off again'
+    [IO.Directory]::Delete($mine, $false)
+    Rename-Item "$mine-real" $mine
+
+    [IO.File]::WriteAllText("$work\kills.done", 'done')
+    [IO.File]::WriteAllText("$work\passed.txt", 'pass')
+    Report 'result' @{ pass = $true; elevated = $elevated }
+    Say "KILLX-PASS format=$format"
+    shutdown.exe /s /t 5 | Out-Null
+}
+
 # Mode 'aliases' (CHECKS 9): one source named by its letter, its volume GUID
 # path and a mount point continues one chain; a destination on that volume is
 # refused whichever name either side uses, one on another volume is not.
@@ -813,6 +951,77 @@ try {
         return
     }
     if ($format -eq 'refsprobe') { return }
+
+    # 'vhdxlab' (CHECKS 12): VHDX chains made on Linux, as Windows sees them,
+    # plus a chain Windows wrote (raw and through NTFS with TRIM) folded by
+    # our code. vhdx_lab.exe prints 'VL PASS/FAIL <step>'.
+    if ($format -eq 'vhdxlab' -and -not $User) {
+        $run = 'C:\vl-run'
+        if (Test-Path $run) { Remove-Item $run -Recurse -Force }
+        Copy-Item "$lab\vl\sets" $run -Recurse
+        Get-ChildItem $run -Recurse -File | ForEach-Object { $_.IsReadOnly = $false }
+        $tool = "$lab\vl\vhdx_lab.exe"
+        $fails = 0
+        function VlRun([string[]]$argv) {
+            $lines = [string[]]@(& $tool @argv 2>&1 | ForEach-Object { "$_" })
+            foreach ($l in $lines) { Say "VL> $l"; if ($l -like 'VL FAIL*') { $script:fails++ } }
+            if ($LASTEXITCODE -ne 0 -and -not ($lines -like 'VL FAIL*')) { $script:fails++; Say "VL> exit $LASTEXITCODE" }
+            return $lines
+        }
+        $null = VlRun @('check', $run)
+
+        # A chain Windows writes through NTFS, with files deleted and trimmed:
+        # Windows read vs our read, before and after our fold and repoint.
+        $y = "$run\y"; New-Item -ItemType Directory -Force $y | Out-Null
+        function Letter([string]$file) {
+            $part = Get-DiskImage -ImagePath $file | Get-Disk | Get-Partition | Where-Object { $_.Type -eq 'Basic' } | Select-Object -First 1
+            if (-not $part.DriveLetter) { $part | Add-PartitionAccessPath -AssignDriveLetter; $part = Get-DiskImage -ImagePath $file | Get-Disk | Get-Partition | Where-Object { $_.Type -eq 'Basic' } | Select-Object -First 1 }
+            return "$($part.DriveLetter):"
+        }
+        function Fill([string]$path, [int]$mb, [int]$seedValue) {
+            $rng = New-Object Random $seedValue; $buf = New-Object byte[] (1MB)
+            $fs = [IO.File]::Create($path)
+            try { for ($i = 0; $i -lt $mb; $i++) { $rng.NextBytes($buf); $fs.Write($buf, 0, $buf.Length) }; $fs.Flush($true) } finally { $fs.Dispose() }
+        }
+        try {
+            "create vdisk file=$y\base.vhdx maximum=64 type=expandable" | Set-Content "$work\vl-dp1.txt" -Encoding ASCII
+            & diskpart.exe /s "$work\vl-dp1.txt" | Out-Null
+            Mount-DiskImage -ImagePath "$y\base.vhdx" | Out-Null
+            $disk = Get-DiskImage -ImagePath "$y\base.vhdx" | Get-Disk
+            Initialize-Disk -Number $disk.Number -PartitionStyle GPT
+            New-Partition -DiskNumber $disk.Number -UseMaximumSize -AssignDriveLetter | Format-Volume -FileSystem NTFS -Confirm:$false | Out-Null
+            $d = Letter "$y\base.vhdx"
+            Fill "$d\a.bin" 16 1; Fill "$d\b.bin" 16 2
+            Dismount-DiskImage -ImagePath "$y\base.vhdx" | Out-Null
+            "create vdisk file=$y\c1.vhdx parent=$y\base.vhdx" | Set-Content "$work\vl-dp2.txt" -Encoding ASCII
+            & diskpart.exe /s "$work\vl-dp2.txt" | Out-Null
+            Mount-DiskImage -ImagePath "$y\c1.vhdx" | Out-Null
+            $d = Letter "$y\c1.vhdx"
+            Remove-Item "$d\a.bin"; Optimize-Volume -DriveLetter $d.TrimEnd(':') -ReTrim
+            Fill "$d\c.bin" 4 3
+            Dismount-DiskImage -ImagePath "$y\c1.vhdx" | Out-Null
+            "create vdisk file=$y\c2.vhdx parent=$y\c1.vhdx" | Set-Content "$work\vl-dp3.txt" -Encoding ASCII
+            & diskpart.exe /s "$work\vl-dp3.txt" | Out-Null
+            Mount-DiskImage -ImagePath "$y\c2.vhdx" | Out-Null
+            $d = Letter "$y\c2.vhdx"
+            Remove-Item "$d\b.bin"; Optimize-Volume -DriveLetter $d.TrimEnd(':') -ReTrim
+            Dismount-DiskImage -ImagePath "$y\c2.vhdx" | Out-Null
+            Say 'VL> VL PASS y-make'
+        } catch { $fails++; Say "VL> VL FAIL y-make: $($_.Exception.Message) line=$($_.InvocationInfo.ScriptLineNumber)" }
+        $before = VlRun @('cmp', "$y\c2.vhdx")
+        $null = VlRun @('cmp', "$y\c1.vhdx")
+        $null = VlRun @('fold', "$y\base.vhdx", "$y\c1.vhdx")
+        $null = VlRun @('repoint', "$y\c2.vhdx", "$y\base.vhdx")
+        $after = VlRun @('cmp', "$y\c2.vhdx")
+        $h1 = (@($before | Where-Object { $_ -like 'VL PASS cmp*' }) -join '').Split(' ')[-1]
+        $h2 = (@($after | Where-Object { $_ -like 'VL PASS cmp*' }) -join '').Split(' ')[-1]
+        if ($h1 -and $h1 -eq $h2) { Say "VL> VL PASS y-fold-same $h1" } else { $fails++; Say "VL> VL FAIL y-fold-same before=$h1 after=$h2" }
+
+        if ($fails -eq 0) { Say "KILLX-PASS format=$format" } else { Say "KILLX-FAIL vhdxlab fails=$fails" }
+        shutdown.exe /s /t 5 | Out-Null
+        return
+    }
+    if ($format -eq 'vhdxlab') { return }
 
     # 'failrestart': the service is set to restart after a crash; a killed
     # service comes back by itself, without anyone starting it.
@@ -1122,6 +1331,95 @@ if ($media) {
                 Step "$($request.action) done ($name)"
                 continue
             }
+            if ($request.action -in @('plant', 'svc-stop', 'svc-start')) {
+                # Mode 'settings6a': a config.toml of the user's, written
+                # while the service is down (as an older window left it).
+                $name = $request.name
+                $cfg = 'C:\ProgramData\OwnBackup\config.toml'
+                $out = [ordered]@{ action = $request.action }
+                if ($request.action -in @('plant', 'svc-stop')) {
+                    Stop-Service OwnBackup -Force
+                    for ($i = 0; $i -lt 60 -and (Get-Service OwnBackup).Status -ne 'Stopped'; $i++) { Start-Sleep -Seconds 1 }
+                    Get-Process own-backup-service -ErrorAction SilentlyContinue | Wait-Process -Timeout 30 -ErrorAction SilentlyContinue
+                }
+                if ($request.action -eq 'plant') {
+                    $planted = 'C:\Windows\Temp\obk-planted'
+                    New-Item -ItemType Directory -Force $planted | Out-Null
+                    Get-ChildItem $planted -Force | Remove-Item -Recurse -Force
+                    Remove-Item $cfg, "$cfg.lock" -Force -ErrorAction SilentlyContinue
+                    $text = "log_level = `"debug`"`r`nlog_mirror_dir = '$planted'`r`n"
+                    [IO.File]::WriteAllText($cfg, $text, [Text.UTF8Encoding]::new($false))
+                    # Not $user: PowerShell names are caseless, and -User is this script's switch.
+                    $console = (Get-CimInstance Win32_ComputerSystem).UserName
+                    & icacls.exe $cfg /setowner $console | Out-Null
+                    & icacls.exe $cfg /grant "${console}:F" | Out-Null
+                    $out.owner_before = (Get-Acl $cfg).GetOwner([Security.Principal.SecurityIdentifier]).Value
+                }
+                $out.alive_after_stop = @(Get-Process own-backup-service -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+                $out.status_after_stop = "$((Get-Service OwnBackup).Status)"
+                $out.exit_code = (Get-CimInstance Win32_Service -Filter "Name='OwnBackup'").ExitCode
+                if ($request.action -in @('plant', 'svc-start')) {
+                    try {
+                        Start-Service OwnBackup
+                        WaitService
+                    } catch {
+                        $out.start_error = "$($_.Exception.Message)"
+                        $since = (Get-Date).AddMinutes(-15)
+                        $out.events = [string[]]@(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager'; StartTime = $since } -ErrorAction SilentlyContinue | Select-Object -First 10 | ForEach-Object { "$($_.Id) $($_.Message)" })
+                        $out.crashes = [string[]]@(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 1000, 1001, 1026; StartTime = $since } -ErrorAction SilentlyContinue | Select-Object -First 5 | ForEach-Object { "$($_.Id) $($_.Message)" })
+                        $out.alive = @(Get-Process own-backup-service -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+                        Report "$name-diag" $out
+                        throw
+                    }
+                }
+                if ($request.action -eq 'plant') {
+                    $out.owner_after = (Get-Acl $cfg).GetOwner([Security.Principal.SecurityIdentifier]).Value
+                    $out.text = [IO.File]::ReadAllText($cfg)
+                }
+                Remove-Item "$work\kill.request" -Force
+                JsonFile "$work\$name.json" $out
+                Step "$($request.action) done ($name)"
+                continue
+            }
+            if ($request.action -in @('fvol', 'fvol-detach')) {
+                # Mode 'fatx': F: is FAT32 in a VHDX on C:, with *.tmp files.
+                $name = $request.name
+                $vhd = 'C:\Lab\f-src.vhdx'
+                $dp = "$work\f-diskpart.txt"
+                $out = [ordered]@{ action = $request.action }
+                if (Test-Path $vhd) {
+                    "select vdisk file=$vhd`r`ndetach vdisk" | Set-Content $dp -Encoding ASCII
+                    & diskpart.exe /s $dp | Out-Null
+                    Remove-Item $vhd -Force
+                }
+                if ($request.action -eq 'fvol') {
+                    "create vdisk file=$vhd maximum=600 type=expandable`r`nselect vdisk file=$vhd`r`nattach vdisk`r`ncreate partition primary`r`nformat fs=fat32 quick label=FATSRC`r`nassign letter=F" | Set-Content $dp -Encoding ASCII
+                    & diskpart.exe /s $dp | Out-Null
+                    [IO.File]::WriteAllText('F:\fat-marker.txt', 'Own Backup FAT32 exclusions acceptance source')
+                    New-Item -ItemType Directory -Force 'F:\keep', 'F:\cache' | Out-Null
+                    $rng = New-Object Random 20261020
+                    $kept = [ordered]@{}
+                    for ($i = 1; $i -le 12; $i++) {
+                        $bytes = New-Object byte[] ($rng.Next(16KB, 3MB)); $rng.NextBytes($bytes)
+                        $rel = 'keep\k{0:D2}.bin' -f $i
+                        [IO.File]::WriteAllBytes("F:\$rel", $bytes)
+                        $kept[$rel] = (Get-FileHash -LiteralPath "F:\$rel").Hash
+                    }
+                    for ($i = 1; $i -le 10; $i++) {
+                        $rel = if ($i -le 7) { 'cache\c{0:D2}.tmp' -f $i } else { 'x{0:D2}.tmp' -f $i }
+                        $bytes = New-Object byte[] ($rng.Next(1KB, 4MB)); $rng.NextBytes($bytes)
+                        [IO.File]::WriteAllBytes("F:\$rel", $bytes)
+                    }
+                    $vol = Get-Volume -DriveLetter F
+                    $out.filesystem = "$($vol.FileSystem)"; $out.cluster = $vol.AllocationUnitSize; $out.free = $vol.SizeRemaining
+                    $out.tmp = @(Get-ChildItem 'F:\' -Recurse -File -Filter '*.tmp' | ForEach-Object { $_.Length })
+                    $out.kept = $kept
+                }
+                Remove-Item "$work\kill.request" -Force
+                JsonFile "$work\$name.json" $out
+                Step "$($request.action) done ($name)"
+                continue
+            }
             if ($request.action -in @('refs-prepare', 'refs-unlock', 'refs-detach')) {
                 # Mode 'refsbl': R: is ReFS in a VHDX on C:, under BitLocker.
                 $name = $request.name
@@ -1327,6 +1625,8 @@ if ($media) {
         if ($format -like 'media*') { MediaBuild; return }
         if ($format -in @('checks9', 'nospace')) { Checks9; return }
         if ($format -eq 'aliases') { Aliases; return }
+        if ($format -eq 'fatx') { FatX; return }
+        if ($format -eq 'settings6a') { Settings6a; return }
         if ($format -eq 'refsbl') { RefsBitLocker; return }
         if ($format -eq 'deletejob') { DeleteJob; return }
         $state = if (Test-Path "$work\job.json") { Get-Content "$work\job.json" -Raw | ConvertFrom-Json } else { $null }

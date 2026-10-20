@@ -55,7 +55,12 @@ def answer_iso() -> Path:
     (lab / 'sys-marker.txt').write_text('Own Backup kill-during-exclusions acceptance media\n')
     # vhdx | qcow2 | obk: which container the guest's job writes this time.
     fmt = os.environ.get('OBK_FORMAT', 'vhdx')
-    assert fmt in ('vhdx', 'qcow2', 'obk', 'consol', 'consol-vhdx', 'consol-qcow2', 'flush-vhdx', 'flush-obk', 'probe-io', 'stall-vhdx', 'stall-obk', 'history', 'media', 'media-sxs', 'checks9', 'nospace', 'aliases', 'view', 'refsprobe', 'refsbl', 'deletejob', 'bootlog', 'failrestart'), fmt
+    assert fmt in ('vhdx', 'qcow2', 'obk', 'consol', 'consol-vhdx', 'consol-qcow2', 'flush-vhdx', 'flush-obk', 'probe-io', 'stall-vhdx', 'stall-obk', 'history', 'media', 'media-sxs', 'checks9', 'nospace', 'aliases', 'view', 'refsprobe', 'refsbl', 'deletejob', 'bootlog', 'failrestart', 'vhdxlab', 'fatx', 'settings6a'), fmt
+    if fmt == 'vhdxlab':
+        # CHECKS 12: chains made on Linux (`vhdx_lab make`) and the checker.
+        shutil.copytree(REPO / 'tmp/vhdx-lab/sets', lab / 'vl' / 'sets')
+        shutil.copyfile(REPO / 'target/x86_64-pc-windows-msvc/release/examples/vhdx_lab.exe',
+                        lab / 'vl' / 'vhdx_lab.exe')
     if fmt.startswith('media'):
         # The medium carries the machine's WebView2; the VM has no network.
         shutil.copyfile(LAB / 'media/WebView2Runtime-x64.exe', lab / 'WebView2Runtime-x64.exe')

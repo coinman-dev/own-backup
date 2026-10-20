@@ -147,6 +147,11 @@ async fn execute(client: &mut BackupClient, v: &Value) -> Result<Value, String> 
             Box::pin(execute(client, &request)).await
         }
         "get" => Ok(serde_json::to_value(job(client, field(v, "id")?).await?).unwrap()),
+        "get-settings" => Ok(serde_json::to_value(client.get_settings().await?).unwrap()),
+        "save-settings" => {
+            let patch = serde_json::from_value(v["patch"].clone()).map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(client.save_settings(&patch).await?).unwrap())
+        }
         "save" => {
             let mut value = serde_json::to_value(job(client, field(v, "id")?).await?).unwrap();
             merge(&mut value, &v["patch"]);
