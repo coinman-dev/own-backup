@@ -175,6 +175,12 @@ pub fn execute_plan(
                 tr!("restore_exec_linux.no_target_device").into_owned(),
             )
         })?;
+    // The kernel's node from here on: the udev hold below switches off the
+    // persistent-storage rules for the target, and a `/dev/disk/by-id/…`
+    // name of it disappears with the first event the hold handles.
+    let device = own_backup_common::linux_block::kernel_name(std::path::Path::new(&device))
+        .map(|name| format!("/dev/{name}"))
+        .unwrap_or(device);
     info!(
         plan = %plan.id,
         target = %device,

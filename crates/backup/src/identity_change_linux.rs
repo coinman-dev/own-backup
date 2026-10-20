@@ -128,6 +128,15 @@ enum Opened {
     Md(String),
 }
 
+/// A stacked device to close, recorded before the command that creates it
+/// runs: a half-done activation or assembly is undone too. `confirmed` once
+/// that command succeeded — a close that fails for one that never came up is
+/// not worth a note.
+struct OpenedDev {
+    what: Opened,
+    confirmed: bool,
+}
+
 /// A device to look at.
 #[derive(Debug, Clone)]
 struct Dev {
@@ -144,6 +153,8 @@ struct FsSeen {
     node: String,
     kind: IdentityKind,
     key: String,
+    /// btrfs spanning more than one device (`Identity::multi_device`).
+    multi_device: bool,
 }
 
 struct Run<'a> {
@@ -152,7 +163,7 @@ struct Run<'a> {
     /// The machine's identities, without the restored devices.
     present: &'a BTreeMap<String, Vec<Identity>>,
     out: Outcome,
-    opened: Vec<Opened>,
+    opened: Vec<OpenedDev>,
     holds: Vec<Box<dyn std::any::Any>>,
     filesystems: Vec<FsSeen>,
     /// Prefix of the LUKS mappings this run opens.
@@ -356,6 +367,7 @@ impl Run<'_> {
                     node: dev.node.clone(),
                     kind: id.kind,
                     key,
+                    multi_device: id.multi_device,
                 });
             }
         }
@@ -395,7 +407,7 @@ impl Run<'_> {
                 new
             }
             IdentityKind::Btrfs => {
-                if self.host.btrfs_devices(node) > 1 {
+                if id.multi_device || self.host.btrfs_devices(node) > 1 {
                     self.out.notes.push(
                         tr!("identity_change_linux.btrfs_multi_device", node = node).into_owned(),
                     );
@@ -445,6 +457,7 @@ impl Run<'_> {
         }
         self.seq += 1;
         let name = format!("{}{}", self.dm_prefix, self.seq);
+        self.opening(Opened::Luks(name.clone()));
         run_checked(
             self.tools,
             "cryptsetup",
@@ -452,7 +465,7 @@ impl Run<'_> {
             Some(passphrase.as_bytes()),
             |c| c == 0,
         )?;
-        self.opened.push(Opened::Luks(name.clone()));
+        self.opened_ok();
         self.host.settle();
         Ok(Dev {
             node: format!("/dev/mapper/{name}"),
@@ -481,8 +494,11 @@ impl Run<'_> {
             &format!("--uuid={new}"),
         ]);
         a.extend(members.iter().map(|m| m.node.clone()));
+        // Recorded first: mdadm can leave an inactive array holding the
+        // members when it fails half-way.
+        self.opening(Opened::Md(array.clone()));
         run_ok(self.tools, "mdadm", &a)?;
-        self.opened.push(Opened::Md(array.clone()));
+        self.opened_ok();
         self.host.settle();
         for m in members {
             self.record(IdentityKind::Md, &md.shown, &new, m);
@@ -498,11 +514,14 @@ impl Run<'_> {
     /// `vgimportclone` the restored PVs of one VG and activate it for what is
     /// inside its LVs.
     fn change_vg(&mut self, ids: &[Identity], pvs: &[Dev]) -> Result<Vec<Dev>> {
+        // Without the old name (its metadata could not be read) nothing in
+        // the restored system can be matched to it: the group still gets a
+        // name of its own, but no reference to a VG name is edited.
         let old_name = ids
             .iter()
             .find(|i| i.kind == IdentityKind::LvmVgName)
-            .map(|i| i.shown.clone())
-            .unwrap_or_else(|| "vg".into());
+            .map(|i| i.shown.clone());
+        let stem = old_name.as_deref().unwrap_or("vg");
         let old_uuid = ids
             .iter()
             .find(|i| i.kind == IdentityKind::LvmVg)
@@ -513,10 +532,10 @@ impl Run<'_> {
                     .any(|i| i.kind == IdentityKind::LvmVgName && i.key == name)
             })
         };
-        let mut base = format!("{old_name}_restored");
+        let mut base = format!("{stem}_restored");
         let mut n = 2;
         while taken(&base) {
-            base = format!("{old_name}_restored{n}");
+            base = format!("{stem}_restored{n}");
             n += 1;
         }
         let mut a = args(["--basevgname", &base]);
@@ -553,7 +572,16 @@ impl Run<'_> {
             }
         }
         let first = &pvs[0];
-        self.record(IdentityKind::LvmVgName, &old_name, &new_name, first);
+        match &old_name {
+            Some(old) => self.record(IdentityKind::LvmVgName, old, &new_name, first),
+            None => self.out.notes.push(
+                tr!(
+                    "identity_change_linux.vg_name_unknown",
+                    vg = new_name.as_str()
+                )
+                .into_owned(),
+            ),
+        }
         if let (Some(old), Some(new)) = (&old_uuid, &new_uuid) {
             self.record(IdentityKind::LvmVg, old, new, first);
         }
@@ -574,8 +602,10 @@ impl Run<'_> {
             );
             return Ok(Vec::new());
         }
+        // Recorded first: vgchange activates LV by LV and may stop half-way.
+        self.opening(Opened::Vg(new_name.clone()));
         run_ok(self.tools, "vgchange", &args(["-ay", &new_name]))?;
-        self.opened.push(Opened::Vg(new_name.clone()));
+        self.opened_ok();
         self.host.settle();
         let listed = run_ok(
             self.tools,
@@ -622,13 +652,12 @@ impl Run<'_> {
                 IdentityKind::Fat => ("vfat", "rw", false),
                 IdentityKind::Btrfs => {
                     // A btrfs still carrying a machine's fsid is mounted only
-                    // where the kernel gives it a temporary one.
-                    let still = self.clashes(&Identity {
-                        kind: IdentityKind::Btrfs,
-                        key: fs.key.clone(),
-                        shown: String::new(),
-                    });
-                    if still && !self.host.kernel().is_some_and(|k| k >= (6, 7)) {
+                    // where the kernel gives it a temporary one: 6.7 and
+                    // later, and a single-device filesystem only.
+                    let still = self.clashes(&Identity::new(IdentityKind::Btrfs, &fs.key));
+                    let temp_fsid =
+                        !fs.multi_device && self.host.kernel().is_some_and(|k| k >= (6, 7));
+                    if still && !temp_fsid {
                         self.out.notes.push(
                             tr!(
                                 "identity_change_linux.btrfs_not_edited",
@@ -657,6 +686,26 @@ impl Run<'_> {
             })?;
             bios_grub |= edited.bios_grub;
             initramfs |= edited.initramfs_config;
+            for flag in &edited.autorelabel {
+                self.out.notes.push(
+                    tr!(
+                        "identity_change_linux.autorelabel",
+                        node = fs.node.as_str(),
+                        file = flag.as_str()
+                    )
+                    .into_owned(),
+                );
+            }
+            if !edited.xattrs_lost.is_empty() {
+                self.out.notes.push(
+                    tr!(
+                        "identity_change_linux.xattrs_lost",
+                        node = fs.node.as_str(),
+                        files = edited.xattrs_lost.join("; ")
+                    )
+                    .into_owned(),
+                );
+            }
             self.out
                 .edited
                 .extend(edited.files.iter().map(|f| format!("{}:{f}", fs.node)));
@@ -680,16 +729,40 @@ impl Run<'_> {
         Ok(())
     }
 
+    /// Record a stacked device about to be created (see [`OpenedDev`]).
+    fn opening(&mut self, what: Opened) {
+        self.opened.push(OpenedDev {
+            what,
+            confirmed: false,
+        });
+    }
+
+    /// The device recorded last came up.
+    fn opened_ok(&mut self) {
+        if let Some(o) = self.opened.last_mut() {
+            o.confirmed = true;
+        }
+    }
+
     /// Close every stacked device, innermost first. A device that will not
     /// close is said, not raised: the restore itself is done.
     fn close_all(&mut self) {
         while let Some(o) = self.opened.pop() {
-            let (prog, a, what) = match &o {
+            let (prog, a, what) = match &o.what {
                 Opened::Luks(name) => ("cryptsetup", args(["close", name]), name.clone()),
                 Opened::Vg(vg) => ("vgchange", args(["-an", vg]), vg.clone()),
                 Opened::Md(array) => ("mdadm", args(["--stop", array]), array.clone()),
             };
-            if let Err(e) = run_ok(self.tools, prog, &a) {
+            let closed = run_ok(self.tools, prog, &a);
+            if !o.confirmed {
+                // Its command failed (that error is the run's): whatever it
+                // left half-made is gone now, or there was nothing.
+                if let Err(e) = closed {
+                    info!(device = %what, error = %e, "nothing left of a failed activation, or it did not close");
+                }
+                continue;
+            }
+            if let Err(e) = closed {
                 warn!(device = %what, error = %e, "a stacked device did not close");
                 self.out.notes.push(
                     tr!(
@@ -724,17 +797,15 @@ fn parse_lvs(out: &str, vg: &str) -> Vec<String> {
 /// The real machine.
 pub struct SystemHost;
 
-struct RealMount(Option<crate::linux_tools::TempMount>);
+struct RealMount(crate::linux_tools::TempMount);
 
 impl MountedFs for RealMount {
     fn path(&self) -> &Path {
-        self.0.as_ref().map(|m| m.path()).unwrap_or(Path::new("/"))
+        self.0.path()
     }
-    fn unmount(mut self: Box<Self>) -> Result<()> {
-        match self.0.take() {
-            Some(m) => m.unmount(),
-            None => Ok(()),
-        }
+    fn unmount(self: Box<Self>) -> Result<()> {
+        let RealMount(m) = *self;
+        m.unmount()
     }
 }
 
@@ -748,9 +819,10 @@ impl Host for SystemHost {
     }
 
     fn mount(&mut self, node: &str, fstype: &str, opts: &str) -> Result<Box<dyn MountedFs>> {
-        Ok(Box::new(RealMount(Some(
-            crate::linux_tools::TempMount::mount(node, &[(fstype, opts)])?,
-        ))))
+        Ok(Box::new(RealMount(crate::linux_tools::TempMount::mount(
+            node,
+            &[(fstype, opts)],
+        )?)))
     }
 
     fn hold(&mut self, rules: Vec<String>) -> Result<Box<dyn std::any::Any>> {
@@ -1321,6 +1393,108 @@ mod tests {
         assert_eq!(programs(&tools).last(), Some(&"cryptsetup"));
         assert_eq!(tools.calls.last().unwrap().1[0], "close");
         assert!(host.mounts.is_empty(), "nothing is edited after a failure");
+    }
+
+    /// A failed assembly can leave an inactive array holding the members:
+    /// it is stopped like a working one, without a note about a device that
+    /// may never have existed.
+    #[test]
+    fn a_failed_assembly_is_still_stopped() {
+        let md = "1a2b3c4d:5e6f4a7b:8c9d0e1f:2a3b4c5d";
+        let mut host = FakeHost::default();
+        host.ids
+            .insert("/dev/sdb1".into(), vec![id(IdentityKind::Md, md)]);
+        let mut tools = FakeTools::default();
+        tools.codes.insert("mdadm".into(), 1);
+        let out = change_identities(
+            &mut tools,
+            &mut host,
+            &machine(vec![id(IdentityKind::Md, md)]),
+            &[dev("/dev/sdb1", 1)],
+            false,
+        );
+        assert!(out.failed.as_deref().unwrap_or("").contains("mdadm"));
+        assert_eq!(programs(&tools), vec!["mdadm", "mdadm"]);
+        assert_eq!(tools.calls[1].1, args(["--stop", "/dev/md126"]));
+        assert!(out.notes.is_empty(), "{:?}", out.notes);
+    }
+
+    /// A volume group whose name could not be read gets a new one, but no
+    /// VG-name reference is edited (an invented old name would match
+    /// whatever the restored system calls `vg`), and the person is told. A
+    /// failed activation is undone.
+    #[test]
+    fn a_volume_group_without_a_readable_name_renames_no_references() {
+        let vg = "aaaaaa-1111-2222-3333-4444-5555-bbbbbb";
+        let pv = "pv0000-1111-2222-3333-4444-5555-pv0000";
+        let mut host = FakeHost::default();
+        host.ids.insert(
+            "/dev/sdb3".into(),
+            vec![id(IdentityKind::LvmPv, pv), id(IdentityKind::LvmVg, vg)],
+        );
+        let mut tools = FakeTools::default();
+        tools.codes.insert("vgchange".into(), 5);
+        let out = change_identities(
+            &mut tools,
+            &mut host,
+            &machine(vec![id(IdentityKind::LvmPv, pv)]),
+            &[dev("/dev/sdb3", 3)],
+            true,
+        );
+        assert_eq!(
+            tools.calls[0].1,
+            args(["--basevgname", "vg_restored", "/dev/sdb3"])
+        );
+        assert!(out
+            .changed
+            .iter()
+            .all(|c| c.kind != IdentityKind::LvmVgName));
+        assert!(
+            out.notes.iter().any(|n| n.contains("vg_restored")),
+            "{:?}",
+            out.notes
+        );
+        // Activation failed: deactivated again all the same.
+        assert!(out.failed.as_deref().unwrap_or("").contains("vgchange"));
+        assert_eq!(
+            programs(&tools),
+            vec!["vgimportclone", "vgchange", "vgchange"]
+        );
+        assert_eq!(tools.calls[2].1, args(["-an", "vg_restored"]));
+    }
+
+    /// A btrfs spanning several devices keeps its fsid, and a copy still
+    /// carrying the machine's is never mounted for editing — not even on a
+    /// kernel with temporary fsids, which covers single-device ones only.
+    #[test]
+    fn a_multi_device_btrfs_copy_is_never_mounted_for_editing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut host = FakeHost {
+            mount_dir: Some(dir.path().to_path_buf()),
+            kernel: Some((6, 8)),
+            ..Default::default()
+        };
+        let ext = "77777777-1111-4222-8333-444444444444";
+        host.ids
+            .insert("/dev/sdb2".into(), vec![id(IdentityKind::Ext, ext)]);
+        host.ids
+            .insert("/dev/sdb3".into(), vec![Identity::btrfs_multi_device(SRC)]);
+        let mut tools = FakeTools::default();
+        let out = change_identities(
+            &mut tools,
+            &mut host,
+            &machine(vec![
+                id(IdentityKind::Ext, ext),
+                id(IdentityKind::Btrfs, SRC),
+            ]),
+            &[dev("/dev/sdb2", 2), dev("/dev/sdb3", 3)],
+            true,
+        );
+        assert_eq!(out.failed, None, "{out:?}");
+        assert_eq!(programs(&tools), vec!["e2fsck", "tune2fs"]);
+        assert_eq!(host.mounts.len(), 1, "{:?}", host.mounts);
+        assert_eq!(host.mounts[0].0, "/dev/sdb2");
+        assert!(out.notes.iter().filter(|n| n.contains("/dev/sdb3")).count() >= 2);
     }
 
     #[test]

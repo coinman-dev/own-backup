@@ -48,13 +48,25 @@
     "ru": "Группа томов %{vg} получила новое имя, но её новый UUID не прочитан — тома внутри не проверены.",
     "en": "Volume group %{vg} got a new name, but its new UUID could not be read — the volumes inside were not checked."
   },
+  "identity_change_linux.vg_name_unknown": {
+    "ru": "Имя прежней группы томов прочитать не удалось; она переименована в %{vg}, но ссылки на её имя в восстановленной системе (/dev/mapper/…, rd.lvm.vg=) не исправлены — исправьте их вручную.",
+    "en": "The volume group's old name could not be read; it was renamed to %{vg}, but references to its name in the restored system (/dev/mapper/…, rd.lvm.vg=) were not fixed — fix them by hand."
+  },
   "identity_change_linux.btrfs_not_edited": {
-    "ru": "btrfs на %{node} не смонтирован для правки: у него идентификатор файловой системы этой машины, а ядро старше 6.7 приняло бы его за оригинал.",
-    "en": "The btrfs on %{node} was not mounted for editing: it carries a filesystem identity of this machine, and a kernel older than 6.7 would take it for the original."
+    "ru": "btrfs на %{node} не смонтирован для правки: у него идентификатор файловой системы этой машины, а ядро приняло бы его за оригинал (ядро старше 6.7 — любой такой btrfs, любое ядро — btrfs из нескольких устройств). Файлы, ссылающиеся на прежние идентификаторы, в нём не исправлены.",
+    "en": "The btrfs on %{node} was not mounted for editing: it carries a filesystem identity of this machine, and the kernel would take it for the original (a kernel older than 6.7 any such btrfs, every kernel a btrfs spanning several devices). The files in it that name the old identities were not fixed."
   },
   "identity_change_linux.edit_failed": {
     "ru": "Не удалось исправить файлы восстановленной системы на %{node}: %{error}",
     "en": "Could not fix the restored system's files on %{node}: %{error}"
+  },
+  "identity_change_linux.autorelabel": {
+    "ru": "Исправленные файлы на %{node} не сохранили метку SELinux; создан %{file}, и восстановленная система переразметит файлы при следующей загрузке (это займёт время).",
+    "en": "The fixed files on %{node} did not keep their SELinux label; %{file} was created, and the restored system relabels its files at its next start (this takes a while)."
+  },
+  "identity_change_linux.xattrs_lost": {
+    "ru": "Исправленные файлы на %{node} не сохранили расширенные атрибуты: %{files}. Если восстановленная система использует SELinux, переразметьте её (restorecon или touch /.autorelabel).",
+    "en": "The fixed files on %{node} did not keep their extended attributes: %{files}. If the restored system uses SELinux, relabel it (restorecon, or touch /.autorelabel)."
   },
   "identity_change_linux.rebuild_initramfs": {
     "ru": "В восстановленной системе исправлены crypttab или mdadm.conf, но её initramfs хранит их прежние копии. Загрузите её с живого носителя (chroot) и выполните update-initramfs -u -k all, иначе она будет искать старые UUID.",

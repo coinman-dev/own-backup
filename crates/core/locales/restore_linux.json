@@ -109,8 +109,8 @@
     "en": "The filesystem on %{node} (%{fs}) cannot be grown here: ext2/3/4, XFS, btrfs and NTFS can."
   },
   "restore_fs_linux.btrfs_clone_mounted": {
-    "ru": "btrfs на %{node} повторяет файловую систему, которая уже есть на этой машине, а ядро старше 6.7 приняло бы её за оригинал — расширение не выполнено. Смените идентификаторы при восстановлении или расширьте её на другой машине.",
-    "en": "The btrfs on %{node} duplicates a filesystem this machine already has, and a kernel older than 6.7 would take it for the original — it was not grown. Change the identities during the restore, or grow it on another machine."
+    "ru": "btrfs на %{node} повторяет файловую систему, которая уже есть на этой машине, и ядро приняло бы его за оригинал (ядро старше 6.7 — любой такой btrfs, любое ядро — btrfs из нескольких устройств), поэтому расширение не выполнено. Смените идентификаторы при восстановлении (у btrfs из нескольких устройств это невозможно) или расширьте его на другой машине.",
+    "en": "The btrfs on %{node} duplicates a filesystem this machine already has, and the kernel would take it for the original (a kernel older than 6.7 any such btrfs, every kernel a btrfs spanning several devices), so it was not grown. Change the identities during the restore (not possible for a multi-device btrfs), or grow it on another machine."
   },
   "restore_exec.change_identities_linux_only": {
     "ru": "Смена идентификаторов восстановленной копии есть только в Linux; этот план составлен не для этой машины.",

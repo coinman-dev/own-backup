@@ -8,7 +8,7 @@
 //!
 //! | what      | what goes wrong                                                    |
 //! |-----------|--------------------------------------------------------------------|
-//! | btrfs     | before kernel 6.7 a scanned clone joins the *mounted* filesystem as one of its devices; 6.7+ gives a single-device clone a temporary fsid on mount |
+//! | btrfs     | before kernel 6.7 a scanned clone joins the *mounted* filesystem as one of its devices; 6.7+ gives a single-device clone a temporary fsid on mount, never a multi-device one |
 //! | LVM       | duplicate PVs: LVM picks one or refuses to activate; duplicate VG names clash outright |
 //! | md        | incremental assembly can add the clone to the running array        |
 //! | XFS       | the second mount is refused until mounted with `nouuid`            |
@@ -59,6 +59,11 @@ pub struct Identity {
     pub key: String,
     /// As the subsystem's own tools print it.
     pub shown: String,
+    /// btrfs only: the superblock says the filesystem spans more than one
+    /// device. The kernel's temporary fsid (6.7+) covers single-device
+    /// filesystems only, so a clone of such a member is always critical.
+    /// Read from the data itself; the udev side never sets it.
+    pub multi_device: bool,
 }
 
 impl Identity {
@@ -73,7 +78,20 @@ impl Identity {
                 .collect::<String>()
                 .to_ascii_lowercase(),
         };
-        Self { kind, key, shown }
+        Self {
+            kind,
+            key,
+            shown,
+            multi_device: false,
+        }
+    }
+
+    /// A btrfs fsid whose superblock counts more than one device.
+    pub fn btrfs_multi_device(shown: &str) -> Self {
+        Self {
+            multi_device: true,
+            ..Self::new(IdentityKind::Btrfs, shown)
+        }
     }
 }
 
@@ -136,23 +154,32 @@ pub fn parse_kernel_version(release: &str) -> Option<KernelVersion> {
 }
 
 fn assess(
-    kind: IdentityKind,
+    id: &Identity,
     kernel: Option<KernelVersion>,
 ) -> (Severity, Reidentify, Option<&'static str>) {
-    match kind {
+    match id.kind {
         IdentityKind::Ext => (Severity::Ambiguous, Reidentify::Tune2fs, Some("ro,noload")),
         IdentityKind::Xfs => (Severity::Mount, Reidentify::XfsAdmin, Some("nouuid")),
         IdentityKind::Btrfs => {
             // 6.7 added temp-fsid for single-device filesystems; before that a
             // clone is registered as another device of the same filesystem. An
-            // unknown kernel is treated as the old one.
-            let temp_fsid = kernel.is_some_and(|k| k >= (6, 7));
+            // unknown kernel is treated as the old one. A member of a
+            // multi-device filesystem never gets a temporary fsid: its clone
+            // joins the original's device set on any kernel.
+            let temp_fsid = !id.multi_device && kernel.is_some_and(|k| k >= (6, 7));
             let sev = if temp_fsid {
                 Severity::Ambiguous
             } else {
                 Severity::Critical
             };
-            (sev, Reidentify::Btrfstune, None)
+            // Re-identifying a multi-device btrfs needs every member present
+            // at once; a restore does not offer it.
+            let how = if id.multi_device {
+                Reidentify::None
+            } else {
+                Reidentify::Btrfstune
+            };
+            (sev, how, None)
         }
         IdentityKind::Luks => (Severity::Ambiguous, Reidentify::CryptsetupLuksUuid, None),
         IdentityKind::LvmPv | IdentityKind::LvmVg | IdentityKind::LvmVgName => {
@@ -190,7 +217,7 @@ pub fn find_clashes(
         if already_on.is_empty() {
             continue;
         }
-        let (severity, reidentify, mount_hint) = assess(id.kind, kernel);
+        let (severity, reidentify, mount_hint) = assess(id, kernel);
         out.push(Clash {
             identity: id.clone(),
             already_on,
@@ -245,8 +272,12 @@ pub fn identities_of(p: &mut dyn Probe) -> Vec<Identity> {
         if let Some(u) = xfs_uuid(&head) {
             out.push(Identity::new(IdentityKind::Xfs, &u));
         }
-        if let Some(u) = btrfs_fsid(&head) {
-            out.push(Identity::new(IdentityKind::Btrfs, &u));
+        if let Some((u, devices)) = btrfs_fsid(&head) {
+            out.push(if devices > 1 {
+                Identity::btrfs_multi_device(&u)
+            } else {
+                Identity::new(IdentityKind::Btrfs, &u)
+            });
         }
         if let Some(u) = fat_serial(&head) {
             out.push(Identity::new(IdentityKind::Fat, &u));
@@ -300,12 +331,14 @@ fn xfs_uuid(head: &[u8]) -> Option<String> {
     Some(dashed(&head[32..48]))
 }
 
-fn btrfs_fsid(head: &[u8]) -> Option<String> {
-    let sb = head.get(65536..65536 + 128)?;
+/// The btrfs fsid and the superblock's `num_devices` (offset 0x88).
+fn btrfs_fsid(head: &[u8]) -> Option<(String, u64)> {
+    let sb = head.get(65536..65536 + 0x90)?;
     if &sb[64..72] != b"_BHRfS_M" || !nonzero(&sb[32..48]) {
         return None;
     }
-    Some(dashed(&sb[32..48]))
+    let devices = u64::from_le_bytes(sb[0x88..0x90].try_into().unwrap());
+    Some((dashed(&sb[32..48]), devices))
 }
 
 /// FAT12/16/32 volume serial, spelled as blkid and fstab spell it
@@ -603,6 +636,10 @@ mod tests {
         d[65536 + 64..65536 + 72].copy_from_slice(b"_BHRfS_M");
         d[65536 + 32..65536 + 48].copy_from_slice(&RAW);
         assert_eq!(ids(&d), vec![Identity::new(IdentityKind::Btrfs, TEXT)]);
+        d[65536 + 0x88..65536 + 0x90].copy_from_slice(&1u64.to_le_bytes());
+        assert!(!ids(&d)[0].multi_device);
+        d[65536 + 0x88..65536 + 0x90].copy_from_slice(&2u64.to_le_bytes());
+        assert_eq!(ids(&d), vec![Identity::btrfs_multi_device(TEXT)]);
 
         let mut d = disk(1 << 20);
         d[0..6].copy_from_slice(b"LUKS\xba\xbe");
@@ -764,6 +801,19 @@ mod tests {
         assert_eq!(sev(None), Severity::Critical);
         assert_eq!(sev(Some((6, 7))), Severity::Ambiguous);
         assert_eq!(sev(Some((7, 0))), Severity::Ambiguous);
+    }
+
+    #[test]
+    fn a_multi_device_btrfs_clone_is_critical_on_every_kernel() {
+        let copy = Identity::btrfs_multi_device(TEXT);
+        // The machine's side comes from udev, which says nothing of devices.
+        let host = present(&[("sda2", Identity::new(IdentityKind::Btrfs, TEXT))]);
+        for k in [None, Some((6, 6)), Some((6, 7)), Some((7, 0))] {
+            let got = find_clashes(std::slice::from_ref(&copy), &host, &[], k);
+            assert_eq!(got.len(), 1);
+            assert_eq!(got[0].severity, Severity::Critical, "{k:?}");
+            assert_eq!(got[0].reidentify, Reidentify::None, "not offered");
+        }
     }
 
     #[test]

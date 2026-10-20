@@ -14,7 +14,14 @@
 //!   (`DM_MULTIPATH_DEVICE_PATH` is the flag multipath sets to keep both off
 //!   the paths it owns, and both rule sets honour it);
 //! - systemd declares the device ready, so a `UUID=` line in fstab may mount
-//!   the restored clone instead of the original (`SYSTEMD_READY=0`).
+//!   the restored clone instead of the original (`SYSTEMD_READY=0`);
+//! - `60-persistent-storage` points `/dev/disk/by-uuid`, `by-label` and
+//!   `by-partuuid` at whichever device it saw last — a restored clone takes
+//!   the machine's own links (`UDEV_DISABLE_PERSISTENT_STORAGE_RULES_FLAG`).
+//!   This removes every persistent link of a held device, its `by-id` and
+//!   `by-path` ones included, until the hold ends: whoever works on a held
+//!   device names it by its kernel node (`/dev/sdb`), resolved before the
+//!   hold, never by a `/dev/disk/by-*` link.
 //!
 //! A hold is one rules file in `/run/udev/rules.d`, numbered before all of
 //! those rule sets, matching the target disk and its partitions by kernel name.
@@ -48,7 +55,8 @@ pub fn rules_text(names: &[&str]) -> String {
          # Removed when the operation ends; /run is cleared on reboot.\n",
     );
     let set = "ENV{UDISKS_IGNORE}=\"1\", ENV{UDISKS_AUTO}=\"0\", \
-               ENV{DM_MULTIPATH_DEVICE_PATH}=\"1\", ENV{SYSTEMD_READY}=\"0\"";
+               ENV{DM_MULTIPATH_DEVICE_PATH}=\"1\", ENV{SYSTEMD_READY}=\"0\", \
+               ENV{UDEV_DISABLE_PERSISTENT_STORAGE_RULES_FLAG}=\"1\"";
     for name in names {
         let parts = partition_pattern(name);
         out.push_str(&format!(
@@ -298,6 +306,8 @@ mod tests {
                 "UDISKS_AUTO}=\"0\"",
                 "DM_MULTIPATH_DEVICE_PATH}=\"1\"",
                 "SYSTEMD_READY}=\"0\"",
+                // No by-uuid/by-label link may move to a restored clone.
+                "UDEV_DISABLE_PERSISTENT_STORAGE_RULES_FLAG}=\"1\"",
             ] {
                 assert!(line.contains(flag), "{line} lacks {flag}");
             }

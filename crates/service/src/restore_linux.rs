@@ -72,12 +72,14 @@ pub(super) fn identity_gate(
     }
 }
 
-/// The duplicates a change leaves as they are: a PARTUUID is never changed
-/// (`root=PARTUUID=` may name it, and the restore keeps the copy's table).
+/// The duplicates a change leaves as they are — those without a command to
+/// change them: a PARTUUID is never changed (`root=PARTUUID=` may name it,
+/// and the restore keeps the copy's table), and a btrfs spanning several
+/// devices can only change on all of them at once.
 pub(super) fn left_by_change(clashes: &[IdentityClashDto]) -> Vec<IdentityClashDto> {
     clashes
         .iter()
-        .filter(|c| c.kind == "partuuid")
+        .filter(|c| c.kind == "partuuid" || c.change_command.is_empty())
         .cloned()
         .collect()
 }
@@ -103,7 +105,7 @@ pub(super) fn set_identity_step(
 ) {
     plan.ops
         .retain(|op| !matches!(op, RestoreOp::ChangeIdentities { .. }));
-    let changeable = clashes.iter().any(|c| c.kind != "partuuid");
+    let changeable = clashes.len() > left_by_change(clashes).len();
     if choice != Some(IdentityChoice::Change) || !changeable {
         return;
     }
@@ -234,8 +236,23 @@ impl BackupServiceImpl {
             #[serde(flatten)]
             secret: ManualSecret,
         }
-        let p: In = serde_json::from_str(&req.into_inner().json)
+        let mut p: In = serde_json::from_str(&req.into_inner().json)
             .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+        // The kernel's node, once: the udev hold switches off the
+        // persistent-storage rules for the target, so a `/dev/disk/by-*` name
+        // of it vanishes during the restore — and a by-uuid one names the
+        // copy's UUID afterwards, not the device.
+        p.target = own_backup_common::linux_block::kernel_name(Path::new(&p.target))
+            .map(|name| format!("/dev/{name}"))
+            .ok_or_else(|| {
+                Status::failed_precondition(
+                    tr!(
+                        "restore_exec_linux_service.not_a_device",
+                        device = p.target.as_str()
+                    )
+                    .into_owned(),
+                )
+            })?;
 
         // No plan and no table on this path: the guard is all that stands
         // between the request and a mounted volume (audit AUD-01).
@@ -320,8 +337,10 @@ impl BackupServiceImpl {
                 Ok(())
             })?;
             // Under the hold still: the machine must not meet the clone
-            // under the source's names.
+            // under the source's names. Nothing may have taken the volume
+            // since it was written (the boot-ESP question was settled before).
             let changed = if change {
+                own_backup_restore::guard_plan_volume(&request.target)?;
                 let device = own_backup_backup::identity_change_linux::RestoredDevice {
                     node: request.target.clone(),
                     part_index: None,
@@ -687,7 +706,10 @@ impl BackupServiceImpl {
         info!(image = %p.manifest_path, target = %p.target_device, "RestoreDisk RPC started");
         let request = LinuxDiskRestoreRequest {
             image_path,
-            target_device: p.target_device.clone(),
+            // The kernel's node: a `/dev/disk/by-id/…` name disappears under
+            // the udev hold, and the partitions are found through it after
+            // the restore.
+            target_device: format!("/dev/{disk}"),
             verify_checksums: true,
             encryption: keys,
         };
@@ -812,7 +834,7 @@ mod tests {
             part_index: Some(3),
             already_on: vec!["sda3".into()],
             severity: "critical".into(),
-            change_command: String::new(),
+            change_command: "vgimportclone --basevgname <new-name> <device>".into(),
             mount_hint: String::new(),
         }
     }
@@ -843,6 +865,13 @@ mod tests {
             ..clash()
         };
         assert_eq!(left_by_change(&[clash(), partuuid.clone()]), vec![partuuid]);
+        // A multi-device btrfs comes without a command: a change keeps it too.
+        let btrfs = IdentityClashDto {
+            kind: "btrfs".into(),
+            change_command: String::new(),
+            ..clash()
+        };
+        assert_eq!(left_by_change(&[clash(), btrfs.clone()]), vec![btrfs]);
     }
 
     #[test]

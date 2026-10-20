@@ -70,7 +70,9 @@ pub fn identities_on(node: &str) -> Result<Vec<Identity>> {
 /// Whether mounting the btrfs on `node` cannot land on a filesystem this
 /// machine already has: no other device carries its fsid, or the kernel gives
 /// a clone a temporary fsid (`identity_clash`: such a duplicate is not
-/// critical). Anything unreadable is not safe.
+/// critical). A member of a multi-device btrfs never gets one, so its
+/// duplicate is critical on every kernel and it is never safe. Anything
+/// unreadable is not safe.
 pub fn btrfs_mount_safe(node: &str) -> bool {
     let Ok(ids) = identities_on(node) else {
         return false;
@@ -361,6 +363,17 @@ mod tests {
             None,
             "a damaged blob says nothing"
         );
+    }
+
+    #[test]
+    fn a_multi_device_btrfs_duplicate_is_critical_even_on_a_new_kernel() {
+        let restored = vec![(Some(2), Identity::btrfs_multi_device(U))];
+        let here = present("sda2", vec![Identity::new(IdentityKind::Btrfs, U)]);
+        let got = clashes_against(&restored, &here, &[], Some((6, 8)));
+        assert_eq!(got[0].severity, "critical");
+        let single = vec![(Some(2), Identity::new(IdentityKind::Btrfs, U))];
+        let got = clashes_against(&single, &here, &[], Some((6, 8)));
+        assert_eq!(got[0].severity, "ambiguous");
     }
 
     #[test]
