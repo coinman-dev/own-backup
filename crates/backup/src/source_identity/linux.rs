@@ -307,10 +307,11 @@ impl DmSegment {
 }
 
 /// The live table of the device-mapper device `name`, through
-/// `/dev/mapper/control` (root only).
+/// `/dev/mapper/control` (root only), with no key in it: where the data lies
+/// is all a placement needs.
 fn read_dm_table(name: &str) -> Option<Vec<DmSegment>> {
     let control = own_backup_snapshot::dm_ioctl::Control::open().ok()?;
-    let targets = control.table(name).ok()?;
+    let targets = control.table_without_keys(name).ok()?;
     Some(
         targets
             .iter()

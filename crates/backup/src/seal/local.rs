@@ -34,8 +34,8 @@ pub use platform::PrivateSecretDatabase;
 
 #[cfg(target_os = "linux")]
 pub use platform::{
-    key_store_on_source, key_store_placement, register_data_dir, KeyProtection, KeyStorePlacement,
-    MACHINE_KEY_FILE,
+    key_store_on_source, key_store_placement, key_store_rule, register_data_dir, KeyProtection,
+    KeyStorePlacement, KeyStoreRule, MACHINE_KEY_FILE,
 };
 
 pub const KEY_DIRECTORY_NAME: &str = ".own-backup-service-keys";

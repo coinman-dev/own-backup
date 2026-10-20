@@ -336,6 +336,10 @@
     "ru": "Машинного ключа службы нет (каталог ключей создан заново или восстановлен без него) — то, что было им защищено, на этой машине больше не открывается.",
     "en": "The service's machine key is missing (the key directory was recreated or restored without it) — what it protected can no longer be opened on this machine."
   },
+  "seal_local_linux.key_store_mount_point": {
+    "ru": "каталог ключей службы %{path} — точка монтирования: его содержимое лежит на томе под другим именем, и исключение по имени не убрало бы его из копии",
+    "en": "the service's key directory %{path} is a mount point: its contents lie on a volume under another name, and leaving out the name would not keep them out of the copy"
+  },
   "seal_local_linux.unsafe_directory": {
     "ru": "Каталог «%{what}» доступен не только службе (нужен владелец root и права без записи для других; каталог ключей — ровно 0700); существующий каталог не исправляется молча.",
     "en": "The directory “%{what}” is not reserved for the service (it must be owned by root and not writable by others; the key directory must be exactly 0700); an existing directory is not silently adjusted."

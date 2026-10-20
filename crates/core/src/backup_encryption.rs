@@ -27,14 +27,18 @@ pub struct RunKeyError {
     pub kind: &'static str,
 }
 
+/// [`crate::JobRun::error_kind`] of an error with no kind of its own.
+pub const ERROR_KIND_NONE: &str = "";
+
 impl RunKeyError {
-    /// The kind follows the error's variant, never its text.
-    fn from_open(e: &OwnBackupError) -> Self {
+    /// `e`, of the kind its variant says — the machine's key protection — or
+    /// else of `kind`, what the failed step means: never decided by its text.
+    fn new(e: &OwnBackupError, kind: &'static str) -> Self {
         RunKeyError {
             message: e.to_string(),
             kind: match e {
                 OwnBackupError::KeyProtection(_) => ERROR_KIND_KEY_PROTECTION,
-                _ => ERROR_KIND_REAUTHORIZE,
+                _ => kind,
             },
         }
     }
@@ -169,21 +173,34 @@ impl JobStore {
 
     /// Opens the service authorization from disk on every run, including after
     /// service/OS restart. Manual mount/restore must not call this method.
-    pub(crate) fn scheduled_archive_key(&self, job: &Job) -> Result<Option<JobPrivateKey>> {
+    pub(crate) fn scheduled_archive_key(
+        &self,
+        job: &Job,
+    ) -> std::result::Result<Option<JobPrivateKey>, RunKeyError> {
         let Some(encryption) = &job.archive_encryption else {
             return Ok(None);
         };
         let data_dir = self.jobs_path.parent().ok_or_else(|| {
-            OwnBackupError::Config(tr!("backup_encryption.no_state_dir").into_owned())
+            RunKeyError::new(
+                &OwnBackupError::Config(tr!("backup_encryption.no_state_dir").into_owned()),
+                ERROR_KIND_NONE,
+            )
         })?;
+        // Only the job's key not opening from the store is what authorizing
+        // the job again repairs (`ServiceKeyStore::open` says so itself); the
+        // store not opening at all (I/O, the machine's key protection) is not.
         let keys = ServiceKeyStore::new(data_dir).map_err(|e| match e {
-            OwnBackupError::KeyProtection(_) => e,
-            e => OwnBackupError::Encryption(
-                tr!("backup_encryption.reauthorize_error", error = e).into_owned(),
+            OwnBackupError::KeyProtection(_) => RunKeyError::new(&e, ERROR_KIND_KEY_PROTECTION),
+            e => RunKeyError::new(
+                &OwnBackupError::Encryption(
+                    tr!("backup_encryption.reauthorize_error", error = e).into_owned(),
+                ),
+                ERROR_KIND_NONE,
             ),
         })?;
         keys.open(&job.id, &encryption.portable_key, &encryption.local_key)
             .map(Some)
+            .map_err(|e| RunKeyError::new(&e, ERROR_KIND_REAUTHORIZE))
     }
 
     /// The keys this run works with, opened once before it starts (§7.4).
@@ -200,15 +217,15 @@ impl JobStore {
             return Ok(None);
         };
         let private = self
-            .scheduled_archive_key(job)
-            .map_err(|e| RunKeyError::from_open(&e))?
+            .scheduled_archive_key(job)?
             .ok_or_else(|| RunKeyError {
                 message: tr!("backup_encryption.reauthorize").into_owned(),
                 kind: ERROR_KIND_REAUTHORIZE,
             })?;
+        // The key opened: what fails past here is not its authorization.
         ArchiveKeys::from_private(encryption.portable_key.clone(), private)
             .map(Some)
-            .map_err(|e| RunKeyError::from_open(&e))
+            .map_err(|e| RunKeyError::new(&e, ERROR_KIND_NONE))
     }
 
     /// The message a run dies with when its keys cannot be opened.
@@ -552,13 +569,24 @@ mod tests {
     /// key protection failing is not "authorize again", whatever the words.
     #[test]
     fn a_key_failure_is_classified_by_its_variant_not_its_words() {
-        let tpm = RunKeyError::from_open(&OwnBackupError::KeyProtection("TPM2".into()));
+        let tpm = RunKeyError::new(
+            &OwnBackupError::KeyProtection("TPM2".into()),
+            ERROR_KIND_REAUTHORIZE,
+        );
         assert_eq!(tpm.kind, ERROR_KIND_KEY_PROTECTION);
         assert!(tpm.message.contains("TPM2"));
         // Worded like a TPM failure, but a lost authorization by its kind.
-        let gone =
-            RunKeyError::from_open(&OwnBackupError::Encryption("TPM2 device not found".into()));
+        let gone = RunKeyError::new(
+            &OwnBackupError::Encryption("TPM2 device not found".into()),
+            ERROR_KIND_REAUTHORIZE,
+        );
         assert_eq!(gone.kind, ERROR_KIND_REAUTHORIZE);
+        // An I/O error past the authorization is no reason to authorize again.
+        let io = RunKeyError::new(
+            &OwnBackupError::Io(std::io::Error::other("disk")),
+            ERROR_KIND_NONE,
+        );
+        assert_eq!(io.kind, ERROR_KIND_NONE);
         // The kind travels with the run, and only when there is one.
         let run = crate::JobRun {
             error_kind: ERROR_KIND_KEY_PROTECTION.into(),
@@ -609,14 +637,16 @@ mod tests {
         let runs = sink.0.lock().unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].status, "error");
-        // Which of the two depends on this machine's key protection; either
-        // way the run says it by kind, not only in words.
-        assert!(
-            [ERROR_KIND_REAUTHORIZE, ERROR_KIND_KEY_PROTECTION]
-                .contains(&runs[0].error_kind.as_str()),
-            "{:?}",
-            runs[0].error_kind
-        );
+        // Which kind depends on whether this machine's key store opens at
+        // all: where it does, the job's key is missing from it — authorize
+        // again; where its protection fails, that; where the store itself
+        // is refused (not root), no kind — authorizing would not help.
+        let expected = match ServiceKeyStore::new(temp.path()) {
+            Ok(_) => ERROR_KIND_REAUTHORIZE,
+            Err(OwnBackupError::KeyProtection(_)) => ERROR_KIND_KEY_PROTECTION,
+            Err(_) => ERROR_KIND_NONE,
+        };
+        assert_eq!(runs[0].error_kind, expected, "{}", runs[0].error);
         assert!(runs[0].image_path.is_empty());
         assert!(!temp.path().join("images").exists());
         assert!(queue.snapshot().current.is_none());

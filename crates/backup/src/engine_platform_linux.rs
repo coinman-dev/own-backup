@@ -83,6 +83,17 @@ impl LinuxPlatform {
                 "{source}: no snapshot was prepared for this source, and it is not read without one"
             ))
         })?;
+        // A key directory that cannot be left out by name (decision 6/E4):
+        // refused before the source is held.
+        let key_store = match crate::seal::local::key_store_rule(source) {
+            crate::seal::local::KeyStoreRule::Nothing => false,
+            crate::seal::local::KeyStoreRule::ExcludeByName => true,
+            crate::seal::local::KeyStoreRule::Refuse(why) => {
+                return Err(crate::engine_core::volume_exclusions::key_store_refusal(
+                    source, &why,
+                ))
+            }
+        };
         let read_path = snapshot.snapshot_device_path.clone();
         let mode = snapshot.metadata.get("mode").map(String::as_str);
         // An idle device holds still only while nobody else can take it:
@@ -94,7 +105,7 @@ impl LinuxPlatform {
             _ => None,
         };
         Ok(LinuxSession {
-            key_store: crate::seal::local::key_store_on_source(source),
+            key_store,
             read_path,
             snapshot: matches!(mode, Some("lvm" | "dm")),
             frozen: own_backup_snapshot::linux::is_frozen(snapshot),

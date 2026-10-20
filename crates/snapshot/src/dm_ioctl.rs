@@ -299,38 +299,61 @@ impl Request {
     /// The targets a `DM_TABLE_STATUS` reply lists: the table itself with
     /// `flag::STATUS_TABLE`, each target's status line without it.
     pub fn targets(&self) -> io::Result<Vec<Target>> {
-        let data = self.data()?;
         let mut out = Vec::new();
-        let mut off = 0usize;
-        for _ in 0..self.target_count() {
-            if off + SPEC_SIZE > data.len() {
-                return Err(bad("device-mapper target outside the reply"));
-            }
-            let spec = &data[off..off + SPEC_SIZE];
-            let kind = get_str(spec, 24, TYPE_LEN)?;
-            let rest = &data[off + SPEC_SIZE..];
-            let end = rest
-                .iter()
-                .position(|&b| b == 0)
-                .ok_or_else(|| bad("unterminated device-mapper target parameters"))?;
+        for (spec, params) in self.target_spans()? {
+            let spec = &self.buf[spec..spec + SPEC_SIZE];
             let params = Zeroizing::new(
-                std::str::from_utf8(&rest[..end])
+                std::str::from_utf8(&self.buf[params])
                     .map_err(|_| bad("non-UTF-8 device-mapper target parameters"))?
                     .to_string(),
             );
             out.push(Target {
                 start: get_u64(spec, 0),
                 length: get_u64(spec, 8),
-                kind,
+                kind: get_str(spec, 24, TYPE_LEN)?,
                 params,
             });
-            let next = get_u32(spec, 20) as usize;
+        }
+        Ok(out)
+    }
+
+    /// Where the targets of a `DM_TABLE_STATUS` reply lie in the buffer: the
+    /// offset of each spec, and its parameters without their NUL.
+    fn target_spans(&self) -> io::Result<Vec<(usize, std::ops::Range<usize>)>> {
+        let data = self.data()?;
+        let base = get_u32(&self.buf, OFF_DATA_START) as usize;
+        let mut out = Vec::new();
+        let mut off = 0usize;
+        for _ in 0..self.target_count() {
+            if off + SPEC_SIZE > data.len() {
+                return Err(bad("device-mapper target outside the reply"));
+            }
+            let rest = &data[off + SPEC_SIZE..];
+            let end = rest
+                .iter()
+                .position(|&b| b == 0)
+                .ok_or_else(|| bad("unterminated device-mapper target parameters"))?;
+            let params = base + off + SPEC_SIZE;
+            out.push((base + off, params..params + end));
+            let next = get_u32(data, off + 20) as usize;
             if next <= off {
                 break; // the last one, or a malformed chain
             }
             off = next;
         }
         Ok(out)
+    }
+
+    /// Overwrite the key of every `crypt` target of a table reply, in this
+    /// (wiped) buffer, with `0`s, as `dmsetup table` without `--showkeys`
+    /// shows it: nothing parsed from the reply afterwards holds a key.
+    fn mask_keys(&mut self) -> io::Result<()> {
+        for (spec, params) in self.target_spans()? {
+            if get_str(&self.buf[spec..spec + SPEC_SIZE], 24, TYPE_LEN)? == "crypt" {
+                mask_crypt_key(&mut self.buf[params]);
+            }
+        }
+        Ok(())
     }
 
     /// `(name, (major, minor))` of every device a `DM_LIST_DEVICES` reply lists.
@@ -376,6 +399,29 @@ impl Request {
         Ok((0..count)
             .map(|i| own_backup_common::linux_block::split_dev(get_u64(data, 8 + i * 8)))
             .collect())
+    }
+}
+
+/// `<cipher> <key> <iv_offset> <device> <offset> …`: the key field turned
+/// into as many `0`s. A key the table names by keyring reference
+/// (`:32:logon:…`) or none (`-`) is masked the same way.
+fn mask_crypt_key(params: &mut [u8]) {
+    let mut fields = 0;
+    let mut i = 0;
+    while i < params.len() {
+        if params[i] == b' ' {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < params.len() && params[i] != b' ' {
+            i += 1;
+        }
+        if fields == 1 {
+            params[start..i].fill(b'0');
+            return;
+        }
+        fields += 1;
     }
 }
 
@@ -484,6 +530,25 @@ impl Control {
             )
         })?
         .targets()
+    }
+
+    /// The live table of `name` with each `crypt` target's key replaced by
+    /// `0`s (`dmsetup table` without `--showkeys`): for callers that need
+    /// where a device's data lies, never its key. The kernel has no keyless
+    /// form of the request — it wipes its own copy (`SECURE_DATA`) — so the
+    /// key is masked in the reply buffer, which is wiped on drop like every
+    /// smaller one tried before it, before anything is parsed out of it.
+    pub fn table_without_keys(&self, name: &str) -> io::Result<Vec<Target>> {
+        let mut reply = self.run_growing(|room| {
+            Request::new(
+                Cmd::TableStatus,
+                name,
+                flag::STATUS_TABLE | flag::SECURE_DATA,
+                room,
+            )
+        })?;
+        reply.mask_keys()?;
+        reply.targets()
     }
 
     /// The status line of each target of `name` (`dmsetup status`).
@@ -700,6 +765,51 @@ mod tests {
         assert_eq!(Request::load("vol", &t, 0).unwrap().bytes(), back.bytes());
         // Debug never shows a key.
         assert!(!format!("{:?}", t[0]).contains(&key));
+    }
+
+    /// The keyless table: the key field of a crypt target is zeros in the
+    /// buffer itself, every other field and target is as the kernel wrote it.
+    #[test]
+    fn a_table_without_keys_masks_them_in_the_buffer() {
+        let key = "ab".repeat(32);
+        let crypt = format!("aes-xts-plain64 {key} 0 253:16 32768 1 allow_discards");
+        let mut r = status_reply(
+            &[
+                (0, 1000, "crypt", &crypt),
+                (1000, 24, "linear", "8:1 2048"),
+                (
+                    1024,
+                    8,
+                    "crypt",
+                    "aes-cbc-essiv:sha256 :32:logon:cryptsetup:x-d0 0 8:2 0",
+                ),
+            ],
+            flag::STATUS_TABLE,
+        );
+        r.mask_keys().unwrap();
+        assert!(!r.bytes().windows(key.len()).any(|w| w == key.as_bytes()));
+        let t = r.targets().unwrap();
+        assert_eq!(
+            t[0].params.as_str(),
+            format!(
+                "aes-xts-plain64 {} 0 253:16 32768 1 allow_discards",
+                "0".repeat(64)
+            )
+        );
+        assert_eq!(t[1].params.as_str(), "8:1 2048");
+        assert_eq!(
+            t[2].params.as_str(),
+            format!(
+                "aes-cbc-essiv:sha256 {} 0 8:2 0",
+                "0".repeat(":32:logon:cryptsetup:x-d0".len())
+            )
+        );
+        let mut short = *b"null -";
+        mask_crypt_key(&mut short);
+        assert_eq!(&short, b"null 0");
+        let mut one = *b"cipher";
+        mask_crypt_key(&mut one);
+        assert_eq!(&one, b"cipher");
     }
 
     #[test]

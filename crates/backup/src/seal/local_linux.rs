@@ -23,6 +23,7 @@ use zeroize::Zeroizing;
 
 use super::{bad, Backend, KEY_DIRECTORY_NAME, MAX_LOCAL_BLOB};
 use crate::seal::{aead_open, aead_seal, fill_random};
+use crate::source_identity::linux::MountEntry;
 
 /// The machine key, wrapped by `systemd-creds`, inside the key directory.
 pub const MACHINE_KEY_FILE: &str = "machine.cred";
@@ -799,8 +800,35 @@ pub fn key_store_on_source(source: &str) -> bool {
 }
 
 /// [`key_store_on_source`], with "cannot tell" kept apart for the wizard.
+/// A key directory that cannot be left out by its name (a mount point, see
+/// [`KeyStoreRule::Refuse`]) is "cannot tell", with that reason.
 pub fn key_store_placement(source: &str) -> KeyStorePlacement {
     key_store_in(source, &key_store_data_dirs())
+}
+
+/// What a copy of a source does about this machine's key directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyStoreRule {
+    /// No key directory with anything in it is on the source.
+    Nothing,
+    /// One is, or may be, under its name: it is left out by that name, and
+    /// the file scan must prove it went.
+    ExcludeByName,
+    /// One is, or may be, on the source under another name — the key
+    /// directory is a mount point, and its bytes lie wherever its mount
+    /// takes them from: leaving its name out proves nothing, so the copy is
+    /// refused. The reason, in words.
+    Refuse(String),
+}
+
+/// What the engine does about the key directory on `source` (decision 6/E4).
+pub fn key_store_rule(source: &str) -> KeyStoreRule {
+    let found = assess(source, &key_store_data_dirs(), &host_mounts());
+    match found {
+        Found::Unexcludable(why) => KeyStoreRule::Refuse(why),
+        Found::Clear => KeyStoreRule::Nothing,
+        Found::Here | Found::CannotTell(_) => KeyStoreRule::ExcludeByName,
+    }
 }
 
 /// Every data directory whose key directory counts: those registered in this
@@ -832,35 +860,106 @@ fn key_store_data_dirs() -> Vec<PathBuf> {
 
 /// [`key_store_placement`] over the data directories given.
 fn key_store_in(source: &str, dirs: &[PathBuf]) -> KeyStorePlacement {
+    match assess(source, dirs, &host_mounts()) {
+        Found::Clear => KeyStorePlacement::Clear,
+        Found::Here => KeyStorePlacement::Here,
+        Found::CannotTell(why) | Found::Unexcludable(why) => KeyStorePlacement::CannotTell(why),
+    }
+}
+
+/// Where the key directories of `dirs` are relative to `source`, the most
+/// telling answer of them all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Found {
+    Clear,
+    Here,
+    CannotTell(String),
+    /// On the source, or maybe, and not under its own name: a mount point.
+    Unexcludable(String),
+}
+
+impl Found {
+    /// How telling an answer is: a refusal over a known place over a doubt
+    /// over nothing.
+    fn rank(&self) -> u8 {
+        match self {
+            Found::Clear => 0,
+            Found::CannotTell(_) => 1,
+            Found::Here => 2,
+            Found::Unexcludable(_) => 3,
+        }
+    }
+}
+
+/// One key directory: where its bytes sit relative to the source, and
+/// whether it is a mount point (`mounted`: why its name proves nothing).
+fn one_key_dir(sits: crate::source_identity::DestPlacement, mounted: Option<String>) -> Found {
     use crate::source_identity::DestPlacement;
+    match (sits, mounted) {
+        (DestPlacement::Clear, _) => Found::Clear,
+        (_, Some(why)) => Found::Unexcludable(why),
+        (DestPlacement::OnSource(_), None) => Found::Here,
+        (DestPlacement::CannotTell(why), None) => Found::CannotTell(why),
+    }
+}
+
+fn assess(source: &str, dirs: &[PathBuf], mounts: &[MountEntry]) -> Found {
     use std::os::unix::fs::FileTypeExt;
     // A volume is a block device. A regular file read as a source (an image
     // the CLI is pointed at, the engine's own tests) is not where this
     // machine's key directory lives, and must not be refused for it.
     if std::fs::metadata(source).is_ok_and(|m| !m.file_type().is_block_device()) {
-        return KeyStorePlacement::Clear;
+        return Found::Clear;
     }
-    let mut unknown = None;
+    let mut best = Found::Clear;
     for dir in dirs.iter().map(|d| d.join(KEY_DIRECTORY_NAME)) {
         if !holds_anything(&dir) {
             continue;
         }
-        let Some(path) = dir.to_str() else {
-            unknown.get_or_insert_with(|| dir.display().to_string());
-            continue;
+        let found = match dir.to_str() {
+            None => Found::CannotTell(dir.display().to_string()),
+            Some(path) => one_key_dir(
+                crate::source_identity::where_the_destination_sits(&[source.to_string()], path),
+                mounted_key_dir(&dir, mounts),
+            ),
         };
-        match crate::source_identity::where_the_destination_sits(&[source.to_string()], path) {
-            DestPlacement::Clear => {}
-            DestPlacement::OnSource(_) => return KeyStorePlacement::Here,
-            DestPlacement::CannotTell(why) => {
-                unknown.get_or_insert(why);
-            }
+        if found.rank() > best.rank() {
+            best = found;
         }
     }
-    match unknown {
-        Some(why) => KeyStorePlacement::CannotTell(why),
-        None => KeyStorePlacement::Clear,
-    }
+    best
+}
+
+/// This machine's mounts; none when they cannot be read.
+fn host_mounts() -> Vec<MountEntry> {
+    crate::source_identity::linux::parse_mountinfo(
+        &std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default(),
+    )
+}
+
+/// Why the key directory `dir` cannot be left out of a copy by its name, or
+/// `None`: it is a mount point — of another filesystem (its device is not
+/// its parent's), or a bind mount of a directory of the same one (the mount
+/// table lists it). Either way its bytes lie where the mount takes them
+/// from, under whatever name they have there.
+fn mounted_key_dir(dir: &Path, mounts: &[MountEntry]) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let real = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let other_fs = match (
+        std::fs::symlink_metadata(&real),
+        real.parent().map(std::fs::symlink_metadata),
+    ) {
+        (Ok(here), Some(Ok(up))) => here.dev() != up.dev(),
+        _ => false,
+    };
+    let listed = mounts.iter().any(|m| m.mount_point == real);
+    (other_fs || listed).then(|| {
+        tr!(
+            "seal_local_linux.key_store_mount_point",
+            path = real.display()
+        )
+        .into_owned()
+    })
 }
 
 /// An entry of any kind in `dir`; an unreadable directory counts as full.
@@ -1172,6 +1271,56 @@ pub(super) mod tests {
         let file = data.path().join("image.raw");
         std::fs::write(&file, b"").unwrap();
         assert_eq!(key_store_in(file.to_str().unwrap(), &dirs), clear);
+    }
+
+    /// A key directory that is a mount point — a bind mount the mount table
+    /// lists — cannot be left out by its name: where its bytes are on the
+    /// source, or may be, the copy is refused with that reason; where they
+    /// are not, the source is clear of it.
+    #[test]
+    fn a_mounted_key_directory_is_refused_not_excluded_by_name() {
+        use crate::source_identity::DestPlacement;
+        let data = data_dir();
+        let dir = data.path().join(KEY_DIRECTORY_NAME);
+        std::fs::create_dir(&dir).unwrap();
+        let real = std::fs::canonicalize(&dir).unwrap();
+        let entry = |at: &Path| MountEntry {
+            mount_point: at.to_path_buf(),
+            fstype: "ext4".into(),
+            source: "/dev/sda2".into(),
+            major: 8,
+            minor: 2,
+        };
+        assert_eq!(mounted_key_dir(&dir, &[entry(data.path())]), None);
+        let why = mounted_key_dir(&dir, &[entry(data.path()), entry(&real)]).unwrap();
+        assert!(why.contains(&real.display().to_string()), "{why}");
+        // The mount table escapes a space; parsed, the paths are equal.
+        let spaced = data.path().join("a b");
+        std::fs::create_dir(&spaced).unwrap();
+        let line = format!(
+            "36 25 8:2 /keys {} rw,relatime - ext4 /dev/sda2 rw\n",
+            std::fs::canonicalize(&spaced)
+                .unwrap()
+                .display()
+                .to_string()
+                .replace(' ', "\\040")
+        );
+        let mounts = crate::source_identity::linux::parse_mountinfo(&line);
+        assert!(mounted_key_dir(&spaced, &mounts).is_some());
+
+        let on = || DestPlacement::OnSource("/dev/sda2".into());
+        assert_eq!(one_key_dir(on(), None), Found::Here);
+        assert_eq!(
+            one_key_dir(on(), Some(why.clone())),
+            Found::Unexcludable(why.clone())
+        );
+        assert_eq!(
+            one_key_dir(DestPlacement::CannotTell("zfs".into()), Some(why.clone())),
+            Found::Unexcludable(why.clone())
+        );
+        assert_eq!(one_key_dir(DestPlacement::Clear, Some(why)), Found::Clear);
+        assert!(Found::Unexcludable(String::new()).rank() > Found::Here.rank());
+        assert!(Found::Here.rank() > Found::CannotTell(String::new()).rank());
     }
 
     /// The real `systemd-creds`, host key: only as root, where it is present.
