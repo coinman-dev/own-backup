@@ -2,7 +2,7 @@
 """Host half of the Linux restore scenario (`linux-restore-scenario.sh`).
 
     python3 -I scripts/lab/linux-restore-boot.py source       # data-1 := the base image
-    python3 -I scripts/lab/linux-restore-boot.py boot DISK [--bios] [--timeout S]
+    python3 -I scripts/lab/linux-restore-boot.py boot DISK [--bios] [--with DISK2] [--timeout S]
 
 `source` turns the run's first data disk into a bootable source system: a
 qcow2 overlay of the read-only cloud base (the Ubuntu 26.04 image boots under
@@ -18,6 +18,14 @@ find `\\EFI\\BOOT\\BOOTX64.EFI` by itself, which is what a restored disk on a
 new machine gets) or SeaBIOS, and waits for the kernel and a login prompt on
 the serial console. Exit 0 when both appeared. One VM at a time, as the stand
 rules say: the stand VM must be down.
+
+`--with DISK2` attaches a second disk behind it (also through an overlay),
+not to boot from: `--with data-1.qcow2` after the scenario's `change` stage
+puts the source system beside its restored copy, as on the machine the copy
+came from. The restored system then has to find its own filesystems by their
+new UUIDs. What the change leaves duplicated by design — the PARTUUIDs, and
+filesystem LABELs, which are not identities a restore changes — can still
+resolve to either disk; the serial log says which root was mounted.
 
 Python standard library only.
 """
@@ -68,7 +76,18 @@ def cmd_boot(args) -> int:
         overlay = tmp / 'boot.qcow2'
         q.run_img('create', '-q', '-f', 'qcow2', '-F', 'qcow2', '-b', str(disk.resolve()),
                   str(overlay))
-        serial = vm.RUN / 'evidence' / f"boot-{disk.stem}-{'bios' if args.bios else 'uefi'}.log"
+        extra = None
+        if args.with_disk:
+            other = Path(args.with_disk)
+            if not other.is_absolute() and not other.exists():
+                other = vm.RUN / args.with_disk
+            if not other.exists():
+                vm.fail(f'no such disk: {other}')
+            extra = tmp / 'with.qcow2'
+            q.run_img('create', '-q', '-f', 'qcow2', '-F', 'qcow2', '-b', str(other.resolve()),
+                      str(extra))
+        suffix = '-with' if args.with_disk else ''
+        serial = vm.RUN / 'evidence' / f"boot-{disk.stem}-{'bios' if args.bios else 'uefi'}{suffix}.log"
         serial.parent.mkdir(exist_ok=True)
         serial.unlink(missing_ok=True)
         argv = [q.system, '-name', 'obk-lab-linux-boot', '-machine', 'q35,accel=kvm',
@@ -84,8 +103,11 @@ def cmd_boot(args) -> int:
             argv += ['-drive', f'if=pflash,format=raw,unit=0,readonly=on,file={q.ovmf_code}',
                      '-drive', f'if=pflash,format=raw,unit=1,file={vars_fd}']
         argv += ['-drive', f'file={overlay},if=none,id=d0,format=qcow2',
-                 '-device', 'virtio-blk-pci,drive=d0,bootindex=0',
-                 '-chardev', f'file,id=ser0,path={serial}', '-serial', 'chardev:ser0',
+                 '-device', 'virtio-blk-pci,drive=d0,bootindex=0']
+        if extra is not None:
+            argv += ['-drive', f'file={extra},if=none,id=d1,format=qcow2',
+                     '-device', 'virtio-blk-pci,drive=d1']
+        argv += ['-chardev', f'file,id=ser0,path={serial}', '-serial', 'chardev:ser0',
                  '-device', 'virtio-rng-pci']
         vm.say(f"booting {disk.name} alone ({'SeaBIOS' if args.bios else 'OVMF, empty NVRAM'})")
         proc = subprocess.Popen(argv, env=q.env, stdin=subprocess.DEVNULL,
@@ -119,6 +141,8 @@ def main() -> int:
     boot = sub.add_parser('boot', help='boot a restored disk alone and wait for a login prompt')
     boot.add_argument('disk', help='data-2.qcow2 (in the run) or a path')
     boot.add_argument('--bios', action='store_true', help='SeaBIOS instead of OVMF')
+    boot.add_argument('--with', dest='with_disk', metavar='DISK2',
+                      help='attach a second disk (not booted from), e.g. the source data-1.qcow2')
     boot.add_argument('--timeout', type=int, default=420)
     args = parser.parse_args()
     return {'source': cmd_source, 'boot': cmd_boot}[args.cmd](args)

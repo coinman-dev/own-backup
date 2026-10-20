@@ -178,6 +178,19 @@ pub fn volume_head(
     Ok(Some(buf))
 }
 
+/// The LUKS identity of a container the restore puts back from its saved
+/// header (re-encryption, D19): the copy holds the volume decrypted, so the
+/// image itself does not show it, and the restored partition carries the
+/// source's container UUID all the same.
+pub fn saved_container_identity(
+    header: &own_backup_common::image::LuksHeaderBackup,
+) -> Option<Identity> {
+    let bytes = crate::luks::decode_stored_header(header).ok()?;
+    identities_of(&mut bytes.as_slice())
+        .into_iter()
+        .find(|i| i.kind == IdentityKind::Luks)
+}
+
 /// Which of `restored` this machine already carries, leaving out the
 /// `overwritten` devices (kernel names) and everything stacked on them.
 pub fn clashes_here(
@@ -320,6 +333,34 @@ mod tests {
         let restored = vec![(None, Identity::new(IdentityKind::Ext, U))];
         let here = present("sdb1", vec![Identity::new(IdentityKind::Ext, U)]);
         assert!(clashes_against(&restored, &here, &["sdb1".into()], None).is_empty());
+    }
+
+    #[test]
+    fn a_container_put_back_from_its_saved_header_shows_its_luks_uuid() {
+        use base64::Engine;
+        let mut header = vec![0u8; 16384];
+        header[0..6].copy_from_slice(b"LUKS\xba\xbe");
+        header[168..168 + U.len()].copy_from_slice(U.as_bytes());
+        let saved = own_backup_common::image::LuksHeaderBackup {
+            part_index: 3,
+            data_offset: header.len() as u64,
+            sector_size: 512,
+            kind: own_backup_common::image::VolumeEncryptionKind::Luks2,
+            header_b64: base64::engine::general_purpose::STANDARD.encode(&header),
+        };
+        assert_eq!(
+            saved_container_identity(&saved),
+            Some(Identity::new(IdentityKind::Luks, U))
+        );
+        let short = own_backup_common::image::LuksHeaderBackup {
+            data_offset: 1,
+            ..saved
+        };
+        assert_eq!(
+            saved_container_identity(&short),
+            None,
+            "a damaged blob says nothing"
+        );
     }
 
     #[test]

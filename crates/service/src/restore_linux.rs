@@ -573,13 +573,29 @@ pub(super) fn plan_clashes(
         return Ok(Vec::new());
     }
     let sidecar = own_backup_backup::sidecar::read_sidecar_with_keys(&plan.image_path, keys)?;
-    let restored = identity_check_linux::restored_identities(
+    let mut restored = identity_check_linux::restored_identities(
         &plan.image_path,
         keys,
         &sidecar,
         &sources,
         plan.touches_partition_table(),
     )?;
+    // A container put back from its saved header carries the source's LUKS
+    // UUID, which the decrypted copy does not show.
+    for op in &plan.ops {
+        if let RestoreOp::RestorePartition {
+            src_index,
+            reencrypt: true,
+            ..
+        } = op
+        {
+            if let Some(id) = own_backup_core::restore_exec::luks_header_for(&sidecar, *src_index)
+                .and_then(identity_check_linux::saved_container_identity)
+            {
+                restored.push((Some(*src_index), id));
+            }
+        }
+    }
     Ok(identity_check_linux::clashes_here(
         &restored,
         &overwritten_by(plan),

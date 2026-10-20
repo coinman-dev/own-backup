@@ -210,7 +210,9 @@ impl TempMount {
                 }
                 Ok(o) => tried.push(format!(
                     "{fstype}: {}",
-                    String::from_utf8_lossy(&o.stderr).trim()
+                    String::from_utf8_lossy(&o.stderr)
+                        .trim()
+                        .trim_end_matches('.')
                 )),
                 Err(e) => tried.push(format!("{fstype}: {e}")),
             }
