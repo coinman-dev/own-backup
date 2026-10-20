@@ -67,11 +67,19 @@ pub fn log_dir(data_dir: &Path) -> Option<PathBuf> {
         candidates.push(std::env::temp_dir().join(LOG_DIR_NAME));
         candidates
     };
+    #[cfg(not(target_os = "linux"))]
+    let temp = candidates.last().cloned();
     let chosen = candidates.into_iter().find(|dir| writable(dir))?;
     // The service sweeps only the folder it writes to itself; a user's own
     // folder is swept by the user's programs, the one time each starts.
     #[cfg(target_os = "linux")]
     if !chosen.starts_with(data_dir) && !chosen.starts_with(LINUX_SYSTEM_LOG_DIR) {
+        sweep(&chosen, KEEP_DAYS);
+    }
+    // On Windows that is the person's temp folder: the installed service
+    // lets nobody else write beside the program or in its data folder.
+    #[cfg(not(target_os = "linux"))]
+    if Some(&chosen) == temp.as_ref() {
         sweep(&chosen, KEEP_DAYS);
     }
     Some(chosen)

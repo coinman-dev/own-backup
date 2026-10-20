@@ -3,6 +3,9 @@
 rust_i18n::i18n!("locales", fallback = "ru");
 
 mod app_state;
+// The decision is plain code tested everywhere; only Windows applies it.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod data_dir_acl;
 mod grpc_server;
 mod install;
 #[cfg(target_os = "linux")]
@@ -660,9 +663,25 @@ pub async fn run_main_loop(
     let config = AppConfig::default();
 
     prepare_data_dir(&config.data_dir)?;
-    // A config.toml that a user owns stops steering the service here.
+    // The installed service's data folder is SYSTEM's and the
+    // Administrators' (`data_dir_acl`). A link to elsewhere somebody else
+    // made stops the start before the service writes anything there.
+    #[cfg(windows)]
+    let protect_data = !use_tcp
+        && !own_backup_common::media_mode::is_media_mode()
+        && matches!(
+            data_dir_acl::check_root(&config.data_dir)?,
+            data_dir_acl::RootKind::Folder
+        );
+    // A config.toml that a user owns stops steering the service here. Before
+    // the folder is protected: which mirror folder it may keep depends on
+    // who owned it.
     #[cfg(windows)]
     settings::adopt_config_file(&AppConfig::default_path());
+    #[cfg(windows)]
+    if protect_data {
+        data_dir_acl::protect(&config.data_dir);
+    }
 
     // Everyone's logs, swept by the one process that is always here.
     start_log_housekeeping();

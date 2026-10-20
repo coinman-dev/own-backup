@@ -3,9 +3,10 @@
 //! The window cannot write `config.toml` itself on either system, and asks
 //! here; the service writes the file under the same lock and atomic replace
 //! every writer uses (`AppConfig::update_file`). On Linux the file lives in
-//! root's data folder (0750, the access group). On Windows every user may
-//! create files in `C:\ProgramData\OwnBackup`, and the window used to write
-//! the file itself, so whoever made it first owned it; a file written here is
+//! root's data folder (0750, the access group). On Windows every user could
+//! create files in `C:\ProgramData\OwnBackup` (until the service protected
+//! the folder at start, `data_dir_acl`), and the window used to write the
+//! file itself, so whoever made it first owned it; a file written here is
 //! SYSTEM's, and an older one is taken over at start ([`adopt_config_file`]).
 //!
 //! One field is more than a preference. `log_mirror_dir` names a folder in

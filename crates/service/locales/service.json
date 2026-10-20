@@ -438,6 +438,10 @@
     "ru": "режим загрузочного носителя: состояние на диске носителя, службу не устанавливать (в WinPE включается сам)",
     "en": "bootable media mode: state kept on the media drive, the service is not installed (turns on by itself in WinPE)"
   },
+  "data_dir_acl.foreign_link": {
+    "ru": "папка данных %{path} — ссылка, которую создала не система и не администраторы (владелец %{owner}): служба не запущена, чтобы не хранить задания, журнал и ключ доступа там, куда ведёт ссылка. Удалите ссылку (администратор) и запустите службу снова",
+    "en": "the data folder %{path} is a link made by someone other than SYSTEM or the Administrators (owner %{owner}): the service did not start, so as not to keep its jobs, history and access token wherever the link leads. Remove the link (as an administrator) and start the service again"
+  },
   "single_instance.already_running": {
     "ru": "служба Own Backup уже запущена — второй экземпляр не нужен и ничего не менял",
     "en": "the Own Backup service is already running — a second instance is not needed and changed nothing"

@@ -232,7 +232,7 @@ pub fn open_append_checked(path: &Path) -> io::Result<(File, bool)> {
         return Ok((file, made));
     }
     if made {
-        delete_by_handle(&file);
+        let _ = delete_by_handle(&file);
     }
     Err(io::Error::new(
         io::ErrorKind::InvalidInput,
@@ -241,19 +241,21 @@ pub fn open_append_checked(path: &Path) -> io::Result<(File, bool)> {
 }
 
 /// Mark an open file for deletion (it goes when the last handle closes).
-pub fn delete_by_handle(file: &File) {
+/// Opened with `FILE_FLAG_OPEN_REPARSE_POINT`, a link goes, not its target.
+pub fn delete_by_handle(file: &File) -> io::Result<()> {
     let info = FILE_DISPOSITION_INFO {
         DeleteFile: true.into(),
     };
     // SAFETY: a live handle with DELETE access and a structure of the size passed.
-    let _ = unsafe {
+    unsafe {
         SetFileInformationByHandle(
             HANDLE(file.as_raw_handle()),
             FileDispositionInfo,
             std::ptr::addr_of!(info).cast(),
             std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
         )
-    };
+    }?;
+    Ok(())
 }
 
 /// Rename an open file to `new_name` in the folder it is in, replacing a file

@@ -820,6 +820,56 @@ function Settings6a {
     shutdown.exe /s /t 5 | Out-Null
 }
 
+# Mode 'datadir6a' (PLAN 6a): the installed service keeps its data folder to
+# SYSTEM and the Administrators. A folder as a user could leave it (theirs,
+# inheriting from ProgramData, with their files, a folder, a file that shuts
+# SYSTEM out, a junction and a second name of a file elsewhere) is taken back
+# at start; the key directory's own DACL is untouched; the user still reads
+# the token and the settings and reaches the service, and creates nothing in
+# the folder. The data folder as a junction a user made stops the start; one
+# the Administrators own is followed, its permissions untouched.
+function DataDir6a {
+    $dd = 'C:\ProgramData\OwnBackup'
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    Ask 'dd-plant' 'dd-plant'
+    $r = Get-Content "$work\dd-plant.json" -Raw | ConvertFrom-Json
+    Check ($r.root_before_owner -eq $me -and -not $r.root_before_protected) "the folder was the user's and inherited from ProgramData ($($r.root_before_owner))"
+    Check (@($r.planted_owners | Where-Object { $_ -ne $me }).Count -eq 0) "the planted entries were the user's ($(@($r.planted_owners) -join ','))"
+    Check ($r.root_owner -eq 'S-1-5-32-544') "the service made the folder the Administrators' ($($r.root_owner))"
+    Check ([bool]$r.root_protected) 'the folder no longer inherits from ProgramData'
+    $dacl = $r.root_sddl.Substring($r.root_sddl.IndexOf('D:'))
+    Check ($dacl -eq 'D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)') "the folder's DACL is SYSTEM and Administrators full, Users read ($dacl)"
+    foreach ($e in @($r.entries)) {
+        Check ($e.exists -and $e.owner -eq 'S-1-5-32-544' -and $e.sddl -notmatch [regex]::Escape($me) -and $e.sddl -match '\(A;[A-Z]*ID;0x1200a9;;;BU\)') "$($e.name) is the Administrators', Users read, nothing of the user's ($($e.owner) $($e.sddl))"
+    }
+    Check (-not $r.junction_left -and $r.target_kept) 'the user''s junction is gone, what it led to is not'
+    Check (-not $r.hard_left -and $r.hard_source_kept -and $r.hard_source_owner -eq $me) 'the second name is gone; the file elsewhere and its owner are untouched'
+    Check ($r.keys_before -and $r.keys_before -eq $r.keys_after) "the key directory's own DACL is untouched ($($r.keys_after))"
+    Check ($r.token_sddl -match '^O:[A-Z]+G:[A-Z]+D:P') "the service token keeps its own protected DACL ($($r.token_sddl))"
+    Check (@($r.log).Count -gt 0) "the service logged what it changed ($(@($r.log).Count) lines)"
+    $refused = { param($block) try { & $block; return $false } catch { return $true } }
+    Check (& $refused { [IO.File]::WriteAllText("$dd\dd-user-new.txt", 'x') }) 'the user can no longer create a file in the folder'
+    Check (& $refused { [IO.Directory]::CreateDirectory("$dd\dd-user-dir") | Out-Null }) 'the user can no longer create a folder in it'
+    Check (& $refused { [IO.File]::AppendAllText("$dd\dd-planted.txt", 'x') }) 'the user can no longer write the file they planted'
+    Check (& $refused { [IO.File]::WriteAllText("$dd\dd-dir\new.txt", 'x') }) 'the user can no longer create a file in the folder they planted'
+    Check ([IO.File]::ReadAllText("$dd\service.token").Trim().Length -eq 64) 'the user still reads the service token'
+    if (Test-Path "$dd\config.toml") { $null = [IO.File]::ReadAllText("$dd\config.toml"); Say 'KILLX-OK the user still reads config.toml' }
+    $null = Rpc 'dd-status' @{ op = 'status' }
+    Say 'KILLX-OK the user still reaches the service'
+
+    Ask 'dd-link' 'dd-link'
+    $l = Get-Content "$work\dd-link.json" -Raw | ConvertFrom-Json
+    Check ($l.foreign_status -ne 'Running' -and @($l.foreign_written).Count -eq 0) "a data folder that is the user's junction stops the start, nothing written behind it (status=$($l.foreign_status) written=$(@($l.foreign_written) -join ','))"
+    Check (@($l.foreign_log).Count -gt 0) 'the refusal is in the service log'
+    Check ($l.admin_status -eq 'Running' -and $l.admin_target_before -eq $l.admin_target_after) "a junction the Administrators own is followed, the permissions behind it untouched (status=$($l.admin_status))"
+
+    [IO.File]::WriteAllText("$work\kills.done", 'done')
+    [IO.File]::WriteAllText("$work\passed.txt", 'pass')
+    Report 'result' @{ pass = $true }
+    Say "KILLX-PASS format=$format"
+    shutdown.exe /s /t 5 | Out-Null
+}
+
 # Mode 'aliases' (CHECKS 9): one source named by its letter, its volume GUID
 # path and a mount point continues one chain; a destination on that volume is
 # refused whichever name either side uses, one on another volume is not.
@@ -1382,6 +1432,118 @@ if ($media) {
                 Step "$($request.action) done ($name)"
                 continue
             }
+            if ($request.action -in @('dd-plant', 'dd-link')) {
+                # Mode 'datadir6a': the data folder as a user could leave it,
+                # then the data folder as a junction, while the service is down.
+                $name = $request.name
+                $dd = 'C:\ProgramData\OwnBackup'
+                $keys = "$dd\.own-backup-service-keys"
+                $console = (Get-CimInstance Win32_ComputerSystem).UserName
+                $sidOf = { param($path) (Get-Acl -LiteralPath $path).GetOwner([Security.Principal.SecurityIdentifier]).Value }
+                $out = [ordered]@{ action = $request.action }
+                Stop-Service OwnBackup -Force
+                for ($i = 0; $i -lt 60 -and (Get-Service OwnBackup).Status -ne 'Stopped'; $i++) { Start-Sleep -Seconds 1 }
+                Get-Process own-backup-service -ErrorAction SilentlyContinue | Wait-Process -Timeout 30 -ErrorAction SilentlyContinue
+                if ($request.action -eq 'dd-plant') {
+                    $out.keys_before = (Get-Acl -LiteralPath $keys).Sddl
+                    $target = 'C:\Windows\Temp\obk-dd-target'
+                    New-Item -ItemType Directory -Force $target | Out-Null
+                    [IO.File]::WriteAllText("$target\target.txt", 'kept')
+                    $src = 'C:\Lab\dd-hard-src.txt'
+                    if (Test-Path -LiteralPath "$dd\dd-junction") { [IO.Directory]::Delete("$dd\dd-junction", $false) }
+                    foreach ($p in @("$dd\dd-planted.txt", "$dd\dd-deny.txt", "$dd\dd-hard.txt", $src)) {
+                        if (Test-Path -LiteralPath $p) { & icacls.exe $p /grant '*S-1-5-18:F' | Out-Null; Remove-Item -LiteralPath $p -Force }
+                    }
+                    if (Test-Path "$dd\dd-dir") { Remove-Item "$dd\dd-dir" -Recurse -Force }
+                    # As an older version left it when a user made it first:
+                    # theirs, inheriting from ProgramData.
+                    & icacls.exe $dd /reset | Out-Null
+                    & icacls.exe $dd /setowner $console | Out-Null
+                    [IO.File]::WriteAllText("$dd\dd-planted.txt", 'user')
+                    New-Item -ItemType Directory -Force "$dd\dd-dir" | Out-Null
+                    [IO.File]::WriteAllText("$dd\dd-dir\inner.txt", 'user')
+                    [IO.File]::WriteAllText("$dd\dd-deny.txt", 'user')
+                    [IO.File]::WriteAllText($src, 'source')
+                    & cmd.exe /c mklink /H "$dd\dd-hard.txt" $src | Out-Null
+                    & cmd.exe /c mklink /J "$dd\dd-junction" $target | Out-Null
+                    $planted = @("$dd\dd-planted.txt", "$dd\dd-dir", "$dd\dd-dir\inner.txt", "$dd\dd-deny.txt")
+                    foreach ($p in $planted + @($src)) {
+                        & icacls.exe $p /setowner $console | Out-Null
+                        & icacls.exe $p /grant "${console}:F" | Out-Null
+                    }
+                    & icacls.exe "$dd\dd-junction" /setowner $console /L | Out-Null
+                    $out.root_before_owner = & $sidOf $dd
+                    $out.root_before_protected = (Get-Acl -LiteralPath $dd).AreAccessRulesProtected
+                    $out.planted_owners = @($planted | ForEach-Object { & $sidOf $_ }) + @(& $sidOf $src)
+                    # Shuts SYSTEM out: the user's own entry and nothing else.
+                    & icacls.exe "$dd\dd-deny.txt" /inheritance:r | Out-Null
+                    & icacls.exe "$dd\dd-deny.txt" /remove:g '*S-1-5-18' '*S-1-5-32-544' | Out-Null
+                    $started = Get-Date
+                    Start-Service OwnBackup
+                    WaitService
+                    $acl = Get-Acl -LiteralPath $dd
+                    $out.root_owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+                    $out.root_protected = $acl.AreAccessRulesProtected
+                    $out.root_sddl = $acl.Sddl
+                    $out.entries = @($planted | ForEach-Object {
+                        $e = [ordered]@{ name = $_.Substring($dd.Length + 1); exists = (Test-Path -LiteralPath $_) }
+                        if ($e.exists) { $a = Get-Acl -LiteralPath $_; $e.owner = $a.GetOwner([Security.Principal.SecurityIdentifier]).Value; $e.sddl = $a.Sddl }
+                        $e
+                    })
+                    $out.junction_left = Test-Path -LiteralPath "$dd\dd-junction"
+                    $out.target_kept = Test-Path "$target\target.txt"
+                    $out.hard_left = Test-Path -LiteralPath "$dd\dd-hard.txt"
+                    $out.hard_source_kept = Test-Path -LiteralPath $src
+                    $out.hard_source_owner = & $sidOf $src
+                    $out.keys_after = (Get-Acl -LiteralPath $keys).Sddl
+                    $out.token_sddl = (Get-Acl -LiteralPath "$dd\service.token").Sddl
+                    $log = Get-ChildItem "$installed\Logs" -Filter 'own-backup-service-*.log' | Sort-Object LastWriteTime | Select-Object -Last 1
+                    $out.log = [string[]]@(Get-Content -LiteralPath $log.FullName -Tail 400 | Where-Object { $_ -match 'data folder' } | ForEach-Object { "$_" })
+                }
+                if ($request.action -eq 'dd-link') {
+                    # The service's data folder moved by its environment to a
+                    # junction, rather than turning the real one into one.
+                    $link = 'C:\Lab\dd-link'
+                    $real = 'C:\Lab\dd-link-real'
+                    $svcKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\OwnBackup'
+                    if (Test-Path -LiteralPath $link) { [IO.Directory]::Delete($link, $false) }
+                    if (Test-Path $real) { Remove-Item $real -Recurse -Force }
+                    New-Item -ItemType Directory -Force $real | Out-Null
+                    & cmd.exe /c mklink /J $link $real | Out-Null
+                    & icacls.exe $link /setowner $console /L | Out-Null
+                    New-ItemProperty $svcKey -Name Environment -PropertyType MultiString -Value @("OWN_BACKUP_DATA_DIR=$link") -Force | Out-Null
+                    $pipeUp = { [IO.Directory]::GetFiles('\\.\pipe\') -contains '\\.\pipe\OwnBackup' }
+                    try {
+                        try { Start-Service OwnBackup -ErrorAction Stop } catch { $out.foreign_start_error = "$($_.Exception.Message)" }
+                        for ($i = 0; $i -lt 60 -and (Get-Service OwnBackup).Status -ne 'Stopped'; $i++) { Start-Sleep -Seconds 1 }
+                        $out.foreign_status = "$((Get-Service OwnBackup).Status)"
+                        $out.foreign_written = @(Get-ChildItem $real -Force | ForEach-Object { $_.Name })
+                        $log = Get-ChildItem "$installed\Logs" -Filter 'own-backup-service-*.log' | Sort-Object LastWriteTime | Select-Object -Last 1
+                        $out.foreign_log = [string[]]@(Get-Content -LiteralPath $log.FullName -Tail 200 | Where-Object { $_ -match 'data folder is a link' } | ForEach-Object { "$_" })
+                        Stop-Service OwnBackup -Force -ErrorAction SilentlyContinue
+                        Get-Process own-backup-service -ErrorAction SilentlyContinue | Wait-Process -Timeout 30 -ErrorAction SilentlyContinue
+                        & icacls.exe $link /setowner '*S-1-5-32-544' /L | Out-Null
+                        $out.admin_target_before = (Get-Acl -LiteralPath $real).Sddl
+                        try { Start-Service OwnBackup -ErrorAction Stop } catch { $out.admin_start_error = "$($_.Exception.Message)" }
+                        for ($i = 0; $i -lt 60 -and -not ((Get-Service OwnBackup).Status -eq 'Running' -and (& $pipeUp)); $i++) { Start-Sleep -Seconds 1 }
+                        $out.admin_status = "$((Get-Service OwnBackup).Status)"
+                        $out.admin_written = @(Get-ChildItem $real -Force | ForEach-Object { $_.Name })
+                        $out.admin_target_after = (Get-Acl -LiteralPath $real).Sddl
+                        Stop-Service OwnBackup -Force
+                        for ($i = 0; $i -lt 60 -and (Get-Service OwnBackup).Status -ne 'Stopped'; $i++) { Start-Sleep -Seconds 1 }
+                        Get-Process own-backup-service -ErrorAction SilentlyContinue | Wait-Process -Timeout 30 -ErrorAction SilentlyContinue
+                    } finally {
+                        Remove-ItemProperty $svcKey -Name Environment -ErrorAction SilentlyContinue
+                        if (Test-Path -LiteralPath $link) { [IO.Directory]::Delete($link, $false) }
+                    }
+                    Start-Service OwnBackup
+                    WaitService
+                }
+                Remove-Item "$work\kill.request" -Force
+                JsonFile "$work\$name.json" $out
+                Step "$($request.action) done ($name)"
+                continue
+            }
             if ($request.action -in @('fvol', 'fvol-detach')) {
                 # Mode 'fatx': F: is FAT32 in a VHDX on C:, with *.tmp files.
                 $name = $request.name
@@ -1630,6 +1792,7 @@ if ($media) {
         if ($format -eq 'aliases') { Aliases; return }
         if ($format -eq 'fatx') { FatX; return }
         if ($format -eq 'settings6a') { Settings6a; return }
+        if ($format -eq 'datadir6a') { DataDir6a; return }
         if ($format -in @('refsbl', 'ntfsbl')) { RefsBitLocker; return }
         if ($format -eq 'deletejob') { DeleteJob; return }
         $state = if (Test-Path "$work\job.json") { Get-Content "$work\job.json" -Raw | ConvertFrom-Json } else { $null }
