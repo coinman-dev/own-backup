@@ -103,6 +103,10 @@ pub trait DiskIo {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()>;
     fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()>;
     fn flush(&mut self) -> Result<()>;
+    /// Write back and drop the device's cached pages, so the next reads come
+    /// from the disk rather than from what the writes left in memory — what a
+    /// read-back verification needs ([`crate::linux_device::LinuxRawDevice::drop_cache`]).
+    fn drop_cache(&mut self) -> Result<()>;
     /// `BLKRRPART`.
     fn reread_partitions(&mut self) -> std::result::Result<(), IoctlError>;
     /// `BLKPG_DEL_PARTITION`.
@@ -608,6 +612,11 @@ impl DiskIo for RealDisk {
     fn flush(&mut self) -> Result<()> {
         self.dev.flush()
     }
+    fn drop_cache(&mut self) -> Result<()> {
+        let how = self.dev.drop_cache()?;
+        debug!(disk = %self.dev.path(), ?how, "disk cache dropped before a read-back");
+        Ok(())
+    }
     fn reread_partitions(&mut self) -> std::result::Result<(), IoctlError> {
         use std::os::unix::io::AsRawFd;
         // SAFETY: BLKRRPART takes no argument.
@@ -752,6 +761,9 @@ mod tests {
         }
         fn flush(&mut self) -> Result<()> {
             self.calls.borrow_mut().push(Call::Flush);
+            Ok(())
+        }
+        fn drop_cache(&mut self) -> Result<()> {
             Ok(())
         }
         fn reread_partitions(&mut self) -> std::result::Result<(), IoctlError> {

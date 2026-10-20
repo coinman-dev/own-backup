@@ -39,7 +39,7 @@ use own_backup_common::{tr, OwnBackupError, Result};
 
 use super::{
     add_failure_follow_ups, encryption_follow_up, execution_slots, finish_cancelled, initial_state,
-    luks_header_for, touched_after_copy, with_captured_gpt_fields, IdentitiesInUse,
+    luks_header_for, with_captured_gpt_fields, IdentitiesInUse,
 };
 
 /// Anything an operation wants to tell the user afterwards.
@@ -107,6 +107,39 @@ fn current_partition_numbers(device: &str) -> Vec<u32> {
                 .ok()
         })
         .collect()
+}
+
+/// Kernel names the run's udev hold covers. A disk held whole is held with
+/// all its partitions. On a disk the running system stands on, only the
+/// partitions the plan writes: a hold tells udev, systemd, LVM and md to
+/// ignore what it covers, and the partitions the system runs from must not be
+/// among them.
+fn held_device_names(plan: &RestorePlan, device: &str, live_disk: bool) -> Vec<String> {
+    let kernel =
+        |path: &str| own_backup_common::linux_block::kernel_name(std::path::Path::new(path));
+    if !live_disk {
+        return kernel(device).into_iter().collect();
+    }
+    written_partitions(plan)
+        .into_iter()
+        .filter_map(|index| partition_node(device, index))
+        .filter_map(|node| kernel(&node))
+        .collect()
+}
+
+/// Partitions whose sectors the plan writes.
+fn written_partitions(plan: &RestorePlan) -> Vec<u32> {
+    let mut out: Vec<u32> = plan
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            RestoreOp::RestorePartition { dst, .. } => Some(dst.index),
+            _ => None,
+        })
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// Where a run writes: the whole disk it holds, or — on a disk the running
@@ -216,14 +249,17 @@ pub fn execute_plan(
         "copy opened"
     );
 
-    let disk_name = own_backup_common::linux_block::kernel_name(std::path::Path::new(&device));
     // Installed before the disk is touched and kept to the end of the run;
     // without it the restore still works, the desktop just reacts to it.
-    let _hold = disk_name.as_deref().and_then(|name| {
-        own_backup_backup::udev_hold_linux::UdevHold::install(&[name])
-            .map_err(|e| warn!(error = %e, "udev hold not installed"))
-            .ok()
-    });
+    let held = held_device_names(plan, &device, live_disk);
+    let _hold = (!held.is_empty())
+        .then(|| {
+            let names: Vec<&str> = held.iter().map(String::as_str).collect();
+            own_backup_backup::udev_hold_linux::UdevHold::install(&names)
+                .map_err(|e| warn!(error = %e, "udev hold not installed"))
+                .ok()
+        })
+        .flatten();
 
     let mut hold = if live_disk {
         Hold::Partitions
@@ -406,41 +442,88 @@ fn release(
 trait PartitionDevice: SectorTarget + own_backup_backup::fat_map::RawVolume {}
 impl<T: SectorTarget + own_backup_backup::fat_map::RawVolume> PartitionDevice for T {}
 
+/// How a step uses a partition's sectors.
+#[derive(Clone, Copy)]
+struct TargetUse {
+    /// The plan writes no table of its own, so the partition must already
+    /// sit where the plan writes: the kernel's start and size are checked
+    /// against the plan's offset and size.
+    existing_slot: bool,
+    /// The step reads back what was written: the device's cache is dropped
+    /// first, or the reads are answered by the page cache the writes filled.
+    read_back: bool,
+}
+
+impl TargetUse {
+    fn for_plan(plan: &RestorePlan, read_back: bool) -> Self {
+        Self {
+            existing_slot: !plan.touches_partition_table(),
+            read_back,
+        }
+    }
+}
+
 /// The target of one partition's sectors under the current hold.
 fn with_target<T>(
     hold: &mut Hold,
     device: &str,
     dst: PartRef,
+    usage: TargetUse,
     f: impl FnOnce(&mut dyn PartitionDevice) -> Result<T>,
 ) -> Result<T> {
     match hold {
-        Hold::Disk(session) => f(&mut DiskWindow::new(
-            session.device_mut(),
-            dst.offset,
-            dst.size,
-        )),
+        Hold::Disk(session) => {
+            // A table this plan wrote is the plan's own; without one, the
+            // window's offsets are only right if the partition is still
+            // where the plan was checked against.
+            if usage.existing_slot {
+                check_partition_slot(&existing_node(device, dst)?, dst)?;
+            }
+            let io = session.device_mut();
+            if usage.read_back {
+                io.drop_cache()?;
+            }
+            f(&mut DiskWindow::new(io, dst.offset, dst.size))
+        }
         Hold::Partitions => {
-            let node = partition_node(device, dst.index).ok_or_else(|| {
-                OwnBackupError::Device(
-                    tr!("restore_exec_linux.no_partition_node", part = dst.index).into_owned(),
-                )
-            })?;
+            let node = existing_node(device, dst)?;
             check_partition_slot(&node, dst)?;
             own_backup_restore::guard_target_volume(&node)?;
-            f(&mut own_backup_backup::linux_device::LinuxRawDevice::open_write(&node)?)
+            let mut dev = own_backup_backup::linux_device::LinuxRawDevice::open_write(&node)?;
+            if usage.read_back {
+                dev.drop_cache()?;
+            }
+            f(&mut dev)
         }
     }
+}
+
+/// The kernel's node for the plan's partition `dst` on `device`.
+fn existing_node(device: &str, dst: PartRef) -> Result<String> {
+    partition_node(device, dst.index).ok_or_else(|| {
+        OwnBackupError::Device(
+            tr!("restore_exec_linux.no_partition_node", part = dst.index).into_owned(),
+        )
+    })
 }
 
 /// The partition node must sit exactly where the plan writes: the plan was
 /// checked against offsets, and a number that now names another stretch of
 /// the disk is not the partition that was checked.
-fn check_partition_slot(node: &str, dst: PartRef) -> Result<()> {
+pub(super) fn check_partition_slot(node: &str, dst: PartRef) -> Result<()> {
     use own_backup_common::linux_block as lb;
-    let sys = std::path::Path::new(lb::SYS_CLASS_BLOCK);
     let name = lb::kernel_name(std::path::Path::new(node)).unwrap_or_default();
+    check_slot_in(std::path::Path::new(lb::SYS_CLASS_BLOCK), &name, node, dst)
+}
+
+/// [`check_partition_slot`] against the sysfs block class at `sys`, for the
+/// partition with kernel name `name`.
+fn check_slot_in(sys: &std::path::Path, name: &str, node: &str, dst: PartRef) -> Result<()> {
     let read = |f: &str| -> Option<u64> {
-        std::fs::read_to_string(sys.join(&name).join(f))
+        if name.is_empty() {
+            return None;
+        }
+        std::fs::read_to_string(sys.join(name).join(f))
             .ok()?
             .trim()
             .parse()
@@ -566,7 +649,9 @@ fn run_op(
                     Hold::Partitions => (String::new(), false),
                 };
                 let dst = *dst;
-                with_target(hold, device, dst, |w| {
+                with_target(hold, device, dst, TargetUse::for_plan(plan, false), |w| {
+                    // Re-reads the header just written: from the disk, not
+                    // from the cache (`ReadWindow::open` drops it too).
                     let mut read_back =
                         || -> Result<Box<dyn own_backup_backup::fat_map::RawVolume>> {
                             if is_disk {
@@ -574,12 +659,13 @@ fn run_op(
                                     &disk_path, dst.offset, dst.size,
                                 )?))
                             } else {
-                                let node = partition_node(device, dst.index).unwrap_or_default();
-                                Ok(Box::new(
+                                let node = existing_node(device, dst)?;
+                                let dev =
                                     own_backup_backup::linux_device::LinuxRawDevice::open_read(
                                         &node,
-                                    )?,
-                                ))
+                                    )?;
+                                dev.drop_cache()?;
+                                Ok(Box::new(dev))
                             }
                         };
                     write_container_blocks(
@@ -598,7 +684,7 @@ fn run_op(
                     )
                 })?
             } else {
-                with_target(hold, device, *dst, |w| {
+                with_target(hold, device, *dst, TargetUse::for_plan(plan, false), |w| {
                     write_partition_blocks(
                         &plan.image_path,
                         archive,
@@ -667,10 +753,8 @@ fn run_op(
 }
 
 /// Read back every sector-restored partition through the current hold and
-/// check it against the copy (R9, D10). Nothing else writes to a held disk,
-/// so a mismatch means the write did not stick — except on a partition the
-/// plan's boot steps change after the copy, which only happens once the disk
-/// is let go, after this.
+/// check it against the copy (R9, D10). The cache is dropped before each
+/// read-back, so the bytes come from the disk.
 #[allow(clippy::too_many_arguments)]
 fn verify_sectors(
     plan: &RestorePlan,
@@ -712,127 +796,127 @@ fn verify_sectors(
         on_update(state);
 
         let label = format!("{device}:{}:{}", dst.offset, dst.size);
-        let result = with_target(hold, device, *dst, |reader| {
-            let crypt = if *reencrypt {
-                match passphrases.get(src_index) {
-                    Some(pw) => match own_backup_backup::luks::open_luks(reader, pw.as_bytes()) {
-                        Ok(p) => Some(p),
-                        Err(e) => {
-                            warn!(part = dst.index, error = %e, "verification: cannot open the restored container");
-                            None
-                        }
-                    },
-                    None => None,
-                }
-            } else {
-                None
-            };
-            if *reencrypt && crypt.is_none() {
-                return Ok(None);
-            }
-            let mut tick = |pr: &SectorRestoreProgress| {
-                state.ops[index].percent = percent_of(pr);
-                state.ops[index].bytes_done = pr.bytes_written;
-                on_update(state);
-                Ok(())
-            };
-            verify_partition_blocks(
-                &plan.image_path,
-                archive,
-                sidecar,
-                *src_index,
-                reader,
-                &label,
-                crypt.as_ref(),
-                cancel,
-                &mut tick,
-            )
-            .map(Some)
-        });
-
-        match result {
-            Ok(None) => {
-                state.ops[index].status = OpStatus::Done;
-                state.ops[index].percent = 100;
-                state.ops[index].message =
-                    tr!("restore_exec.verify_not_checked_reencrypted").into_owned();
-            }
-            Ok(Some(v)) if v.cancelled || cancel.is_cancelled() => {
-                state.ops[index].status = OpStatus::Skipped;
-                state.ops[index].message = tr!("restore_exec.verify_interrupted").into_owned();
-            }
-            Ok(Some(v)) if v.ok() => {
-                state.ops[index].status = OpStatus::Done;
-                state.ops[index].percent = 100;
-                state.ops[index].message =
-                    tr!("restore_exec.verify_blocks_ok", count = v.blocks_checked).into_owned();
-                info!(
-                    part = dst.index,
-                    blocks = v.blocks_checked,
-                    "verification passed"
-                );
-            }
-            Ok(Some(v)) => {
-                // On a live disk the partition was written through its own
-                // node and something could have written to it since; held,
-                // nothing could. Either way only the boot steps would change
-                // it on purpose, and they run later.
-                let excused = matches!(hold, Hold::Partitions)
-                    && v.image_corrupt.is_empty()
-                    && touched_after_copy(ordered, dst.index);
-                state.ops[index].status = if excused {
-                    OpStatus::Done
+        let result = with_target(
+            hold,
+            device,
+            *dst,
+            TargetUse::for_plan(plan, true),
+            |reader| {
+                let crypt = if *reencrypt {
+                    match passphrases.get(src_index) {
+                        Some(pw) => match own_backup_backup::luks::open_luks(reader, pw.as_bytes())
+                        {
+                            Ok(p) => Some(p),
+                            Err(e) => {
+                                warn!(part = dst.index, error = %e, "verification: cannot open the restored container");
+                                None
+                            }
+                        },
+                        None => None,
+                    }
                 } else {
-                    OpStatus::Failed
+                    None
                 };
-                let mut parts = Vec::new();
-                if !v.image_corrupt.is_empty() {
-                    parts.push(
-                        tr!(
-                            "restore_exec.verify_image_corrupt",
-                            count = v.image_corrupt.len()
-                        )
-                        .into_owned(),
-                    );
+                if *reencrypt && crypt.is_none() {
+                    return Ok(None);
                 }
-                if !v.mismatches.is_empty() {
-                    parts.push(
-                        tr!("restore_exec.verify_mismatch", count = v.mismatches.len())
-                            .into_owned(),
-                    );
-                }
-                let text = parts.join("; ");
-                error!(part = dst.index, %text, "verification failed");
-                state.ops[index].message = text.clone();
-                if !excused {
-                    state.follow_ups.push(
-                        tr!(
-                            "restore_exec.follow_up_partition",
-                            part = dst.index,
-                            text = text
-                        )
-                        .into_owned(),
-                    );
-                }
-            }
-            Err(e) => {
-                state.ops[index].status = OpStatus::Failed;
-                state.ops[index].message = e.to_string();
-                state.follow_ups.push(
-                    tr!(
-                        "restore_exec.follow_up_verify_failed",
-                        part = dst.index,
-                        error = e
-                    )
-                    .into_owned(),
-                );
-            }
-        }
+                let mut tick = |pr: &SectorRestoreProgress| {
+                    state.ops[index].percent = percent_of(pr);
+                    state.ops[index].bytes_done = pr.bytes_written;
+                    on_update(state);
+                    Ok(())
+                };
+                verify_partition_blocks(
+                    &plan.image_path,
+                    archive,
+                    sidecar,
+                    *src_index,
+                    reader,
+                    &label,
+                    crypt.as_ref(),
+                    cancel,
+                    &mut tick,
+                )
+                .map(Some)
+            },
+        );
+
+        record_verification(state, index, dst.index, result, cancel.is_cancelled());
         on_update(state);
     }
     state.current = None;
     state.cancellable = false;
     on_update(state);
+}
+
+/// Put the outcome of one partition's read-back into the run state.
+///
+/// A mismatch is always a failure here. Windows excuses a partition its boot
+/// steps rewrote after the copy, because there the check can run after them;
+/// on Linux it runs before any boot step, so the bytes it reads are the ones
+/// the restore wrote and nothing else has changed them on purpose.
+fn record_verification(
+    state: &mut RestoreRunState,
+    index: usize,
+    part: u32,
+    result: Result<Option<own_backup_backup::sector_restore::VerifySummary>>,
+    cancelled: bool,
+) {
+    match result {
+        Ok(None) => {
+            state.ops[index].status = OpStatus::Done;
+            state.ops[index].percent = 100;
+            state.ops[index].message =
+                tr!("restore_exec.verify_not_checked_reencrypted").into_owned();
+        }
+        Ok(Some(v)) if v.cancelled || cancelled => {
+            state.ops[index].status = OpStatus::Skipped;
+            state.ops[index].message = tr!("restore_exec.verify_interrupted").into_owned();
+        }
+        Ok(Some(v)) if v.ok() => {
+            state.ops[index].status = OpStatus::Done;
+            state.ops[index].percent = 100;
+            state.ops[index].message =
+                tr!("restore_exec.verify_blocks_ok", count = v.blocks_checked).into_owned();
+            info!(part, blocks = v.blocks_checked, "verification passed");
+        }
+        Ok(Some(v)) => {
+            state.ops[index].status = OpStatus::Failed;
+            let mut parts = Vec::new();
+            if !v.image_corrupt.is_empty() {
+                parts.push(
+                    tr!(
+                        "restore_exec.verify_image_corrupt",
+                        count = v.image_corrupt.len()
+                    )
+                    .into_owned(),
+                );
+            }
+            if !v.mismatches.is_empty() {
+                parts.push(
+                    tr!("restore_exec.verify_mismatch", count = v.mismatches.len()).into_owned(),
+                );
+            }
+            let text = parts.join("; ");
+            error!(part, %text, "verification failed");
+            state.ops[index].message = text.clone();
+            state.follow_ups.push(
+                tr!("restore_exec.follow_up_partition", part = part, text = text).into_owned(),
+            );
+        }
+        Err(e) => {
+            state.ops[index].status = OpStatus::Failed;
+            state.ops[index].message = e.to_string();
+            state.follow_ups.push(
+                tr!(
+                    "restore_exec.follow_up_verify_failed",
+                    part = part,
+                    error = e
+                )
+                .into_owned(),
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -897,6 +981,103 @@ mod tests {
         plan.target_device = Some("/dev/disk/by-id/virtio-target".into());
         plan.ops.clear();
         assert!(linux_refusals(&plan).is_empty());
+    }
+
+    /// A plan that restores partition 1 and then puts the fallback loader on
+    /// it, with the read-back asked for.
+    fn plan_with_boot_step_on(index: u32) -> RestorePlan {
+        let mut plan = RestorePlan::new(
+            0,
+            "/tmp/copy.qcow2".into(),
+            vec![
+                RestoreOp::RestorePartition {
+                    src_index: 1,
+                    dst: part(index),
+                    mode: RestoreMode::Sectors,
+                    wipe_free_space: false,
+                    reencrypt: false,
+                },
+                RestoreOp::EnsureFallbackBootloader { esp: part(index) },
+            ],
+        );
+        plan.verify_after = true;
+        plan
+    }
+
+    #[test]
+    fn a_mismatch_fails_even_on_a_partition_a_boot_step_changes_later() {
+        let plan = plan_with_boot_step_on(1);
+        let mut state = initial_state(&plan);
+        let index = state
+            .ops
+            .iter()
+            .position(|o| o.kind == "verify_sectors")
+            .expect("the read-back is queued");
+        let summary = own_backup_backup::sector_restore::VerifySummary {
+            blocks_checked: 4,
+            mismatches: vec![2],
+            ..Default::default()
+        };
+        record_verification(&mut state, index, 1, Ok(Some(summary)), false);
+        assert_eq!(state.ops[index].status, OpStatus::Failed);
+        assert_eq!(state.follow_ups.len(), 1, "{:?}", state.follow_ups);
+
+        // A clean read-back is still a pass.
+        let mut state = initial_state(&plan);
+        let clean = own_backup_backup::sector_restore::VerifySummary {
+            blocks_checked: 4,
+            ..Default::default()
+        };
+        record_verification(&mut state, index, 1, Ok(Some(clean)), false);
+        assert_eq!(state.ops[index].status, OpStatus::Done);
+        assert!(state.follow_ups.is_empty());
+    }
+
+    #[test]
+    fn a_partition_slot_must_match_the_plan_exactly() {
+        let sys = tempfile::tempdir().unwrap();
+        let p = sys.path().join("sdz2");
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("start"), "2048\n").unwrap();
+        std::fs::write(p.join("size"), "4096\n").unwrap();
+        let planned = PartRef {
+            index: 2,
+            offset: 2048 * 512,
+            size: 4096 * 512,
+        };
+        check_slot_in(sys.path(), "sdz2", "/dev/sdz2", planned).unwrap();
+        let moved = PartRef {
+            offset: 4096 * 512,
+            ..planned
+        };
+        assert!(matches!(
+            check_slot_in(sys.path(), "sdz2", "/dev/sdz2", moved),
+            Err(OwnBackupError::RestoreIncompatible(_))
+        ));
+        let resized = PartRef {
+            size: 2048 * 512,
+            ..planned
+        };
+        assert!(check_slot_in(sys.path(), "sdz2", "/dev/sdz2", resized).is_err());
+        // No such partition, or a node the kernel does not name: refused.
+        assert!(check_slot_in(sys.path(), "sdz3", "/dev/sdz3", planned).is_err());
+        assert!(check_slot_in(sys.path(), "", "/dev/sdz2", planned).is_err());
+    }
+
+    #[test]
+    fn only_the_partitions_written_are_held_on_a_live_disk() {
+        let mut plan = plan_with_boot_step_on(3);
+        plan.ops.push(RestoreOp::RestorePartition {
+            src_index: 2,
+            dst: part(5),
+            mode: RestoreMode::Sectors,
+            wipe_free_space: false,
+            reencrypt: false,
+        });
+        assert_eq!(written_partitions(&plan), vec![3, 5]);
+        // Without a device the kernel names, nothing is held — not "all".
+        assert!(held_device_names(&plan, "/nonexistent/disk", true).is_empty());
+        assert!(held_device_names(&plan, "/nonexistent/disk", false).is_empty());
     }
 
     #[test]

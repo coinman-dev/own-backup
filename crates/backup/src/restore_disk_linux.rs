@@ -99,6 +99,10 @@ impl<D: DiskIo> RawVolume for DiskWindow<'_, D> {
 
 /// A partition read through its own read-only descriptor of the disk. Opening
 /// without `O_EXCL` is allowed while the session holds the disk exclusively.
+///
+/// It exists to re-read what was just written, so opening it drops the disk's
+/// cached pages first: the reads then come from the disk, not from the page
+/// cache the writes filled.
 pub struct ReadWindow {
     dev: LinuxRawDevice,
     offset: u64,
@@ -107,11 +111,9 @@ pub struct ReadWindow {
 
 impl ReadWindow {
     pub fn open(disk: &str, offset: u64, size: u64) -> Result<Self> {
-        Ok(Self {
-            dev: LinuxRawDevice::open_read(disk)?,
-            offset,
-            size,
-        })
+        let dev = LinuxRawDevice::open_read(disk)?;
+        dev.drop_cache()?;
+        Ok(Self { dev, offset, size })
     }
 }
 
@@ -394,6 +396,9 @@ mod tests {
             Ok(())
         }
         fn flush(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn drop_cache(&mut self) -> Result<()> {
             Ok(())
         }
         fn reread_partitions(

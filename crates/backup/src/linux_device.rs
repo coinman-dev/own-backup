@@ -17,6 +17,18 @@ use own_backup_common::{OwnBackupError, Result};
 // asm-generic ioctl numbers (x86_64 / arm64).
 const BLKSSZGET: libc::c_ulong = 0x1268; // _IO(0x12, 104)  -> logical sector size (int)
 const BLKGETSIZE64: libc::c_ulong = 0x8008_1272; // _IOR(0x12, 114, size_t) -> u64 bytes
+const BLKFLSBUF: libc::c_ulong = 0x1261; // _IO(0x12, 97)   -> write back and drop the buffer cache
+
+/// How [`LinuxRawDevice::drop_cache`] emptied the cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheDropped {
+    /// `BLKFLSBUF`: the block device's buffer cache was written back and
+    /// invalidated.
+    Buffers,
+    /// `posix_fadvise(POSIX_FADV_DONTNEED)` over the whole file: a regular
+    /// file, or a block device that refused `BLKFLSBUF`.
+    Advised,
+}
 
 /// A block device or image file opened for raw positional I/O.
 pub struct LinuxRawDevice {
@@ -122,6 +134,54 @@ impl LinuxRawDevice {
         self.file
             .sync_all()
             .map_err(|e| OwnBackupError::Device(format!("fsync({}): {e}", self.path)))
+    }
+
+    /// Write back and then drop the cached pages of this device, so the next
+    /// reads come from the device itself.
+    ///
+    /// Reads through a block device's node are buffered: right after a write,
+    /// a read-back of the same sectors is served from the page cache the write
+    /// filled, and proves nothing about what reached the disk. A verification
+    /// calls this after the data is flushed and before it reads.
+    ///
+    /// `BLKFLSBUF` (needs `CAP_SYS_ADMIN`) first; `POSIX_FADV_DONTNEED` when
+    /// the device refuses it or for a regular file. Fails only when neither
+    /// worked — a read-back that cannot bypass the cache must not pass as one
+    /// that did.
+    pub fn drop_cache(&self) -> Result<CacheDropped> {
+        self.file
+            .sync_all()
+            .map_err(|e| OwnBackupError::Device(format!("fsync({}): {e}", self.path)))?;
+        let fd = self.file.as_raw_fd();
+        let is_block = self
+            .file
+            .metadata()
+            .map(|m| m.file_type().is_block_device())
+            .unwrap_or(false);
+        let mut refused = None;
+        if is_block {
+            // SAFETY: fd is valid for the call; BLKFLSBUF takes no argument.
+            if unsafe { libc::ioctl(fd, BLKFLSBUF, 0) } == 0 {
+                return Ok(CacheDropped::Buffers);
+            }
+            refused = Some(std::io::Error::last_os_error());
+        }
+        // SAFETY: fd is valid for the call; offset 0 / len 0 = the whole file.
+        let rc = unsafe { libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_DONTNEED) };
+        if rc == 0 {
+            if let Some(e) = refused {
+                tracing::debug!(path = %self.path, error = %e, "BLKFLSBUF refused — page cache dropped by fadvise");
+            }
+            return Ok(CacheDropped::Advised);
+        }
+        let advise = std::io::Error::from_raw_os_error(rc);
+        Err(OwnBackupError::Device(match refused {
+            Some(e) => format!(
+                "drop cache({}): BLKFLSBUF: {e}; POSIX_FADV_DONTNEED: {advise}",
+                self.path
+            ),
+            None => format!("drop cache({}): POSIX_FADV_DONTNEED: {advise}", self.path),
+        }))
     }
 }
 
@@ -238,5 +298,21 @@ mod tests {
         let mut check = [0u8; 16];
         w.read_at(0, &mut check).unwrap();
         assert_eq!(check, [0xAB; 16]);
+    }
+
+    #[test]
+    fn dropping_the_cache_of_a_regular_file_advises_and_keeps_the_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("img.bin");
+        std::fs::write(&path, vec![0u8; 8192]).unwrap();
+        let mut w = LinuxRawDevice::open_write(path.to_str().unwrap()).unwrap();
+        w.write_at(4096, &[0x5A; 512]).unwrap();
+        // A regular file has no buffer cache ioctl: the fallback does it.
+        assert_eq!(w.drop_cache().unwrap(), CacheDropped::Advised);
+        let r = LinuxRawDevice::open_read(path.to_str().unwrap()).unwrap();
+        assert_eq!(r.drop_cache().unwrap(), CacheDropped::Advised);
+        let mut back = [0u8; 512];
+        r.read_at(4096, &mut back).unwrap();
+        assert_eq!(back, [0x5A; 512]);
     }
 }

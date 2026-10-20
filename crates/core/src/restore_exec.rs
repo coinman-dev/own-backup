@@ -891,7 +891,7 @@ fn a09_lab_gate(plan_id: uuid::Uuid, cancel: &CancelToken) -> std::result::Resul
 /// Only the boot steps do: `bcdboot` rebuilds the Windows loader, and the
 /// fallback step drops `\EFI\BOOT\BOOTX64.EFI` on the ESP. Both are asked for
 /// deliberately, and both make the partition differ from the copy on purpose.
-#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[cfg(target_os = "windows")]
 fn touched_after_copy(ordered: &[RestoreOp], part_index: u32) -> bool {
     ordered.iter().any(|op| match op {
         RestoreOp::EnsureFallbackBootloader { esp } => esp.index == part_index,
