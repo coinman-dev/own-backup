@@ -108,6 +108,7 @@ fn from_posix_locale(values: [Option<String>; 4]) -> &'static str {
 }
 
 /// `ru` for any Russian locale id (primary language 0x19), `en` otherwise.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn from_langid(id: u16) -> &'static str {
     if id & 0x3FF == 0x19 {
         "ru"

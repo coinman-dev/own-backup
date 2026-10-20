@@ -230,7 +230,17 @@ impl BackupServiceImpl {
             // What the image holds. The client read the same sidecar, but the
             // service can read it again and this is the sizes every "will it
             // fit" answer is computed from.
-            sources: image_sources(&plan.image_path, keys).unwrap_or(from_client.sources),
+            sources: image_sources(&plan.image_path, keys).unwrap_or_else(|| {
+                // A copy made from the command line has no snapshot of the
+                // live disk. The window's list, when it sent one, says more;
+                // without it (a plan applied from elsewhere) the copy's own
+                // partition table still gives every size.
+                if from_client.sources.is_empty() {
+                    image_layout_sources(&plan.image_path, keys).unwrap_or_default()
+                } else {
+                    from_client.sources
+                }
+            }),
             source_sector_size: image_sector_size(&plan.image_path, keys)
                 .unwrap_or(from_client.source_sector_size),
             ..Default::default()
@@ -321,6 +331,55 @@ fn image_sources(
             })
             .collect(),
     )
+}
+
+/// A whole-disk copy's partitions from its partition table — how full each
+/// one is stays unknown (0). `None` when the copy is not a whole-disk image.
+fn image_layout_sources(
+    image: &std::path::Path,
+    keys: Option<&own_backup_backup::seal::context::ArchiveKeys>,
+) -> Option<Vec<own_backup_common::restore_check::SourcePartition>> {
+    let sidecar = read_sidecar_for_checks(image, keys)?;
+    let disk = sidecar.disk_manifest.as_ref()?;
+    Some(layout_sources(disk, &sidecar.info.luks_headers))
+}
+
+/// Each partition of `disk`'s table, with the filesystem its image recorded.
+fn layout_sources(
+    disk: &own_backup_common::gpt::DiskBackupManifest,
+    luks_headers: &[own_backup_common::image::LuksHeaderBackup],
+) -> Vec<own_backup_common::restore_check::SourcePartition> {
+    use own_backup_common::image::VolumeCaptureMode;
+    use own_backup_common::types::FileSystem;
+    let sector = u64::from(disk.layout.sector_size.max(1));
+    disk.layout
+        .partitions
+        .iter()
+        .map(|p| {
+            let image = disk.images.iter().find(|i| i.part_index == p.index);
+            let filesystem = match image.map(|i| i.filesystem.to_ascii_lowercase()).as_deref() {
+                Some("ntfs") => FileSystem::Ntfs,
+                Some("fat32" | "fat" | "vfat") => FileSystem::Fat32,
+                Some("exfat") => FileSystem::ExFat,
+                Some("ext2" | "ext3" | "ext4") => FileSystem::Ext4,
+                Some("xfs") => FileSystem::Xfs,
+                Some("btrfs") => FileSystem::Btrfs,
+                Some("refs") => FileSystem::ReFs,
+                _ => FileSystem::Unknown,
+            };
+            own_backup_common::restore_check::SourcePartition {
+                index: p.index,
+                size_bytes: (p.last_lba + 1).saturating_sub(p.first_lba) * sector,
+                used_bytes: 0,
+                filesystem,
+                label: p.name.clone(),
+                encrypted_at_source: image
+                    .and_then(|i| i.encryption.as_ref())
+                    .is_some_and(|e| e.capture_mode == VolumeCaptureMode::Plaintext),
+                luks_header_available: luks_headers.iter().any(|h| h.part_index == p.index),
+            }
+        })
+        .collect()
 }
 
 /// The copy's own description of itself, for the plan checks — with the key
@@ -3414,6 +3473,60 @@ impl BackupService for BackupServiceImpl {
 
 #[cfg(test)]
 mod tests {
+    /// A command-line whole-disk copy has no live-disk snapshot; its own
+    /// partition table still names every partition the plan restores.
+    #[test]
+    fn a_whole_disk_copy_without_a_snapshot_is_described_by_its_table() {
+        use own_backup_common::gpt::{
+            DiskBackupManifest, DiskImageRef, DiskLayout, GptPartitionEntry,
+        };
+        use own_backup_common::types::FileSystem;
+        let entry = |index, first, last| GptPartitionEntry {
+            index,
+            type_guid: String::new(),
+            part_guid: String::new(),
+            first_lba: first,
+            last_lba: last,
+            attributes: 0,
+            name: format!("p{index}"),
+        };
+        let image = |index, fs: &str| DiskImageRef {
+            part_index: index,
+            token: String::new(),
+            image_file_name: String::new(),
+            filesystem: fs.into(),
+            encryption: None,
+        };
+        let disk = DiskBackupManifest {
+            format_version: 1,
+            created_at: String::new(),
+            job_id: None,
+            disk_number: 0,
+            disk_model: String::new(),
+            layout: DiskLayout {
+                disk_guid: String::new(),
+                sector_size: 512,
+                size_bytes: 1 << 32,
+                partitions: vec![
+                    entry(1, 2048, 4095),
+                    entry(14, 4096, 4097),
+                    entry(15, 8192, 16383),
+                ],
+            },
+            images: vec![image(1, "ext4"), image(15, "FAT32")],
+            source_disk: None,
+        };
+        let sources = super::layout_sources(&disk, &[]);
+        let by = |i: u32| sources.iter().find(|s| s.index == i).unwrap();
+        assert_eq!(sources.len(), 3);
+        assert_eq!(by(1).size_bytes, 2048 * 512);
+        assert_eq!(by(1).filesystem, FileSystem::Ext4);
+        assert_eq!(by(14).filesystem, FileSystem::Unknown);
+        assert_eq!(by(14).size_bytes, 2 * 512);
+        assert_eq!(by(15).filesystem, FileSystem::Fat32);
+        assert_eq!(by(15).label, "p15");
+    }
+
     /// The English text of this refusal once belonged to another message (the
     /// destination-on-source one, REPORT-cloud-gui2). It must speak of what
     /// it refuses.
