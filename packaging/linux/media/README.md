@@ -17,10 +17,12 @@ window: the engine (`own-backup.service` from our `.deb`) and the window in a
   byte for byte, reads it back and adds a FAT32 partition `OBK-LOGS` behind
   it (`crates/backup/src/media_stick*.rs`). `dd` works too, without the log
   partition.
-- **Logs:** at boot `own-backup-media-log` mounts `OBK-LOGS` (any disk) and
-  points the engine's and the window's log copy at
-  `own-backup-logs/<date>_<boot id>/`; the session's journal is written there
-  at power-off. Without such a partition the logs stay in memory.
+- **Logs:** at boot `own-backup-media-log` mounts the FAT partition
+  `OBK-LOGS` of the disk the medium booted from (never one of another disk:
+  those are the machines being rescued) and points the engine's and the
+  window's log copy at `own-backup-logs/<date>_<boot id>/`; the session's
+  journal is written there at power-off. Without such a partition (`dd`, a
+  CD, `toram`) the logs stay in memory, and the journal says why.
 - **Network:** optional; DHCP on wired ports through systemd-networkd, nothing
   waits for it.
 - **Stand:** `scripts/lab/linux-media-scenario.sh` (boots under OVMF with
