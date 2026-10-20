@@ -76,8 +76,31 @@ part() { # disk number -> its node
     done
     return 1
 }
-same_partition() { # disk-a disk-b number: byte-identical
-    cmp -s "$(part "$1" "$3")" "$(part "$2" "$3")"
+same_partition() { # disk-a disk-b number [esp-may-gain-fallback]: the same data
+    # Byte-identical, or — for a filesystem the copy took by its used blocks,
+    # whose free space the restore wipes — the same files and a clean check.
+    local a b fs ma=$WORK/cmp-a mb=$WORK/cmp-b rc=1 extra=()
+    a=$(part "$1" "$3") && b=$(part "$2" "$3") || return 1
+    cmp -s "$a" "$b" && return 0
+    fs=$(blkid -o value -s TYPE "$a")
+    case $fs in
+        ext2|ext3|ext4) e2fsck -fn "$b" >/dev/null 2>&1 || return 1 ;;
+        vfat) fsck.fat -n "$b" >/dev/null 2>&1 || return 1 ;;
+        *) return 1 ;;
+    esac
+    [[ ${4:-} == esp ]] && extra=(-x BOOTX64.EFI -x BOOT)
+    mkdir -p "$ma" "$mb"
+    local opts=ro
+    [[ $fs == ext* ]] && opts=ro,noload
+    if mount -o "$opts" "$a" "$ma"; then
+        if mount -o "$opts" "$b" "$mb"; then
+            diff -r "${extra[@]}" "$ma" "$mb" >>"$EV/same-$3.diff" 2>&1 && rc=0
+            umount "$mb"
+        fi
+        umount "$ma"
+    fi
+    [[ $rc -eq 0 ]] && echo "partition $3: free space differs, files identical, $fs check clean" >>"$EV/same.txt"
+    return $rc
 }
 cleanup() {
     local m
@@ -187,7 +210,7 @@ stage_disk() {
     for n in $SRC_PARTS; do
         same_partition "$SOURCE" "$TARGET" "$n" || { bad=1; echo "partition $n differs" >>"$EV/d-cmp.out"; }
     done
-    check d-data "$(verdict $bad)" "every partition is byte-identical to the source's"
+    check d-data "$(verdict $bad)" "every partition holds the source's data (bytes, or files + fsck)"
     [[ -z $(ls /run/udev/rules.d/59-own-backup-hold-* 2>/dev/null) ]]
     check d-hold "$(verdict $?)" "the temporary udev hold is gone"
 }
@@ -215,7 +238,7 @@ stage_plan() {
     grep -q '"kind": "verify_sectors"' "$EV/p-apply.out" && ! grep -q '"status": "failed"' "$EV/p-apply.out"
     check p-verified "$(verdict $?)" "every restored partition was read back and matched"
     local n bad=0
-    for n in $SRC_PARTS; do same_partition "$SOURCE" "$TARGET" "$n" || bad=1; done
+    for n in $SRC_PARTS; do same_partition "$SOURCE" "$TARGET" "$n" esp || bad=1; done
     # The ESP may differ by the fallback loader the plan put there.
     check p-data "$(verdict $bad)" "partitions identical to the source (an ESP may gain BOOTX64.EFI)"
     if [[ $UEFI -eq 1 ]]; then

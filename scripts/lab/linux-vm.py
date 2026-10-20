@@ -503,7 +503,14 @@ def qemu_argv(cfg: dict, q: Qemu) -> list:
                  '-device', 'tpm-tis,tpmdev=tpm0']
     argv += ['-drive', f"file={RUN / 'root.qcow2'},if=none,id=root,format=qcow2,discard=unmap",
              '-device', 'virtio-blk-pci,drive=root,bootindex=0']
+    late = set(cfg.get('late', []))
     for n in range(1, cfg['disks'] + 1):
+        if n in late:
+            # Plugged in after boot (`plug_late`): a disk that is a clone of
+            # the root (the restore scenario's source system) must not be
+            # where the guest finds its root by UUID or label.
+            argv += ['-device', f'pcie-root-port,id=hp{n},chassis={10 + n}']
+            continue
         argv += ['-drive', f"file={RUN / f'data-{n}.qcow2'},if=none,id=data{n},format=qcow2,"
                            'discard=unmap',
                  '-device', f'virtio-blk-pci,drive=data{n},serial=ob-data-{n}']
@@ -545,6 +552,30 @@ def tail(path: Path, lines: int = 25) -> str:
         return '\n'.join(path.read_text(errors='replace').splitlines()[-lines:])
     except OSError:
         return '(none)'
+
+
+def plug_late(cfg: dict) -> None:
+    """Attach the `--late` data disks to the running guest, as the same
+    `virtio-ob-data-N` it would have had from the start."""
+    for n in cfg.get('late', []):
+        steps = [('blockdev-add', {'driver': 'qcow2', 'node-name': f'data{n}',
+                                   'discard': 'unmap',
+                                   'file': {'driver': 'file',
+                                            'filename': str(RUN / f'data-{n}.qcow2')}}),
+                 ('device_add', {'driver': 'virtio-blk-pci', 'id': f'data{n}dev',
+                                 'drive': f'data{n}', 'bus': f'hp{n}',
+                                 'serial': f'ob-data-{n}'})]
+        for command, arguments in steps:
+            reply = qmp(command, arguments)
+            if 'error' in reply:
+                fail(f'plugging data-{n} in: {command}: {reply["error"]}')
+        deadline = time.monotonic() + 30
+        while subprocess.run(ssh_argv(cfg, f'test -b /dev/disk/by-id/virtio-ob-data-{n}'),
+                             stdin=subprocess.DEVNULL, capture_output=True).returncode != 0:
+            if time.monotonic() > deadline:
+                fail(f'data-{n} plugged in, but the guest shows no virtio-ob-data-{n}')
+            time.sleep(1)
+        say(f'data-{n}.qcow2 plugged in after boot')
 
 
 def cmd_up(args) -> int:
@@ -589,6 +620,11 @@ def cmd_up(args) -> int:
     say('space: ' + show(row))
     if not reuse:
         cfg = create_run(args, q)
+    # A boot option, not a property of the run: only this boot plugs late.
+    cfg['late'] = sorted(set(args.late or []))
+    bad = [n for n in cfg['late'] if not 1 <= n <= cfg['disks']]
+    if bad:
+        fail(f'--late {bad}: the run has data disks 1..{cfg["disks"]}')
     if args.tpm and not cfg.get('tpm'):
         # A TPM added to a run later is a new one, and says so to the guest.
         cfg['tpm'] = True
@@ -651,6 +687,7 @@ def cmd_up(args) -> int:
     finally:
         server.shutdown()
 
+    plug_late(cfg)
     record(measure('up-done'))
     say('VM is up.')
     print(f'  ssh:     python3 -I {Path(__file__).relative_to(REPO)} ssh -- <command>\n'
@@ -790,6 +827,8 @@ def main() -> int:
     up.add_argument('--size', type=int, default=4, help='GiB per data disk (default 4)')
     up.add_argument('--root-size', type=int, default=6, help='GiB of the root overlay (default 6)')
     up.add_argument('--bios', action='store_true', help='SeaBIOS instead of UEFI')
+    up.add_argument('--late', type=int, action='append', metavar='N',
+                    help='plug data disk N in only after the guest has booted (repeatable)')
     up.add_argument('--tpm', action='store_true',
                     help='a TPM 2.0 for the guest (swtpm on this host; kept with the run)')
     up.add_argument('--mem', type=int, default=2048, help='MiB of RAM (default 2048)')
