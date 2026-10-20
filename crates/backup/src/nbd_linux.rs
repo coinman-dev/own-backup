@@ -163,9 +163,9 @@ impl NbdAttachment {
         };
         // Before the device has any content: udev probes it the moment the
         // kernel sees the size.
-        let hold = crate::udev_hold_linux::UdevHold::install(&[device.trim_start_matches("/dev/")])
-            .map_err(|e| warn!(device = %device, error = %e, "udev hold not installed"))
-            .ok();
+        let hold = udev_hold(&device, matches!(source, Served::Writable(_)), |name| {
+            crate::udev_hold_linux::UdevHold::install(&[name])
+        })?;
 
         let (kernel_side, user_side) =
             UnixStream::pair().map_err(|e| OwnBackupError::Device(format!("socketpair: {e}")))?;
@@ -178,18 +178,19 @@ impl NbdAttachment {
             "NBD_SET_SIZE",
         )?;
         ioctl(&nbd_file, NBD_SET_FLAGS, flags, "NBD_SET_FLAGS")?;
+        // NBD_DO_IT blocks for the whole lifetime of the attachment and
+        // returns on disconnect — it needs its own thread and its own handle.
+        let doit_file = nbd_file
+            .try_clone()
+            .map_err(|e| OwnBackupError::Device(format!("dup nbd fd: {e}")))?;
         ioctl(
             &nbd_file,
             NBD_SET_SOCK,
             kernel_side.as_raw_fd() as libc::c_ulong,
             "NBD_SET_SOCK",
         )?;
-
-        // NBD_DO_IT blocks for the whole lifetime of the attachment and
-        // returns on disconnect — it needs its own thread and its own handle.
-        let doit_file = nbd_file
-            .try_clone()
-            .map_err(|e| OwnBackupError::Device(format!("dup nbd fd: {e}")))?;
+        // From here the kernel holds the socket: a failure gives the device
+        // back before it is reported.
         let device_for_log = device.clone();
         let doit_thread = std::thread::Builder::new()
             .name("nbd-doit".into())
@@ -203,9 +204,13 @@ impl NbdAttachment {
                 let _ = unsafe { libc::ioctl(doit_file.as_raw_fd(), NBD_CLEAR_QUE as _, 0) };
                 let _ = unsafe { libc::ioctl(doit_file.as_raw_fd(), NBD_CLEAR_SOCK as _, 0) };
             })
-            .map_err(|e| OwnBackupError::Device(format!("spawn nbd-doit: {e}")))?;
+            .map_err(|e| {
+                // NBD_DO_IT never ran: nothing waits on the socket to end.
+                let _ = ioctl(&nbd_file, NBD_CLEAR_SOCK, 0, "NBD_CLEAR_SOCK");
+                OwnBackupError::Device(format!("spawn nbd-doit: {e}"))
+            })?;
 
-        let serve_thread = std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("nbd-serve".into())
             .spawn(move || {
                 let mut stream = user_side;
@@ -213,8 +218,18 @@ impl NbdAttachment {
                 if let Err(e) = serve(&mut stream, source.target()) {
                     warn!(error = %e, "NBD serve loop ended with an error");
                 }
-            })
-            .map_err(|e| OwnBackupError::Device(format!("spawn nbd-serve: {e}")))?;
+            });
+        let serve_thread = match spawned {
+            Ok(t) => t,
+            Err(e) => {
+                // NBD_DO_IT is running with nobody to answer it (our side of
+                // the socket went with the closure): disconnect, and let its
+                // thread clear the socket on the way out.
+                let _ = ioctl(&nbd_file, NBD_DISCONNECT, 0, "NBD_DISCONNECT");
+                let _ = doit_thread.join();
+                return Err(OwnBackupError::Device(format!("spawn nbd-serve: {e}")));
+            }
+        };
 
         // The device is usable once the kernel reports the size we set.
         let sys_size = format!("/sys/block/{}/size", device.trim_start_matches("/dev/"));
@@ -277,6 +292,27 @@ impl Drop for NbdAttachment {
         // through detach(). A second DISCONNECT on a dead device just errors.
         if self.doit_thread.is_some() {
             let _ = unsafe { libc::ioctl(self.nbd_file.as_raw_fd(), NBD_DISCONNECT as _, 0) };
+        }
+    }
+}
+
+/// The udev hold for `device` (`udev_hold_linux`), `install`ed. Without one
+/// a read-only device is still served — a warning; a writable one is not:
+/// what a probe or an auto-assembly writes would land in the overlay, so the
+/// attach fails before anything was written.
+fn udev_hold<H>(
+    device: &str,
+    writable: bool,
+    install: impl FnOnce(&str) -> Result<H>,
+) -> Result<Option<H>> {
+    match install(device.trim_start_matches("/dev/")) {
+        Ok(hold) => Ok(Some(hold)),
+        Err(e) if writable => Err(OwnBackupError::Device(format!(
+            "{device}: the udev hold a writable device needs could not be installed: {e}"
+        ))),
+        Err(e) => {
+            warn!(device = %device, error = %e, "udev hold not installed");
+            Ok(None)
         }
     }
 }
@@ -515,6 +551,23 @@ mod tests {
         assert_eq!(err, 0);
         client.write_all(&request(NBD_CMD_DISC, 11, 0, 0)).unwrap();
         handle.join().unwrap();
+    }
+
+    /// A writable device is not attached without its udev hold; a
+    /// read-only one is, with a warning.
+    #[test]
+    fn a_writable_device_needs_its_udev_hold() {
+        let fail = |_: &str| -> Result<()> { Err(OwnBackupError::Device("read-only /run".into())) };
+        let err = udev_hold("/dev/nbd3", true, fail).unwrap_err();
+        assert!(err.to_string().contains("/dev/nbd3"), "{err}");
+        assert!(udev_hold("/dev/nbd3", false, fail).unwrap().is_none());
+        let mut asked = String::new();
+        let held = udev_hold("/dev/nbd3", true, |name| {
+            asked = name.to_string();
+            Ok(7)
+        });
+        assert_eq!(held.unwrap(), Some(7));
+        assert_eq!(asked, "nbd3");
     }
 
     impl WritableBlockSource for MemSource {
