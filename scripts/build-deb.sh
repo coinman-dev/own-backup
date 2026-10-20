@@ -166,6 +166,8 @@ if [[ -z "$shlibs" ]]; then
 fi
 
 installed_size="$(du -sk --exclude=DEBIAN "$stage" | cut -f1)"
+# libtss2-rc: without it systemd-creds sees the TPM only "partially" and
+# seals the machine key with the host key alone (stand, 20.10).
 cat > "$stage/DEBIAN/control" <<EOF
 Package: own-backup
 Version: $deb_version
@@ -173,7 +175,7 @@ Architecture: $arch
 Maintainer: $holder
 Installed-Size: $installed_size
 Depends: $shlibs, libayatana-appindicator3-1, systemd, dbus, polkitd | policykit-1, mount, kmod
-Recommends: lvm2, cryptsetup-bin, pkexec
+Recommends: lvm2, cryptsetup-bin, pkexec, libtss2-rc0t64 | libtss2-rc0
 Section: admin
 Priority: optional
 Homepage: https://github.com/coinman-dev/own-backup
