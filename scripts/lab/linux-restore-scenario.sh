@@ -649,6 +649,82 @@ initramfs_rebuilt() { # the restored image differs from the source's and names t
     umount "$tm"
     [[ $n -gt 0 && $bad -eq 0 ]]
 }
+initramfs_kernel_names() { # no rebuilt image on the restored /boot names this machine's block devices
+    # by kernel name (/dev/vdb13, \x2fdev\x2fvdb13, dev-vdb13.device, /dev/block/252:29) where
+    # it makes the boot wait or mount — the restored machine has other names
+    # (dracut: "devexists-\x2fdev\x2fvdb13.sh" timeouts, emergency shell) —
+    # and the rebuild left no copy of a previous image behind
+    local tm=$WORK/m-tboot-k x=$WORK/initrd-k img name n=0 bad=0
+    mkdir -p "$tm"
+    mount -o ro,noload "$(part "$TARGET" "$SRC_BOOT_N")" "$tm" || return 1
+    : >"$EV/ch-initramfs-names.txt"
+    if compgen -G "$tm/*.obk-prev" >/dev/null; then
+        bad=1
+        ls -l "$tm"/*.obk-prev >>"$EV/ch-initramfs-names.txt"
+    fi
+    for img in "$tm"/initrd.img-* "$tm"/initramfs-*.img; do
+        [[ -f $img && ! -L $img && $img != *.obk-prev ]] || continue
+        name=$(basename "$img")
+        n=$((n + 1))
+        rm -rf "$x" && mkdir -p "$x"
+        if command -v lsinitrd >/dev/null; then
+            (cd "$x" && lsinitrd --unpack "$img") >/dev/null 2>&1
+        else
+            unmkinitramfs "$img" "$x" >/dev/null 2>&1
+        fi
+        [[ -n $(ls -A "$x") ]] || { bad=1; echo "$name: could not be unpacked" >>"$EV/ch-initramfs-names.txt"; continue; }
+        python3 - "$x" "$name" >>"$EV/ch-initramfs-names.txt" <<'PY' || bad=1
+import os, re, sys
+root, image = sys.argv[1], sys.argv[2]
+if os.path.isdir(os.path.join(root, "main")):  # unmkinitramfs: early/, main/
+    root = os.path.join(root, "main")
+devs = []
+for n in os.listdir("/sys/class/block"):
+    devs.append("/dev/" + n)
+    try:
+        devs.append("/dev/block/" + open("/sys/class/block/%s/dev" % n).read().strip())
+    except OSError:
+        pass
+def unit(p):  # systemd-escape -p
+    out = []
+    for i, c in enumerate(p.strip("/")):
+        if c == "/":
+            out.append("-")
+        elif c.isascii() and (c.isalnum() or c in ":_.") and not (c == "." and i == 0):
+            out.append(c)
+        else:
+            out.append("".join("\\x%02x" % b for b in c.encode()))
+    return "".join(out)
+pats = []
+for d in devs:
+    for s, pre in ((d, ""), (d.replace("/", "\\x2f"), ""), (unit(d), r"(?<![A-Za-z0-9\\-])")):
+        pats.append((d, re.compile(pre + re.escape(s) + r"(?![A-Za-z0-9])")))
+def relevant(rel):
+    return ("dracut/hooks/" in rel
+            or rel.startswith(("etc/cmdline.d/", "etc/systemd/system/", "conf/", "cryptroot/"))
+            or rel in ("etc/cmdline", "etc/fstab", "etc/crypttab", "etc/block_uuid.map"))
+found = set()
+for dp, dirs, files in os.walk(root):
+    for f in files + [d for d in dirs if os.path.islink(os.path.join(dp, d))]:
+        p = os.path.join(dp, f)
+        rel = os.path.relpath(p, root)
+        if not relevant(rel):
+            continue
+        if os.path.islink(p):
+            text = os.readlink(p)
+        else:
+            with open(p, "rb") as fh:
+                text = fh.read(1 << 20).decode("latin-1")
+        found.update((rel, d) for d, rx in pats if rx.search(rel) or rx.search(text))
+for rel, d in sorted(found):
+    print("%s: %s names %s" % (image, rel, d))
+sys.exit(1 if found else 0)
+PY
+    done
+    rm -rf "$x"
+    umount "$tm"
+    [[ $n -gt 0 && $bad -eq 0 ]]
+}
 reply_counts() { # NAME: "<identity_changes> <edited_files>" of a JSON reply
     python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(len(d.get('identity_changes',[])),len(d.get('edited_files',[])))" "$EV/$1.out"
 }
@@ -719,6 +795,8 @@ stage_change() {
         check ch-initramfs-note "$(verdict $?)" "the plan step reports the restored system's initramfs rebuilt"
         initramfs_rebuilt
         check ch-initramfs "$(verdict $?)" "the restored /boot's initramfs is new and names the new root UUID, not the old"
+        initramfs_kernel_names
+        check ch-initramfs-names "$(verdict $?)" "the rebuilt image names no device by this machine's kernel name (it waits by UUID), no previous-image copy is left"
     else
         check ch-initramfs SKIP "the source's initramfs could not be prepared"
     fi
