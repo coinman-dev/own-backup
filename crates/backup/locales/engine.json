@@ -77,8 +77,8 @@
     "en": "some excluded %{fs} files are still listed in the image's catalog under their names — their contents in the backup are zeroed, but removing the entries themselves was not safe"
   },
   "engine.entries_kept_linux": {
-    "ru": "в Linux их пока не удалить из файловой системы образа — содержимого этих файлов в копии нет, остались только записи в каталоге",
-    "en": "on Linux they cannot be deleted from the image's file system yet — the files' contents are not in the backup, only their catalog entries remain"
+    "ru": "удалить их из файловой системы образа не удалось (для этого нужны ntfs-3g и модуль ядра nbd; подробности — в журнале службы) — содержимого этих файлов в копии нет, остались только записи в каталоге",
+    "en": "they could not be deleted from the image's file system (this needs ntfs-3g and the nbd kernel module; details are in the service log) — the files' contents are not in the backup, only their catalog entries remain"
   },
   "engine.skip_no_walk": {
     "ru": "файлы не перечислены: MFT не прочитана (%{error}), а обойти каталоги тома здесь нечем — правила исключений не применялись",

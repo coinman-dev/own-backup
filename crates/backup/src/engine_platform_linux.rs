@@ -6,16 +6,15 @@
 //! (`own_backup_snapshot::linux`) — never a device nobody vouched for; an idle
 //! device is claimed exclusively for the length of the copy, so that it stays
 //! idle; the NTFS used map comes from the engine's own `$Bitmap` reader; VHDX
-//! images are made
-//! in userspace with the geometry Windows gives them; and nothing deletes the
-//! names of excluded files inside a finished image yet, which the engine then
-//! says in so many words.
+//! images are made in userspace with the geometry Windows gives them; and the
+//! names of excluded NTFS files are deleted inside the finished image by
+//! ntfs-3g over our own NBD device (`ntfs_names_linux`).
 
 #![cfg(target_os = "linux")]
 
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use own_backup_common::gpt::DiskLayout;
 use own_backup_common::{tr, OwnBackupError, Result};
@@ -30,6 +29,7 @@ use crate::engine_core::platform::{
 use crate::exclusions::{ByteRanges, ExcludedPath, ExclusionScan};
 use crate::linux_device::LinuxRawDevice;
 use crate::ntfs_map::NtfsUsedMap;
+use crate::ntfs_names_linux::{NamedVolume, NbdExposer, VolumeExposer};
 use crate::removal_types::InsideRemoval;
 use crate::sidecar::BlockChecksum;
 use crate::used_sectors::UsedSectorMap;
@@ -39,6 +39,11 @@ use crate::vhdx_format::VhdxWriter;
 /// the source device each was taken of.
 pub(crate) struct LinuxPlatform {
     snapshots: HashMap<String, Snapshot>,
+    /// How a volume of a finished image is handed to ntfs-3g for its names
+    /// to be deleted: our NBD device, or in tests a file standing in for it.
+    exposer: Box<dyn VolumeExposer>,
+    /// Where those volumes are mounted meanwhile.
+    mount_base: PathBuf,
 }
 
 impl LinuxPlatform {
@@ -53,7 +58,23 @@ impl LinuxPlatform {
                 .into_iter()
                 .map(|s| (s.source_device.clone(), s))
                 .collect(),
+            exposer: Box::new(NbdExposer),
+            mount_base: PathBuf::from(crate::ntfs_names_linux::MOUNT_BASE),
         }
+    }
+
+    /// The same, with the volumes whose names are deleted handed to ntfs-3g
+    /// by `exposer` and mounted under `mount_base` — how a test without the
+    /// kernel NBD module runs the pass.
+    #[cfg(test)]
+    pub(crate) fn with_name_removal(
+        mut self,
+        exposer: Box<dyn VolumeExposer>,
+        mount_base: PathBuf,
+    ) -> Self {
+        self.exposer = exposer;
+        self.mount_base = mount_base;
+        self
     }
 
     fn session(&self, source: &str) -> Result<LinuxSession> {
@@ -286,8 +307,10 @@ impl EnginePlatform for LinuxPlatform {
         VhdxWriter::create_differencing(path, parent)
     }
 
-    /// Deleting files inside an image needs a filesystem driver over it (an
-    /// NBD overlay and ntfs-3g, plan N1) — not there yet.
+    /// Matching the rules inside the image of a volume whose files could not
+    /// be listed (a locked BitLocker volume) needs a walk of the image's
+    /// filesystem, which Linux does not have yet; the engine says the rules
+    /// did not run.
     fn exclude_inside_image(
         &self,
         _image: &FinishedImage<'_>,
@@ -299,17 +322,30 @@ impl EnginePlatform for LinuxPlatform {
         Ok(None)
     }
 
-    /// See [`Self::exclude_inside_image`]: the names stay, and the engine
-    /// reports them with [`Self::entries_kept_reason`].
+    /// ntfs-3g deletes them inside the image, over a scratch the image gets
+    /// only once every volume went through (`ntfs_names_linux`).
     fn remove_from_image(
         &self,
-        _image: &FinishedImage<'_>,
-        _span: VolumeSpan,
-        _paths: &[ExcludedPath],
-        _checksums: &mut Vec<BlockChecksum>,
-        _tick: &mut dyn FnMut(u64, u64),
+        image: &FinishedImage<'_>,
+        span: VolumeSpan,
+        paths: &[ExcludedPath],
+        checksums: &mut Vec<BlockChecksum>,
+        tick: &mut dyn FnMut(u64, u64),
     ) -> Result<Option<u64>> {
-        Ok(None)
+        let volume = NamedVolume {
+            offset: span.data_offset,
+            len: Some(span.volume_len),
+            paths,
+        };
+        crate::ntfs_names_linux::remove_names(
+            image,
+            span,
+            &[volume],
+            checksums,
+            tick,
+            self.exposer.as_ref(),
+            &self.mount_base,
+        )
     }
 
     fn entries_kept_reason(&self) -> String {
@@ -376,15 +412,37 @@ impl DiskPlatform for LinuxPlatform {
         crate::efivars_linux::Efivarfs::default().export(&machine)
     }
 
+    /// Each partition's volume is sized by its own boot sector; a whole-disk
+    /// image is checksummed from its first byte.
     fn remove_from_disk_image(
         &self,
-        _image: &FinishedImage<'_>,
-        _image_size: u64,
-        _partitions: &[(u64, Vec<ExcludedPath>)],
-        _checksums: &mut Vec<BlockChecksum>,
-        _tick: &mut dyn FnMut(u64, u64),
+        image: &FinishedImage<'_>,
+        image_size: u64,
+        partitions: &[(u64, Vec<ExcludedPath>)],
+        checksums: &mut Vec<BlockChecksum>,
+        tick: &mut dyn FnMut(u64, u64),
     ) -> Result<Option<u64>> {
-        Ok(None)
+        let volumes: Vec<NamedVolume<'_>> = partitions
+            .iter()
+            .map(|(offset, paths)| NamedVolume {
+                offset: *offset,
+                len: None,
+                paths,
+            })
+            .collect();
+        let grid = VolumeSpan {
+            data_offset: 0,
+            volume_len: image_size,
+        };
+        crate::ntfs_names_linux::remove_names(
+            image,
+            grid,
+            &volumes,
+            checksums,
+            tick,
+            self.exposer.as_ref(),
+            &self.mount_base,
+        )
     }
 }
 
@@ -664,35 +722,16 @@ mod tests {
             data_offset: MIB,
             volume_len: 4096,
         };
-        let path = ExcludedPath {
-            rel: "pagefile.sys".into(),
-            is_dir: false,
-            is_reparse: false,
-        };
         let mut checksums = Vec::new();
         let mut tick = |_: u64, _: u64| {};
         assert!(p
             .exclude_inside_image(&image, span, &["*.sys".into()], &mut checksums, &mut tick)
             .unwrap()
             .is_none());
+        // Deleting the names inside an image is done (ntfs_names_linux, with
+        // its own tests); with no paths there is nothing to do or to claim.
         assert!(p
-            .remove_from_image(
-                &image,
-                span,
-                std::slice::from_ref(&path),
-                &mut checksums,
-                &mut tick
-            )
-            .unwrap()
-            .is_none());
-        assert!(p
-            .remove_from_disk_image(
-                &image,
-                8 * MIB,
-                &[(MIB, vec![path])],
-                &mut checksums,
-                &mut tick
-            )
+            .remove_from_image(&image, span, &[], &mut checksums, &mut tick)
             .unwrap()
             .is_none());
         // Honest about the names left behind, and no promise about the next run.

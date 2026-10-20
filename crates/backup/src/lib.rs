@@ -90,6 +90,8 @@ pub mod linux_tools;
 #[cfg(target_os = "linux")]
 pub mod nbd_linux;
 #[cfg(target_os = "linux")]
+mod ntfs_names_linux;
+#[cfg(target_os = "linux")]
 pub mod restore_disk_linux;
 #[cfg(target_os = "linux")]
 pub mod udev_hold_linux;
@@ -123,6 +125,7 @@ pub mod file_restore_win;
 #[cfg(target_os = "windows")]
 pub mod format_win;
 pub mod iscsi_win;
+pub mod image_fold;
 pub mod iso9660;
 #[cfg(target_os = "windows")]
 pub mod letters_win;
