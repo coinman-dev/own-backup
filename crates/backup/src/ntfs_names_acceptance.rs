@@ -88,6 +88,24 @@ fn add_extras(mnt: &Path) -> Extras {
         b"[ZoneTransfer]\r\nZoneId=3\r\n",
     );
     crate::exclusion_corpus::setxattr(&temp.join("x.tmp"), "user.stream", &[0xAB; 9000]);
+    // Small enough to live inside their MFT records: the scan cannot leave
+    // them out of the copy, the deletion frees the record without clearing
+    // it — the pass clears them first. A small file with a kept twin keeps
+    // its content.
+    std::fs::write(temp.join("small.tmp"), b"RESIDENT-SECRET-0123456789").unwrap();
+    crate::exclusion_corpus::setxattr(
+        &temp.join("small.tmp"),
+        "user.small",
+        b"STREAM-SECRET-abcdef",
+    );
+    gone.push(temp.join("small.tmp"));
+    // Under `cache/`, which goes as a whole: the name goes, the file lives on
+    // under its kept twin with its content.
+    std::fs::create_dir_all(mnt.join("cache")).unwrap();
+    std::fs::write(mnt.join("cache/tiny.txt"), b"TINY-KEPT-TWIN").unwrap();
+    std::fs::hard_link(mnt.join("cache/tiny.txt"), mnt.join("keep/tiny_twin.txt")).unwrap();
+    gone.push(mnt.join("cache/tiny.txt"));
+    kept.push((mnt.join("keep/tiny_twin.txt"), b"TINY-KEPT-TWIN".to_vec()));
     let svi = mnt.join("System Volume Information");
     std::fs::create_dir_all(&svi).unwrap();
     std::fs::write(svi.join("tracking.log"), [0xAB; 8192]).unwrap();
@@ -214,6 +232,13 @@ fn ntfsfix_clean(file: &Path, tag: &str) {
 fn judge(file: &Path, mnt: &Path, corpus: &Corpus, extras: &Extras, tag: &str) {
     let data = std::fs::read(file).unwrap();
     assert!(!holds_run(&data, 0xAB), "{tag}: excluded content survived");
+    for secret in [&b"RESIDENT-SECRET"[..], b"STREAM-SECRET"] {
+        assert!(
+            !data.windows(secret.len()).any(|w| w == secret),
+            "{tag}: resident content of an excluded file survived: {}",
+            String::from_utf8_lossy(secret)
+        );
+    }
     drop(data);
     ntfsfix_clean(file, tag);
     with_mount(file, mnt, || {

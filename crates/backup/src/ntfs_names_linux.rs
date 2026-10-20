@@ -16,6 +16,10 @@
 //!    its writes), the recorded paths are deleted through the mount without
 //!    ever following a link, the volume is unmounted, the device flushed,
 //!    `ntfsfix -n` reads it back;
+//!    a file whose only name goes has its resident content — the data of a
+//!    small file and its short named streams, kept inside its MFT record —
+//!    overwritten with zeros through the mount first: deleting a file frees
+//!    its record but does not clear it, here or on Windows;
 //! 4. every cluster the deletions freed is erased — `$Bitmap` before and
 //!    after, as the Windows in-image pass does it. The scan subtracted the
 //!    files' data before the copy, but not everything a deleted file held:
@@ -624,6 +628,98 @@ fn delete_children(dir: &Path, deleted: &mut u64, failed: &mut u64) {
     }
 }
 
+/// What can live inside an MFT record (1 KiB, minus its headers): a value
+/// this short may be resident. Anything longer is in clusters, which the scan
+/// left out of the copy (unnamed data) or the deletion frees and
+/// [`erase_freed`] clears (named streams).
+const RESIDENT_MAX: u64 = 1024;
+
+/// Overwrite, in place and through the mount, the content of the file at
+/// `path` and of its named streams (ntfs-3g's `user.*` attributes) that may
+/// be resident in its MFT record. The record is freed by the deletion, never
+/// cleared, and the copy took it whole. Best effort: what cannot be
+/// overwritten is said in the log, and the deletion goes on.
+fn wipe_resident(path: &Path, len: u64) {
+    use std::io::Write;
+    if len > 0 && len <= RESIDENT_MAX {
+        let zeros = vec![0u8; len as usize];
+        let written = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .and_then(|mut f| f.write_all(&zeros).and_then(|()| f.sync_data()));
+        if let Err(e) = written {
+            warn!(path = %path.display(), error = %e,
+                  "NTFS name removal: a small file's content could not be cleared before its deletion");
+        }
+    }
+    for name in user_xattrs(path) {
+        let Some(len) = xattr_len(path, &name) else {
+            continue;
+        };
+        if len == 0 || len as u64 > RESIDENT_MAX {
+            continue;
+        }
+        if let Err(e) = set_xattr(path, &name, &vec![0u8; len]) {
+            warn!(path = %path.display(), stream = %name.to_string_lossy(), error = %e,
+                  "NTFS name removal: a named stream could not be cleared before its deletion");
+        }
+    }
+}
+
+fn cpath(path: &Path) -> Option<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::CString::new(path.as_os_str().as_bytes()).ok()
+}
+
+/// The `user.*` attribute names of `path` itself (never a link's target).
+fn user_xattrs(path: &Path) -> Vec<std::ffi::CString> {
+    let Some(p) = cpath(path) else {
+        return Vec::new();
+    };
+    // SAFETY: a NUL-terminated path; a null buffer asks for the size only.
+    let size = unsafe { libc::llistxattr(p.as_ptr(), std::ptr::null_mut(), 0) };
+    if size <= 0 {
+        return Vec::new();
+    }
+    let mut buf = vec![0u8; size as usize];
+    // SAFETY: the buffer is `buf.len()` bytes long and outlives the call.
+    let got = unsafe { libc::llistxattr(p.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+    if got <= 0 {
+        return Vec::new();
+    }
+    buf.truncate(got as usize);
+    buf.split(|&b| b == 0)
+        .filter(|n| n.starts_with(b"user."))
+        .filter_map(|n| std::ffi::CString::new(n).ok())
+        .collect()
+}
+
+fn xattr_len(path: &Path, name: &std::ffi::CStr) -> Option<usize> {
+    let p = cpath(path)?;
+    // SAFETY: NUL-terminated strings; a null buffer asks for the size only.
+    let size = unsafe { libc::lgetxattr(p.as_ptr(), name.as_ptr(), std::ptr::null_mut(), 0) };
+    (size >= 0).then_some(size as usize)
+}
+
+fn set_xattr(path: &Path, name: &std::ffi::CStr, value: &[u8]) -> std::io::Result<()> {
+    let p = cpath(path)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in path"))?;
+    // SAFETY: NUL-terminated strings; the value outlives the call.
+    let rc = unsafe {
+        libc::lsetxattr(
+            p.as_ptr(),
+            name.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            libc::XATTR_REPLACE,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Delete `path` and, if it is a real directory, everything in it first. A
 /// link — a symlink or junction as ntfs-3g shows it, or an entry the scan saw
 /// as a reparse point — is removed itself, never what it leads to.
@@ -642,6 +738,11 @@ fn delete_tree(path: &Path, is_reparse: bool, deleted: &mut u64, failed: &mut u6
         }
         std::fs::remove_dir(path)
     } else {
+        // A file with a name outside the exclusion lives on under it: only
+        // the name goes, the content is not ours to clear.
+        if meta.file_type().is_file() && meta.nlink() == 1 {
+            wipe_resident(path, meta.len());
+        }
         std::fs::remove_file(path)
     };
     match result {
