@@ -686,6 +686,35 @@ impl BackupClient {
         parse(&reply.json)
     }
 
+    /// Linux: the disks the medium may be written onto.
+    pub async fn list_media_sticks(
+        &mut self,
+    ) -> Result<Vec<own_backup_common::engine_dto::MediaStickDto>> {
+        let reply = self
+            .inner
+            .list_media_sticks(self.request(proto::Empty {}))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
+    /// Linux: erase the stick and write the medium's ISO onto it. Progress
+    /// arrives on the event stream as kind `media`.
+    pub async fn write_media_stick(
+        &mut self,
+        options: &own_backup_common::engine_dto::MediaStickWriteDto,
+    ) -> Result<own_backup_common::engine_dto::MediaStickReportDto> {
+        let json = serde_json::to_string(options).unwrap_or_default();
+        let reply = self
+            .inner
+            .write_media_stick(self.request(proto::JsonRequest { json }))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
     pub async fn unmount_image(&mut self, image_path: &str) -> Result<()> {
         let json = serde_json::json!({ "image_path": image_path }).to_string();
         self.inner

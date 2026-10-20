@@ -88,6 +88,8 @@ pub mod linux_device;
 #[cfg(target_os = "linux")]
 pub mod linux_tools;
 #[cfg(target_os = "linux")]
+pub mod media_stick_linux;
+#[cfg(target_os = "linux")]
 pub mod nbd_linux;
 #[cfg(target_os = "linux")]
 mod ntfs_names_linux;
@@ -133,6 +135,7 @@ pub mod letters_win;
 pub mod media_build_win;
 pub mod media_layout;
 pub mod media_preflight_win;
+pub mod media_stick;
 #[cfg(target_os = "windows")]
 pub mod media_tools_win;
 #[cfg(target_os = "windows")]

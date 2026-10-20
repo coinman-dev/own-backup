@@ -1,0 +1,87 @@
+{
+  "_version": 2,
+  "media_stick.not_an_iso": {
+    "ru": "это не образ ISO 9660 — записывается только ISO загрузочного носителя",
+    "en": "this is not an ISO 9660 image — only the boot medium's ISO is written"
+  },
+  "media_stick.not_hybrid": {
+    "ru": "образ загружается только с компакт-диска: в нём нет загрузочной записи для флешки (isohybrid)",
+    "en": "the image boots only from a CD: it has no boot record for a USB stick (isohybrid)"
+  },
+  "media_stick.odd_length": {
+    "ru": "длина образа (%{bytes} байт) не кратна 512 — файл обрезан или повреждён",
+    "en": "the image length (%{bytes} bytes) is not a multiple of 512 — the file is truncated or damaged"
+  },
+  "media_stick.log_sector_size": {
+    "ru": "сектор флешки — %{bytes} байт, а таблица разделов образа рассчитана на 512",
+    "en": "the stick has %{bytes}-byte sectors, while the image's partition table counts 512-byte ones"
+  },
+  "media_stick.log_no_mbr": {
+    "ru": "в начале образа нет таблицы разделов MBR",
+    "en": "the image starts with no MBR partition table"
+  },
+  "media_stick.log_gpt": {
+    "ru": "таблица разделов образа — GPT; раздел для журналов добавляется только в MBR",
+    "en": "the image's partition table is GPT; a log partition is added to MBR tables only"
+  },
+  "media_stick.log_extended": {
+    "ru": "в таблице разделов образа есть расширенный раздел",
+    "en": "the image's partition table has an extended partition"
+  },
+  "media_stick.log_no_slot": {
+    "ru": "в таблице разделов образа нет свободной записи",
+    "en": "the image's partition table has no free entry"
+  },
+  "media_stick.log_no_room": {
+    "ru": "за образом свободно %{free_mib} МиБ, а нужно не меньше %{need_mib} МиБ",
+    "en": "%{free_mib} MiB are free behind the image; at least %{need_mib} MiB are needed"
+  },
+  "media_stick.log_no_mkfs": {
+    "ru": "не найдена программа mkfs.vfat (пакет dosfstools)",
+    "en": "mkfs.vfat (package dosfstools) was not found"
+  },
+  "media_stick.log_no_node": {
+    "ru": "ядро не показало раздел %{number} флешки %{device}",
+    "en": "the kernel shows no partition %{number} on the stick %{device}"
+  },
+  "media_stick.log_mkfs_failed": {
+    "ru": "раздел для журналов %{node} не отформатирован: %{error}",
+    "en": "the log partition %{node} was not formatted: %{error}"
+  },
+  "media_stick.stage_write": {
+    "ru": "Запись образа",
+    "en": "Writing the image"
+  },
+  "media_stick.stage_verify": {
+    "ru": "Проверка записанного",
+    "en": "Verifying what was written"
+  },
+  "media_stick.stage_logs": {
+    "ru": "Раздел для журналов",
+    "en": "Log partition"
+  },
+  "media_stick.not_a_device": {
+    "ru": "%{device} — не блочное устройство",
+    "en": "%{device} is not a block device"
+  },
+  "media_stick.not_a_stick": {
+    "ru": "%{device} — не флешка: носитель записывается только на USB-диск, карту памяти или съёмный диск",
+    "en": "%{device} is not a stick: the medium is written only onto a USB disk, a memory card or a removable disk"
+  },
+  "media_stick.mounted": {
+    "ru": "флешка %{device} подключена в системе (%{mounts}) — извлеките её в файловом менеджере, не вынимая, и повторите",
+    "en": "the stick %{device} is mounted (%{mounts}) — eject it in the file manager without unplugging it, then try again"
+  },
+  "media_stick.iso_unreadable": {
+    "ru": "не удалось открыть образ %{path}: %{error}",
+    "en": "could not open the image %{path}: %{error}"
+  },
+  "media_stick.too_small": {
+    "ru": "образ (%{need_mib} МиБ) не помещается на %{device} (%{have_mib} МиБ)",
+    "en": "the image (%{need_mib} MiB) does not fit on %{device} (%{have_mib} MiB)"
+  },
+  "media_stick.verify_mismatch": {
+    "ru": "флешка %{device} вернула не те данные со смещения %{offset} — она неисправна или её настоящий объём меньше заявленного",
+    "en": "the stick %{device} returned different data at offset %{offset} — it is faulty or smaller than it claims"
+  }
+}

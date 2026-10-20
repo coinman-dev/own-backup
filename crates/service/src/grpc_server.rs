@@ -2446,6 +2446,119 @@ impl BackupService for BackupServiceImpl {
         }
     }
 
+    async fn list_media_sticks(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[cfg(target_os = "linux")]
+        {
+            let sticks =
+                tokio::task::spawn_blocking(own_backup_backup::media_stick_linux::list_sticks)
+                    .await
+                    .map_err(|e| Status::internal(format!("stick listing panicked: {e}")))?;
+            json_reply(&sticks)
+        }
+        #[cfg(not(target_os = "linux"))]
+        Err(Status::unimplemented(
+            tr!("grpc_server.media_stick_linux_only").into_owned(),
+        ))
+    }
+
+    /// Erase a USB stick and write the Linux medium's ISO onto it. The same
+    /// gates as a whole-disk restore: an administrator's yes, the one slot the
+    /// machine has, and the running system's disks out of reach.
+    async fn write_media_stick(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[cfg(target_os = "linux")]
+        {
+            use own_backup_backup::media_stick_linux::{write_stick, StickStage};
+            use own_backup_common::engine_dto::{
+                MediaProgressDto, MediaStageDto, MediaStickReportDto, MediaStickWriteDto,
+            };
+
+            crate::polkit::authorize(&req, crate::polkit::Action::Restore).await?;
+            let p: MediaStickWriteDto = serde_json::from_str(&req.into_inner().json)
+                .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+            // The stick's own refusals first ("not a stick", "eject it"): the
+            // guard would call a mounted stick part of the running system.
+            let device = p.device.clone();
+            tokio::task::spawn_blocking(move || {
+                own_backup_backup::media_stick_linux::check_stick(&device)?;
+                own_backup_restore::guard_target_disk_device(&device)
+            })
+            .await
+            .map_err(|e| Status::internal(format!("stick check panicked: {e}")))?
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+            let slot = self.reserve(
+                &tr!("grpc_server.busy_media_stick"),
+                &tr!("grpc_server.busy_which_stick", device = p.device.as_str()),
+            )?;
+            let cancel = slot.cancel();
+            let events = self.state.events.clone();
+            let stages: Vec<MediaStageDto> = StickStage::ALL
+                .iter()
+                .map(|s| MediaStageDto {
+                    id: s.id().into(),
+                    title: s.title(),
+                })
+                .collect();
+            let device = p.device.clone();
+            let report = tokio::task::spawn_blocking(move || {
+                let _slot = slot;
+                let _awake = keep_awake(&tr!("grpc_server.busy_media_stick"));
+                let mut emit = |stage: StickStage, percent: u64| {
+                    let index = StickStage::ALL.iter().position(|s| *s == stage);
+                    emit_engine(
+                        &events,
+                        "media",
+                        &MediaProgressDto {
+                            stages: stages.clone(),
+                            stage_index: index.unwrap_or(0),
+                            percent,
+                            detail: String::new(),
+                            finished: stage == StickStage::Logs && percent == 100,
+                        },
+                    );
+                };
+                write_stick(
+                    std::path::Path::new(&p.iso_path),
+                    &p.device,
+                    &cancel,
+                    &mut emit,
+                )
+            })
+            .await
+            .map_err(|e| Status::internal(format!("stick write panicked: {e}")))?
+            .map_err(|e| match e {
+                own_backup_common::OwnBackupError::Cancelled => {
+                    Status::cancelled(tr!("grpc_server.media_stick_cancelled").into_owned())
+                }
+                other => Status::failed_precondition(other.to_string()),
+            })?;
+            info!(
+                device = %device,
+                mb = report.iso_bytes / 1_048_576,
+                log = ?report.log_partition,
+                "boot medium written onto a stick"
+            );
+            json_reply(&MediaStickReportDto {
+                device,
+                iso_bytes: report.iso_bytes,
+                volume_id: report.volume_id,
+                log_partition: report.log_partition,
+                log_skipped: report.log_skipped,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = req;
+            Err(Status::unimplemented(
+                tr!("grpc_server.media_stick_linux_only").into_owned(),
+            ))
+        }
+    }
+
     async fn unmount_image(&self, req: Request<JsonRequest>) -> Result<Response<Empty>, Status> {
         check_auth(&req, &self.service_token)?;
         #[cfg(target_os = "windows")]

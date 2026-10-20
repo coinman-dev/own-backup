@@ -198,6 +198,22 @@
     "ru": "диск %{disk}",
     "en": "disk %{disk}"
   },
+  "grpc_server.busy_media_stick": {
+    "ru": "запись носителя на флешку",
+    "en": "writing the medium onto a stick"
+  },
+  "grpc_server.busy_which_stick": {
+    "ru": "флешка %{device}",
+    "en": "stick %{device}"
+  },
+  "grpc_server.media_stick_cancelled": {
+    "ru": "запись отменена; начало флешки стёрто — до новой записи она не загружается",
+    "en": "the write was cancelled; the stick's start was wiped — it does not boot until written again"
+  },
+  "grpc_server.media_stick_linux_only": {
+    "ru": "запись носителя Linux на флешку есть только в Linux-версии",
+    "en": "writing the Linux medium onto a stick is available in the Linux version only"
+  },
   "grpc_server.plan_refused": {
     "ru": "План не прошёл проверку — ничего не записано:\n%{refusals}",
     "en": "The plan did not pass the checks — nothing was written:\n%{refusals}"

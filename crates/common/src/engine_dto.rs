@@ -303,6 +303,47 @@ pub struct MediaCleanupDto {
     pub bytes_freed: u64,
 }
 
+// --- writing the Linux medium onto a USB stick ------------------------------
+
+/// A disk the medium may be written onto: USB or removable, whole, writable.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MediaStickDto {
+    /// `/dev/sdb` — what the write is asked for.
+    pub device: String,
+    /// Vendor and model as the device reports them; may be empty.
+    pub model: String,
+    pub size_bytes: u64,
+    /// `usb`, `mmc` (a card reader) or `removable` (another bus).
+    pub transport: String,
+    /// Mount points of its partitions now. A stick in use is not written:
+    /// the window says to eject it in the file manager first.
+    #[serde(default)]
+    pub mounted: Vec<String>,
+}
+
+/// What to write where.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MediaStickWriteDto {
+    pub iso_path: String,
+    pub device: String,
+}
+
+/// What the write did. Progress arrives as `media` engine events, as for a
+/// build ([`MediaProgressDto`]).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct MediaStickReportDto {
+    pub device: String,
+    pub iso_bytes: u64,
+    pub volume_id: String,
+    /// The log partition's device (`/dev/sdb3`) when one was made.
+    #[serde(default)]
+    pub log_partition: Option<String>,
+    /// Why there is none, when there is none: the stick boots regardless,
+    /// and the medium's log then stays in memory.
+    #[serde(default)]
+    pub log_skipped: Option<String>,
+}
+
 // --- duplicate identities (Linux restore and mount) ------------------------
 
 /// An identity the restored or mounted copy carries that a device of this

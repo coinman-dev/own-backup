@@ -34,6 +34,21 @@ pub enum MediaCommand {
     Tools,
     /// Драйверы этой машины, которые предлагает сборщик
     Drivers,
+    /// Linux: флешки, на которые можно записать носитель
+    Sticks,
+    /// Linux: стереть флешку и записать на неё ISO носителя
+    WriteStick(WriteStickArgs),
+}
+
+#[derive(Args)]
+pub struct WriteStickArgs {
+    /// ISO носителя (`scripts/build-linux-media.sh`)
+    #[arg(long)]
+    pub iso: String,
+
+    /// Флешка целиком (`/dev/sdb`); список — `media sticks`. Всё на ней стирается.
+    #[arg(long)]
+    pub device: String,
 }
 
 #[derive(Args)]
@@ -125,6 +140,46 @@ pub async fn run(args: MediaArgs) -> Result<()> {
                         ""
                     }
                 );
+            }
+        }
+        MediaCommand::Sticks => {
+            let sticks = client.list_media_sticks().await.map_err(cfg)?;
+            if sticks.is_empty() {
+                println!("Ни одной флешки, карты памяти или съёмного диска.");
+            }
+            for d in &sticks {
+                println!(
+                    "{:<14} {:>8} МиБ  {:<10} {}{}",
+                    d.device,
+                    d.size_bytes >> 20,
+                    d.transport,
+                    d.model,
+                    if d.mounted.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  (подключена: {})", d.mounted.join(", "))
+                    }
+                );
+            }
+        }
+        MediaCommand::WriteStick(w) => {
+            let report = client
+                .write_media_stick(&own_backup_common::engine_dto::MediaStickWriteDto {
+                    iso_path: w.iso.clone(),
+                    device: w.device.clone(),
+                })
+                .await
+                .map_err(cfg)?;
+            println!(
+                "Записано и проверено: {} МиБ ({}) на {}",
+                report.iso_bytes >> 20,
+                report.volume_id,
+                report.device
+            );
+            match (&report.log_partition, &report.log_skipped) {
+                (Some(p), _) => println!("Раздел для журналов: {p}"),
+                (None, Some(why)) => println!("Раздела для журналов нет: {why}"),
+                (None, None) => {}
             }
         }
         MediaCommand::Build(b) => {

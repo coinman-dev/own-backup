@@ -158,6 +158,12 @@ service BackupService {
   // and never distributed by us.
   rpc ListMediaTools(Empty) returns (JsonReply);        // JSON: [MediaToolDto]
   rpc BuildMedia(JsonRequest) returns (JsonReply);      // in: MediaBuildOptions -> MediaBuildReport
+  // Linux: the disks a medium may be written onto (USB, card readers,
+  // removable), and the write itself — the whole stick is erased, the ISO
+  // written and read back, a FAT32 log partition added behind it. Progress as
+  // `media` events; CancelEngineOp stops it.
+  rpc ListMediaSticks(Empty) returns (JsonReply);       // JSON: [MediaStickDto]
+  rpc WriteMediaStick(JsonRequest) returns (JsonReply); // in: MediaStickWriteDto -> MediaStickReportDto
 
   // --- What mounting a backup image needs on this machine ---
   // No driver of ours is installed on either platform: Windows serves the

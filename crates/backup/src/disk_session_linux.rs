@@ -413,6 +413,22 @@ impl<D: DiskIo> LinuxDiskSession<D> {
         })
     }
 
+    /// Write sectors that carry a partition table someone else laid out — an
+    /// isohybrid image's own MBR, or one slot added to it — and make the
+    /// kernel show `expected`. Nothing is rebuilt from a spec and no boot code
+    /// is carried over: the bytes are the table.
+    pub fn write_raw_table(
+        &mut self,
+        writes: &[(u64, &[u8])],
+        expected: &[KernelPartition],
+    ) -> Result<KernelUpdate> {
+        for (offset, bytes) in writes {
+            self.io_mut().write_at(*offset, bytes)?;
+        }
+        self.io_mut().flush()?;
+        self.tell_kernel(expected)
+    }
+
     fn tell_kernel(&mut self, expected: &[KernelPartition]) -> Result<KernelUpdate> {
         let path = self.io().path().to_string();
         let disk = self.io().kernel_name().to_string();
