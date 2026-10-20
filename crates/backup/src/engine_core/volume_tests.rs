@@ -589,6 +589,12 @@ fn backup_volume_refused_at_publication_leaves_no_image() {
 /// in memory; `None` without the tool.
 #[cfg(target_os = "linux")]
 fn ext4_with_key_store() -> Option<Vec<u8>> {
+    ext4_with_key_store_and(|_| {})
+}
+
+/// [`ext4_with_key_store`], with `more` done to the tree before `mke2fs`.
+#[cfg(target_os = "linux")]
+fn ext4_with_key_store_and(more: impl FnOnce(&std::path::Path)) -> Option<Vec<u8>> {
     let dir = tempfile::tempdir().ok()?;
     let src = dir.path().join("src");
     let keys = src
@@ -597,6 +603,7 @@ fn ext4_with_key_store() -> Option<Vec<u8>> {
     std::fs::create_dir_all(&keys).ok()?;
     std::fs::write(keys.join("machine.cred"), [0x6Bu8; 8192]).ok()?;
     std::fs::write(src.join("var/lib/own-backup/jobs.json"), [0x4Au8; 4096]).ok()?;
+    more(&src);
     let img = dir.path().join("fs.img");
     let out = std::process::Command::new("mke2fs")
         .args(["-q", "-F", "-t", "ext4", "-b", "4096", "-d"])
@@ -654,6 +661,37 @@ fn the_key_directory_is_left_out_whatever_the_rules() {
     let plain = TestPlatform::new().source(&source, TestSource::Direct { frozen: true });
     let summary = run(&plain, &request(&source, &other, ImageFormat::Qcow2));
     assert!(!summary.key_store_excluded);
+}
+
+/// Decision 6/E4 proof: a scan that walked the files but had to keep the
+/// content of a key file (a second name outside the key directory needs it)
+/// does not count as having left the directory out — the copy is refused.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_key_file_the_scan_had_to_keep_refuses_the_copy() {
+    let Some(volume) = ext4_with_key_store_and(|src| {
+        let keys = src
+            .join("var/lib/own-backup")
+            .join(crate::seal::local::KEY_DIRECTORY_NAME);
+        std::fs::hard_link(keys.join("machine.cred"), src.join("stray")).unwrap();
+    }) else {
+        eprintln!("skipped: no mke2fs");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let source = unique_path("root-with-linked-key");
+    register_device(&source, volume, 512);
+    let platform = TestPlatform::new()
+        .source(&source, TestSource::Direct { frozen: true })
+        .key_store_on(&source);
+    let image = dir.path().join("full.qcow2");
+    let req = request(&source, &image, ImageFormat::Qcow2);
+    let e = backup_volume_inner(&platform, &req, None, &req.image_path, |_| Ok(()))
+        .err()
+        .expect("refused")
+        .to_string();
+    assert!(e.contains("machine.cred (hard link)"), "{e}");
+    assert!(!image.exists(), "nothing published");
 }
 
 /// A copy the rule cannot be applied to is not made: sector by sector, a

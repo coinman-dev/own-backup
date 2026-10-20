@@ -96,6 +96,7 @@ pub(crate) fn prepare_partition_map<P: EnginePlatform>(
         excluded_bytes: 0,
         categories: None,
         skipped: None,
+        left: Vec::new(),
     };
     // The same, with the reason nobody walked this partition's files.
     let none_because = |fs: &str, map: Option<Box<dyn UsedSectorMap>>, why: &str| PreparedMap {
@@ -151,6 +152,7 @@ pub(crate) fn prepare_partition_map<P: EnginePlatform>(
                         out.excluded_files = mft.files_excluded;
                         out.excluded_bytes = mft.bytes_excluded;
                         out.categories = Some(mft.categories);
+                        out.left = super::volume_exclusions::ntfs_left(&mft.kept);
                         out.removal_paths = mft
                             .paths
                             .iter()
@@ -237,6 +239,7 @@ pub(crate) fn prepare_partition_map<P: EnginePlatform>(
                     out.excluded_files = scan.files_excluded;
                     out.excluded_bytes = scan.bytes_excluded;
                     out.categories = Some(scan.categories);
+                    out.left = scan.left;
                     if !scan.ranges.is_empty() {
                         // Rebuild the map so excluded clusters drop out.
                         if let Ok(mut dev2) = P::Dev::open_read(read_path) {

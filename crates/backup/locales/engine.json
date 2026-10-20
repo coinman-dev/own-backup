@@ -622,5 +622,9 @@
   "engine.key_store_not_walked": {
     "ru": "файлы тома не были просмотрены",
     "en": "the volume's files were not walked"
+  },
+  "engine.key_store_left_behind": {
+    "ru": "разбор файлов оставил в копии содержимое: %{path}",
+    "en": "the file scan left content in the copy: %{path}"
   }
 }

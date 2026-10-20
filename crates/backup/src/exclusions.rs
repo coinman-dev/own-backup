@@ -566,6 +566,75 @@ pub struct ExcludedPath {
     pub is_reparse: bool,
 }
 
+/// Why something a scan matched (or could not look at) is still in the copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeftReason {
+    /// A hard link whose other name is not excluded: emptying it would empty
+    /// that file too.
+    HardLink,
+    /// Its data is shared with a file that stays (a reflink, a snapshot).
+    Shared,
+    /// Its data lives inside metadata the scan does not rewrite (an inline or
+    /// compressed inline extent, resident data).
+    Inline,
+    /// Its inode or extent map could not be read.
+    Unreadable,
+    /// A directory whose entries could not be read: nothing under it was
+    /// matched at all, so it may hold anything.
+    SubtreeNotWalked,
+    /// A btrfs subvolume: walked as its own tree, never removed by name.
+    Subvolume,
+}
+
+impl LeftReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LeftReason::HardLink => "hard link",
+            LeftReason::Shared => "shared data",
+            LeftReason::Inline => "inline data",
+            LeftReason::Unreadable => "unreadable",
+            LeftReason::SubtreeNotWalked => "directory not walked",
+            LeftReason::Subvolume => "subvolume",
+        }
+    }
+}
+
+/// A matched file whose content is still in the copy, or a directory the
+/// scan could not walk. `path` is relative to the root the scan walked from,
+/// lowercased components.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeftInCopy {
+    pub path: Vec<String>,
+    pub reason: LeftReason,
+}
+
+impl LeftInCopy {
+    pub fn new(path: &[String], reason: LeftReason) -> Self {
+        Self {
+            path: path.to_vec(),
+            reason,
+        }
+    }
+
+    /// `path (reason)`, for the log and the refusal.
+    pub fn shown(&self) -> String {
+        format!("/{} ({})", self.path.join("/"), self.reason.as_str())
+    }
+}
+
+/// The proof decision 6/E4 asks of a scan: did every match of the service's
+/// key directory leave the copy? The first entry of `left` that says it may
+/// not have — a file under a directory of that name whose content stayed, or
+/// any directory the scan could not walk (the key directory may be under it,
+/// unseen) — or `None` when the scan accounts for all of it.
+pub fn key_store_left_behind(left: &[LeftInCopy]) -> Option<&LeftInCopy> {
+    let key = crate::seal::local::KEY_DIRECTORY_NAME;
+    left.iter().find(|l| {
+        l.reason == LeftReason::SubtreeNotWalked
+            || l.path.iter().any(|c| c.eq_ignore_ascii_case(key))
+    })
+}
+
 /// Outcome of an exclusion scan over a volume.
 pub struct ExclusionScan {
     /// Merged excluded byte ranges (volume offsets), finalized.
@@ -624,6 +693,32 @@ mod mandatory_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Decision 6/E4: content left under any directory of the key store's
+    /// name, in any letter case, or a directory nobody walked, stands in the
+    /// way; content left elsewhere does not.
+    #[test]
+    fn the_key_store_proof_looks_under_its_name_and_at_unwalked_directories() {
+        let key = crate::seal::local::KEY_DIRECTORY_NAME;
+        let p = |parts: &[&str]| parts.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let elsewhere = LeftInCopy::new(&p(&["home", "a.bin"]), LeftReason::HardLink);
+        assert_eq!(
+            key_store_left_behind(std::slice::from_ref(&elsewhere)),
+            None
+        );
+        let upper = key.to_uppercase();
+        let under = LeftInCopy::new(&p(&["@", &upper, "x.key"]), LeftReason::Shared);
+        assert_eq!(
+            key_store_left_behind(&[elsewhere.clone(), under.clone()]),
+            Some(&under)
+        );
+        let unwalked = LeftInCopy::new(&p(&["var", "lib"]), LeftReason::SubtreeNotWalked);
+        assert_eq!(
+            key_store_left_behind(&[elsewhere, unwalked.clone()]),
+            Some(&unwalked)
+        );
+        assert_eq!(unwalked.shown(), "/var/lib (directory not walked)");
+    }
 
     /// Only the folder Windows recreates is beyond the delete pass — what lies
     /// inside it is deleted like anything else.

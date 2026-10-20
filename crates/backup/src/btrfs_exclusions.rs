@@ -43,7 +43,9 @@ use crate::btrfs_map::{
     for_each_item, parse_chunk, read_node, walk_tree, ChunkMap, CHUNK_ITEM, HEADER, MAGIC,
     ROOT_ITEM, SUPER_OFFSET, SUPER_SIZE,
 };
-use crate::exclusions::{parse_patterns, ByteRanges, CategorySizes, ExclusionPattern};
+use crate::exclusions::{
+    parse_patterns, ByteRanges, CategorySizes, ExclusionPattern, LeftInCopy, LeftReason,
+};
 use crate::fat_map::RawVolume;
 
 // --- Additional key types (btrfs_map exports the tree-level ones) ---
@@ -172,6 +174,9 @@ pub struct BtrfsExclusionScan {
     /// removal. Non-overlapping; every touched tree block carries a recomputed
     /// node checksum, DUP metadata patched in both copies.
     pub patches: Vec<(u64, Vec<u8>)>,
+    /// Matched files whose content is still in the copy, and matched
+    /// subvolumes (`exclusions::key_store_left_behind`).
+    pub left: Vec<crate::exclusions::LeftInCopy>,
 }
 
 impl BtrfsExclusionScan {
@@ -185,6 +190,7 @@ impl BtrfsExclusionScan {
             files_kept_shared: 0,
             categories: CategorySizes::default(),
             patches: Vec::new(),
+            left: Vec::new(),
         }
     }
 }
@@ -887,6 +893,7 @@ fn match_subvol(
     d: &SubvolData,
     parsed: &[ExclusionPattern],
     scan: &mut BtrfsExclusionScan,
+    paths: &mut HashMap<u64, Vec<String>>,
 ) -> HashSet<u64> {
     // Children by parent for the BFS.
     let mut children: HashMap<u64, Vec<&DirEnt>> = HashMap::new();
@@ -922,6 +929,7 @@ fn match_subvol(
                             warn!(dir = %e.name, "exclusions: kept an essential mount point (contents still excluded)");
                         } else {
                             matched.insert(ino);
+                            paths.entry(ino).or_insert_with(|| crel.clone());
                         }
                         if is_dir {
                             stack.push((ino, crel, true));
@@ -935,6 +943,10 @@ fn match_subvol(
                 Err(()) => {
                     if hit {
                         warn!(name = %e.name, "btrfs exclusions: pattern matches a SUBVOLUME — kept (subvolumes are never removed)");
+                        // Walked as its own tree, where this name is not on
+                        // the path: nothing in it matches by it.
+                        scan.left
+                            .push(LeftInCopy::new(&crel, LeftReason::Subvolume));
                     }
                     // Never descend: the subvolume is walked as its own tree.
                 }
@@ -1312,14 +1324,32 @@ pub fn scan_btrfs_exclusions(
     let mut candidates: HashMap<u64, u64> = HashMap::new();
     let mut file_extents: HashMap<(u64, u64), Vec<DataRef>> = HashMap::new();
     let mut file_sizes: HashMap<(u64, u64), u64> = HashMap::new();
+    // (subvolume, inode) → the path it was matched under, for `scan.left`.
+    let mut matched_paths: HashMap<(u64, u64), Vec<String>> = HashMap::new();
     for (id, root) in fs.subvol_roots() {
         let data = collect_subvol(vol, &fs, root)?;
         tick(scan.entries_scanned)?;
-        let matched = match_subvol(&data, &parsed, &mut scan);
+        let mut paths = HashMap::new();
+        let matched = match_subvol(&data, &parsed, &mut scan, &mut paths);
+        for (ino, path) in paths {
+            matched_paths.insert((id, ino), path);
+        }
         for &ino in &matched {
-            if let Some(&(size, nlink, is_dir)) = data.inodes.get(&ino) {
+            let path = |p: &HashMap<(u64, u64), Vec<String>>| {
+                p.get(&(id, ino)).cloned().unwrap_or_default()
+            };
+            let Some(&(size, nlink, is_dir)) = data.inodes.get(&ino) else {
+                scan.left.push(LeftInCopy::new(
+                    &path(&matched_paths),
+                    LeftReason::Unreadable,
+                ));
+                continue;
+            };
+            {
                 // Hard-linked files kept whole (like ext4/NTFS).
                 if !is_dir && nlink > 1 {
+                    scan.left
+                        .push(LeftInCopy::new(&path(&matched_paths), LeftReason::HardLink));
                     continue;
                 }
                 matched_pairs.insert((id, ino));
@@ -1582,6 +1612,10 @@ pub fn scan_btrfs_exclusions(
         let excl: Vec<&DataRef> = exts.iter().filter(|e| freeable(e.disk_bytenr)).collect();
         if excl.len() != exts.len() {
             scan.files_kept_shared += 1;
+            scan.left.push(LeftInCopy::new(
+                matched_paths.get(&(sid, ino)).map_or(&[][..], |p| p),
+                LeftReason::Shared,
+            ));
         }
         let header = swap_keep.get(&(sid, ino)).copied();
         for e in excl {
@@ -1630,13 +1664,21 @@ pub fn scan_btrfs_exclusions(
                 // the leaf can hold it; otherwise the file keeps its data and
                 // is counted, because a silent leak is the one outcome an
                 // exclusion may not have.
+                let kept = || {
+                    LeftInCopy::new(
+                        matched_paths.get(&(sv.id, ino)).map_or(&[][..], |p| p),
+                        LeftReason::Inline,
+                    )
+                };
                 let Some(hdr) = it.header else {
                     inline_compressed += 1;
+                    scan.left.push(kept());
                     continue;
                 };
                 let ram = u64at(&hdr, 8) as usize;
                 if ram > MAX_INLINE_REWRITE {
                     inline_compressed += 1;
+                    scan.left.push(kept());
                     continue;
                 }
                 let mut data = hdr.to_vec();
@@ -1742,6 +1784,23 @@ pub fn scan_btrfs_exclusions(
             }
             scan.ranges.finalize();
             scan.bytes_excluded = only_zeroed.iter().map(|(s, e)| e - s).sum();
+            // The inline zeroing of step 5b went with the rejected edit set:
+            // every matched file with inline data keeps it.
+            for sv in &subvols {
+                for &ino in &sv.matched {
+                    let has_inline = sv.data.inline.get(&ino).is_some_and(|items| {
+                        items
+                            .iter()
+                            .any(|it| it.data_len > 0 || it.compression != 0)
+                    });
+                    if has_inline {
+                        scan.left.push(LeftInCopy::new(
+                            matched_paths.get(&(sv.id, ino)).map_or(&[][..], |p| p),
+                            LeftReason::Inline,
+                        ));
+                    }
+                }
+            }
             freed_bytes = 0;
             removable.clear();
             stage1.finalize(vol, &fs)?
@@ -2557,6 +2616,91 @@ mod btrfs_integration {
             return None;
         }
         Some((img, dir))
+    }
+
+    /// `mkfs.btrfs --rootdir` over a tree `build` makes, with `extra` mkfs
+    /// arguments (`--subvol …`). `None` when mkfs is missing or refuses.
+    fn make_btrfs_from(
+        build: impl FnOnce(&Path),
+        extra: &[&str],
+    ) -> Option<(PathBuf, tempfile::TempDir)> {
+        if !have("mkfs.btrfs") {
+            return None;
+        }
+        let dir = tempfile::tempdir().ok()?;
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).ok()?;
+        build(&src);
+        let img = dir.path().join("fs.img");
+        let f = std::fs::File::create(&img).ok()?;
+        f.set_len(128 * 1024 * 1024).ok()?;
+        drop(f);
+        let out = std::process::Command::new("mkfs.btrfs")
+            .args(["-q", "-r"])
+            .arg(&src)
+            .args(extra)
+            .arg(&img)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            eprintln!(
+                "mkfs.btrfs failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            return None;
+        }
+        Some((img, dir))
+    }
+
+    /// Decision 6/E4 proof on btrfs: a key file hard-linked from outside, a
+    /// key directory that is a subvolume (walked as its own tree, where the
+    /// name is not on the path) — both are reported, never passed as
+    /// excluded. Small key files are inline: zeroed in their leaf, nothing
+    /// left.
+    #[test]
+    fn key_directory_matches_btrfs_cannot_remove_are_reported() {
+        let key = crate::seal::local::KEY_DIRECTORY_NAME;
+        let Some((img, _keep)) = make_btrfs_from(
+            |src| {
+                std::fs::create_dir_all(src.join(key)).unwrap();
+                std::fs::write(src.join(key).join("a.key"), vec![0x5A; 65536]).unwrap();
+                std::fs::hard_link(src.join(key).join("a.key"), src.join("copy.bin")).unwrap();
+            },
+            &[],
+        ) else {
+            return;
+        };
+        let (scan, _) = run_scan(&img, &[]);
+        let left = crate::exclusions::key_store_left_behind(&scan.left).expect("reported");
+        assert_eq!(left.reason, LeftReason::HardLink);
+
+        let Some((img, _keep)) = make_btrfs_from(
+            |src| {
+                std::fs::create_dir_all(src.join(key)).unwrap();
+                std::fs::write(src.join(key).join("small.key"), vec![0x5A; 200]).unwrap();
+                std::fs::write(src.join(key).join("big.key"), vec![0x5B; 65536]).unwrap();
+            },
+            &[],
+        ) else {
+            return;
+        };
+        let (scan, _) = run_scan(&img, &[]);
+        assert!(scan.left.is_empty(), "{:?}", scan.left);
+        assert_eq!(scan.files_excluded, 3, "the directory and both files");
+
+        let Some((img, _keep)) = make_btrfs_from(
+            |src| {
+                std::fs::create_dir_all(src.join(key)).unwrap();
+                std::fs::write(src.join(key).join("a.key"), vec![0x5A; 65536]).unwrap();
+            },
+            &["--subvol", key],
+        ) else {
+            eprintln!("mkfs.btrfs without --subvol — subvolume case skipped");
+            return;
+        };
+        let (scan, _) = run_scan(&img, &[]);
+        let left = crate::exclusions::key_store_left_behind(&scan.left).expect("reported");
+        assert_eq!(left.reason, LeftReason::Subvolume);
     }
 
     fn run_scan(img: &Path, patterns: &[&str]) -> (BtrfsExclusionScan, FileVol) {

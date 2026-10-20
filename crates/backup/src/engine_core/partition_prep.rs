@@ -35,6 +35,9 @@ pub(crate) struct PreparedMap {
     /// Why no walk ran over this partition, for the result screen. `None` when
     /// one did.
     pub(crate) skipped: Option<String>,
+    /// Matched content the walk left in the copy, and directories it could
+    /// not walk (`exclusions::key_store_left_behind`).
+    pub(crate) left: Vec<crate::exclusions::LeftInCopy>,
 }
 
 /// Карта и исключения для раздела, который Windows не монтирует: NTFS внутри
@@ -60,6 +63,7 @@ pub(crate) fn prepare_encrypted_partition_map(
         excluded_bytes: 0,
         categories: None,
         skipped: None,
+        left: Vec::new(),
     };
 
     let scan = if patterns.is_empty() {
@@ -106,6 +110,7 @@ pub(crate) fn prepare_encrypted_partition_map(
         out.excluded_files = scan.files_excluded;
         out.excluded_bytes = scan.bytes_excluded;
         out.categories = Some(scan.categories);
+        out.left = super::volume_exclusions::ntfs_left(&scan.kept);
         out.removal_paths = scan
             .paths
             .iter()
@@ -152,6 +157,7 @@ pub(crate) fn linux_fs_exclusions(
         excluded_bytes: 0,
         categories: None,
         skipped: None,
+        left: Vec::new(),
     };
     if let Ok(mut m) = crate::ext_map::build_ext_used_map(src.as_mut(), block_size) {
         // ext2/3/4: full file-level exclusions (Stage 1 drop+zero, Stage 2
@@ -171,6 +177,7 @@ pub(crate) fn linux_fs_exclusions(
                         out.excluded_bytes = scan.bytes_excluded;
                         out.categories = Some(scan.categories);
                         out.patches = scan.patches;
+                        out.left = scan.left;
                         if !scan.ranges.is_empty() {
                             // Only what Stage 2 actually freed leaves the image.
                             // A zero-filled ghost keeps its blocks: the
@@ -233,6 +240,7 @@ pub(crate) fn linux_fs_exclusions(
                         out.excluded_bytes = scan.bytes_excluded;
                         out.categories = Some(scan.categories);
                         out.patches = scan.patches;
+                        out.left = scan.left;
                         if !scan.ranges.is_empty() {
                             // Stage-2 frees may be dropped; Stage-1 ghosts keep
                             // their blocks — btrfs rewrote their checksums to
@@ -293,6 +301,7 @@ pub(crate) fn linux_fs_exclusions(
                         out.excluded_bytes = scan.bytes_excluded;
                         out.categories = Some(scan.categories);
                         out.patches = scan.patches;
+                        out.left = scan.left;
                         if !scan.ranges.is_empty() {
                             // Из образа уходит только то, что Stage 2 успел
                             // вернуть в свободное место. Призрак держит свои

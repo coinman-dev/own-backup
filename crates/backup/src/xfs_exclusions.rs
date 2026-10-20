@@ -25,7 +25,7 @@ use tracing::{info, warn};
 
 use own_backup_common::{tr, OwnBackupError, Result};
 
-use crate::exclusions::{parse_patterns, ByteRanges, CategorySizes};
+use crate::exclusions::{parse_patterns, ByteRanges, CategorySizes, LeftInCopy, LeftReason};
 use crate::fat_map::RawVolume;
 
 const SB_MAGIC: u32 = 0x5846_5342; // "XFSB"
@@ -123,6 +123,9 @@ pub struct XfsExclusionScan {
     /// Файлы, чьи данные Stage 1 занулил — то есть кандидаты на НАСТОЯЩЕЕ
     /// удаление (этап D). Stage 1 сам их не трогает структурно.
     pub(crate) removable: Vec<RemovableFile>,
+    /// Matched files whose content is still in the copy, and directories the
+    /// walk could not enter (`exclusions::key_store_left_behind`).
+    pub left: Vec<LeftInCopy>,
 }
 
 impl XfsExclusionScan {
@@ -138,6 +141,7 @@ impl XfsExclusionScan {
             patches: Vec::new(),
             stage2_spared: Vec::new(),
             removable: Vec::new(),
+            left: Vec::new(),
         }
     }
 }
@@ -724,6 +728,8 @@ fn scan_xfs(
     // Per matched file: its extents (to zero if exclusive).
     // ino → (extents, size, parent dir ino)
     let mut matched_files: HashMap<u64, (Vec<Extent>, u64, u64, String)> = HashMap::new();
+    // ino → the path it was matched under, for `scan.left`.
+    let mut matched_paths: HashMap<u64, Vec<String>> = HashMap::new();
 
     while let Some((ino, rel, sub_excluded)) = stack.pop() {
         if !visited.insert(ino) {
@@ -733,6 +739,8 @@ fn scan_xfs(
             Ok(i) => i,
             Err(e) => {
                 warn!(ino, error = %e, "xfs exclusions: unreadable inode — skipping");
+                scan.left
+                    .push(LeftInCopy::new(&rel, LeftReason::SubtreeNotWalked));
                 continue;
             }
         };
@@ -743,6 +751,8 @@ fn scan_xfs(
             Ok(e) => e,
             Err(e) => {
                 warn!(ino, error = %e, "xfs exclusions: cannot read directory — keeping subtree");
+                scan.left
+                    .push(LeftInCopy::new(&rel, LeftReason::SubtreeNotWalked));
                 continue;
             }
         };
@@ -767,7 +777,12 @@ fn scan_xfs(
             if e.is_dir {
                 stack.push((e.ino, crel, hit));
             } else if hit {
-                if let Ok(fi) = read_inode(vol, &sb, e.ino) {
+                let Ok(fi) = read_inode(vol, &sb, e.ino) else {
+                    scan.left
+                        .push(LeftInCopy::new(&crel, LeftReason::Unreadable));
+                    continue;
+                };
+                {
                     let mode = be16(&fi, 2) as u16;
                     if mode & S_IFMT != S_IFREG {
                         continue; // symlinks/devices: no data blocks to zero
@@ -779,13 +794,21 @@ fn scan_xfs(
                     // ext4/btrfs/NTFS.
                     if be32(&fi, 0x10) > 1 {
                         scan.files_kept_shared += 1;
+                        scan.left.push(LeftInCopy::new(&crel, LeftReason::HardLink));
                         continue;
                     }
                     let size = be64(&fi, 0x38);
                     let format = fi[5];
                     let nextents = data_nextents(&fi);
-                    if let Ok(exts) = fork_extents(vol, &sb, &fi, format, nextents) {
-                        matched_files.insert(e.ino, (exts, size, ino, e.name.clone()));
+                    match fork_extents(vol, &sb, &fi, format, nextents) {
+                        Ok(exts) => {
+                            matched_files.insert(e.ino, (exts, size, ino, e.name.clone()));
+                            matched_paths.insert(e.ino, crel);
+                        }
+                        Err(_) => {
+                            scan.left
+                                .push(LeftInCopy::new(&crel, LeftReason::Unreadable));
+                        }
                     }
                 }
             } else if let Ok(fi) = read_inode(vol, &sb, e.ino) {
@@ -813,6 +836,10 @@ fn scan_xfs(
         }
         if any_shared {
             scan.files_kept_shared += 1;
+            scan.left.push(LeftInCopy::new(
+                matched_paths.get(&fino).map_or(&[][..], |p| p),
+                LeftReason::Shared,
+            ));
             continue;
         }
         for (a, b) in ranges {

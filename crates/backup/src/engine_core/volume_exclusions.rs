@@ -144,6 +144,9 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
     // исключённых данных в образе нет, осталось убрать записи из каталога.
     let mut pre_copy_exclusions = false;
     let mut entries_kept: Option<String> = None;
+    // Matched content the scan left in the copy, and directories it could not
+    // walk — what the key-directory proof below is checked against.
+    let mut left: Vec<crate::exclusions::LeftInCopy> = Vec::new();
     // A Linux filesystem the engine parsed itself (its map exists only when
     // the session holds still) and rules written for it.
     let linux_fs = maps.ext_map.is_some() || maps.btrfs_map.is_some() || maps.xfs_map.is_some();
@@ -174,6 +177,7 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
                     excluded_files = mft.files_excluded;
                     excluded_bytes = mft.bytes_excluded;
                     categories = Some(mft.categories);
+                    left = ntfs_left(&mft.kept);
                     removal_paths = mft
                         .paths
                         .iter()
@@ -286,6 +290,7 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
                     excluded_files = scan.files_excluded;
                     excluded_bytes = scan.bytes_excluded;
                     categories = Some(scan.categories);
+                    left = ntfs_left(&scan.kept);
                     report_categories(
                         &mut progress,
                         categories.as_ref(),
@@ -354,6 +359,7 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
                     excluded_files = scan.files_excluded;
                     excluded_bytes = scan.bytes_excluded;
                     categories = Some(scan.categories);
+                    left = scan.left;
                     info!(
                         files = scan.files_excluded,
                         bytes = scan.bytes_excluded,
@@ -393,6 +399,7 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
         excluded_files = scan.files_excluded;
         excluded_bytes = scan.bytes_excluded;
         categories = Some(scan.categories);
+        left = scan.left;
         if !scan.ranges.is_empty() {
             // Rebuild the map so excluded clusters drop out (cluster-level).
             let mut dev2 = P::Dev::open_read(read_path)?;
@@ -441,6 +448,7 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
                 excluded_files = scan.files;
                 excluded_bytes = scan.bytes;
                 categories = Some(scan.categories);
+                left = scan.left;
                 info!(
                     fs = scan.fs,
                     files = scan.files,
@@ -556,6 +564,14 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
         if let Some(why) = unapplied {
             return Err(key_store_refusal(&req.source, &why));
         }
+        // The scan walked the files; it must also account for every match of
+        // the directory having left the copy (decision 6/E4).
+        if let Some(l) = crate::exclusions::key_store_left_behind(&left) {
+            return Err(key_store_refusal(
+                &req.source,
+                &tr!("engine.key_store_left_behind", path = l.shown()),
+            ));
+        }
         info!(source = %req.source, "the service key directory is left out of this copy");
     }
 
@@ -571,6 +587,31 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
         in_image_exclusions,
         entries_kept,
     })
+}
+
+/// What an NTFS `$MFT` scan kept, as [`crate::exclusions::LeftInCopy`]. A
+/// junction or symlink holds no content of its own.
+pub(crate) fn ntfs_left(
+    kept: &[(String, crate::ntfs_scan::KeptReason)],
+) -> Vec<crate::exclusions::LeftInCopy> {
+    use crate::exclusions::{LeftInCopy, LeftReason};
+    use crate::ntfs_scan::KeptReason;
+    kept.iter()
+        .filter_map(|(path, why)| {
+            let reason = match why {
+                KeptReason::Resident => LeftReason::Inline,
+                KeptReason::OtherNameKept => LeftReason::HardLink,
+                KeptReason::ExtentsIncomplete | KeptReason::Unreadable => LeftReason::Unreadable,
+                KeptReason::Reparse => return None,
+            };
+            let parts: Vec<String> = path
+                .split(['\\', '/'])
+                .filter(|c| !c.is_empty())
+                .map(str::to_lowercase)
+                .collect();
+            Some(LeftInCopy::new(&parts, reason))
+        })
+        .collect()
 }
 
 /// The copy of `source` is refused: the service's key directory is on it and
@@ -621,6 +662,8 @@ struct LinuxFsScan {
     /// The part of `ranges` Stage 2 freed: left out of the copy entirely.
     droppable: ByteRanges,
     patches: Vec<(u64, Vec<u8>)>,
+    /// What the scan could not take out (`exclusions::LeftInCopy`).
+    left: Vec<crate::exclusions::LeftInCopy>,
 }
 
 impl LinuxFsScan {
@@ -633,6 +676,7 @@ impl LinuxFsScan {
             ranges: s.ranges,
             droppable: s.droppable,
             patches: s.patches,
+            left: s.left,
         }
     }
 
@@ -645,6 +689,7 @@ impl LinuxFsScan {
             ranges: s.ranges,
             droppable: s.droppable,
             patches: s.patches,
+            left: s.left,
         }
     }
 
@@ -657,6 +702,7 @@ impl LinuxFsScan {
             ranges: s.ranges,
             droppable: s.droppable,
             patches: s.patches,
+            left: s.left,
         }
     }
 }

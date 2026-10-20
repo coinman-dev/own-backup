@@ -420,6 +420,7 @@ fn backup_disk_inner<P: DiskPlatform>(
                 excluded_bytes: 0,
                 categories: None,
                 skipped: Some(tr!("engine_win.skip_bitlocker_no_password").into_owned()),
+                left: Vec::new(),
             }),
             None => prepare_partition_map(
                 platform,
@@ -448,6 +449,14 @@ fn backup_disk_inner<P: DiskPlatform>(
                     .clone()
                     .unwrap_or_else(|| tr!("engine.key_store_not_walked").into_owned());
                 return Err(super::volume_exclusions::key_store_refusal(&source, &why));
+            }
+            // …and the walk must account for every match of it having left
+            // the copy.
+            if let Some(l) = crate::exclusions::key_store_left_behind(&pm.left) {
+                return Err(super::volume_exclusions::key_store_refusal(
+                    &source,
+                    &tr!("engine.key_store_left_behind", path = l.shown()),
+                ));
             }
             key_store_excluded = true;
             info!(
