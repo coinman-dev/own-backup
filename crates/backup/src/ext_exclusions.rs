@@ -1449,8 +1449,12 @@ mod ext_integration {
                         }
                         len += 1;
                     } else {
-                        if len >= min_len {
-                            out.push((start as u64, (start + len) as u64));
+                        // File data starts and ends on a block boundary; a
+                        // byte of metadata beside it may carry the fill value
+                        // by chance (~1/256 per edge) — trim to sectors.
+                        let (s, e) = (start.div_ceil(512) * 512, (start + len) / 512 * 512);
+                        if e >= s + min_len {
+                            out.push((s as u64, e as u64));
                         }
                         len = 0;
                     }
