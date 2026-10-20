@@ -20,7 +20,10 @@
 //! Detection is deliberately not clever. `--media` (or `OWN_BACKUP_MEDIA=1`)
 //! wins, because a human said so. Otherwise we look for the marker Microsoft
 //! documents for exactly this question: WinPE, and only WinPE, has the registry
-//! key `HKLM\SYSTEM\CurrentControlSet\Control\MiniNT`. It is checked once and
+//! key `HKLM\SYSTEM\CurrentControlSet\Control\MiniNT`. Our Linux medium says
+//! it on the kernel command line instead ([`KERNEL_MARKER`]): its boot menu
+//! puts the word there, so the service, the window and the CLI all see it
+//! without a flag being passed between them. It is checked once and
 //! remembered — the answer cannot change while the process lives.
 
 use std::sync::OnceLock;
@@ -30,6 +33,11 @@ static MEDIA_MODE: OnceLock<bool> = OnceLock::new();
 /// Environment variable form of `--media`, so a launcher can set it for every
 /// program on the medium at once and child processes inherit it.
 pub const MEDIA_ENV: &str = "OWN_BACKUP_MEDIA";
+
+/// The word the Linux boot medium's boot menu puts on the kernel command line
+/// (`packaging/linux/media`). `own-backup.media=0` turns it off again, as the
+/// kernel's own `name=value` parameters do: the last one given wins.
+pub const KERNEL_MARKER: &str = "own-backup.media";
 
 /// Force media mode on (or off) before anything asks. Call this from `main`
 /// when the command line says `--media`; the first answer given out is final,
@@ -72,7 +80,7 @@ fn detect() -> bool {
             return !matches!(v, "0" | "false" | "no");
         }
     }
-    is_windows_pe()
+    is_windows_pe() || is_linux_medium()
 }
 
 /// The documented WinPE marker: the `MiniNT` control key. Present in WinPE and
@@ -104,11 +112,42 @@ pub fn is_windows_pe() -> bool {
     false
 }
 
-/// There is no Linux equivalent of WinPE here — a Linux rescue system would be
-/// told with `--media`.
+/// Not WinPE: the Linux medium is told apart by [`is_linux_medium`].
 #[cfg(not(target_os = "windows"))]
 pub fn is_windows_pe() -> bool {
     false
+}
+
+/// Booted from our Linux boot medium: [`KERNEL_MARKER`] on the kernel command
+/// line. Unlike [`MEDIA_ENV`] and `--media` this is not something a process
+/// can say about itself — only whoever booted the machine chose it.
+#[cfg(target_os = "linux")]
+pub fn is_linux_medium() -> bool {
+    std::fs::read_to_string("/proc/cmdline").is_ok_and(|c| cmdline_marks_medium(&c))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn is_linux_medium() -> bool {
+    false
+}
+
+/// Does this kernel command line carry the marker? The bare word or `=1`
+/// switches it on, `=0`/`no`/`false`/`off` off; the last occurrence wins.
+/// Only whole words count: `own-backup.mediax` or `foo.own-backup.media` do not.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn cmdline_marks_medium(cmdline: &str) -> bool {
+    let mut on = false;
+    for word in cmdline.split_ascii_whitespace() {
+        if word == KERNEL_MARKER {
+            on = true;
+        } else if let Some(value) = word
+            .strip_prefix(KERNEL_MARKER)
+            .and_then(|rest| rest.strip_prefix('='))
+        {
+            on = !matches!(value, "0" | "no" | "false" | "off");
+        }
+    }
+    on
 }
 
 #[cfg(test)]
@@ -131,5 +170,26 @@ mod tests {
             "blank must fall through to detection, not to true"
         );
         std::env::remove_var(MEDIA_ENV);
+    }
+
+    #[test]
+    fn the_kernel_marker_is_a_whole_word_and_the_last_one_wins() {
+        let debian = "BOOT_IMAGE=/live/vmlinuz boot=live components quiet own-backup.media";
+        assert!(cmdline_marks_medium(debian));
+        assert!(cmdline_marks_medium("own-backup.media=1 quiet\n"));
+        assert!(!cmdline_marks_medium(
+            "BOOT_IMAGE=/vmlinuz root=UUID=1 ro quiet splash"
+        ));
+        assert!(!cmdline_marks_medium(""));
+        assert!(!cmdline_marks_medium(
+            "own-backup.mediax own-backup.media_x"
+        ));
+        assert!(!cmdline_marks_medium("foo.own-backup.media"));
+        // Edited at the boot menu: the later word decides.
+        assert!(!cmdline_marks_medium("own-backup.media own-backup.media=0"));
+        assert!(cmdline_marks_medium(
+            "own-backup.media=off own-backup.media"
+        ));
+        assert!(!cmdline_marks_medium("own-backup.media=no"));
     }
 }

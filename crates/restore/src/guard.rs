@@ -285,9 +285,9 @@ pub fn guard_target_volume(target: &str) -> Result<()> {
     use own_backup_common::linux_block as lb;
     use std::path::Path;
 
-    if is_boot_media() {
-        return Ok(()); // nothing here is running
-    }
+    // Not skipped on our boot medium: unlike WinPE, which runs from a RAM
+    // disk, Debian live reads its system from the stick it booted from (and
+    // logs onto it), so what is mounted is still what must not be overwritten.
     let path = Path::new(target);
     let usage = lb::device_usage(path).map_err(|e| {
         OwnBackupError::RestoreIncompatible(
@@ -327,6 +327,10 @@ pub fn guard_target_volume(target: &str) -> Result<()> {
                 ));
             }
         }
+        // The medium booted from its own ESP (inside the ISO, or a CD with
+        // none); the disks here are the machines being rescued, whose ESPs
+        // are exactly what a restore writes.
+        LinuxBootEsp::Unknown if is_boot_media() => {}
         LinuxBootEsp::Unknown => {
             // Which ESP started the machine is not known: any ESP — or any
             // partition whose type udev does not know — might be it.
@@ -427,9 +431,7 @@ pub fn protection_of_device(device: &str) -> Protection {
     use own_backup_common::linux_block as lb;
     use std::path::Path;
 
-    if is_boot_media() {
-        return Protection::nothing_is_running();
-    }
+    // The boot medium is not exempt: see `guard_target_volume`.
     let sys = Path::new(lb::SYS_CLASS_BLOCK);
     let Some(name) = lb::kernel_name(Path::new(device)) else {
         return Protection::unsure(tr!("guard.target_unrecognised", target = device).into_owned());
@@ -520,6 +522,7 @@ pub fn protection_of_device(device: &str) -> Protection {
         let boot_esp = match &esp {
             LinuxBootEsp::NotUefi => false,
             LinuxBootEsp::PartUuid(boot) => lb::partuuid(sys, p).as_deref() == Some(boot.as_str()),
+            LinuxBootEsp::Unknown if is_boot_media() => false,
             LinuxBootEsp::Unknown => lb::dev_numbers(sys, p)
                 .and_then(|(ma, mi)| lb::partition_type(udev, ma, mi))
                 .is_none_or(|t| t == lb::ESP_TYPE_GUID),
@@ -756,12 +759,10 @@ fn system_volume_offset(disk: u32) -> Option<u64> {
 
 /// Not knowing is not permission: Linux disks have no stable number yet that
 /// the plan's disk could be matched against, so nothing is certain here —
-/// which makes every plan check refuse rather than wave a disk through.
+/// which makes every plan check refuse rather than wave a disk through. The
+/// boot medium too: it runs from a stick that a number could name.
 #[cfg(not(target_os = "windows"))]
 pub fn protection(_disk: u32) -> Protection {
-    if is_boot_media() {
-        return Protection::nothing_is_running();
-    }
     Protection::unsure(tr!("guard.linux_disk_numbers").into_owned())
 }
 
@@ -777,24 +778,24 @@ pub fn system_disk_number() -> Option<u32> {
 
 /// Running from our own Linux boot medium: its kernel command line carries
 /// `own-backup.media` (`.ai/PLAN.md` §6, stage 6). Anywhere else, the system
-/// we run on is a live one.
+/// we run on is a live one. Not `--media` or the environment: those are a
+/// process's own say, and must not lift a protection on an installed system.
 #[cfg(target_os = "linux")]
 pub fn is_boot_media() -> bool {
-    std::fs::read_to_string("/proc/cmdline")
-        .is_ok_and(|c| c.split_whitespace().any(|w| w == "own-backup.media"))
+    own_backup_common::media_mode::is_linux_medium()
 }
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub fn is_boot_media() -> bool {
     false
 }
 
-/// Whole-disk restore by number: refused outside the boot medium until Linux
-/// disks are addressed by a stable identity (see [`protection`]).
+/// Whole-disk restore by number: refused, the boot medium included, until
+/// Linux disks are addressed by a stable identity (see [`protection`]); the
+/// device-named road is [`guard_target_disk_device`].
 #[cfg(not(target_os = "windows"))]
 pub fn guard_target_disk(target_disk: u32) -> Result<()> {
-    let media = is_boot_media();
     let protected = protection(target_disk);
-    check_whole_disk_protection(target_disk, system_disk_number(), media, &protected)
+    check_whole_disk_protection(target_disk, system_disk_number(), false, &protected)
 }
 
 #[cfg(test)]

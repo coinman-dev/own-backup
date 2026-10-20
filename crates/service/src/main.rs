@@ -233,7 +233,9 @@ fn init_logging() {
     let config_path = AppConfig::default_path();
     // The boot medium starts with no config at all, and its log is the one
     // that has to explain a restore afterwards.
-    let fallback = if own_backup_common::media_mode::is_windows_pe() {
+    let fallback = if own_backup_common::media_mode::is_windows_pe()
+        || own_backup_common::media_mode::is_linux_medium()
+    {
         "debug"
     } else {
         "info"
