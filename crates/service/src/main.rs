@@ -699,6 +699,19 @@ pub async fn run_main_loop(
             e
         })?
     };
+    // The root CLI on this machine learns from here where this instance
+    // keeps its data — above all its key directory, which a copy the CLI
+    // makes must leave out too (decision 6/E4). Not a reason to stop: the
+    // configured directory is still known to it.
+    #[cfg(target_os = "linux")]
+    if !use_tcp {
+        if let Some(runtime) = config.socket_path().parent() {
+            if let Err(e) = own_backup_common::service_data_dir::publish(runtime, &config.data_dir)
+            {
+                warn!(error = %e, "the data directory could not be published for the CLI");
+            }
+        }
+    }
 
     let conn = own_backup_metadata::open_database(&config.db_path())?;
     info!("Metadata database initialized");

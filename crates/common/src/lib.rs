@@ -19,6 +19,8 @@ pub mod progress;
 pub mod restore_check;
 pub mod restore_plan;
 pub mod restore_state;
+#[cfg(target_os = "linux")]
+pub mod service_data_dir;
 pub mod types;
 pub mod units;
 #[cfg(windows)]

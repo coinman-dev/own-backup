@@ -27,6 +27,22 @@
 #       with the password from --password-stdin (and refused without it); the
 #       raw container copied with `--exclude '*.tmp'` — the rule applied
 #       inside it, the restore holds report.txt and not report.tmp.
+#   k5  LVM (task K2): a VG on one loop PV with two LVs — `keys` (ext4, mounted
+#       read-only as the data directory, a key store in it) and `other` (idle
+#       ext4). A sector-by-sector copy of `other` is made (the key LV's real
+#       extents, from its device-mapper table, are elsewhere on the PV); of
+#       `keys` it is refused; a file copy of `keys` leaves the key out; the PV
+#       itself, in use by its LVs, is refused.
+#   k6  the service's data directory published in /run/own-backup/data-dir
+#       (as the service does with any --data-dir): the CLI, given no data
+#       directory, still leaves that key store out. An existing file there is
+#       put back afterwards.
+#   k7  proof: a key file with a second name outside the key directory keeps
+#       its content in any file copy, so the copy is refused (path and
+#       "hard link" in the reason), nothing written.
+#   k8  "cannot tell": the data directory on overlayfs — the key store counts
+#       as on every block source: an unrelated idle ext4 is copied with the
+#       scan (and says so), sector by sector it is refused.
 # Each check prints `CHECK <id> PASS|FAIL|SKIP <text>`; the exit code is the
 # number of FAILs. Evidence stays in $WORK/evidence until the next run.
 set -uo pipefail
@@ -35,7 +51,7 @@ cd "$(dirname "$0")/../.."
 CLI=$(readlink -f "${1:-target/debug/own-backup-cli}")
 shift || true
 STAGES=("$@")
-[[ ${#STAGES[@]} -eq 0 ]] && STAGES=(k1 k2 k3 k4)
+[[ ${#STAGES[@]} -eq 0 ]] && STAGES=(k1 k2 k3 k4 k5 k6 k7 k8)
 
 WORK=${WORK:-$PWD/tmp/lab-keys}
 EV=$WORK/evidence
@@ -46,6 +62,8 @@ CHECKS=0
 LOOPS=()
 MOUNTS=()
 MAPPINGS=()
+VGS=()
+RESTORE_PUBLISHED=""
 
 if [[ $(id -u) -ne 0 ]]; then
     echo "run as root (loop devices, mount, cryptsetup, systemd-creds)" >&2
@@ -106,7 +124,13 @@ compare() { (cd "$1" && sha256sum -c --quiet "$2") >/dev/null 2>&1; }
 cleanup() {
     local m d
     for m in "${MOUNTS[@]}"; do umnt "$m" 2>/dev/null; done
+    for d in "${VGS[@]}"; do vgchange -an "$d" >/dev/null 2>&1; vgremove -f "$d" >/dev/null 2>&1; done
     for d in "${MAPPINGS[@]}"; do cryptsetup close "$d" 2>/dev/null; done
+    if [[ $RESTORE_PUBLISHED == none ]]; then
+        rm -f /run/own-backup/data-dir
+    elif [[ -n $RESTORE_PUBLISHED ]]; then
+        mv -f "$RESTORE_PUBLISHED" /run/own-backup/data-dir
+    fi
     for d in "${LOOPS[@]}"; do losetup -d "$d" 2>/dev/null; done
     "$CLI" cleanup-snapshots >/dev/null 2>&1 || true
 }
@@ -284,11 +308,120 @@ stage_k4() {
     umnt "$WORK/k4-rst"
 }
 
+# key_store DIR: a key store in the data directory DIR; the marker it holds is
+# printed (searched for in images).
+key_store() {
+    local keys=$1/.own-backup-service-keys
+    mkdir -m 0700 "$keys" && printf 'OBK-LAB-KEY-MARKER-%s' "$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')" \
+        >"$keys/machine.cred" && chmod 0600 "$keys/machine.cred" && sync && cat "$keys/machine.cred"
+}
+
+stage_k5() {
+    local pv out=$WORK/out-k5 data=$WORK/k5-data vg=obklabk5 marker
+    rm -rf "$out" && mkdir -p "$out"
+    if ! command -v lvcreate >/dev/null; then
+        check k5-lvm SKIP "no lvm2"
+        return
+    fi
+    loopdev pv k5-pv 512 || { check k5-setup FAIL "loop device"; return; }
+    pvcreate -qq "$pv" && vgcreate -qq "$vg" "$pv" && VGS+=("$vg") \
+        && lvcreate -qq -y -n other -L 96M "$vg" && lvcreate -qq -y -n keys -L 64M "$vg" \
+        && mkfs.ext4 -q -F "/dev/$vg/other" && mkfs.ext4 -q -F "/dev/$vg/keys" \
+        && mnt "/dev/$vg/keys" "$data" && marker=$(key_store "$data") \
+        && mount -o remount,ro "$data"
+    check k5-setup "$(verdict $?)" "VG on one PV: LV keys (data directory, key store) and LV other"
+    dmsetup table "$vg-keys" >"$EV/k5-dm-table.out" 2>&1
+    OWN_BACKUP_DATA_DIR=$data run k5-other-sectors "$CLI" backup "/dev/$vg/other" \
+        -o "$out/other_sec.qcow2" --format qcow2 --all-sectors
+    check k5-other-sectors "$(verdict $?)" "sector copy of the OTHER LV of the same PV is made"
+    OWN_BACKUP_DATA_DIR=$data run k5-keys-sectors "$CLI" backup "/dev/$vg/keys" \
+        -o "$out/keys_sec.qcow2" --format qcow2 --all-sectors
+    [[ $? -ne 0 && ! -e $out/keys_sec.qcow2 ]]
+    check k5-keys-sectors-refused "$(verdict $?)" "sector copy of the key LV is refused, nothing written"
+    OWN_BACKUP_DATA_DIR=$data run k5-keys "$CLI" backup "/dev/$vg/keys" \
+        -o "$out/keys_full.qcow2" --format qcow2
+    check k5-keys "$(verdict $?)" "file copy of the key LV"
+    ! grep -qa "$marker" "$out/keys_full.qcow2"
+    check k5-no-key-bytes "$(verdict $?)" "the key file's bytes are not in it"
+    OWN_BACKUP_DATA_DIR=$data run k5-pv "$CLI" backup "$pv" -o "$out/pv.qcow2" --format qcow2
+    [[ $? -ne 0 && ! -e $out/pv.qcow2 ]]
+    check k5-pv-refused "$(verdict $?)" "the PV in use by its LVs is refused (not read live)"
+    umnt "$data"
+}
+
+stage_k6() {
+    local src out=$WORK/out-k6 data=$WORK/k6-data marker
+    rm -rf "$out" && mkdir -p "$out"
+    loopdev src k6-src 128 || { check k6-setup FAIL "loop device"; return; }
+    mkfs.ext4 -q -F "$src" && mnt "$src" "$data" && populate "$data" \
+        && marker=$(key_store "$data") && mount -o remount,ro "$data"
+    check k6-setup "$(verdict $?)" "ext4 mounted read-only with a key store, NOT the configured data directory"
+    # Control: before anything is published the CLI knows nothing of this key
+    # store, and its bytes go into the copy — the check below can fail.
+    if [[ ! -e /run/own-backup/data-dir ]]; then
+        run k6-control "$CLI" backup "$src" -o "$out/control.qcow2" --format qcow2
+        grep -qa "$marker" "$out/control.qcow2"
+        check k6-control "$(verdict $?)" "unpublished, the key bytes are in the copy (the check bites)"
+        rm -f "$out/control.qcow2"
+    fi
+    mkdir -p -m 0750 /run/own-backup
+    if [[ -e /run/own-backup/data-dir ]]; then
+        RESTORE_PUBLISHED=$WORK/data-dir.saved
+        cp -a /run/own-backup/data-dir "$RESTORE_PUBLISHED"
+    else
+        RESTORE_PUBLISHED=none
+    fi
+    printf '%s\n' "$data" >/run/own-backup/data-dir && chmod 0644 /run/own-backup/data-dir
+    run k6-copy "$CLI" backup "$src" -o "$out/full.qcow2" --format qcow2
+    check k6-copy "$(verdict $?)" "copied by the CLI with no data directory given"
+    ! grep -qa "$marker" "$out/full.qcow2"
+    check k6-no-key-bytes "$(verdict $?)" "the published data directory's key store is left out"
+    run k6-sectors "$CLI" backup "$src" -o "$out/sec.qcow2" --format qcow2 --all-sectors
+    [[ $? -ne 0 && ! -e $out/sec.qcow2 ]]
+    check k6-sector-refused "$(verdict $?)" "sector by sector it is refused"
+    umnt "$data"
+}
+
+stage_k7() {
+    local src out=$WORK/out-k7 data=$WORK/k7-data
+    rm -rf "$out" && mkdir -p "$out"
+    loopdev src k7-src 128 || { check k7-setup FAIL "loop device"; return; }
+    mkfs.ext4 -q -F "$src" && mnt "$src" "$data" && key_store "$data" >/dev/null \
+        && ln "$data/.own-backup-service-keys/machine.cred" "$data/stray-link" && sync \
+        && mount -o remount,ro "$data"
+    check k7-setup "$(verdict $?)" "a key file with a second name outside the key directory"
+    OWN_BACKUP_DATA_DIR=$data run k7-copy "$CLI" backup "$src" -o "$out/full.qcow2" --format qcow2
+    [[ $? -ne 0 && ! -e $out/full.qcow2 ]]
+    check k7-refused "$(verdict $?)" "the copy is refused, nothing written"
+    grep -q 'machine.cred (hard link)' "$EV/k7-copy.out"
+    check k7-reason "$(verdict $?)" "the refusal names the file and why"
+    umnt "$data"
+}
+
+stage_k8() {
+    local src out=$WORK/out-k8 o=$WORK/k8-overlay
+    rm -rf "$out" "$o" && mkdir -p "$out" "$o"/{lower,upper,work,merged}
+    mount -t overlay overlay -o "lowerdir=$o/lower,upperdir=$o/upper,workdir=$o/work" "$o/merged" \
+        && MOUNTS+=("$o/merged") && key_store "$o/merged" >/dev/null
+    check k8-setup "$(verdict $?)" "the data directory on overlayfs, a key store in it"
+    loopdev src k8-src 128 && mkfs.ext4 -q -F "$src" && mnt "$src" "$WORK/k8" && populate "$WORK/k8" \
+        && umnt "$WORK/k8"
+    OWN_BACKUP_DATA_DIR=$o/merged run k8-copy "$CLI" backup "$src" -o "$out/full.qcow2" --format qcow2
+    check k8-copy "$(verdict $?)" "an unrelated idle ext4 is copied, with the scan"
+    ! grep -q 'Exclusions not applied' "$EV/k8-copy.out"
+    check k8-scanned "$(verdict $?)" "the scan ran (nothing to leave out there)"
+    OWN_BACKUP_DATA_DIR=$o/merged run k8-sectors "$CLI" backup "$src" -o "$out/sec.qcow2" \
+        --format qcow2 --all-sectors
+    [[ $? -ne 0 && ! -e $out/sec.qcow2 ]]
+    check k8-sector-refused "$(verdict $?)" "sector by sector it is refused (cannot tell = keys here)"
+    umnt "$o/merged"
+}
+
 mkdir -p "$EV"
 : >"$EV/summary.txt"
 for s in "${STAGES[@]}"; do
     case $s in
-        k1 | k2 | k3 | k4) "stage_$s" ;;
+        k1 | k2 | k3 | k4 | k5 | k6 | k7 | k8) "stage_$s" ;;
         *) echo "unknown stage $s" >&2; exit 2 ;;
     esac
 done

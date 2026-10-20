@@ -804,7 +804,10 @@ pub fn key_store_placement(source: &str) -> KeyStorePlacement {
 }
 
 /// Every data directory whose key directory counts: those registered in this
-/// process, the configured one.
+/// process, the configured one, and the one the running service published
+/// (`common::service_data_dir`) — a CLI copy as root must leave out the
+/// service's key directory even when the service runs with another
+/// `--data-dir`.
 fn key_store_data_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = KEY_STORE_DATA_DIRS
         .lock()
@@ -812,12 +815,16 @@ fn key_store_data_dirs() -> Vec<PathBuf> {
         .unwrap_or_default();
     // The crate's own tests see only what they register: whether this
     // machine has the package (and a root-only key directory, which reads as
-    // full) installed must not change their answer.
+    // full) installed, or a service published its directory, must not change
+    // their answer.
     #[cfg(not(test))]
     {
         let configured = own_backup_common::config::AppConfig::load_or_default().data_dir;
-        if !dirs.contains(&configured) {
-            dirs.push(configured);
+        let published = own_backup_common::service_data_dir::published();
+        for dir in std::iter::once(configured).chain(published) {
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
         }
     }
     dirs
