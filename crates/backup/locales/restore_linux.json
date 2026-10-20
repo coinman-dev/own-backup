@@ -35,5 +35,41 @@
   "linux_tools.umount_failed": {
     "ru": "Не удалось отмонтировать %{dir}: изменения могли не попасть на диск.",
     "en": "Could not unmount %{dir}: the changes may not have reached the disk."
+  },
+  "identity_change_linux.luks_inside_unchecked": {
+    "ru": "У контейнера LUKS на %{node} новый UUID, но то, что внутри, не проверено: пароль к нему восстановлению не давали. Если внутри файловая система этой машины, у неё прежний UUID.",
+    "en": "The LUKS container on %{node} has a new UUID, but what is inside was not checked: the restore was given no passphrase for it. If it holds one of this machine's filesystems, that one keeps its old UUID."
+  },
+  "identity_change_linux.btrfs_multi_device": {
+    "ru": "btrfs на %{node} занимает несколько устройств — его UUID оставлен прежним (менять можно только всем устройствам сразу: btrfstune -u, когда подключены все).",
+    "en": "The btrfs on %{node} spans several devices — its UUID was kept (it can only change on all of them at once: btrfstune -u with every device present)."
+  },
+  "identity_change_linux.vg_not_activated": {
+    "ru": "Группа томов %{vg} получила новое имя, но её новый UUID не прочитан — тома внутри не проверены.",
+    "en": "Volume group %{vg} got a new name, but its new UUID could not be read — the volumes inside were not checked."
+  },
+  "identity_change_linux.btrfs_not_edited": {
+    "ru": "btrfs на %{node} не смонтирован для правки: у него идентификатор файловой системы этой машины, а ядро старше 6.7 приняло бы его за оригинал.",
+    "en": "The btrfs on %{node} was not mounted for editing: it carries a filesystem identity of this machine, and a kernel older than 6.7 would take it for the original."
+  },
+  "identity_change_linux.edit_failed": {
+    "ru": "Не удалось исправить файлы восстановленной системы на %{node}: %{error}",
+    "en": "Could not fix the restored system's files on %{node}: %{error}"
+  },
+  "identity_change_linux.rebuild_initramfs": {
+    "ru": "В восстановленной системе исправлены crypttab или mdadm.conf, но её initramfs хранит их прежние копии. Загрузите её с живого носителя (chroot) и выполните update-initramfs -u -k all, иначе она будет искать старые UUID.",
+    "en": "The restored system's crypttab or mdadm.conf were fixed, but its initramfs keeps the old copies. Start it from a live medium (chroot) and run update-initramfs -u -k all, otherwise it looks for the old UUIDs."
+  },
+  "identity_change_linux.reinstall_bios_grub": {
+    "ru": "В восстановленной системе есть GRUB для BIOS: его загрузочный образ может содержать прежний UUID /boot. Если она не загрузится, выполните grub-install на её диск из неё самой или с живого носителя.",
+    "en": "The restored system has a BIOS GRUB: its core image may embed the old /boot UUID. If it does not start, run grub-install for its disk from the system itself or from a live medium."
+  },
+  "identity_change_linux.nothing_to_edit": {
+    "ru": "Файлов, ссылающихся на прежние идентификаторы (fstab, crypttab, GRUB), в восстановленных файловых системах не найдено.",
+    "en": "No files naming the old identities (fstab, crypttab, GRUB) were found in the restored filesystems."
+  },
+  "identity_change_linux.not_closed": {
+    "ru": "Временное устройство %{device} не закрылось (%{error}); закройте его вручную или перезагрузитесь.",
+    "en": "The temporary device %{device} did not close (%{error}); close it by hand or restart."
   }
 }

@@ -12,7 +12,7 @@
 //! | LVM       | duplicate PVs: LVM picks one or refuses to activate; duplicate VG names clash outright |
 //! | md        | incremental assembly can add the clone to the running array        |
 //! | XFS       | the second mount is refused until mounted with `nouuid`            |
-//! | ext2/3/4, LUKS, PARTUUID | both work, but `UUID=`/`PARTUUID=` in fstab, crypttab and the kernel command line resolve to whichever udev saw last |
+//! | ext2/3/4, FAT, LUKS, PARTUUID | both work, but `UUID=`/`PARTUUID=` in fstab, crypttab and the kernel command line resolve to whichever udev saw last |
 //!
 //! This module finds the duplicates — what the restored data carries, read
 //! from its first bytes and its tail, against what the machine already has,
@@ -46,6 +46,8 @@ pub enum IdentityKind {
     Md,
     /// GPT partition unique GUID.
     PartUuid,
+    /// FAT volume serial (`XXXX-XXXX`) — an ESP's `UUID=` in fstab.
+    Fat,
 }
 
 /// One identity, normalised for comparison and kept as shown for people.
@@ -105,6 +107,8 @@ pub enum Reidentify {
     Vgimportclone,
     /// `mdadm --assemble --update=uuid …` on the restored members only.
     MdadmUpdateUuid,
+    /// `fatlabel -i <dev> <serial>`.
+    Fatlabel,
     /// Not offered: changing it is the owner's decision (see module docs).
     None,
 }
@@ -156,6 +160,7 @@ fn assess(
         }
         IdentityKind::Md => (Severity::Critical, Reidentify::MdadmUpdateUuid, None),
         IdentityKind::PartUuid => (Severity::Ambiguous, Reidentify::None, None),
+        IdentityKind::Fat => (Severity::Ambiguous, Reidentify::Fatlabel, None),
     }
 }
 
@@ -243,6 +248,9 @@ pub fn identities_of(p: &mut dyn Probe) -> Vec<Identity> {
         if let Some(u) = btrfs_fsid(&head) {
             out.push(Identity::new(IdentityKind::Btrfs, &u));
         }
+        if let Some(u) = fat_serial(&head) {
+            out.push(Identity::new(IdentityKind::Fat, &u));
+        }
     }
     out.extend(lvm_identities(p));
     if let Some(u) = md_uuid(p) {
@@ -298,6 +306,24 @@ fn btrfs_fsid(head: &[u8]) -> Option<String> {
         return None;
     }
     Some(dashed(&sb[32..48]))
+}
+
+/// FAT12/16/32 volume serial, spelled as blkid and fstab spell it
+/// (`ABCD-1234`). FAT32 keeps it at 0x43, FAT12/16 at 0x27; the boot sector
+/// signature has to be there too.
+fn fat_serial(head: &[u8]) -> Option<String> {
+    if head.get(510..512)? != [0x55, 0xAA] {
+        return None;
+    }
+    let at = if head.get(0x52..0x57)? == b"FAT32" {
+        0x43
+    } else if head.get(0x36..0x39)? == b"FAT" {
+        0x27
+    } else {
+        return None;
+    };
+    let s = head.get(at..at + 4)?;
+    nonzero(s).then(|| format!("{:02X}{:02X}-{:02X}{:02X}", s[3], s[2], s[1], s[0]))
 }
 
 /// LVM2 PV: `LABELONE` in one of the first four sectors, the PV UUID in the
@@ -505,6 +531,7 @@ pub fn host_identities(
                 "crypto_LUKS" => Some(IdentityKind::Luks),
                 "LVM2_member" => Some(IdentityKind::LvmPv),
                 "linux_raid_member" => Some(IdentityKind::Md),
+                "vfat" => Some(IdentityKind::Fat),
                 _ => None,
             };
             if let Some(kind) = kind {
@@ -581,6 +608,17 @@ mod tests {
         d[0..6].copy_from_slice(b"LUKS\xba\xbe");
         d[168..168 + TEXT.len()].copy_from_slice(TEXT.as_bytes());
         assert_eq!(ids(&d), vec![Identity::new(IdentityKind::Luks, TEXT)]);
+
+        let mut d = disk(1 << 20);
+        d[0x52..0x57].copy_from_slice(b"FAT32");
+        d[0x43..0x47].copy_from_slice(&[0x34, 0x12, 0xCD, 0xAB]);
+        d[510..512].copy_from_slice(&[0x55, 0xAA]);
+        assert_eq!(ids(&d), vec![Identity::new(IdentityKind::Fat, "ABCD-1234")]);
+        assert_eq!(
+            ids(&d)[0].key,
+            "abcd1234",
+            "blkid's case and ours are one key"
+        );
 
         assert!(ids(&disk(1 << 20)).is_empty());
         assert!(ids(&disk(100)).is_empty(), "a short device must not panic");

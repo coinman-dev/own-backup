@@ -231,6 +231,7 @@ fn to_dto(c: &Clash, part_index: Option<u32>) -> IdentityClashDto {
             IdentityKind::LvmVgName => "lvm_vg_name",
             IdentityKind::Md => "md",
             IdentityKind::PartUuid => "partuuid",
+            IdentityKind::Fat => "vfat",
         }
         .to_string(),
         value: c.identity.shown.clone(),
@@ -249,6 +250,7 @@ fn to_dto(c: &Clash, part_index: Option<u32>) -> IdentityClashDto {
             Reidentify::CryptsetupLuksUuid => "cryptsetup luksUUID --uuid $(uuidgen) <device>",
             Reidentify::Vgimportclone => "vgimportclone --basevgname <new-name> <device>",
             Reidentify::MdadmUpdateUuid => "mdadm --assemble --update=uuid <array> <device>",
+            Reidentify::Fatlabel => "fatlabel -i <device> <new-serial>",
             Reidentify::None => "",
         }
         .to_string(),

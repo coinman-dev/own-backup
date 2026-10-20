@@ -59,6 +59,39 @@ pub fn rules_text(names: &[&str]) -> String {
     out
 }
 
+/// What every rule of a hold on a device the restore itself stacks on what it
+/// wrote (a LUKS mapping it opens, an LV it activates, an md array it
+/// assembles) sets. These devices carry the source's identities until the
+/// restore has changed them, so on top of the flags above nothing may name
+/// them: no `/dev/disk/by-uuid` link that would move the machine's own
+/// `UUID=` to the clone, no btrfs registration.
+const STACK_FLAGS: &str = "ENV{UDISKS_IGNORE}=\"1\", ENV{UDISKS_AUTO}=\"0\", \
+     ENV{SYSTEMD_READY}=\"0\", ENV{DM_UDEV_DISABLE_DISK_RULES_FLAG}=\"1\", \
+     ENV{DM_UDEV_DISABLE_OTHER_RULES_FLAG}=\"1\", \
+     ENV{UDEV_DISABLE_PERSISTENT_STORAGE_RULES_FLAG}=\"1\"";
+
+/// A rule holding the device-mapper devices whose name starts with `prefix`
+/// (the LUKS mappings a restore opens). `55-dm.rules` has set `DM_NAME` by
+/// the time it runs; `60-persistent-storage-dm.rules` honours the flags.
+pub fn dm_name_rule(prefix: &str) -> String {
+    format!("SUBSYSTEM==\"block\", KERNEL==\"dm-[0-9]*\", ENV{{DM_NAME}}==\"{prefix}*\", {STACK_FLAGS}\n")
+}
+
+/// A rule holding the logical volumes of the volume group with UUID
+/// `vg_uuid` (dashes dropped, as device-mapper writes it into `DM_UUID`).
+pub fn dm_lvm_vg_rule(vg_uuid: &str) -> String {
+    let id: String = vg_uuid.chars().filter(|c| *c != '-').collect();
+    format!("SUBSYSTEM==\"block\", KERNEL==\"dm-[0-9]*\", ENV{{DM_UUID}}==\"LVM-{id}*\", {STACK_FLAGS}\n")
+}
+
+/// A rule holding the md array with kernel name `name` and its partitions.
+pub fn md_rule(name: &str) -> String {
+    format!(
+        "SUBSYSTEM==\"block\", KERNEL==\"{name}\", {STACK_FLAGS}\n\
+         SUBSYSTEM==\"block\", KERNEL==\"{name}p[0-9]*\", {STACK_FLAGS}\n"
+    )
+}
+
 /// Kernel names of the partitions of disk `name`: a name ending in a digit
 /// takes a `p` before the partition number (`nvme0n1p2`, `loop0p1`, `nbd0p1`).
 fn partition_pattern(name: &str) -> String {
@@ -102,6 +135,38 @@ impl UdevHold {
             path,
             names: names.iter().map(|s| s.to_string()).collect(),
             reannounce,
+        })
+    }
+
+    /// Install a hold made of `rules` (from [`dm_name_rule`],
+    /// [`dm_lvm_vg_rule`], [`md_rule`]), named after `tag`. Nothing is
+    /// announced again when it drops: the devices it holds are gone by then.
+    pub fn install_rules(tag: &str, rules: &[String]) -> Result<Self> {
+        Self::install_rules_in(Path::new(RULES_DIR), tag, rules, true)
+    }
+
+    /// [`Self::install_rules`] under `dir` (tests); `reload` runs `udevadm`.
+    pub fn install_rules_in(dir: &Path, tag: &str, rules: &[String], reload: bool) -> Result<Self> {
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join(file_name_for(&[tag]));
+        let tmp = path.with_extension("tmp");
+        let mut text = String::from(
+            "# Own Backup: temporary hold on devices a restore stacks on what it wrote.\n\
+             # Removed when the operation ends; /run is cleared on reboot.\n",
+        );
+        for r in rules {
+            text.push_str(r);
+        }
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(&tmp, &path)?;
+        if reload {
+            udevadm(&["control", "--reload"]);
+        }
+        info!(rules = %path.display(), tag, "udev hold installed");
+        Ok(Self {
+            path,
+            names: Vec::new(),
+            reannounce: reload,
         })
     }
 
@@ -237,6 +302,33 @@ mod tests {
                 assert!(line.contains(flag), "{line} lacks {flag}");
             }
         }
+    }
+
+    #[test]
+    fn stacked_devices_are_held_from_naming_and_scanning() {
+        let dir = tempfile::tempdir().unwrap();
+        let rules = vec![
+            dm_name_rule("obk-42-"),
+            dm_lvm_vg_rule("abcDEF-1234"),
+            md_rule("md126"),
+        ];
+        let hold = UdevHold::install_rules_in(dir.path(), "reid", &rules, false).unwrap();
+        let text = std::fs::read_to_string(hold.path()).unwrap();
+        assert!(text.contains("ENV{DM_NAME}==\"obk-42-*\""));
+        assert!(text.contains("ENV{DM_UUID}==\"LVM-abcDEF1234*\""));
+        assert!(text.contains("KERNEL==\"md126p[0-9]*\""));
+        for line in text.lines().filter(|l| l.starts_with("SUBSYSTEM")) {
+            for flag in [
+                "SYSTEMD_READY}=\"0\"",
+                "DM_UDEV_DISABLE_DISK_RULES_FLAG}=\"1\"",
+                "UDEV_DISABLE_PERSISTENT_STORAGE_RULES_FLAG}=\"1\"",
+            ] {
+                assert!(line.contains(flag), "{line} lacks {flag}");
+            }
+        }
+        let path = hold.path().to_path_buf();
+        drop(hold);
+        assert!(!path.exists());
     }
 
     #[test]
