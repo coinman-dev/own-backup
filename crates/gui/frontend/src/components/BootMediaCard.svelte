@@ -9,6 +9,7 @@
   import { media, ensureMediaMode } from '../lib/mediaStore.svelte';
   import { formatBytes } from '../lib/format';
   import MediaBuildModal from './MediaBuildModal.svelte';
+  import MediaStickModal from './MediaStickModal.svelte';
   import { pickPath } from '../lib/pickPath.svelte';
   import type { BaseImage } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
@@ -23,6 +24,8 @@
   /** The Windows medium can be built here at all. */
   const canBuildWindows = $derived(isWindows());
   let open: 'windows' | 'linux' | null = $state(null);
+  /** Linux: the stick writer. The ISO is built by a script, not here. */
+  let stickOpen = $state(false);
   // A Winre.wim the user pointed at — taken from an installation ISO, say —
   // goes before anything the search found. The service reads it first; a file
   // that will not do is refused with its reason, not built on.
@@ -72,6 +75,10 @@
   function openDialog() {
     if (media.active) return;
     if (tab === 'windows' && (!canBuildWindows || !windowsBase)) return; // nothing to build on
+    if (tab === 'linux' && !isWindows()) {
+      stickOpen = true;
+      return;
+    }
     open = tab;
   }
 </script>
@@ -111,7 +118,10 @@
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
   <div class="panel" class:disabled={media.active || (tab === 'windows' && (!canBuildWindows || !windowsBase))}
        onclick={openDialog} role="button" tabindex="0">
-    {#if media.active}
+    {#if media.active && !isWindows()}
+      <div class="p-desc">{m.bmc_linux_desc()}</div>
+      <div class="p-meta soon">{m.bmc_on_media_linux()}</div>
+    {:else if media.active}
       <!-- Building from the medium failed at DISM halfway through, which
            explains nothing. Say so before, and say why. -->
       <div class="p-desc">
@@ -158,6 +168,10 @@
           <div class="p-warn">{@render warnIcon()}<span>{chooseError}</span></div>
         {/if}
       {/if}
+    {:else if !isWindows()}
+      <div class="p-desc">{m.bmc_linux_desc()}</div>
+      <div class="p-meta">{m.bmc_linux_ready()}</div>
+      <div class="p-go">{m.bmc_click_to_write()}</div>
     {:else}
       <div class="p-desc">{m.bmc_linux_desc()}</div>
       <div class="p-meta soon">{m.bmc_linux_soon()}</div>
@@ -165,6 +179,10 @@
     {/if}
   </div>
 </div>
+
+{#if stickOpen}
+  <MediaStickModal onClose={() => (stickOpen = false)} />
+{/if}
 
 {#if open}
   <MediaBuildModal

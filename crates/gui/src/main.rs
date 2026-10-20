@@ -722,6 +722,8 @@ fn main() {
             commands::engine::list_driver_packages,
             commands::engine::list_media_tools,
             commands::engine::build_boot_media,
+            commands::engine::list_media_sticks,
+            commands::engine::write_media_stick,
             commands::engine::boot_status,
             commands::engine::boot_action,
             commands::engine::mount_backend_status,

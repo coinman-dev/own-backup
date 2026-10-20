@@ -281,8 +281,11 @@ fn start_installed_service() {
     // On the boot medium there is no installed service to start — asking the
     // SCM would just fail. Re-launch the engine as a process instead, the same
     // way the medium's launcher does, so losing it (a crash, a stray Ctrl+C in
-    // the console it shares) is recoverable from the interface.
-    if own_backup_common::media_mode::is_media_mode() {
+    // the console it shares) is recoverable from the interface. The Linux
+    // medium is a systemd system with the packaged unit: starting it is
+    // the same `systemctl start` as below, which the window — root there —
+    // is allowed, and a second engine beside systemd's would fight it.
+    if cfg!(target_os = "windows") && own_backup_common::media_mode::is_media_mode() {
         start_media_engine();
         return;
     }
@@ -314,6 +317,7 @@ fn start_installed_service() {
 /// Start the engine as a plain process from next to this exe — the boot
 /// medium's equivalent of "start the service". Nothing is installed and nothing
 /// is elevated: on the medium everything already runs as SYSTEM.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn start_media_engine() {
     let Some(dir) = std::env::current_exe()
         .ok()

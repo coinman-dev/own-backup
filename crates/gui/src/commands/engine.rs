@@ -821,6 +821,37 @@ pub async fn build_boot_media(
     Ok(report)
 }
 
+/// Linux: the disks the medium may be written onto (USB, card readers,
+/// removable), as the service sees them now.
+#[tauri::command]
+pub async fn list_media_sticks(
+    state: State<'_, GuiState>,
+) -> Result<Vec<own_backup_common::engine_dto::MediaStickDto>, String> {
+    state.link.client().await?.list_media_sticks().await
+}
+
+/// Linux: erase the stick and write the medium's ISO onto it. Progress comes
+/// back on the `media-progress` window event, as for a build.
+#[tauri::command]
+pub async fn write_media_stick(
+    state: State<'_, GuiState>,
+    options: own_backup_common::engine_dto::MediaStickWriteDto,
+) -> Result<own_backup_common::engine_dto::MediaStickReportDto, String> {
+    tracing::info!(iso = %options.iso_path, device = %options.device, "writing the medium onto a stick");
+    let report = state
+        .link
+        .client()
+        .await?
+        .write_media_stick(&options)
+        .await?;
+    tracing::info!(
+        device = %report.device,
+        log = ?report.log_partition,
+        "boot medium written onto a stick"
+    );
+    Ok(report)
+}
+
 #[tauri::command]
 pub async fn unmount_backup(state: State<'_, GuiState>, image_path: String) -> Result<(), String> {
     state.link.client().await?.unmount_image(&image_path).await

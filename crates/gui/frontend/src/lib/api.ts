@@ -35,6 +35,9 @@ import type {
   MediaTool,
   MediaBuildOptions,
   MediaBuildReport,
+  MediaStick,
+  MediaStickReport,
+  MediaStickWrite,
   ServiceStatus,
   MountBackendStatus,
   ArchiveImageInfo,
@@ -68,6 +71,10 @@ export const api = {
   listMediaTools: () => invoke<MediaTool[]>('list_media_tools'),
   buildBootMedia: (options: MediaBuildOptions) =>
     invoke<MediaBuildReport>('build_boot_media', { options }),
+  // Linux: writing the medium's ISO onto a stick (erases it).
+  listMediaSticks: () => invoke<MediaStick[]>('list_media_sticks'),
+  writeMediaStick: (options: MediaStickWrite) =>
+    invoke<MediaStickReport>('write_media_stick', { options }),
   driveSignature: () => invoke<number>('drive_signature'),
   // EFI, recovery and vendor partitions without a letter (the service decides
   // which), and giving one a letter or taking it away (`letter: null`).

@@ -1188,6 +1188,32 @@ export interface MediaBuildReport {
   warnings: string[];
 }
 
+/** A disk the Linux medium may be written onto (`MediaStickDto`). */
+export interface MediaStick {
+  device: string;
+  model: string;
+  size_bytes: number;
+  /** `usb`, `mmc` or `removable`. */
+  transport: string;
+  /** Mount points now; a mounted stick is not written. */
+  mounted: string[];
+}
+
+export interface MediaStickWrite {
+  iso_path: string;
+  device: string;
+}
+
+export interface MediaStickReport {
+  device: string;
+  iso_bytes: number;
+  volume_id: string;
+  /** The log partition's device, when one was made. */
+  log_partition: string | null;
+  /** Why there is none: the stick boots regardless. */
+  log_skipped: string | null;
+}
+
 export interface MediaProgress {
   /** The whole queue, sent with every event so the two sides cannot drift. */
   stages: MediaStage[];
