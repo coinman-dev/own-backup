@@ -46,8 +46,15 @@ if [[ -z "$version" ]]; then
     exit 1
 fi
 # Debian orders "0.1.5~beta" before "0.1.5", as semver orders "0.1.5-beta";
-# a hyphen would be read as the Debian revision. "-1" is the package revision.
-deb_version="$(printf '%s' "$version" | sed 's/-/~/')-1"
+# a hyphen would be read as the Debian revision. "-1" is the package revision;
+# DEB_REVISION gives another one (a test build of the same version, e.g.
+# DEB_REVISION=2 upgrades an installed -1).
+revision="${DEB_REVISION:-1}"
+if [[ ! "$revision" =~ ^[0-9][0-9A-Za-z.+~]*$ ]]; then
+    echo "DEB_REVISION must start with a digit and use only 0-9A-Za-z.+~: $revision" >&2
+    exit 1
+fi
+deb_version="$(printf '%s' "$version" | sed 's/-/~/')-$revision"
 
 target_dir="${CARGO_TARGET_DIR:-$root/target}"
 bin_dir="$target_dir/release"
