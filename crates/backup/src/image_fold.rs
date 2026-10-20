@@ -140,6 +140,17 @@ impl WritableBlockSource for ScratchWindow {
     }
 }
 
+/// The NTFS readers (`ntfs_map`) read a window like any volume.
+impl crate::fat_map::RawVolume for ScratchWindow {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        BlockSource::read_at(self, offset, buf)
+    }
+
+    fn len(&self) -> u64 {
+        self.len
+    }
+}
+
 /// What a pass that changed the image reported, and what the fold did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Folded {

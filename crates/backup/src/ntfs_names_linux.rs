@@ -16,7 +16,13 @@
 //!    its writes), the recorded paths are deleted through the mount without
 //!    ever following a link, the volume is unmounted, the device flushed,
 //!    `ntfsfix -n` reads it back;
-//! 4. only when every volume went through cleanly is the change folded into
+//! 4. every cluster the deletions freed is erased — `$Bitmap` before and
+//!    after, as the Windows in-image pass does it. The scan subtracted the
+//!    files' data before the copy, but not everything a deleted file held:
+//!    the clusters of its named streams (`Zone.Identifier`, anything an
+//!    application hides in an ADS) were copied, and would linger in the
+//!    image's free space;
+//! 5. only when every volume went through cleanly is the change folded into
 //!    the image and the touched blocks re-checksummed.
 //!
 //! Anything that goes wrong after a volume was mounted leaves the image as it
@@ -24,8 +30,9 @@
 //! not be mounted at all — hibernated Windows, no ntfs-3g — wrote nothing; its
 //! paths are counted as not deleted and the other volumes go on.
 //!
-//! No NTFS structure is parsed or written by this code; ntfs-3g does the
-//! deleting, our code only reads the boot sector to size a volume of a disk.
+//! No NTFS structure is written by this code; ntfs-3g does the deleting. Ours
+//! only reads: the boot sector to size a volume of a disk, and `$Bitmap`
+//! through the engine's own reader (`ntfs_map`) to know what was freed.
 
 #![cfg(target_os = "linux")]
 
@@ -140,6 +147,20 @@ pub(crate) fn remove_names(
                 done += v.paths.len() as u64;
                 continue;
             };
+            let free_before = match crate::ntfs_map::ntfs_free_map(&mut ScratchWindow::new(
+                scratch.clone(),
+                v.offset,
+                len,
+            )) {
+                Ok(map) => map,
+                Err(e) => {
+                    warn!(offset = v.offset, error = %e,
+                          "NTFS name removal: the volume's bitmap cannot be read — its names stay");
+                    failed += v.paths.len() as u64;
+                    done += v.paths.len() as u64;
+                    continue;
+                }
+            };
             let before = scratch.lock().unwrap().touched_count();
             let window = ScratchWindow::new(scratch.clone(), v.offset, len);
             let mut on_device = |device: &str| {
@@ -149,6 +170,13 @@ pub(crate) fn remove_names(
                 Ok((d, f)) => {
                     deleted += d;
                     failed += f;
+                    let mut window = ScratchWindow::new(scratch.clone(), v.offset, len);
+                    let erased = erase_freed(&mut window, &free_before)?;
+                    info!(
+                        offset = v.offset,
+                        bytes = erased,
+                        "NTFS name removal: what the deleted entries freed is erased"
+                    );
                 }
                 // Not mounted and nothing written: this volume's names stay,
                 // the others' still go.
@@ -166,6 +194,49 @@ pub(crate) fn remove_names(
     };
     let folded = change_through_scratch(image, grid, checksums, tick, &mut pass)?;
     Ok(folded.map(|f| f.entries_failed))
+}
+
+/// Zero every cluster that is free now and was not before the deletions,
+/// where it still holds anything. Clusters the filesystem took back for itself
+/// meanwhile read as allocated and are not touched. Returns the bytes zeroed.
+fn erase_freed(window: &mut ScratchWindow, before: &crate::ntfs_map::NtfsFreeMap) -> Result<u64> {
+    use crate::block_source::{BlockSource, WritableBlockSource};
+    let after = crate::ntfs_map::ntfs_free_map(window)?;
+    let cs = after.cluster_size;
+    if cs != before.cluster_size {
+        return Err(dev("the cluster size changed under the deletions"));
+    }
+    // Runs of newly freed clusters, read a few MiB at a time: most of them
+    // held excluded data the copy already left out, and read as zeros.
+    const RUN: u64 = 1024;
+    let mut zeroed = 0u64;
+    let mut buf = vec![0u8; (RUN * cs) as usize];
+    let zeros = vec![0u8; cs as usize];
+    let mut cluster = 0u64;
+    while cluster < after.total_clusters {
+        if !(after.is_free(cluster) && !before.is_free(cluster)) {
+            cluster += 1;
+            continue;
+        }
+        let mut end = cluster + 1;
+        while end < after.total_clusters
+            && end - cluster < RUN
+            && after.is_free(end)
+            && !before.is_free(end)
+        {
+            end += 1;
+        }
+        let bytes = ((end - cluster) * cs) as usize;
+        window.read_at(cluster * cs, &mut buf[..bytes])?;
+        for (i, c) in buf[..bytes].chunks(cs as usize).enumerate() {
+            if c.iter().any(|&b| b != 0) {
+                window.write_at((cluster + i as u64) * cs, &zeros)?;
+                zeroed += cs;
+            }
+        }
+        cluster = end;
+    }
+    Ok(zeroed)
 }
 
 /// The length of the NTFS volume at `offset`, from its boot sector: the
@@ -828,3 +899,7 @@ mod tests {
         assert!(mine.exists() && base.join("unrelated").exists());
     }
 }
+
+#[cfg(test)]
+#[path = "ntfs_names_acceptance.rs"]
+mod acceptance;

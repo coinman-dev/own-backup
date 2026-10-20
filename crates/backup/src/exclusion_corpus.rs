@@ -10,7 +10,7 @@
 //! sockets, fast and slow symlinks, shared and private xattr blocks, reflink
 //! copies, and (for btrfs) enough big files to give the checksum tree real
 //! internal nodes — built by the KERNEL through a mount, not assembled by
-//! debugfs, and shared by ext4, xfs and btrfs alike.
+//! debugfs, and shared by ext4, xfs, btrfs and NTFS (through ntfs-3g) alike.
 //!
 //! Everything under `cache/` is meant to be excluded, everything under `keep/`
 //! must come out untouched. `Corpus::verify_kept` is the half every filesystem
@@ -56,6 +56,17 @@ impl Caps {
             xattr: true,
             reflink: true,
             big_files: 200,
+        }
+    }
+    /// NTFS through ntfs-3g: no `trusted.*` attributes (its xattrs are named
+    /// streams, `user.*` only — the NTFS test adds those itself) and no
+    /// reflinks; device nodes, FIFOs and sockets become Interix files, links
+    /// reparse points, hard links real ones.
+    pub const fn ntfs() -> Self {
+        Caps {
+            xattr: false,
+            reflink: false,
+            big_files: 0,
         }
     }
 }
