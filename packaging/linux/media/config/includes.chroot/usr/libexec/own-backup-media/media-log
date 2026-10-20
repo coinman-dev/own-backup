@@ -1,0 +1,106 @@
+#!/bin/sh
+# Logs onto the boot medium (own-backup-media-log.service and
+# own-backup-media-journal.service).
+#
+#   media-log start          find the OBK-LOGS partition, mount it, make this
+#                            session's folder and name it to the engine and
+#                            the window (/run/own-backup-media-log.env)
+#   media-log save-journal   write the session's journal into that folder
+#
+# The partition is the one the window's stick writer adds behind the image
+# (crates/backup/src/media_stick.rs, LOG_LABEL). Any FAT or ext partition with
+# that label will do, on any disk: a medium written with `dd` has none, and a
+# second stick labelled OBK-LOGS gives it one. None found is not an error —
+# the logs then stay in memory, which the engine's log says.
+set -u
+
+label=OBK-LOGS
+mnt=/run/own-backup-media-log
+env_file=/run/own-backup-media-log.env
+dir_file=/run/own-backup-media-log.dir
+
+say() {
+    echo "own-backup-media-log: $*"
+}
+
+start() {
+    # The stick was found by the initramfs already; a second one plugged in
+    # at the boot menu may still be on its way.
+    udevadm settle --timeout=15 || true
+    dev=""
+    tries=0
+    while [ -z "$dev" ] && [ "$tries" -lt 5 ]; do
+        dev="$(blkid -L "$label" 2>/dev/null || true)"
+        [ -n "$dev" ] || { sleep 1; tries=$((tries + 1)); }
+    done
+    if [ -z "$dev" ]; then
+        say "no partition labelled $label; logs stay in memory"
+        exit 0
+    fi
+    fstype="$(blkid -o value -s TYPE "$dev" 2>/dev/null || true)"
+    mkdir -p "$mnt"
+    chmod 0700 "$mnt"
+    case "$fstype" in
+        vfat)
+            # flush: written out without waiting for the cache — the stick
+            # may be pulled the moment the screen goes dark.
+            opts="rw,noatime,nodev,nosuid,noexec,uid=0,gid=0,umask=0077,flush"
+            ;;
+        ext2|ext3|ext4)
+            opts="rw,noatime,nodev,nosuid,noexec,sync"
+            ;;
+        *)
+            say "$dev ($label) is $fstype, not FAT or ext; logs stay in memory"
+            exit 0
+            ;;
+    esac
+    # A file system the last session left dirty (the power went) is repaired
+    # first: a log written into a damaged FAT can take the rest with it.
+    case "$fstype" in
+        vfat) fsck.fat -a "$dev" >/dev/null 2>&1 || true ;;
+        *) fsck -p "$dev" >/dev/null 2>&1 || true ;;
+    esac
+    if ! mount -t "$fstype" -o "$opts" "$dev" "$mnt"; then
+        say "could not mount $dev; logs stay in memory"
+        exit 0
+    fi
+    # One folder per session. The clock of a machine being rescued is often
+    # wrong, so the boot id goes into the name too: two sessions never share
+    # a folder even when their times say they should.
+    boot="$(cut -c1-8 /proc/sys/kernel/random/boot_id)"
+    dir="$mnt/own-backup-logs/$(date +%Y-%m-%d_%H-%M-%S)_$boot"
+    if ! mkdir -p "$dir"; then
+        say "could not create a folder on $dev; logs stay in memory"
+        exit 0
+    fi
+    umask 077
+    printf 'OWN_BACKUP_LOG_MIRROR=%s\n' "$dir" >"$env_file"
+    printf '%s\n' "$dir" >"$dir_file"
+    {
+        echo "Own Backup boot medium session"
+        echo "boot id: $(cat /proc/sys/kernel/random/boot_id)"
+        echo "kernel: $(uname -r)"
+        echo "command line: $(cat /proc/cmdline)"
+    } >"$dir/session.txt"
+    sync
+    say "logs go to $dir ($dev)"
+    # The journal goes there too, at power-off.
+    systemctl start --no-block own-backup-media-journal.service || true
+}
+
+save_journal() {
+    [ -r "$dir_file" ] || exit 0
+    dir="$(cat "$dir_file")"
+    [ -d "$dir" ] || exit 0
+    journalctl -b --no-pager -o short-iso >"$dir/journal.txt" 2>&1 || true
+    sync
+}
+
+case "${1:-}" in
+    start) start ;;
+    save-journal) save_journal ;;
+    *)
+        echo "usage: $0 start|save-journal" >&2
+        exit 2
+        ;;
+esac

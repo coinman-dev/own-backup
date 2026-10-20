@@ -1,0 +1,19 @@
+# Logs onto the medium: find the stick's log partition (FAT32, label
+# OBK-LOGS — the window's stick writer makes it behind the image), mount it
+# and tell the engine and the window to copy their logs there. Without one
+# the logs stay in memory; the settings can still name a folder on any disk.
+[Unit]
+Description=Own Backup logs onto the boot medium
+ConditionKernelCommandLine=own-backup.media
+DefaultDependencies=no
+After=systemd-udev-settle.service local-fs.target systemd-udevd.service
+Wants=systemd-udevd.service
+Before=own-backup.service own-backup-kiosk.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/own-backup-media/media-log start
+
+[Install]
+WantedBy=multi-user.target

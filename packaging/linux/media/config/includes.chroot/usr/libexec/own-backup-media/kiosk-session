@@ -1,0 +1,18 @@
+#!/bin/sh
+# What cage runs on the medium (own-backup-kiosk.service): the window, with
+# the language the boot menu chose. When it exits, cage exits and systemd
+# starts the session again.
+set -u
+
+# live-config writes the locale it was given on the kernel command line.
+if [ -r /etc/default/locale ]; then
+    # shellcheck source=/dev/null
+    . /etc/default/locale
+    export LANG
+fi
+# GTK as a Wayland client of cage; no accessibility bus on the medium (the
+# warning about it would be the first line of every log).
+export GDK_BACKEND=wayland
+export NO_AT_BRIDGE=1
+
+exec /usr/bin/own-backup-gui

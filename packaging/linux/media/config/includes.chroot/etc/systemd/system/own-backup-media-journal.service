@@ -1,0 +1,18 @@
+# The whole session's journal onto the log partition at power-off — kernel,
+# systemd, cage and the window included, not only the engine's own log.
+# Started by media-log once the partition is mounted; stopped (and so run)
+# before that mount goes away, which the After= below orders.
+[Unit]
+Description=Own Backup journal onto the boot medium at power-off
+ConditionKernelCommandLine=own-backup.media
+DefaultDependencies=no
+After=run-own\x2dbackup\x2dmedia\x2dlog.mount own-backup-media-log.service
+Before=shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecStop=/usr/libexec/own-backup-media/media-log save-journal
+TimeoutStopSec=60

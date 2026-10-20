@@ -1,0 +1,43 @@
+# The window on the boot medium: own-backup-gui full screen in cage, a Wayland
+# kiosk compositor, on tty1 — no desktop, no login. The counterpart of the
+# WinPE medium's own-backup-shell, which is for WinPE only.
+#
+# As root, like the WinPE medium's window (SYSTEM there): on the medium the
+# engine's token and settings live in /run/own-backup-media, 0700, and the
+# person at the machine owns it anyway. The session comes from PAM
+# (pam_systemd), so logind sees an active local session on seat0 and cage
+# gets the seat and the DRM device through it.
+
+[Unit]
+Description=Own Backup window (boot medium)
+ConditionKernelCommandLine=own-backup.media
+After=systemd-user-sessions.service own-backup.service own-backup-media-log.service
+Wants=own-backup.service
+# tty1 is the window's; the other consoles keep their login prompt.
+Conflicts=getty@tty1.service
+After=getty@tty1.service
+
+[Service]
+Type=simple
+PAMName=own-backup-kiosk
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+UtmpIdentifier=tty1
+UtmpMode=user
+Environment=XDG_SESSION_TYPE=wayland
+EnvironmentFile=-/run/own-backup-media-log.env
+# -d: no client-side decorations where the client lets go of them;
+# -s: Ctrl+Alt+F2… still reach the text consoles for repairs by hand.
+ExecStart=/usr/bin/cage -d -s -- /usr/libexec/own-backup-media/kiosk-session
+# Closing the window, or a crash, brings it back: on the medium there is
+# nothing else on the screen to go back to.
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=graphical.target

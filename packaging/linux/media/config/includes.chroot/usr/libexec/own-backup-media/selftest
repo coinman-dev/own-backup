@@ -1,0 +1,83 @@
+#!/bin/sh
+# The stand's check of a booted medium (own-backup-media-selftest.service).
+# Asked for by the VM through QEMU's firmware config; prints `OBK-SELFTEST
+# key=value` lines on the first serial port, which
+# scripts/lab/linux-media-scenario.sh reads, and the screenshot is the host's
+# job. Every value is observed here, none assumed: a check that cannot be made
+# says so (`unknown`), it does not pass.
+set -u
+
+modprobe qemu_fw_cfg 2>/dev/null || true
+flag=/sys/firmware/qemu_fw_cfg/by_name/opt/own-backup/selftest/raw
+[ -r "$flag" ] || exit 0
+out=/dev/ttyS0
+
+report() {
+    echo "OBK-SELFTEST $*" >"$out"
+    echo "OBK-SELFTEST $*"
+}
+
+report "start version=$(dpkg-query -W -f='${Version}' own-backup 2>/dev/null || echo none)"
+
+if grep -qw own-backup.media /proc/cmdline; then
+    report "cmdline=1"
+else
+    report "cmdline=0"
+fi
+
+if [ -d /sys/firmware/efi ]; then
+    sb=/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
+    if [ -r "$sb" ]; then
+        # Four bytes of attributes, then the value.
+        report "firmware=uefi secureboot=$(od -An -tu1 -j4 -N1 "$sb" | tr -d ' ')"
+    else
+        report "firmware=uefi secureboot=unknown"
+    fi
+else
+    report "firmware=bios secureboot=na"
+fi
+
+# The engine answers on its socket: a call that goes through the token, the
+# peer check and the service's own code (the stick list is read live).
+i=0
+until own-backup-cli media sticks >/run/own-backup-selftest.sticks 2>&1; do
+    i=$((i + 1))
+    if [ "$i" -ge 60 ]; then
+        report "service=fail $(tail -n1 /run/own-backup-selftest.sticks | tr '\n' ' ')"
+        break
+    fi
+    sleep 2
+done
+[ "$i" -lt 60 ] && report "service=ok"
+# Media mode: only an engine in media mode keeps its state on the RAM disk.
+if [ -d /run/own-backup-media ]; then
+    report "service_media=1"
+else
+    report "service_media=0"
+fi
+
+# The window: cage running as the kiosk session, the window's process in it,
+# and the page drawn — the window removes its start marker only when the page
+# says it has drawn (crates/gui/src/linux_display.rs).
+i=0
+state=unknown
+while [ "$i" -lt 90 ]; do
+    if systemctl is-active --quiet own-backup-kiosk.service && pgrep -x own-backup-gui >/dev/null; then
+        if [ ! -e /run/user/0/own-backup/gui-starting ]; then
+            state=drawn
+            break
+        fi
+        state=started
+    fi
+    i=$((i + 1))
+    sleep 2
+done
+report "kiosk=$(systemctl is-active own-backup-kiosk.service) window=$state"
+
+if [ -r /run/own-backup-media-log.dir ]; then
+    report "logs=$(cat /run/own-backup-media-log.dir)"
+else
+    report "logs=memory"
+fi
+report "failed_units=$(systemctl --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | tr '\n' ',')"
+report "done"

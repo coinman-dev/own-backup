@@ -2,7 +2,9 @@
 """Linux guest for the Linux stand: an Ubuntu 26.04 cloud image under QEMU/KVM.
 
     python3 -I scripts/lab/linux-vm.py prepare      # download + verify the base once
-    python3 -I scripts/lab/linux-vm.py up [--disks N] [--size G] [--bios] [--tpm]
+    python3 -I scripts/lab/linux-vm.py up [--disks N] [--size G] [--bios] [--tpm] [--stick G]
+    python3 -I scripts/lab/linux-vm.py media (--iso PATH | --stick) [--firmware uefi-sb|uefi|bios]
+                                             [--attach cdrom|usb]   # boot the boot medium
     python3 -I scripts/lab/linux-vm.py ssh -- <command...>   # exit code is the guest's
     python3 -I scripts/lab/linux-vm.py put <host-path> <guest-path>
     python3 -I scripts/lab/linux-vm.py get <guest-path> <host-path>
@@ -21,6 +23,15 @@ Layout (`~/lab/linux/`):
   `budgets.jsonl` and `evidence/` for scenarios; with `--tpm`, the state of the
   guest's TPM 2.0 (`tpm/`, an `swtpm` emulator the run starts beside QEMU).
 - `evidence/<run-id>/` — what `clean` keeps of a run before deleting it.
+
+The boot medium (`media`, plan §6 stage 6) boots an ISO — as a CD or as a USB
+stick written with `dd` — or the run's own USB stick `stick.img` (`up --stick
+G` gives the Ubuntu guest that stick, so the service's stick writer can be run
+on it). Firmware: OVMF with Secure Boot and Microsoft's keys enrolled
+(`uefi-sb`, what a PC ships with: Debian's shim is signed by Microsoft's UEFI
+CA), OVMF without Secure Boot, or SeaBIOS. The medium's self-test is asked for
+through QEMU's firmware config and reports on the serial port; `media` waits
+for it and takes a screenshot (`evidence/media-<label>.png`). No SSH there.
 
 The guest is Ubuntu 26.04 on purpose: binaries built on this host need its
 glibc. User `lab` (passwordless sudo) gets the run key through a NoCloud seed
@@ -122,6 +133,9 @@ class Qemu:
                 fail('no QEMU: neither tmp/tools/qemu nor qemu-system-x86_64 on PATH')
         self.ovmf_code = share / 'OVMF' / 'OVMF_CODE_4M.fd'
         self.ovmf_vars = share / 'OVMF' / 'OVMF_VARS_4M.fd'
+        # Secure Boot: the SMM build, and VARS with Microsoft's keys enrolled.
+        self.ovmf_code_sb = share / 'OVMF' / 'OVMF_CODE_4M.secboot.fd'
+        self.ovmf_vars_ms = share / 'OVMF' / 'OVMF_VARS_4M.ms.fd'
         self.seabios = share / 'seabios' / 'bios-256k.bin'
 
     def run_img(self, *args, capture=False) -> str:
@@ -469,6 +483,7 @@ def create_run(args, q: Qemu) -> dict:
               str(RUN / 'root.qcow2'), f'{args.root_size}G')
     for n in range(1, args.disks + 1):
         q.run_img('create', '-q', '-f', 'qcow2', str(RUN / f'data-{n}.qcow2'), f'{args.size}G')
+    make_stick(cfg, getattr(args, 'stick', 0))
     if not args.bios:
         shutil.copyfile(q.ovmf_vars, RUN / 'vars.fd')
         os.chmod(RUN / 'vars.fd', 0o600)
@@ -476,13 +491,40 @@ def create_run(args, q: Qemu) -> dict:
     return cfg
 
 
+def make_stick(cfg: dict, gib_size: int) -> None:
+    """The run's USB stick: an empty sparse raw image, `stick.img`. A raw
+    file, not qcow2, so `media --stick` boots exactly the bytes the guest's
+    stick writer put there."""
+    if not gib_size or (RUN / 'stick.img').exists():
+        return
+    with (RUN / 'stick.img').open('wb') as f:
+        f.truncate(gib_size * GIB)
+    cfg['stick_gib'] = gib_size
+    save_config(cfg)
+
+
 def worst_growth(cfg: dict, q: Qemu) -> int:
     """How much the run's images can still grow: virtual minus allocated."""
     growth = 0
-    for name in ['root.qcow2'] + [f"data-{n}.qcow2" for n in range(1, cfg['disks'] + 1)]:
+    names = [f"data-{n}.qcow2" for n in range(1, cfg.get('disks', 0) + 1)]
+    if (RUN / 'root.qcow2').exists():
+        names.insert(0, 'root.qcow2')
+    for name in names:
         info = q.info(RUN / name)
         growth += max(0, info['virtual-size'] - info.get('actual-size', 0))
+    stick = RUN / 'stick.img'
+    if stick.exists():
+        growth += max(0, stick.stat().st_size - stick.stat().st_blocks * 512)
     return growth
+
+
+def stick_argv(bootindex=None) -> list:
+    """The run's stick on a USB 3 controller, as the guest's /dev/sdX on the
+    USB bus (what the stick writer offers)."""
+    boot = f',bootindex={bootindex}' if bootindex is not None else ''
+    return ['-device', 'qemu-xhci,id=xhci',
+            '-drive', f"file={RUN / 'stick.img'},if=none,id=stick,format=raw,discard=unmap",
+            '-device', f'usb-storage,bus=xhci.0,drive=stick,serial=ob-stick,removable=on{boot}']
 
 
 def qemu_argv(cfg: dict, q: Qemu) -> list:
@@ -514,6 +556,8 @@ def qemu_argv(cfg: dict, q: Qemu) -> list:
         argv += ['-drive', f"file={RUN / f'data-{n}.qcow2'},if=none,id=data{n},format=qcow2,"
                            'discard=unmap',
                  '-device', f'virtio-blk-pci,drive=data{n},serial=ob-data-{n}']
+    if (RUN / 'stick.img').exists():
+        argv += stick_argv()
     argv += ['-netdev', f"user,id=net0,hostfwd=tcp:127.0.0.1:{cfg['ssh_port']}-:22",
              '-device', 'virtio-net-pci,netdev=net0,romfile=',
              '-smbios', f"type=1,serial=ds=nocloud;s=http://10.0.2.2:{cfg['http_port']}/",
@@ -595,6 +639,8 @@ def cmd_up(args) -> int:
         fail('--size must be 1..8 GiB per data disk')
     if not 4 <= args.root_size <= 16:
         fail('--root-size must be 4..16 GiB')
+    if not 0 <= args.stick <= 8:
+        fail('--stick must be 0..8 GiB')
     q = Qemu()
     firmware = q.seabios if args.bios else q.ovmf_code
     if not Path(firmware).exists():
@@ -603,6 +649,8 @@ def cmd_up(args) -> int:
     reuse = (RUN / 'config.json').exists()
     if reuse:
         cfg = config()
+        if cfg.get('kind') == 'media':
+            fail('this run only boots the medium (`media`); `clean` it for an Ubuntu guest')
         say(f"booting the existing run {cfg['run_id']} again (its disks and firmware kept; "
             'use `clean` for a fresh one)')
         growth = worst_growth(cfg, q)
@@ -610,7 +658,7 @@ def cmd_up(args) -> int:
     else:
         if RUN.exists():
             fail(f'{RUN} exists without config.json; inspect and remove it')
-        growth = (args.root_size + args.disks * args.size) * GIB
+        growth = (args.root_size + args.disks * args.size + args.stick) * GIB
         run_worst = growth
     row = measure('up', growth)
     record(row)
@@ -620,6 +668,8 @@ def cmd_up(args) -> int:
     say('space: ' + show(row))
     if not reuse:
         cfg = create_run(args, q)
+    else:
+        make_stick(cfg, args.stick)
     # A boot option, not a property of the run: only this boot plugs late.
     cfg['late'] = sorted(set(args.late or []))
     bad = [n for n in cfg['late'] if not 1 <= n <= cfg['disks']]
@@ -697,6 +747,189 @@ def cmd_up(args) -> int:
           f'  QMP:     {RUN / "qmp.sock"}   HMP: {RUN / "monitor.sock"}\n'
           f'  stop:    python3 -I {Path(__file__).relative_to(REPO)} down', flush=True)
     return 0
+
+
+def media_argv(cfg: dict, q: Qemu, args, label: str) -> list:
+    sb = args.firmware == 'uefi-sb'
+    machine = 'q35,accel=kvm' + (',smm=on' if sb else '')
+    argv = [q.system, '-name', 'obk-lab-media', '-machine', machine, '-cpu', 'host',
+            '-smp', str(args.cpus), '-m', str(args.mem),
+            '-nodefaults', '-no-user-config', '-display', 'none',
+            '-pidfile', str(RUN / 'qemu.pid')]
+    if q.datadir:
+        argv += ['-L', str(q.datadir)]
+    if args.firmware == 'bios':
+        argv += ['-bios', str(q.seabios)]
+    else:
+        code = q.ovmf_code_sb if sb else q.ovmf_code
+        if sb:
+            # The SMM build refuses to run with its flash writable from the guest.
+            argv += ['-global', 'driver=cfi.pflash01,property=secure,value=on']
+        argv += ['-drive', f'if=pflash,format=raw,unit=0,readonly=on,file={code}',
+                 '-drive', f"if=pflash,format=raw,unit=1,file={RUN / f'vars-{label}.fd'}"]
+    # A plain VGA (bochs-drm in the guest): the kiosk must come up on the
+    # dullest display there is, and screendump reads it.
+    argv += ['-device', 'VGA,edid=on,xres=1280,yres=800']
+    if args.stick:
+        argv += stick_argv(bootindex=0)
+    elif args.attach == 'cdrom':
+        argv += ['-drive', f'file={args.iso},if=none,id=cd,media=cdrom,readonly=on,format=raw',
+                 '-device', 'ide-cd,drive=cd,bootindex=0']
+    else:
+        argv += ['-device', 'qemu-xhci,id=xhci',
+                 '-drive', f'file={args.iso},if=none,id=stick,readonly=on,format=raw',
+                 '-device', 'usb-storage,bus=xhci.0,drive=stick,serial=ob-iso,removable=on,'
+                            'bootindex=0']
+    # On a run made by `up`, its Ubuntu disk is the machine the medium
+    # rescues: copied offline, restored to. Never the boot device here.
+    if (RUN / 'root.qcow2').exists():
+        argv += ['-drive', f"file={RUN / 'root.qcow2'},if=none,id=root,format=qcow2",
+                 '-device', 'virtio-blk-pci,drive=root,serial=ob-root']
+    for n in range(1, cfg.get('disks', 0) + 1):
+        argv += ['-drive', f"file={RUN / f'data-{n}.qcow2'},if=none,id=data{n},format=qcow2",
+                 '-device', f'virtio-blk-pci,drive=data{n},serial=ob-data-{n}']
+    argv += ['-netdev', 'user,id=net0', '-device', 'virtio-net-pci,netdev=net0,romfile=',
+             '-fw_cfg', 'name=opt/own-backup/selftest,string=1',
+             '-chardev', f"file,id=ser0,path={RUN / 'serial.log'},append=on",
+             '-serial', 'chardev:ser0',
+             '-qmp', f"unix:{RUN / 'qmp.sock'},server=on,wait=off",
+             '-monitor', f"unix:{RUN / 'monitor.sock'},server=on,wait=off",
+             '-device', 'virtio-rng-pci']
+    return argv
+
+
+def cmd_media(args) -> int:
+    """Boot the boot medium and wait for its self-test (`OBK-SELFTEST done`)."""
+    if not os.access('/dev/kvm', os.R_OK | os.W_OK):
+        fail('/dev/kvm is not usable by this user')
+    if our_pid() is not None:
+        fail('this run is already up (status / down)')
+    others = other_vms()
+    if others:
+        fail('another VM is running; the stand runs one VM at a time')
+    if args.iso and not Path(args.iso).is_file():
+        fail(f'no such ISO: {args.iso}')
+    args.iso = str(Path(args.iso).resolve()) if args.iso else None
+    if args.stick and not (RUN / 'stick.img').exists():
+        fail('the run has no stick.img (`up --stick G`, then the stick writer in the guest)')
+    q = Qemu()
+    needed = {'uefi-sb': [q.ovmf_code_sb, q.ovmf_vars_ms], 'uefi': [q.ovmf_code, q.ovmf_vars],
+              'bios': [q.seabios]}[args.firmware]
+    for f in needed:
+        if not Path(f).exists():
+            fail(f'firmware not found: {f}')
+
+    if (RUN / 'config.json').exists():
+        cfg = config()
+        growth = worst_growth(cfg, q)
+    else:
+        if RUN.exists():
+            fail(f'{RUN} exists without config.json; inspect and remove it')
+        growth = args.disks * args.size * GIB
+    row = measure('media', growth)
+    record(row)
+    problems = over_budget(row, du(RUN) + growth)
+    if problems:
+        fail('space budget (AGENTS.md): ' + '; '.join(problems))
+    if not (RUN / 'config.json').exists():
+        RUN.mkdir(parents=True, mode=0o700)
+        cfg = {'run_id': time.strftime('%Y%m%dT%H%M%SZ', time.gmtime()), 'kind': 'media',
+               'disks': args.disks, 'size_gib': args.size, 'bios': args.firmware == 'bios'}
+        save_config(cfg)
+        for n in range(1, args.disks + 1):
+            q.run_img('create', '-q', '-f', 'qcow2', str(RUN / f'data-{n}.qcow2'),
+                      f'{args.size}G')
+    (RUN / 'evidence').mkdir(exist_ok=True)
+    source = 'stick' if args.stick else args.attach
+    label = args.label or f'{args.firmware}-{source}'
+    if args.firmware != 'bios':
+        # Fresh variables for every boot: no boot entry or key a previous boot
+        # left decides this one.
+        template = q.ovmf_vars_ms if args.firmware == 'uefi-sb' else q.ovmf_vars
+        shutil.copyfile(template, RUN / f'vars-{label}.fd')
+        os.chmod(RUN / f'vars-{label}.fd', 0o600)
+
+    argv = media_argv(cfg, q, args, label)
+    (RUN / f'qemu-argv-{label}.json').write_text(json.dumps(argv, indent=1) + '\n')
+    serial = RUN / 'serial.log'
+    with serial.open('a') as log:
+        log.write(f'\n--- media boot {label} '
+                  f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n")
+    start = serial.stat().st_size
+    with (RUN / 'qemu.log').open('a') as log:
+        log.write(f"--- media {label} {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n")
+        log.flush()
+        proc = subprocess.Popen(argv, env=q.env, stdin=subprocess.DEVNULL, stdout=log,
+                                stderr=subprocess.STDOUT, start_new_session=True, cwd=RUN)
+    say(f'QEMU pid {proc.pid}: medium from {source}, firmware {args.firmware}')
+
+    deadline = time.monotonic() + args.timeout
+    began = time.monotonic()
+    lines = []
+    keys_sent = 0
+    while True:
+        if proc.poll() is not None:
+            fail(f'QEMU exited with {proc.returncode}\n--- qemu.log\n{tail(RUN / "qemu.log")}')
+        # The boot menus wait for a key when their timeout is off; Enter takes
+        # the first entry. Only while a menu can be up — later the window has
+        # the keyboard.
+        if keys_sent < 4 and time.monotonic() - began > 12 + 8 * keys_sent:
+            try:
+                qmp('send-key', {'keys': [{'type': 'qcode', 'data': 'ret'}]})
+            except (OSError, ValueError):
+                pass
+            keys_sent += 1
+        with serial.open('rb') as f:
+            f.seek(start)
+            text = f.read().decode(errors='replace')
+        lines = [ln.strip() for ln in text.splitlines() if ln.startswith('OBK-SELFTEST')]
+        if 'OBK-SELFTEST done' in lines:
+            break
+        if time.monotonic() > deadline:
+            lines.append(shot(label))
+            (RUN / 'evidence' / f'media-{label}.txt').write_text('\n'.join(lines) + '\n')
+            fail(f'no self-test after {args.timeout} s (VM left running; see {serial}, '
+                 f"evidence/media-{label}.png, then `down`)")
+        time.sleep(3)
+    # The page is drawn by now (the self-test waited for it); a moment for the
+    # compositor to put the last frame on the screen.
+    time.sleep(3)
+    lines.append(shot(label))
+    (RUN / 'evidence' / f'media-{label}.txt').write_text('\n'.join(lines) + '\n')
+    for ln in lines:
+        print(ln, flush=True)
+    say(f'self-test done; evidence/media-{label}.txt and .png (VM left running: `down`)')
+    return 0
+
+
+def shot(label: str) -> str:
+    """Screenshot into `evidence/media-<label>.png`, and a line saying whether
+    anything is on the screen: how many colours, and how much of it is the
+    most common one. A kiosk that never drew is one colour (black, or the
+    compositor's grey) over the whole screen."""
+    import importlib.util
+    ppm = RUN / f'screen-{label}.ppm'
+    out = RUN / 'evidence' / f'media-{label}.png'
+    try:
+        reply = qmp('screendump', {'filename': str(ppm)}, timeout=30)
+    except (OSError, ValueError) as error:
+        return f'SCREEN error={error}'
+    if 'error' in reply or not ppm.exists():
+        return f"SCREEN error={reply.get('error')}"
+    spec = importlib.util.spec_from_file_location('qshot', Path(__file__).with_name(
+        'qemu-screenshot.py'))
+    qshot = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(qshot)
+    width, height, rgb = qshot.read_ppm(str(ppm))
+    qshot.write_png(str(out), width, height, rgb)
+    ppm.unlink()
+    counts = {}
+    for i in range(0, len(rgb), 3 * 7):  # every 7th pixel is plenty
+        px = rgb[i:i + 3]
+        counts[px] = counts.get(px, 0) + 1
+    total = sum(counts.values()) or 1
+    dominant = max(counts.values(), default=0) * 100 // total
+    return f'SCREEN {width}x{height} colours={len(counts)} dominant={dominant}'
 
 
 def cmd_ssh(args) -> int:
@@ -834,6 +1067,24 @@ def main() -> int:
     up.add_argument('--mem', type=int, default=2048, help='MiB of RAM (default 2048)')
     up.add_argument('--cpus', type=int, default=2, help='vCPUs (default 2)')
     up.add_argument('--timeout', type=int, default=900, help='seconds to wait for SSH')
+    up.add_argument('--stick', type=int, default=0, metavar='G',
+                    help='an empty USB stick of G GiB (stick.img, kept with the run)')
+    media = sub.add_parser('media', help='boot the boot medium (ISO or the run\'s stick)')
+    source = media.add_mutually_exclusive_group(required=True)
+    source.add_argument('--iso', help='the medium\'s ISO (scripts/build-linux-media.sh)')
+    source.add_argument('--stick', action='store_true',
+                        help='the run\'s stick.img, as the guest\'s stick writer left it')
+    media.add_argument('--firmware', choices=['uefi-sb', 'uefi', 'bios'], default='uefi-sb')
+    media.add_argument('--attach', choices=['cdrom', 'usb'], default='cdrom',
+                       help='--iso as a CD or as a stick written with dd (default cdrom)')
+    media.add_argument('--disks', type=int, default=0,
+                       help='data disks for a new media run (an existing run keeps its own)')
+    media.add_argument('--size', type=int, default=4, help='GiB per new data disk')
+    media.add_argument('--mem', type=int, default=3072, help='MiB of RAM (default 3072)')
+    media.add_argument('--cpus', type=int, default=2, help='vCPUs (default 2)')
+    media.add_argument('--timeout', type=int, default=600,
+                       help='seconds to wait for the self-test (default 600)')
+    media.add_argument('--label', default='', help='name of the evidence files')
     ssh = sub.add_parser('ssh', help='run a command in the guest: ssh -- <command...>')
     ssh.add_argument('command', nargs=argparse.REMAINDER)
     put = sub.add_parser('put', help='copy host -> guest')
@@ -849,7 +1100,8 @@ def main() -> int:
     budget.add_argument('--step', default='manual')
     sub.add_parser('clean', help='archive the evidence and remove the run (never the base)')
     args = parser.parse_args()
-    return {'prepare': cmd_prepare, 'up': cmd_up, 'ssh': cmd_ssh, 'put': cmd_put,
+    return {'prepare': cmd_prepare, 'up': cmd_up, 'media': cmd_media, 'ssh': cmd_ssh,
+            'put': cmd_put,
             'get': cmd_get, 'down': cmd_down, 'status': cmd_status, 'budget': cmd_budget,
             'clean': cmd_clean}[args.cmd](args)
 
