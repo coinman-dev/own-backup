@@ -1283,7 +1283,7 @@ mod tests {
         let (target, _) = restore_to_blank(&full, first.source_bytes, None);
         assert!(std::fs::read(&target).unwrap() == data);
 
-        // VHDX: no child on Linux yet (CHECKS 12) — a full copy.
+        // VHDX: a differencing child written in userspace (CHECKS 12).
         let vfull = dir.path().join("full.vhdx");
         backup_volume(
             &request(&src, &vfull, ImageFormat::Vhdx),
@@ -1302,13 +1302,18 @@ mod tests {
             no_progress,
         )
         .unwrap();
-        assert_eq!(v.backup_kind, BackupType::Full);
-        assert_eq!(v.blocks_copied, v.used_blocks);
-        assert!(read_embedded_sidecar(&v.image_path, "vhdx")
-            .unwrap()
-            .info
-            .parent_image_file_name
-            .is_none());
+        assert_eq!(v.backup_kind, BackupType::Incremental);
+        assert_eq!(
+            read_embedded_sidecar(&v.image_path, "vhdx")
+                .unwrap()
+                .info
+                .parent_image_file_name
+                .as_deref(),
+            Some("full.vhdx")
+        );
+        assert!(verify_image(&v.image_path, |_, _| Ok(())).unwrap().valid());
+        let (target, _) = restore_to_blank(&v.image_path, v.source_bytes, None);
+        assert!(std::fs::read(&target).unwrap() == std::fs::read(&src).unwrap());
 
         // 4 KiB blocks: a qcow2 child would zero-fill the rest of each
         // 64 KiB cluster it touches — a full copy instead.
@@ -1840,7 +1845,7 @@ mod tests {
         assert!(image_at(&inc, *fat_at, want.len()) == want, "the child");
         assert!(verify_image(&inc, |_, _| Ok(())).unwrap().valid());
 
-        // VHDX: no child on Linux yet — a full copy.
+        // VHDX: a differencing child of the whole disk, verified.
         let vfull = out.join("disk_full.vhdx");
         let vreq = DiskBackupRequest {
             image_format: ImageFormat::Vhdx,
@@ -1858,7 +1863,10 @@ mod tests {
             no_progress,
         )
         .unwrap();
-        assert_eq!(v.backup_kind, BackupType::Full);
+        assert_eq!(v.backup_kind, BackupType::Incremental);
+        assert!(verify_image(&out.join("disk_inc.avhdx"), |_, _| Ok(()))
+            .unwrap()
+            .valid());
     }
 
     /// `req` with a Windows rule (not for ext4: keep.txt stays) and a Linux

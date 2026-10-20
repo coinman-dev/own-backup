@@ -597,7 +597,8 @@ function RefsBitLocker {
     Ask 'refs-prepare' 'refs-prepare'
     $prep = Get-Content "$work\refs-prepare.json" -Raw | ConvertFrom-Json
     Report 'refs-prepare' $prep
-    Check ($prep.filesystem -eq 'ReFS' -and $prep.lock -eq 'Locked') "a locked BitLocker volume with ReFS inside ($($prep.filesystem), $($prep.method), $($prep.lock))"
+    $wantFs = if ($format -eq 'ntfsbl') { 'NTFS' } else { 'ReFS' }
+    Check ($prep.filesystem -eq $wantFs -and $prep.lock -eq 'Locked') "a locked BitLocker volume with $wantFs inside ($($prep.filesystem), $($prep.method), $($prep.lock))"
     [IO.File]::WriteAllText("$work\refs-password.txt", 'KillX-Refs-2026!')
     $base = @{ schedule = @{ kind = 'none' }; image_format = 'vhdx'; requires_password = $true
         source = 'R:'; sources = @('R:'); dest_folder = $store
@@ -1421,7 +1422,9 @@ if ($media) {
                 continue
             }
             if ($request.action -in @('refs-prepare', 'refs-unlock', 'refs-detach')) {
-                # Mode 'refsbl': R: is ReFS in a VHDX on C:, under BitLocker.
+                # Mode 'refsbl': R: is ReFS in a VHDX on C:, under BitLocker;
+                # mode 'ntfsbl': the same with NTFS (own FVE read, MFT scan).
+                $innerFs = if ($format -eq 'ntfsbl') { 'ntfs' } else { 'refs' }
                 $name = $request.name
                 $vhd = 'C:\Lab\refs-src.vhdx'
                 $dp = "$work\refs-diskpart.txt"
@@ -1433,7 +1436,7 @@ if ($media) {
                         & diskpart.exe /s $dp | Out-Null
                         Remove-Item $vhd -Force
                     }
-                    "create vdisk file=$vhd maximum=1536 type=expandable`r`nselect vdisk file=$vhd`r`nattach vdisk`r`ncreate partition primary`r`nformat fs=refs quick label=REFSSRC`r`nassign letter=R" | Set-Content $dp -Encoding ASCII
+                    "create vdisk file=$vhd maximum=1536 type=expandable`r`nselect vdisk file=$vhd`r`nattach vdisk`r`ncreate partition primary`r`nformat fs=$innerFs quick label=REFSSRC`r`nassign letter=R" | Set-Content $dp -Encoding ASCII
                     & diskpart.exe /s $dp | Out-Null
                     [IO.File]::WriteAllText('R:\refs-marker.txt', 'Own Backup ReFS-in-BitLocker acceptance source')
                     New-Item -ItemType Directory -Force 'R:\keep', 'R:\cache', 'R:\docs' | Out-Null
@@ -1627,7 +1630,7 @@ if ($media) {
         if ($format -eq 'aliases') { Aliases; return }
         if ($format -eq 'fatx') { FatX; return }
         if ($format -eq 'settings6a') { Settings6a; return }
-        if ($format -eq 'refsbl') { RefsBitLocker; return }
+        if ($format -in @('refsbl', 'ntfsbl')) { RefsBitLocker; return }
         if ($format -eq 'deletejob') { DeleteJob; return }
         $state = if (Test-Path "$work\job.json") { Get-Content "$work\job.json" -Raw | ConvertFrom-Json } else { $null }
         if (-not $state) {

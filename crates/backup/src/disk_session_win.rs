@@ -57,7 +57,7 @@ use own_backup_common::{tr, OwnBackupError, Result};
 use crate::table_merge::{
     adopt_existing_entries, describe_disk, describe_table, entry_unchanged, same_layout,
 };
-use crate::table_writer::partition_table_write_ops;
+use crate::table_writer::partition_table_write_ops_keeping_boot_code;
 use crate::win_device::WinRawDevice;
 
 /// Parse a GUID that may or may not be wrapped in braces. An empty or unusable
@@ -255,7 +255,19 @@ impl DiskSession {
             return Ok(true);
         }
 
-        let ops = partition_table_write_ops(&spec)?;
+        // The BIOS boot code already in LBA 0 stays (`boot_code`): the writer
+        // builds LBA 0 from scratch, and a BIOS disk whose table was rewritten
+        // with zeros there no longer starts, though every partition is intact.
+        let sector_len = (self.dev.sector_size() as usize).max(512);
+        let mut head = vec![0u8; 2 * sector_len];
+        self.dev.read_at(0, &mut head)?;
+        let (lba0, lba1) = head.split_at(sector_len);
+        let (ops, boot_code) = partition_table_write_ops_keeping_boot_code(&spec, lba0, lba1)?;
+        info!(
+            disk = self.disk_number,
+            ?boot_code,
+            "BIOS boot code in LBA 0"
+        );
         let total: usize = ops.iter().map(|o| o.bytes.len()).sum();
         for op in &ops {
             self.dev.write_at(op.offset, &op.bytes)?;

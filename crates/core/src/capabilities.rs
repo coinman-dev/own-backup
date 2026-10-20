@@ -93,11 +93,9 @@ pub fn linux() -> BackupCapabilities {
     BackupCapabilities {
         os: "linux",
         methods: vec!["full", "incremental", "differential"],
-        // qcow2 and `.obk` chains are the shared engine's (L2). A VHDX child
-        // made on Linux waits for its Windows check (CHECKS 12, decision R2):
-        // quietly writing full copies where a chain was asked for would be a
-        // plan that is not one.
-        chain_formats: vec!["qcow2", "obk"],
+        // The shared engine's chains (L2); a VHDX child made here is one
+        // Windows opens, writes and merges (CHECKS 12, 2026-10-20).
+        chain_formats: vec!["vhdx", "qcow2", "obk"],
         // L3: ext/XFS/btrfs/FAT/NTFS on a source that holds still; a source
         // that does not is copied whole and the run says why.
         exclusions: true,
@@ -266,11 +264,11 @@ mod tests {
         assert!(refusals(&j, &windows()).is_empty());
     }
 
-    /// The Linux table refuses exactly what its engine does not do: a VHDX
-    /// chain, a disk named by number — and nothing else. Encrypted archives
-    /// are offered once the key store is (decision 6/E4).
+    /// The Linux table refuses exactly what its engine does not do: a disk
+    /// named by number — and nothing else; VHDX chains included (CHECKS 12).
+    /// Encrypted archives are offered once the key store is (decision 6/E4).
     #[test]
-    fn linux_refuses_vhdx_chains_and_numbered_disks_only() {
+    fn linux_refuses_numbered_disks_only() {
         let caps = linux();
         let mut j = job();
         j.scheme.method = "incremental".into();
@@ -283,9 +281,7 @@ mod tests {
         j.scheme.method = "differential".into();
         assert!(refusals(&j, &caps).is_empty());
         j.image_format = ImageFormat::Vhdx;
-        let r = refusals(&j, &caps);
-        assert_eq!(r.len(), 1);
-        assert!(r[0].contains("VHDX") && r[0].contains("qcow2"), "{}", r[0]);
+        assert!(refusals(&j, &caps).is_empty(), "{:?}", refusals(&j, &caps));
         j.scheme.method = "full".into();
         assert!(refusals(&j, &caps).is_empty());
 

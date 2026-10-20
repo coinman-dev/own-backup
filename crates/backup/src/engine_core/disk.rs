@@ -543,21 +543,17 @@ fn backup_disk_inner<P: DiskPlatform>(
                         "the disk layout changed since the parent copy — creating a full backup instead");
                     kind = BackupType::Full;
                 }
-                Ok(sc) => match child_refusal(
-                    req.image_format,
-                    req.encryption.is_some(),
-                    req.block_size,
-                    &sc,
-                    P::SOURCE_OS,
-                    P::VHDX_CHAINS,
-                ) {
-                    None => parent = Some((pp.clone(), sc)),
-                    Some(why) => {
-                        warn!(parent = %pp.display(), reason = %why,
+                Ok(sc) => {
+                    match child_refusal(req.image_format, req.encryption.is_some(), req.block_size)
+                    {
+                        None => parent = Some((pp.clone(), sc)),
+                        Some(why) => {
+                            warn!(parent = %pp.display(), reason = %why,
                             "not continuing this whole-disk chain — creating a full backup instead");
-                        kind = BackupType::Full;
+                            kind = BackupType::Full;
+                        }
                     }
-                },
+                }
                 Err(e) => {
                     warn!(parent = %pp.display(), error = %e,
                         "whole-disk parent chain unusable — creating a full backup instead");

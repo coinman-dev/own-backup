@@ -277,9 +277,6 @@ fn backup_volume_inner<P: EnginePlatform>(
                         req.image_format,
                         req.encryption.is_some(),
                         req.block_size,
-                        &sidecar,
-                        P::SOURCE_OS,
-                        P::VHDX_CHAINS,
                     ) {
                         None => parent = Some((parent_path.clone(), sidecar)),
                         Some(why) => {

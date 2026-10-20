@@ -6921,17 +6921,23 @@ mod linux_run_tests {
         .unwrap();
         assert!(std::fs::read(&target).unwrap() == std::fs::read(&src).unwrap());
 
-        // A VHDX job asking for a chain is refused, not turned into fulls.
+        // A VHDX job chains too (CHECKS 12): a full, then a differencing child.
         job.image_format = own_backup_common::types::ImageFormat::Vhdx;
         let fresh = dir.path().join("vhdx");
         std::fs::create_dir(&fresh).unwrap();
         job.dest_folder = fresh.to_str().unwrap().into();
-        let run = perform_backup(&sink, &job, &cancel, None, &passwords, None).await;
-        assert_eq!(run.status, "error");
-        let reasons = crate::capabilities::refusals(&job, &crate::capabilities::linux());
-        assert_eq!(reasons.len(), 1, "{reasons:?}");
-        assert!(run.error.contains(&reasons[0]), "{}", run.error);
-        assert_eq!(std::fs::read_dir(&fresh).unwrap().count(), 0);
+        assert!(crate::capabilities::refusals(&job, &crate::capabilities::linux()).is_empty());
+        let first = perform_backup(&sink, &job, &cancel, None, &passwords, None).await;
+        assert_eq!(first.status, "success", "{}", first.error);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let second = perform_backup(&sink, &job, &cancel, None, &passwords, None).await;
+        assert_eq!(second.status, "success", "{}", second.error);
+        assert_eq!(second.backup_kind, "incremental");
+        assert!(
+            second.image_path.ends_with(".avhdx"),
+            "{}",
+            second.image_path
+        );
     }
 
     /// An encrypted job on Linux (decision 6): with the keys the service

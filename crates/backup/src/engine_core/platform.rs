@@ -174,13 +174,6 @@ pub(crate) trait EnginePlatform {
     /// is copied whole, its metadata never parsed.
     const METADATA_NEEDS_FROZEN: bool;
 
-    /// A VHDX may be continued by a differencing child here. Linux makes its
-    /// children in userspace (`vhdx_format::create_differencing`), and until
-    /// Windows has accepted such a child (CHECKS 12) a Linux VHDX chain could
-    /// be one Windows refuses to open; where this is false, a VHDX copy is
-    /// always a full one.
-    const VHDX_CHAINS: bool;
-
     /// The canonical form of a source path, before anything opens it.
     fn normalize_source(&self, source: &str) -> String;
 

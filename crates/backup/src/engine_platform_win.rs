@@ -95,7 +95,6 @@ impl EnginePlatform for WinPlatform {
 
     const SOURCE_OS: &'static str = "windows";
     const METADATA_NEEDS_FROZEN: bool = false;
-    const VHDX_CHAINS: bool = true;
 
     fn normalize_source(&self, source: &str) -> String {
         normalize_device_path(source)

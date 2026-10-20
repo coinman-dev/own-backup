@@ -1,8 +1,8 @@
 // What the service's backup engine carries out. The wizard offers only that:
 // a job asking for more is refused at run time — after it was saved,
-// scheduled and queued. On Linux that is, for now, VHDX chains (R2),
-// encrypted archives (no key store yet) and a disk named by number rather
-// than by its `/dev/disk/by-id` device.
+// scheduled and queued. On Linux that is a disk named by number rather than
+// by its `/dev/disk/by-id` device, and encrypted archives where there is no
+// key store.
 //
 // The service answers (`backup_capabilities`) from the same table its engine
 // refuses by (`own_backup_core::capabilities`); the window does not decide

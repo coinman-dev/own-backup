@@ -176,7 +176,7 @@ stage_l1() {
 }
 
 # ---------------------------------------------------------------------------
-# L2: qcow2 chains on Linux; VHDX chains are refused until CHECKS 12.
+# L2: qcow2 and VHDX chains on Linux.
 # ---------------------------------------------------------------------------
 stage_l2() {
     local src dst out=$WORK/out/l2
@@ -206,11 +206,22 @@ stage_l2() {
         --parent "$out/v1.qcow2"
     check l2-diff "$(verdict $?)" "differential over the full"
 
-    run l2-vhdx "$CLI" backup "$src" -o "$out/v.avhdx" --format vhdx --kind incremental \
+    # A VHDX chain (CHECKS 12: Windows opens such children) — and none across
+    # container formats.
+    run l2-vhdx-full "$CLI" backup "$src" -o "$out/vf.vhdx" --format vhdx
+    check l2-vhdx-full "$(verdict $?)" "a full VHDX"
+    run l2-vhdx-inc "$CLI" backup "$src" -o "$out/vi.avhdx" --format vhdx --kind incremental \
+        --parent "$out/vf.vhdx" --verify
+    check l2-vhdx-inc "$(verdict $?)" "a VHDX incremental over it, verified"
+    grep -q 'Incremental: .* blocks written' "$EV/l2-vhdx-inc.out"
+    check l2-vhdx-child "$(verdict $?)" "it is a differencing child"
+    run l2-vhdx-cross "$CLI" backup "$src" -o "$out/v.avhdx" --format vhdx --kind incremental \
         --parent "$out/v1.qcow2"
     [[ $? -ne 0 && ! -e $out/v.avhdx ]]
-    check l2-vhdx-refused "$(verdict $?)" "a VHDX chain is refused on Linux"
+    check l2-vhdx-cross-refused "$(verdict $?)" "a VHDX child of a qcow2 parent is refused"
     umnt "$WORK/m-l2"
+
+    restore_and_check l2-vhdx "$out/vi.avhdx" "$dst" ext4 "$WORK/l2-v2.sums"
 
     restore_and_check l2-v2 "$out/v2.qcow2" "$dst" ext4 "$WORK/l2-v2.sums"
     restore_and_check l2-v3 "$out/v3.qcow2" "$dst" ext4 "$WORK/l2-v2.sums"

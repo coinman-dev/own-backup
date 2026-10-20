@@ -221,9 +221,6 @@ impl EnginePlatform for LinuxPlatform {
 
     const SOURCE_OS: &'static str = "linux";
     const METADATA_NEEDS_FROZEN: bool = true;
-    /// Off until Windows has opened, written and merged a child made here
-    /// (CHECKS 12, decision R2): a VHDX job writes full copies, qcow2 chains.
-    const VHDX_CHAINS: bool = false;
 
     /// Device paths are used as given: a job keeps the stable `/dev/disk/…`
     /// name, and resolving it here would record the unstable one.
@@ -285,8 +282,7 @@ impl EnginePlatform for LinuxPlatform {
     fn create_vhdx_child(&self, path: &Path, parent: &Path) -> Result<VhdxWriter> {
         // The has-parent bit and a parent locator with the DataWriteGuid
         // linkage, written in userspace — what CreateVirtualDisk does on
-        // Windows. The engine keeps VHDX chains off on Linux until Windows has
-        // accepted such children (CHECKS 12).
+        // Windows, which opens, writes and merges such a child (CHECKS 12).
         VhdxWriter::create_differencing(path, parent)
     }
 

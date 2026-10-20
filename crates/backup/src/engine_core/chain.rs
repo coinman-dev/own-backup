@@ -46,17 +46,15 @@ pub(crate) fn validate_parent(
 /// - A qcow2 or `.obk` child writes whole blocks into its clusters, and a
 ///   cluster it writes only part of is filled with zeros, not with the
 ///   parent's bytes (`qcow2/io.rs`): its blocks must cover whole clusters.
-/// - A VHDX child only where the platform makes children Windows accepts
-///   ([`super::platform::EnginePlatform::VHDX_CHAINS`]), and never over a
-///   parent another system wrote (decision R2): a cross-system VHDX chain has
-///   not been checked on both sides yet.
+///
+/// A VHDX chain continues on either system, whichever wrote its parent: a
+/// child made in userspace on Linux is opened, written and merged by Windows,
+/// and a Windows chain is read and folded here as Windows reads it (CHECKS 12,
+/// accepted 2026-10-20; owner's decision R2 lifted the same day).
 pub(crate) fn child_refusal(
     format: ImageFormat,
     encrypted: bool,
     block_size: u32,
-    parent: &Sidecar,
-    source_os: &str,
-    vhdx_chains: bool,
 ) -> Option<String> {
     let cluster = 1u32 << crate::qcow2::DEFAULT_CLUSTER_BITS;
     match (format, encrypted) {
@@ -66,14 +64,6 @@ pub(crate) fn child_refusal(
              a child would zero-fill the parent's bytes"
             ))
         }
-        (ImageFormat::Vhdx, false) if !vhdx_chains => {
-            Some("VHDX chains are not written on this system yet (CHECKS 12)".into())
-        }
-        (ImageFormat::Vhdx, false) if parent.manifest.source_os != source_os => Some(format!(
-            "the parent VHDX was written on '{}', this copy on '{source_os}' — \
-             a VHDX chain does not cross systems (decision R2)",
-            parent.manifest.source_os
-        )),
         _ => None,
     }
 }
@@ -312,29 +302,18 @@ mod tests {
 
     #[test]
     fn a_child_is_refused_where_it_would_not_read_back() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut parent = load_sidecar_with_keys(&volume_copy(dir.path()), None).unwrap();
-        parent.manifest.source_os = "linux".into();
-        let refuse = |format, encrypted, block, chains| {
-            child_refusal(format, encrypted, block, &parent, "linux", chains)
-        };
         let mib = 1024 * 1024;
-        assert_eq!(refuse(ImageFormat::Qcow2, false, mib, false), None);
-        assert_eq!(refuse(ImageFormat::Qcow2, true, mib, false), None);
-        assert_eq!(refuse(ImageFormat::Qcow2, false, 64 * 1024, false), None);
+        assert_eq!(child_refusal(ImageFormat::Qcow2, false, mib), None);
+        assert_eq!(child_refusal(ImageFormat::Qcow2, true, mib), None);
+        assert_eq!(child_refusal(ImageFormat::Qcow2, false, 64 * 1024), None);
         // Part of a cluster: the rest would be zeros, not the parent's bytes.
-        assert!(refuse(ImageFormat::Qcow2, false, 4096, true).is_some());
+        assert!(child_refusal(ImageFormat::Qcow2, false, 4096).is_some());
         assert!(
-            refuse(ImageFormat::Vhdx, true, 4096, true).is_some(),
+            child_refusal(ImageFormat::Vhdx, true, 4096).is_some(),
             ".obk is qcow2-based"
         );
-        // VHDX: only where the platform makes children, never across systems.
-        assert_eq!(refuse(ImageFormat::Vhdx, false, 4096, true), None);
-        assert!(refuse(ImageFormat::Vhdx, false, mib, false).is_some());
-        assert!(child_refusal(ImageFormat::Vhdx, false, mib, &parent, "windows", true).is_some());
-        assert_eq!(
-            child_refusal(ImageFormat::Qcow2, false, mib, &parent, "windows", true),
-            None
-        );
+        // A VHDX child takes any block size, on either system.
+        assert_eq!(child_refusal(ImageFormat::Vhdx, false, 4096), None);
+        assert_eq!(child_refusal(ImageFormat::Vhdx, false, mib), None);
     }
 }
