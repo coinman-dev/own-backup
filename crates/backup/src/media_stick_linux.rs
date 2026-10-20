@@ -526,16 +526,11 @@ mod tests {
         );
     }
 
-    /// The whole write on a loop device: an isohybrid image made by xorriso,
-    /// written, read back, the log partition added and formatted, the boot
-    /// sectors of the image untouched. Needs root, `losetup`, `xorriso`,
-    /// isolinux, dosfstools and mtools:
-    /// `sudo -E cargo test -p own-backup-backup media_stick_linux -- --ignored`.
-    #[test]
-    #[ignore = "needs root, losetup, xorriso, isolinux, dosfstools and mtools"]
-    fn real_loop_stick() {
-        let dir = tempfile::tempdir().unwrap();
-        let tree = dir.path().join("tree");
+    /// An isohybrid image in the live-build layout, made by xorriso:
+    /// isohybrid MBR, image partition from LBA 64, the EFI image appended as
+    /// partition 2.
+    fn medium_iso(dir: &Path) -> PathBuf {
+        let tree = dir.join("tree");
         std::fs::create_dir_all(tree.join("isolinux")).unwrap();
         std::fs::create_dir_all(tree.join("live")).unwrap();
         std::fs::copy(
@@ -544,7 +539,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(tree.join("live/filesystem.squashfs"), vec![0xA5u8; 3 << 20]).unwrap();
-        let efi = dir.path().join("efi.img");
+        let efi = dir.join("efi.img");
         std::fs::write(&efi, vec![0u8; 4 << 20]).unwrap();
         assert!(std::process::Command::new("mkfs.vfat")
             .arg(&efi)
@@ -552,21 +547,18 @@ mod tests {
             .unwrap()
             .status
             .success());
-        let iso = dir.path().join("medium.iso");
-        // The live-build layout: isohybrid MBR, image partition from LBA 64,
-        // the EFI image appended as partition 2.
+        let iso = dir.join("medium.iso");
         let st = std::process::Command::new("xorriso")
             .args(["-as", "mkisofs", "-R", "-J", "-l", "-V", "OWNBACKUP"])
             .args(["-isohybrid-mbr", "/usr/lib/ISOLINUX/isohdpfx.bin"])
             .args(["-partition_offset", "16", "-b", "isolinux/isolinux.bin"])
+            .args(["-c", "isolinux/boot.cat", "-no-emul-boot"])
             .args([
-                "-c",
-                "isolinux/boot.cat",
-                "-no-emul-boot",
                 "-boot-load-size",
                 "4",
+                "-boot-info-table",
+                "-eltorito-alt-boot",
             ])
-            .args(["-boot-info-table", "-eltorito-alt-boot"])
             .args([
                 "-e",
                 "--interval:appended_partition_2:all::",
@@ -586,29 +578,58 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&st.stderr)
         );
+        iso
+    }
 
-        let disk = dir.path().join("stick.img");
-        std::fs::File::create(&disk)
-            .unwrap()
-            .set_len(256 << 20)
-            .unwrap();
-        // A previous life: a FAT stick, which the write must replace.
-        let out = std::process::Command::new("losetup")
-            .args(["--show", "-f", "-P"])
-            .arg(&disk)
-            .output()
-            .unwrap();
-        let dev = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        assert!(dev.starts_with("/dev/loop"), "{out:?}");
-        struct Detach(String);
-        impl Drop for Detach {
-            fn drop(&mut self) {
-                let _ = std::process::Command::new("losetup")
-                    .args(["-d", &self.0])
-                    .status();
-            }
+    /// A loop device over a 256 MiB file that was a FAT "superfloppy" stick
+    /// before — the write must replace that, not live beside it.
+    struct LoopStick(String);
+
+    impl LoopStick {
+        fn new(dir: &Path) -> Self {
+            let disk = dir.join("stick.img");
+            std::fs::File::create(&disk)
+                .unwrap()
+                .set_len(256 << 20)
+                .unwrap();
+            assert!(std::process::Command::new("mkfs.vfat")
+                .args(["-F", "32", "-n", "OLDSTICK"])
+                .arg(&disk)
+                .output()
+                .unwrap()
+                .status
+                .success());
+            let out = std::process::Command::new("losetup")
+                .args(["--show", "-f", "-P"])
+                .arg(&disk)
+                .output()
+                .unwrap();
+            let dev = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            assert!(dev.starts_with("/dev/loop"), "{out:?}");
+            Self(dev)
         }
-        let _detach = Detach(dev.clone());
+    }
+
+    impl Drop for LoopStick {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("losetup")
+                .args(["-d", &self.0])
+                .status();
+        }
+    }
+
+    /// The whole write on a loop device: written, read back, the log
+    /// partition added and formatted, the boot sectors of the image
+    /// untouched. Needs root, `losetup`, `xorriso`, isolinux, dosfstools and
+    /// mtools: `sudo -E cargo test -p own-backup-backup media_stick_linux --
+    /// --ignored`.
+    #[test]
+    #[ignore = "needs root, losetup, xorriso, isolinux, dosfstools and mtools"]
+    fn real_loop_stick() {
+        let dir = tempfile::tempdir().unwrap();
+        let iso = medium_iso(dir.path());
+        let stick = LoopStick::new(dir.path());
+        let dev = stick.0.clone();
 
         let mut stages = Vec::new();
         let report = write_image(&iso, &dev, &CancelToken::default(), &mut |s, p| {
@@ -667,5 +688,25 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&copy.stderr)
         );
+    }
+
+    /// Cancelled before the first byte: the write says so, and the stick's
+    /// start is wiped rather than left looking like something it is not.
+    #[test]
+    #[ignore = "needs root, losetup, xorriso, isolinux and dosfstools"]
+    fn real_loop_stick_cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        let iso = medium_iso(dir.path());
+        let stick = LoopStick::new(dir.path());
+        let cancel = CancelToken::default();
+        cancel.cancel();
+        let r = write_image(&iso, &stick.0, &cancel, &mut |_, _| {});
+        assert!(matches!(r, Err(OwnBackupError::Cancelled)), "{r:?}");
+        let mut head = vec![0xFFu8; 1 << 20];
+        std::fs::File::open(&stick.0)
+            .unwrap()
+            .read_exact_at(&mut head, 0)
+            .unwrap();
+        assert!(head.iter().all(|&b| b == 0), "the old start is still there");
     }
 }
