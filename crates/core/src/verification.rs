@@ -83,10 +83,11 @@ pub(crate) fn chain_is_invalid(job: &Job, chain: &own_backup_backup::chains::Cha
 /// password is needed; only the service's local archive key opens OBK.
 pub fn perform(store: &JobStore, job: &Job, cancel: &CancelToken, sink: &dyn EventSink) -> JobRun {
     let keys = store.archive_keys_for_run(job);
-    perform_with(store, job, cancel, |path, index, count| {
+    let key_error_kind = keys.as_ref().err().map(|e| e.kind);
+    let mut run = perform_with(store, job, cancel, |path, index, count| {
         let keys = keys
             .as_ref()
-            .map_err(|message| OwnBackupError::Config(message.clone()))?;
+            .map_err(|e| OwnBackupError::Config(e.message.clone()))?;
         let mut last_percent = u64::MAX;
         let mut last_emit = std::time::Instant::now();
         let progress = |done, total| {
@@ -139,7 +140,15 @@ pub fn perform(store: &JobStore, job: &Job, cancel: &CancelToken, sink: &dyn Eve
             mismatched_blocks,
             error: String::new(),
         })
-    })
+    });
+    // The images could not be opened because the keys could not: say which
+    // kind of failure that was, as a backup run does.
+    if run.status == "error" {
+        if let Some(kind) = key_error_kind {
+            run.error_kind = kind.into();
+        }
+    }
+    run
 }
 
 /// One image against its stored checksums: `(valid, blocks checked, mismatched)`.

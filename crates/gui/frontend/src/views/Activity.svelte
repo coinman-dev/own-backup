@@ -165,6 +165,11 @@
             {#if r.status === 'error' && r.error}
               <div class="note">{r.error}</div>
             {/if}
+            {#if r.status === 'error' && r.error_kind === 'key_protection'}
+              <div class="note">{m.run_error_key_protection()}</div>
+            {:else if r.status === 'error' && r.error_kind === 'archive_reauthorize'}
+              <div class="note">{m.run_error_reauthorize()}</div>
+            {/if}
             {#if r.excluded_entries_kept}
               <div class="note">{r.excluded_entries_kept}</div>
             {/if}

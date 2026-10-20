@@ -172,8 +172,13 @@ impl CredentialSealer for SystemdCreds {
     }
 }
 
+/// `systemd-creds` (and the TPM behind it) could not seal or open the
+/// machine key: a failure of the machine's key protection, told apart from a
+/// lost authorization by its kind.
 fn no_store(detail: impl std::fmt::Display) -> OwnBackupError {
-    OwnBackupError::Encryption(tr!("seal_local_linux.no_machine_key", error = detail).into_owned())
+    OwnBackupError::KeyProtection(
+        tr!("seal_local_linux.no_machine_key", error = detail).into_owned(),
+    )
 }
 
 fn os(context: &str) -> OwnBackupError {
@@ -875,6 +880,8 @@ pub(super) mod tests {
         pub(crate) host: [u8; 32],
         pub(crate) with: Option<KeyProtection>,
         pub(crate) seals: AtomicUsize,
+        /// Fail every unseal as `systemd-creds` does when the TPM is gone.
+        pub(crate) broken: std::sync::atomic::AtomicBool,
     }
 
     impl FakeCreds {
@@ -883,6 +890,7 @@ pub(super) mod tests {
                 host: [host; 32],
                 with: Some(KeyProtection::Host),
                 seals: AtomicUsize::new(0),
+                broken: Default::default(),
             })
         }
     }
@@ -900,6 +908,9 @@ pub(super) mod tests {
             Ok(out)
         }
         fn unseal(&self, blob: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+            if self.broken.load(Ordering::SeqCst) {
+                return Err(no_store("systemd-creds decrypt: TPM2 device not found"));
+            }
             aead_open(
                 &self.host,
                 blob[..12].try_into().unwrap(),
@@ -1094,6 +1105,7 @@ pub(super) mod tests {
             host: [6; 32],
             with: None,
             seals: AtomicUsize::new(0),
+            broken: Default::default(),
         });
         let b = backend(data.path(), &creds);
         let e = b.protect(b"binding", &[7; 32]).unwrap_err().to_string();

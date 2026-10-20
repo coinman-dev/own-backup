@@ -509,6 +509,11 @@
       <!-- When: the stats above now date the last COPY, and without its own
            time this banner read as if that copy had failed. -->
       <div class="banner err">{@render errIcon()}<span>{m.dash_error({ date: formatDate(lastRun.finished_at), error: lastRun.error ?? '' })}</span></div>
+      {#if lastRun.error_kind === 'key_protection'}
+        <div class="banner info"><span>{m.run_error_key_protection()}</span></div>
+      {:else if lastRun.error_kind === 'archive_reauthorize'}
+        <div class="banner info"><span>{m.run_error_reauthorize()}</span></div>
+      {/if}
     {/if}
   {/if}
 

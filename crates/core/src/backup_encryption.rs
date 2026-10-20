@@ -12,6 +12,34 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Job, JobStore};
 
+/// [`crate::JobRun::error_kind`]: the job's local authorization is missing or
+/// no longer opens — authorizing it again is the remedy.
+pub const ERROR_KIND_REAUTHORIZE: &str = "archive_reauthorize";
+/// [`crate::JobRun::error_kind`]: the machine's key protection (TPM,
+/// `systemd-creds`) failed — authorizing again would fail the same way.
+pub const ERROR_KIND_KEY_PROTECTION: &str = "key_protection";
+
+/// Why the keys of an encrypted run could not be opened, and which kind of
+/// failure that is (`ERROR_KIND_*`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunKeyError {
+    pub message: String,
+    pub kind: &'static str,
+}
+
+impl RunKeyError {
+    /// The kind follows the error's variant, never its text.
+    fn from_open(e: &OwnBackupError) -> Self {
+        RunKeyError {
+            message: e.to_string(),
+            kind: match e {
+                OwnBackupError::KeyProtection(_) => ERROR_KIND_KEY_PROTECTION,
+                _ => ERROR_KIND_REAUTHORIZE,
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArchiveEncryption {
@@ -148,10 +176,11 @@ impl JobStore {
         let data_dir = self.jobs_path.parent().ok_or_else(|| {
             OwnBackupError::Config(tr!("backup_encryption.no_state_dir").into_owned())
         })?;
-        let keys = ServiceKeyStore::new(data_dir).map_err(|e| {
-            OwnBackupError::Encryption(
+        let keys = ServiceKeyStore::new(data_dir).map_err(|e| match e {
+            OwnBackupError::KeyProtection(_) => e,
+            e => OwnBackupError::Encryption(
                 tr!("backup_encryption.reauthorize_error", error = e).into_owned(),
-            )
+            ),
         })?;
         keys.open(&job.id, &encryption.portable_key, &encryption.local_key)
             .map(Some)
@@ -166,23 +195,26 @@ impl JobStore {
     pub(crate) fn archive_keys_for_run(
         &self,
         job: &Job,
-    ) -> std::result::Result<Option<ArchiveKeys>, String> {
+    ) -> std::result::Result<Option<ArchiveKeys>, RunKeyError> {
         let Some(encryption) = &job.archive_encryption else {
             return Ok(None);
         };
         let private = self
             .scheduled_archive_key(job)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| tr!("backup_encryption.reauthorize").into_owned())?;
+            .map_err(|e| RunKeyError::from_open(&e))?
+            .ok_or_else(|| RunKeyError {
+                message: tr!("backup_encryption.reauthorize").into_owned(),
+                kind: ERROR_KIND_REAUTHORIZE,
+            })?;
         ArchiveKeys::from_private(encryption.portable_key.clone(), private)
             .map(Some)
-            .map_err(|e| e.to_string())
+            .map_err(|e| RunKeyError::from_open(&e))
     }
 
     /// The message a run dies with when its keys cannot be opened.
     #[cfg(test)]
     pub(crate) fn archive_encryption_run_error(&self, job: &Job) -> Option<String> {
-        self.archive_keys_for_run(job).err()
+        self.archive_keys_for_run(job).err().map(|e| e.message)
     }
 }
 
@@ -516,6 +548,28 @@ mod tests {
         assert!(!temp.path().join("jobs.json").exists());
     }
 
+    /// The kind of a key failure follows the error's variant: the machine's
+    /// key protection failing is not "authorize again", whatever the words.
+    #[test]
+    fn a_key_failure_is_classified_by_its_variant_not_its_words() {
+        let tpm = RunKeyError::from_open(&OwnBackupError::KeyProtection("TPM2".into()));
+        assert_eq!(tpm.kind, ERROR_KIND_KEY_PROTECTION);
+        assert!(tpm.message.contains("TPM2"));
+        // Worded like a TPM failure, but a lost authorization by its kind.
+        let gone =
+            RunKeyError::from_open(&OwnBackupError::Encryption("TPM2 device not found".into()));
+        assert_eq!(gone.kind, ERROR_KIND_REAUTHORIZE);
+        // The kind travels with the run, and only when there is one.
+        let run = crate::JobRun {
+            error_kind: ERROR_KIND_KEY_PROTECTION.into(),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&run).unwrap();
+        assert_eq!(json["error_kind"], "key_protection");
+        let plain = serde_json::to_value(crate::JobRun::default()).unwrap();
+        assert!(plain.get("error_kind").is_none());
+    }
+
     #[tokio::test]
     async fn queued_encrypted_job_records_failure_without_creating_an_image() {
         use std::sync::{atomic::AtomicBool, Arc, Mutex};
@@ -555,6 +609,14 @@ mod tests {
         let runs = sink.0.lock().unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].status, "error");
+        // Which of the two depends on this machine's key protection; either
+        // way the run says it by kind, not only in words.
+        assert!(
+            [ERROR_KIND_REAUTHORIZE, ERROR_KIND_KEY_PROTECTION]
+                .contains(&runs[0].error_kind.as_str()),
+            "{:?}",
+            runs[0].error_kind
+        );
         assert!(runs[0].image_path.is_empty());
         assert!(!temp.path().join("images").exists());
         assert!(queue.snapshot().current.is_none());

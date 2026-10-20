@@ -553,6 +553,12 @@ export interface JobRun {
    *  (a snapshot store allocated in full, the service's key directory left
    *  out). Absent when there is nothing to say. */
   notes?: string[];
+  /** What kind of failure `error` is, decided by the service from the
+   *  error's structure: `archive_reauthorize` — authorizing the job again
+   *  helps; `key_protection` — the machine's key protection (TPM,
+   *  systemd-creds) failed, and authorizing again would not. Absent
+   *  otherwise. */
+  error_kind?: 'archive_reauthorize' | 'key_protection' | string;
   /** Set by the service while this run is not in its history files (the
    *  write failed and is retried before the next run) — said in words. */
   record_error?: string;

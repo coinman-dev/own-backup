@@ -63,6 +63,13 @@ pub enum OwnBackupError {
     /// restore.
     #[error("Not implemented: {0}")]
     NotImplemented(String),
+
+    /// What protects the service's keys on this machine failed — the TPM or
+    /// `systemd-creds` on Linux. Not a lost authorization: authorizing the
+    /// job again needs the same protection and fails the same way, so the
+    /// remedy is the machine's, not the job's.
+    #[error("Key protection unavailable: {0}")]
+    KeyProtection(String),
 }
 
 pub type Result<T> = std::result::Result<T, OwnBackupError>;

@@ -594,6 +594,14 @@ pub struct JobRun {
     /// of the job can.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub refused: bool,
+    /// What kind of failure `error` is, for the window to act on — decided by
+    /// the error's structure, never by its words. Empty for every failure
+    /// without a kind of its own. `archive_reauthorize`: the job's local
+    /// authorization is missing or no longer opens; authorizing it again
+    /// helps. `key_protection`: the machine's key protection itself failed
+    /// (TPM, `systemd-creds`); authorizing again would fail the same way.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error_kind: String,
     /// Why this run is not in the history files although it happened — set
     /// only on what the store hands out while the write keeps failing, never
     /// written to those files itself (`JobStore::unrecorded`).
@@ -2128,11 +2136,12 @@ pub async fn run_queue_worker(
             run
         } else {
             match store.archive_keys_for_run(&job) {
-                Err(message) => {
+                Err(e) => {
                     let mut run = run_skeleton(&job);
                     run.finished_at = chrono::Utc::now().to_rfc3339();
                     run.status = "error".into();
-                    run.error = message;
+                    run.error = e.message;
+                    run.error_kind = e.kind.into();
                     run
                 }
                 Ok(keys) => {

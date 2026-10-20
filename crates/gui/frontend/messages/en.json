@@ -160,6 +160,8 @@
   ],
   "dash_excl_ignored_rest": "({rules}): {reason}. Everything they cover is in the backup.",
   "dash_error": "Error ({date}): {error}",
+  "run_error_reauthorize": "The authorization for this job's automatic backups is missing or no longer opens. Authorize them again: job menu → \"Authorize automatic backups again…\".",
+  "run_error_key_protection": "The service's key protection on this machine failed (TPM or systemd-creds). Authorizing the job again will not help: it needs the same protection. Check that the TPM is enabled and visible to the system (systemd-creds has-tpm2), then run the backup again.",
   "dash_queued": "Queued to run…",
   "dash_schedule": "Schedule: {schedule}",
   "dash_sched_none": "not set (run manually)",

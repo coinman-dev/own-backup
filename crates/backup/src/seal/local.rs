@@ -184,9 +184,15 @@ impl ServiceKeyStore {
         portable: &SealedPrivateKey,
         reference: &LocalKeyRef,
     ) -> Result<JobPrivateKey> {
-        self.open_inner(job_id, portable, reference).map_err(|e| {
-            OwnBackupError::Encryption(tr!("seal_local.reauthorize_job", error = e).into_owned())
-        })
+        self.open_inner(job_id, portable, reference)
+            .map_err(|e| match e {
+                // The machine's key protection failed: authorizing again would
+                // fail the same way, so it is not offered as the remedy.
+                OwnBackupError::KeyProtection(_) => e,
+                e => OwnBackupError::Encryption(
+                    tr!("seal_local.reauthorize_job", error = e).into_owned(),
+                ),
+            })
     }
 
     fn open_inner(
@@ -529,5 +535,39 @@ mod tests {
             .any(|w| w == pair.private.storage_bytes()));
         assert!(reopened.retain(&Default::default()).unwrap() == vec![reference.id]);
         assert!(reopened.open("job", &key, &reference).is_err());
+    }
+
+    /// A TPM or `systemd-creds` failure is the machine's key protection
+    /// failing, not a lost authorization: it keeps its own kind, and is not
+    /// worded as "authorize the job again" — that would fail the same way.
+    /// A key that is simply gone still is.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_key_protection_failure_is_not_a_reauthorization() {
+        use super::platform::tests::{backend, data_dir, FakeCreds};
+        use std::sync::atomic::Ordering;
+        let data = data_dir();
+        let creds = FakeCreds::new(1);
+        let keys = ServiceKeyStore {
+            backend: Box::new(backend(data.path(), &creds)),
+            transaction: Mutex::new(()),
+        };
+        let (pair, _, key) = portable();
+        let reference = keys
+            .authorize_and_commit("job", &key, &pair.private, Ok)
+            .unwrap();
+        creds.broken.store(true, Ordering::SeqCst);
+        match keys.open("job", &key, &reference) {
+            Err(OwnBackupError::KeyProtection(m)) => {
+                assert!(m.contains("TPM2 device not found"), "{m}")
+            }
+            other => panic!("expected KeyProtection, got {other:?}"),
+        }
+        creds.broken.store(false, Ordering::SeqCst);
+        keys.revoke(&reference).unwrap();
+        assert!(matches!(
+            keys.open("job", &key, &reference),
+            Err(OwnBackupError::Encryption(_))
+        ));
     }
 }
