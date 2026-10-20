@@ -134,7 +134,7 @@ stage_stick() {
     # An internal disk is refused even when asked for by name.
     if ! "${vm[@]}" ssh -- sudo own-backup-cli media write-stick --iso /tmp/own-backup-media.iso \
         --device /dev/vda >"$RUN/evidence/write-internal.txt" 2>&1 \
-        && grep -q 'не флешка\|not a stick' "$RUN/evidence/write-internal.txt"; then
+        && grep -q 'не флешка\|not a stick\|нет в списке флешек\|not in the stick list' "$RUN/evidence/write-internal.txt"; then
         check stick:internal-refused PASS "the system disk is refused"
     else
         check stick:internal-refused FAIL "the system disk was not refused"
