@@ -499,12 +499,24 @@ stage_stack() {
     [[ -n $t3 && $(mdadm --examine --export "$t3" | sed -n 's/^MD_UUID=//p') != "$md_old" ]] \
         && [[ $(mdadm --examine --export "$t3" | sed -n 's/^MD_UUID=//p') == $(mdadm --examine --export "$t4" | sed -n 's/^MD_UUID=//p') ]]
     check st-md "$(verdict $?)" "both restored RAID members share a new array UUID"
-    local arr
-    arr=$(mdadm --detail --scan 2>/dev/null | grep -v obkstack | awk '{print $2}' | head -1)
-    if [[ -z $arr ]]; then
-        mdadm --assemble /dev/md127 --run "$t3" "$t4" >"$EV/st-md-assemble.out" 2>&1 && arr=/dev/md127
+    # The restored array keeps the md NAME (…:obkstack) — only its UUID is
+    # new — so it cannot be told from the machine's own one by name, and
+    # md127 is the machine's own. udev may have assembled the restored
+    # members already once the restore's hold went away: take whatever holds
+    # them, else assemble them under a name of our own.
+    python3 -c "import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if any(c.get('kind')=='ext' and '/dev/md' in c.get('device','') for c in d.get('identity_changes',[])) else 1)" "$EV/st-change.out"
+    check st-md-fs-reply "$(verdict $?)" "the reply lists the filesystem inside the restored array as changed"
+    local arr= holder
+    holder=$(ls "/sys/class/block/$(basename "$t3")/holders" 2>/dev/null | head -1)
+    if [[ -n $holder ]]; then
+        arr=/dev/$holder
+    elif mdadm --assemble /dev/md100 --run "$t3" "$t4" >"$EV/st-md-assemble.out" 2>&1; then
+        arr=/dev/md100
     fi
-    [[ -n $arr && $(blkid -p -o value -s UUID "$arr") != "$mdfs_old" ]]
+    udevadm settle
+    echo "array: $arr" >>"$EV/st-md-assemble.out"
+    [[ -n $arr ]] && blkid -p "$arr" >>"$EV/st-md-assemble.out" 2>&1
+    [[ -n $arr && -n $(blkid -p -o value -s UUID "$arr") && $(blkid -p -o value -s UUID "$arr") != "$mdfs_old" ]]
     check st-md-fs "$(verdict $?)" "the filesystem inside the restored array has a new UUID"
     [[ -n $arr ]] && mdadm --stop "$arr" >/dev/null 2>&1
     [[ -n $(cryptsetup luksUUID "$l1") && $(blkid -p -o value -s UUID /dev/obkstack/data) == "$lv_old" \

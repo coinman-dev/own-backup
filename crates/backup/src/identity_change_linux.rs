@@ -20,7 +20,12 @@
 //! What lies inside a container is a device too: a LUKS container whose
 //! passphrase came with the restore is opened, a renamed volume group is
 //! activated, an array is assembled — and the filesystems found there are
-//! treated the same way. Those stacked devices are created under a udev hold
+//! treated the same way, with one difference: inside a container whose own
+//! identity clashed, everything is a copy of what the machine's original
+//! container holds, so it is changed whether or not that original is open
+//! right now (a stopped array, an inactive volume group and a closed LUKS
+//! container show nothing of their contents to the machine, yet starting
+//! them later would meet the copy). Those stacked devices are created under a udev hold
 //! of their own (`udev_hold_linux::dm_name_rule` and the others): until their
 //! identities are changed they would otherwise get the machine's own
 //! `/dev/disk/by-uuid` links. They are closed again before the run ends, in
@@ -96,8 +101,9 @@ pub trait MountedFs {
 
 /// What the run needs from the machine besides its programs.
 pub trait Host {
-    /// The identities the device at `node` carries now.
-    fn identities_on(&mut self, node: &str) -> Vec<Identity>;
+    /// The identities the device at `node` carries now. A device that cannot
+    /// be read is an error, not a device without identities.
+    fn identities_on(&mut self, node: &str) -> Result<Vec<Identity>>;
     /// A fresh random UUID, lowercase and dashed.
     fn new_uuid(&mut self) -> String;
     /// Mount `node` read-write as `fstype` with `opts`.
@@ -128,6 +134,9 @@ struct Dev {
     node: String,
     part_index: Option<u32>,
     passphrase: Option<String>,
+    /// Inside a restored container whose own identity clashed: what it
+    /// holds is the machine's too (see the module documentation).
+    in_clashing_container: bool,
 }
 
 /// A filesystem seen on a restored device, for the editing pass.
@@ -181,6 +190,7 @@ pub fn change_identities(
             node: d.node.clone(),
             part_index: d.part_index,
             passphrase: d.passphrase.clone(),
+            in_clashing_container: false,
         })
         .collect();
     let mut result = run.walk(devs);
@@ -245,6 +255,12 @@ impl Run<'_> {
                 .any(|ids| ids.iter().any(|p| p.kind == id.kind && p.key == id.key))
     }
 
+    /// Must `id`, found on `dev`, change? When the machine carries it, or
+    /// when `dev` is inside a container whose identity clashed.
+    fn must_change(&self, dev: &Dev, id: &Identity) -> bool {
+        self.clashes(id) || (dev.in_clashing_container && !id.key.is_empty())
+    }
+
     fn record(&mut self, kind: IdentityKind, old: &str, new: &str, dev: &Dev) {
         info!(kind = kind_slug(kind), old, new, node = %dev.node, "identity changed");
         self.out.changed.push(Changed {
@@ -261,11 +277,12 @@ impl Run<'_> {
         let mut arrays: BTreeMap<String, (Identity, Vec<Dev>)> = BTreeMap::new();
         let mut groups: BTreeMap<String, (Vec<Identity>, Vec<Dev>)> = BTreeMap::new();
         for dev in devs {
-            let ids = self.host.identities_on(&dev.node);
+            let ids = self.host.identities_on(&dev.node)?;
+            info!(node = %dev.node, identities = ?ids, "restored device read");
             if let Some(md) = ids.iter().find(|i| i.kind == IdentityKind::Md) {
                 // A member's data may begin with a filesystem (v1.0, 0.90):
                 // that one is the array's, changed through the array.
-                if self.clashes(md) {
+                if self.must_change(&dev, md) {
                     arrays
                         .entry(md.key.clone())
                         .or_insert_with(|| (md.clone(), Vec::new()))
@@ -285,7 +302,7 @@ impl Run<'_> {
                 .cloned()
                 .collect();
             if !lvm.is_empty() {
-                if lvm.iter().any(|i| self.clashes(i)) {
+                if lvm.iter().any(|i| self.must_change(&dev, i)) {
                     let vg = lvm
                         .iter()
                         .find(|i| i.kind == IdentityKind::LvmVg)
@@ -303,15 +320,16 @@ impl Run<'_> {
                 continue;
             }
             if let Some(luks) = ids.iter().find(|i| i.kind == IdentityKind::Luks) {
-                if self.clashes(luks) {
+                let clashing = self.must_change(&dev, luks);
+                if clashing {
                     self.change_luks(&dev, luks)?;
                 }
                 match &dev.passphrase {
                     Some(pw) => {
-                        let inner = self.open_luks(&dev, pw)?;
+                        let inner = self.open_luks(&dev, pw, clashing)?;
                         self.walk(vec![inner])?;
                     }
-                    None if self.clashes(luks) => self.out.notes.push(
+                    None if clashing => self.out.notes.push(
                         tr!(
                             "identity_change_linux.luks_inside_unchecked",
                             node = dev.node.as_str()
@@ -329,7 +347,7 @@ impl Run<'_> {
                 )
             }) {
                 let mut key = id.key.clone();
-                if self.clashes(id) {
+                if self.must_change(&dev, id) {
                     if let Some(new) = self.change_fs(&dev, id)? {
                         key = Identity::new(id.kind, &new).key;
                     }
@@ -416,7 +434,8 @@ impl Run<'_> {
     }
 
     /// Open the container with the restore's passphrase, under a hold.
-    fn open_luks(&mut self, dev: &Dev, passphrase: &str) -> Result<Dev> {
+    /// `clashing`: the container's own identity clashed.
+    fn open_luks(&mut self, dev: &Dev, passphrase: &str, clashing: bool) -> Result<Dev> {
         if !self.dm_held {
             let guard = self
                 .host
@@ -439,6 +458,7 @@ impl Run<'_> {
             node: format!("/dev/mapper/{name}"),
             part_index: dev.part_index,
             passphrase: None,
+            in_clashing_container: clashing,
         })
     }
 
@@ -471,6 +491,7 @@ impl Run<'_> {
             node: array,
             part_index: members.first().and_then(|m| m.part_index),
             passphrase: None,
+            in_clashing_container: true,
         })
     }
 
@@ -505,12 +526,12 @@ impl Run<'_> {
             .map(|p| {
                 let pv = self
                     .host
-                    .identities_on(&p.node)
+                    .identities_on(&p.node)?
                     .into_iter()
                     .find(|i| i.kind == IdentityKind::LvmPv);
-                (p.clone(), pv)
+                Ok((p.clone(), pv))
             })
-            .collect();
+            .collect::<Result<_>>()?;
         run_ok(self.tools, "vgimportclone", &a)?;
 
         // What vgimportclone actually wrote: the name (it may add a number)
@@ -518,7 +539,7 @@ impl Run<'_> {
         let mut new_name = base.clone();
         let mut new_uuid = None;
         for (dev, old_pv) in &old_pvs {
-            let now = self.host.identities_on(&dev.node);
+            let now = self.host.identities_on(&dev.node)?;
             if let Some(n) = now.iter().find(|i| i.kind == IdentityKind::LvmVgName) {
                 new_name = n.shown.clone();
             }
@@ -574,6 +595,7 @@ impl Run<'_> {
                 node,
                 part_index: first.part_index,
                 passphrase: None,
+                in_clashing_container: true,
             })
             .collect())
     }
@@ -717,8 +739,8 @@ impl MountedFs for RealMount {
 }
 
 impl Host for SystemHost {
-    fn identities_on(&mut self, node: &str) -> Vec<Identity> {
-        crate::identity_check_linux::identities_on(node).unwrap_or_default()
+    fn identities_on(&mut self, node: &str) -> Result<Vec<Identity>> {
+        crate::identity_check_linux::identities_on(node)
     }
 
     fn new_uuid(&mut self) -> String {
@@ -842,8 +864,8 @@ mod tests {
     }
 
     impl Host for FakeHost {
-        fn identities_on(&mut self, node: &str) -> Vec<Identity> {
-            self.ids.get(node).cloned().unwrap_or_default()
+        fn identities_on(&mut self, node: &str) -> Result<Vec<Identity>> {
+            Ok(self.ids.get(node).cloned().unwrap_or_default())
         }
         fn new_uuid(&mut self) -> String {
             self.uuids += 1;
@@ -1073,14 +1095,14 @@ mod tests {
             after: Vec<Identity>,
         }
         impl Host for Seq<'_> {
-            fn identities_on(&mut self, node: &str) -> Vec<Identity> {
+            fn identities_on(&mut self, node: &str) -> Result<Vec<Identity>> {
                 if node == "/dev/sdb3" {
                     self.calls += 1;
-                    return if self.calls <= 2 {
+                    return Ok(if self.calls <= 2 {
                         self.old.clone()
                     } else {
                         self.after.clone()
-                    };
+                    });
                 }
                 self.inner.identities_on(node)
             }
@@ -1175,6 +1197,101 @@ mod tests {
         assert_eq!(tools.calls[1].1, args(["--stop", "/dev/md126"]));
         assert_eq!(out.changed.len(), 2, "both members");
         assert!(host.holds[0][0].contains("KERNEL==\"md126\""));
+    }
+
+    /// The array assembled from the restored members is read like any
+    /// restored device, and its filesystem is changed even when the machine's
+    /// own array is not assembled (its filesystem then shows nowhere): it is
+    /// the same filesystem, and assembling the original later would meet it.
+    #[test]
+    fn the_filesystem_inside_a_restored_array_gets_a_new_uuid() {
+        let md = "1a2b3c4d:5e6f4a7b:8c9d0e1f:2a3b4c5d";
+        let inner = "77777777-1111-4222-8333-444444444444";
+        let mut host = FakeHost::default();
+        for n in ["/dev/sdb3", "/dev/sdb4"] {
+            host.ids.insert(n.into(), vec![id(IdentityKind::Md, md)]);
+        }
+        host.ids
+            .insert("/dev/md126".into(), vec![id(IdentityKind::Ext, inner)]);
+        // The machine: the original members only — no array, no ext4.
+        let present = machine(vec![id(IdentityKind::Md, md)]);
+        let mut tools = FakeTools::default();
+        let out = change_identities(
+            &mut tools,
+            &mut host,
+            &present,
+            &[dev("/dev/sdb3", 3), dev("/dev/sdb4", 4)],
+            false,
+        );
+        assert_eq!(out.failed, None);
+        assert_eq!(
+            programs(&tools),
+            vec!["mdadm", "e2fsck", "tune2fs", "mdadm"],
+            "assemble, change the ext4 inside, stop"
+        );
+        assert_eq!(tools.calls[2].1[2], "/dev/md126");
+        let ext = out
+            .changed
+            .iter()
+            .find(|c| c.kind == IdentityKind::Ext)
+            .expect("the ext4 inside the array changed");
+        assert_eq!((ext.node.as_str(), ext.part_index), ("/dev/md126", Some(3)));
+
+        // A filesystem on a plain restored partition the machine does not
+        // have is still left alone.
+        let mut host = FakeHost::default();
+        host.ids
+            .insert("/dev/sdb5".into(), vec![id(IdentityKind::Ext, inner)]);
+        let mut tools = FakeTools::default();
+        let out = change_identities(
+            &mut tools,
+            &mut host,
+            &present,
+            &[dev("/dev/sdb5", 5)],
+            false,
+        );
+        assert_eq!((out.failed, out.changed.len()), (None, 0));
+        assert!(tools.calls.is_empty());
+    }
+
+    /// A restored device that cannot be read fails the run instead of
+    /// passing for one without identities.
+    #[test]
+    fn an_unreadable_restored_device_fails_the_run() {
+        struct Broken;
+        impl Host for Broken {
+            fn identities_on(&mut self, node: &str) -> Result<Vec<Identity>> {
+                Err(OwnBackupError::Device(format!("open({node}): EIO")))
+            }
+            fn new_uuid(&mut self) -> String {
+                String::new()
+            }
+            fn mount(&mut self, _: &str, _: &str, _: &str) -> Result<Box<dyn MountedFs>> {
+                unreachable!()
+            }
+            fn hold(&mut self, _: Vec<String>) -> Result<Box<dyn std::any::Any>> {
+                Ok(Box::new(()))
+            }
+            fn settle(&mut self) {}
+            fn free_md_name(&mut self) -> String {
+                "md126".into()
+            }
+            fn kernel(&self) -> Option<KernelVersion> {
+                None
+            }
+            fn btrfs_devices(&mut self, _node: &str) -> u64 {
+                1
+            }
+        }
+        let mut tools = FakeTools::default();
+        let out = change_identities(
+            &mut tools,
+            &mut Broken,
+            &machine(Vec::new()),
+            &[dev("/dev/sdb1", 1)],
+            false,
+        );
+        assert!(out.failed.as_deref().is_some_and(|e| e.contains("EIO")));
     }
 
     #[test]
@@ -1305,7 +1422,7 @@ mod tests {
     fn source_of(nodes: &[&str]) -> BTreeMap<String, Vec<Identity>> {
         let mut ids = Vec::new();
         for n in nodes {
-            ids.extend(SystemHost.identities_on(n));
+            ids.extend(SystemHost.identities_on(n).unwrap());
         }
         let mut m = BTreeMap::new();
         m.insert("sda9".to_string(), ids);
@@ -1344,7 +1461,7 @@ mod tests {
         assert_eq!(out.failed, None, "{out:?}");
         assert_eq!(out.changed.len(), 3, "{out:?}");
         for c in &out.changed {
-            let now = SystemHost.identities_on(&c.node);
+            let now = SystemHost.identities_on(&c.node).unwrap();
             assert!(
                 now.iter()
                     .any(|i| i.kind == c.kind && i.key == Identity::new(c.kind, &c.new).key),
@@ -1384,7 +1501,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let xfs = image(dir.path(), "xfs.img", 320);
         sh(&format!("mkfs.xfs -q -f {xfs}"));
-        let xfs_uuid = SystemHost.identities_on(&xfs)[0].shown.clone();
+        let xfs_uuid = SystemHost.identities_on(&xfs).unwrap()[0].shown.clone();
         let tree = dir.path().join("tree");
         std::fs::create_dir_all(tree.join("etc")).unwrap();
         let root_uuid = "0a0b0c0d-1111-4222-8333-444455556666";
