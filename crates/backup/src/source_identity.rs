@@ -48,17 +48,42 @@ pub struct Extent {
     pub disk: u32,
     pub offset: u64,
     pub length: u64,
+    /// Set when the range was reached through a file-backed device (a Linux
+    /// loop device): that device and the range of it. `disk`/`offset`/
+    /// `length` are then the whole filesystem holding the backing file —
+    /// where the bytes may be, not where they are.
+    pub through: Option<Through>,
+}
+
+/// A byte range of a file-backed device, by its device number (as
+/// `linux::disk_key` on Linux).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Through {
+    pub device: u32,
+    pub offset: u64,
+    pub length: u64,
+}
+
+fn ranges_overlap(a: u64, a_len: u64, b: u64, b_len: u64) -> bool {
+    a < b.saturating_add(b_len) && b < a.saturating_add(a_len)
 }
 
 impl Extent {
     /// Do these two ranges share a byte?
+    ///
+    /// Two ranges reached through the same file-backed device are compared
+    /// on that device: distinct offsets of one file are distinct bytes,
+    /// however the filesystem holding it lays them out. Two logical volumes
+    /// of a physical volume that is a loop device are two places, not "the
+    /// whole filesystem the image file is on" twice.
     pub fn overlaps(&self, other: &Extent) -> bool {
-        if self.disk != other.disk {
-            return false;
+        if let (Some(a), Some(b)) = (self.through, other.through) {
+            if a.device == b.device {
+                return ranges_overlap(a.offset, a.length, b.offset, b.length);
+            }
         }
-        let a_end = self.offset.saturating_add(self.length);
-        let b_end = other.offset.saturating_add(other.length);
-        self.offset < b_end && other.offset < a_end
+        self.disk == other.disk
+            && ranges_overlap(self.offset, self.length, other.offset, other.length)
     }
 }
 
@@ -89,6 +114,7 @@ pub fn parse_part_spec(device: &str) -> Option<Extent> {
         disk,
         offset,
         length,
+        through: None,
     })
 }
 
@@ -256,6 +282,7 @@ mod win {
                 disk: e.disk_number,
                 offset: e.offset,
                 length: e.length,
+                through: None,
             })
             .collect();
         (!out.is_empty()).then_some(out)
@@ -435,7 +462,8 @@ mod tests {
             Some(Extent {
                 disk: 4,
                 offset: 1048576,
-                length: 1000
+                length: 1000,
+                through: None,
             })
         );
         assert_eq!(parse_part_spec("C:"), None);
@@ -460,14 +488,45 @@ mod tests {
             disk: 0,
             offset: 1024 * 1024,
             length: 100 * 1024 * 1024,
+            through: None,
         };
         let b = Extent {
             disk: 0,
             offset: 200 * 1024 * 1024,
             length: 100 * 1024 * 1024,
+            through: None,
         };
         assert!(!a.overlaps(&b));
         assert!(!b.overlaps(&a));
+    }
+
+    /// Ranges reached through one file-backed device are compared on it;
+    /// through different ones, or one of them not, on the disks underneath.
+    #[test]
+    fn ranges_through_one_loop_device_are_compared_on_it() {
+        let fs = |through| Extent {
+            disk: 7,
+            offset: 0,
+            length: 1 << 30,
+            through,
+        };
+        let on = |device, offset, length| {
+            Some(Through {
+                device,
+                offset,
+                length,
+            })
+        };
+        let a = fs(on(6, 0, 4096));
+        let b = fs(on(6, 4096, 4096));
+        assert!(!a.overlaps(&b), "two places of one loop device");
+        assert!(a.overlaps(&fs(on(6, 2048, 4096))));
+        assert!(a.overlaps(&fs(on(9, 4096, 4096))), "another loop device");
+        assert!(a.overlaps(&fs(None)), "the filesystem holding the file");
+        assert!(!a.overlaps(&Extent {
+            disk: 8,
+            ..fs(None)
+        }));
     }
 
     #[test]
@@ -476,6 +535,7 @@ mod tests {
             disk: 2,
             offset: 1024,
             length: 4096,
+            through: None,
         };
         assert!(a.overlaps(&a));
         // Touching but not sharing a byte is not an overlap.
@@ -483,6 +543,7 @@ mod tests {
             disk: 2,
             offset: 1024 + 4096,
             length: 4096,
+            through: None,
         };
         assert!(!a.overlaps(&after));
         // One byte inside is.
@@ -490,6 +551,7 @@ mod tests {
             disk: 2,
             offset: 1024 + 4095,
             length: 4096,
+            through: None,
         };
         assert!(a.overlaps(&inside));
     }
@@ -500,11 +562,13 @@ mod tests {
             disk: 0,
             offset: 1024,
             length: 4096,
+            through: None,
         };
         let b = Extent {
             disk: 1,
             offset: 1024,
             length: 4096,
+            through: None,
         };
         assert!(!a.overlaps(&b));
     }
@@ -517,11 +581,13 @@ mod tests {
             disk: 0,
             offset: u64::MAX - 10,
             length: u64::MAX,
+            through: None,
         };
         let low = Extent {
             disk: 0,
             offset: 0,
             length: 4096,
+            through: None,
         };
         // Saturating means `huge` reaches the end of the disk, not back to 0.
         assert!(!huge.overlaps(&low));
@@ -529,6 +595,7 @@ mod tests {
             disk: 0,
             offset: u64::MAX - 5,
             length: 2,
+            through: None,
         };
         assert!(huge.overlaps(&at_the_top));
     }
@@ -576,6 +643,7 @@ mod tests {
             disk,
             offset,
             length: 100,
+            through: None,
         };
         let src = |s: &str| match s {
             "A" => Some(vec![at(1, 0)]),

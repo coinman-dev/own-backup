@@ -17,7 +17,7 @@ use std::path::{Component, Path, PathBuf};
 
 use own_backup_common::tr;
 
-use super::{DestLocation, Extent};
+use super::{DestLocation, Extent, Through};
 
 /// How deep stacked devices are followed (a loop file on LVM on LUKS on RAID
 /// is four). Past this the answer is "cannot tell", never a guess.
@@ -484,17 +484,35 @@ impl Host {
             }
             return Some(out);
         }
-        if let Some(file) = self.loop_backing_file(name) {
-            return match self.locate_path(&file, depth + 1) {
-                DestLocation::Local(e) => Some(e),
-                DestLocation::Network | DestLocation::Unknown(_) => None,
-            };
-        }
         let size = read_u64(&dir.join("size"))?.checked_mul(512)?;
         if offset >= size {
             return Some(Vec::new());
         }
         let length = length.min(size - offset);
+        if let Some(file) = self.loop_backing_file(name) {
+            // Where the file's bytes are is not known (no extent map is
+            // read), so the whole filesystem holding it counts — but the
+            // range of the loop device goes along: two volumes stacked on
+            // one loop device at different offsets do not share a byte
+            // (`Extent::overlaps`).
+            let (major, minor) = read_dev(&dir.join("dev"))?;
+            let through = Through {
+                device: disk_key(major, minor),
+                offset,
+                length,
+            };
+            return match self.locate_path(&file, depth + 1) {
+                DestLocation::Local(e) => Some(
+                    e.into_iter()
+                        .map(|x| Extent {
+                            through: Some(through),
+                            ..x
+                        })
+                        .collect(),
+                ),
+                DestLocation::Network | DestLocation::Unknown(_) => None,
+            };
+        }
         if dir.join("partition").is_file() {
             let start = read_u64(&dir.join("start"))?.checked_mul(512)?;
             let disk_dir = std::fs::canonicalize(&dir).ok()?.parent()?.to_path_buf();
@@ -509,6 +527,7 @@ impl Host {
                 disk: disk_key(major, minor),
                 offset: start.checked_add(offset)?,
                 length,
+                through: None,
             }]);
         }
         let (major, minor) = read_dev(&dir.join("dev"))?;
@@ -516,6 +535,7 @@ impl Host {
             disk: disk_key(major, minor),
             offset,
             length,
+            through: None,
         }])
     }
 
@@ -1039,7 +1059,23 @@ mod tests {
             disk: disk_key(disk.0, disk.1),
             offset: start * 512,
             length: sectors * 512,
+            through: None,
         }
+    }
+
+    /// `extents` reached through the loop device `dev`, sectors `start..+n`.
+    fn via(extents: &[Extent], dev: (u32, u32), start: u64, sectors: u64) -> Vec<Extent> {
+        extents
+            .iter()
+            .map(|e| Extent {
+                through: Some(Through {
+                    device: disk_key(dev.0, dev.1),
+                    offset: start * 512,
+                    length: sectors * 512,
+                }),
+                ..*e
+            })
+            .collect()
     }
 
     #[test]
@@ -1411,9 +1447,56 @@ mod tests {
         f.disk("virtual/nbd0", "nbd0", "43:0", 2048);
         let host = f.host(MOUNTINFO);
         let luks = vec![range((259, 0), 4_784_128, 268_435_456)];
-        assert_eq!(host.extents_of_source("/dev/loop0"), Some(luks.clone()));
-        assert_eq!(host.extents_of_source("/dev/loop0p1"), Some(luks));
+        assert_eq!(
+            host.extents_of_source("/dev/loop0"),
+            Some(via(&luks, (7, 0), 0, 2048))
+        );
+        assert_eq!(
+            host.extents_of_source("/dev/loop0p1"),
+            Some(via(&luks, (7, 0), 34, 2000))
+        );
         assert_eq!(host.extents_of_source("/dev/nbd0"), None);
+    }
+
+    /// The stand's K5: a VG on one loop-device PV with two LVs, the service's
+    /// data directory (and key directory) on `keys`. A sector copy of the
+    /// OTHER LV is clear of it — both LVs' bytes are "somewhere in the
+    /// filesystem holding the image file", but at different offsets of that
+    /// one file. The PV itself, the key LV, and the filesystem holding the
+    /// image file do hold the key directory.
+    #[test]
+    fn two_volumes_of_one_loop_device_pv_are_two_places() {
+        let f = owner_machine();
+        let lp = f.disk("virtual/loop6", "loop6", "7:6", 1_048_576);
+        f.write(&lp.join("loop/backing_file"), "/home/u/k5-pv.img\n");
+        let keys = f.dm("dm-7", "252:7", "obklabk5-keys", "LVM-K5KEYS", &[&lp]);
+        f.write(&keys.join("dm/table"), "0 131072 linear 7:6 198656\n");
+        f.write(&keys.join("size"), "131072\n");
+        let other = f.dm("dm-8", "252:8", "obklabk5-other", "LVM-K5OTHER", &[&lp]);
+        f.write(&other.join("dm/table"), "0 131072 linear 7:6 2048\n");
+        f.write(&other.join("size"), "131072\n");
+        f.dir("/srv/obk-data/keys");
+        let host = f.host(&format!(
+            "{MOUNTINFO}400 34 252:7 / /srv/obk-data rw,relatime shared:600 - ext4 \
+             /dev/mapper/obklabk5-keys rw\n"
+        ));
+        let luks = vec![range((259, 0), 4_784_128, 268_435_456)];
+        assert_eq!(
+            host.extents_of_source("/dev/mapper/obklabk5-other"),
+            Some(via(&luks, (7, 6), 2048, 131_072))
+        );
+        let on = |source: &str| {
+            placement(
+                &[source.to_string()],
+                host.locate_destination("/srv/obk-data/keys"),
+                |s| host.extents_of_source(s),
+            )
+        };
+        assert_eq!(on("/dev/mapper/obklabk5-other"), DestPlacement::Clear);
+        for here in ["/dev/mapper/obklabk5-keys", "/dev/loop6", LUKS] {
+            assert_eq!(on(here), DestPlacement::OnSource(here.into()), "{here}");
+        }
+        assert_eq!(on("/dev/sdb1"), DestPlacement::Clear);
     }
 
     /// A whole-disk copy asks which slot of which disk a partition is: for a
