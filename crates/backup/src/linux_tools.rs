@@ -99,6 +99,7 @@ pub fn package_of(prog: &str) -> &'static str {
         "cryptsetup" => "cryptsetup-bin",
         "vgimportclone" | "vgchange" | "vgs" | "lvs" => "lvm2",
         "mdadm" => "mdadm",
+        "dmsetup" => "dmsetup",
         "mount" | "umount" => "mount",
         _ => "",
     }

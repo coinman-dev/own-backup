@@ -34,7 +34,10 @@
 //! Then, if the person asked for it, the restored system is made to name its
 //! devices by the new identities (`identity_refs_linux`): every restored
 //! filesystem is mounted and its fstab, crypttab, mdadm.conf, GRUB and
-//! systemd-boot files rewritten.
+//! systemd-boot files rewritten. When its initramfs keeps a copy of what
+//! changed, the restored system's own tool rebuilds it (`initramfs_linux`)
+//! while the stacked devices are still open; a rebuild that fails is a
+//! follow-up for the person, not a failed run — the data is restored.
 //!
 //! Never changed: a GPT PARTUUID — `root=PARTUUID=` may name it, and the
 //! restore keeps the copy's partition table as it is (reported as kept). A
@@ -56,6 +59,7 @@ use own_backup_common::{tr, OwnBackupError, Result};
 
 use crate::identity_clash::{Identity, IdentityKind, KernelVersion};
 use crate::identity_refs_linux::{fix_tree, Renamed};
+use crate::initramfs_linux as initramfs;
 use crate::linux_tools::{args, run_checked, run_ok, Tools};
 
 /// A device the restore wrote.
@@ -99,6 +103,13 @@ pub trait MountedFs {
     fn unmount(self: Box<Self>) -> Result<()>;
 }
 
+/// What a restored fstab may name a filesystem by besides its UUID.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FsNames {
+    pub label: Option<String>,
+    pub partuuid: Option<String>,
+}
+
 /// What the run needs from the machine besides its programs.
 pub trait Host {
     /// The identities the device at `node` carries now. A device that cannot
@@ -119,6 +130,13 @@ pub trait Host {
     /// How many devices the btrfs on `node` spans (`num_devices` in its
     /// superblock); 1 when it cannot be read — btrfstune then says.
     fn btrfs_devices(&mut self, node: &str) -> u64;
+    /// The label and GPT partition UUID of the device at `node`, read from
+    /// the device itself — never from what this machine's links resolve.
+    fn fs_names(&mut self, node: &str) -> FsNames;
+    /// No device-mapper device on the machine is called `name`.
+    fn dm_name_free(&mut self, name: &str) -> bool;
+    /// Rebuild a restored system's initramfs (`initramfs_linux::rebuild`).
+    fn rebuild_initramfs(&mut self, req: &initramfs::Request) -> initramfs::Rebuilt;
 }
 
 /// What the stacked devices are, to close them again.
@@ -146,6 +164,8 @@ struct Dev {
     /// Inside a restored container whose own identity clashed: what it
     /// holds is the machine's too (see the module documentation).
     in_clashing_container: bool,
+    /// The LUKS mapping this run opened that it lies in, innermost.
+    luks_map: Option<String>,
 }
 
 /// A filesystem seen on a restored device, for the editing pass.
@@ -155,6 +175,25 @@ struct FsSeen {
     key: String,
     /// btrfs spanning more than one device (`Identity::multi_device`).
     multi_device: bool,
+    luks_map: Option<String>,
+}
+
+/// A filesystem mounted by the editing pass, for the rebuild's mount plan.
+struct MountedSeen {
+    node: String,
+    fstype: String,
+    key: String,
+}
+
+/// A restored system found by the editing pass.
+struct SystemSeen {
+    /// Its root filesystem, and how the editing pass mounted it.
+    node: String,
+    fstype: String,
+    opts: String,
+    subdir: std::path::PathBuf,
+    config: initramfs::SystemConfig,
+    luks_map: Option<String>,
 }
 
 struct Run<'a> {
@@ -166,6 +205,8 @@ struct Run<'a> {
     opened: Vec<OpenedDev>,
     holds: Vec<Box<dyn std::any::Any>>,
     filesystems: Vec<FsSeen>,
+    /// The LUKS mappings this run opened, with the container's UUID key.
+    luks_maps: Vec<(String, String)>,
     /// Prefix of the LUKS mappings this run opens.
     dm_prefix: String,
     dm_held: bool,
@@ -191,6 +232,7 @@ pub fn change_identities(
         opened: Vec::new(),
         holds: Vec::new(),
         filesystems: Vec::new(),
+        luks_maps: Vec::new(),
         dm_prefix: format!("obk-reid-{}-", std::process::id()),
         dm_held: false,
         seq: 0,
@@ -202,6 +244,7 @@ pub fn change_identities(
             part_index: d.part_index,
             passphrase: d.passphrase.clone(),
             in_clashing_container: false,
+            luks_map: None,
         })
         .collect();
     let mut result = run.walk(devs);
@@ -332,12 +375,14 @@ impl Run<'_> {
             }
             if let Some(luks) = ids.iter().find(|i| i.kind == IdentityKind::Luks) {
                 let clashing = self.must_change(&dev, luks);
+                let mut key = luks.key.clone();
                 if clashing {
-                    self.change_luks(&dev, luks)?;
+                    let new = self.change_luks(&dev, luks)?;
+                    key = Identity::new(IdentityKind::Luks, &new).key;
                 }
                 match &dev.passphrase {
                     Some(pw) => {
-                        let inner = self.open_luks(&dev, pw, clashing)?;
+                        let inner = self.open_luks(&dev, pw, clashing, &key)?;
                         self.walk(vec![inner])?;
                     }
                     None if clashing => self.out.notes.push(
@@ -368,6 +413,7 @@ impl Run<'_> {
                     kind: id.kind,
                     key,
                     multi_device: id.multi_device,
+                    luks_map: dev.luks_map.clone(),
                 });
             }
         }
@@ -434,7 +480,8 @@ impl Run<'_> {
         Ok(Some(new))
     }
 
-    fn change_luks(&mut self, dev: &Dev, id: &Identity) -> Result<()> {
+    /// The new UUID.
+    fn change_luks(&mut self, dev: &Dev, id: &Identity) -> Result<String> {
         let new = self.host.new_uuid();
         run_ok(
             self.tools,
@@ -442,12 +489,13 @@ impl Run<'_> {
             &args(["luksUUID", "-q", "--uuid", &new, &dev.node]),
         )?;
         self.record(IdentityKind::Luks, &id.shown, &new, dev);
-        Ok(())
+        Ok(new)
     }
 
     /// Open the container with the restore's passphrase, under a hold.
-    /// `clashing`: the container's own identity clashed.
-    fn open_luks(&mut self, dev: &Dev, passphrase: &str, clashing: bool) -> Result<Dev> {
+    /// `clashing`: the container's own identity clashed; `key`: its UUID's
+    /// key now.
+    fn open_luks(&mut self, dev: &Dev, passphrase: &str, clashing: bool, key: &str) -> Result<Dev> {
         if !self.dm_held {
             let guard = self
                 .host
@@ -466,12 +514,14 @@ impl Run<'_> {
             |c| c == 0,
         )?;
         self.opened_ok();
+        self.luks_maps.push((name.clone(), key.to_string()));
         self.host.settle();
         Ok(Dev {
             node: format!("/dev/mapper/{name}"),
             part_index: dev.part_index,
             passphrase: None,
             in_clashing_container: clashing,
+            luks_map: Some(name),
         })
     }
 
@@ -508,6 +558,7 @@ impl Run<'_> {
             part_index: members.first().and_then(|m| m.part_index),
             passphrase: None,
             in_clashing_container: true,
+            luks_map: members.first().and_then(|m| m.luks_map.clone()),
         })
     }
 
@@ -626,14 +677,14 @@ impl Run<'_> {
                 part_index: first.part_index,
                 passphrase: None,
                 in_clashing_container: true,
+                luks_map: first.luks_map.clone(),
             })
             .collect())
     }
 
-    /// Mount each filesystem seen and rewrite what names the old identities.
-    fn fix_references(&mut self) -> Result<()> {
-        let renamed: Vec<Renamed> = self
-            .out
+    /// The changes as `identity_refs_linux` takes them.
+    fn renamed(&self) -> Vec<Renamed> {
+        self.out
             .changed
             .iter()
             .map(|c| Renamed {
@@ -641,9 +692,17 @@ impl Run<'_> {
                 old: c.old.clone(),
                 new: c.new.clone(),
             })
-            .collect();
+            .collect()
+    }
+
+    /// Mount each filesystem seen and rewrite what names the old identities;
+    /// then rebuild the initramfs of a restored system that needs it.
+    fn fix_references(&mut self) -> Result<()> {
+        let renamed = self.renamed();
         let mut bios_grub = false;
-        let mut initramfs = false;
+        let mut boot_config = false;
+        let mut mounted: Vec<MountedSeen> = Vec::new();
+        let mut systems: Vec<SystemSeen> = Vec::new();
         let filesystems = std::mem::take(&mut self.filesystems);
         for fs in &filesystems {
             let (fstype, opts, top_level) = match fs.kind {
@@ -673,6 +732,11 @@ impl Run<'_> {
             };
             let m = self.host.mount(&fs.node, fstype, opts)?;
             let edited = fix_tree(m.path(), top_level, &renamed);
+            // Read after the edits: what the system names is the new identities.
+            let found = match &edited {
+                Ok(_) => initramfs::find_systems(m.path(), top_level),
+                Err(_) => Vec::new(),
+            };
             m.unmount()?;
             let edited = edited.map_err(|e| {
                 OwnBackupError::Device(
@@ -685,7 +749,11 @@ impl Run<'_> {
                 )
             })?;
             bios_grub |= edited.bios_grub;
-            initramfs |= edited.initramfs_config;
+            boot_config |= edited.initramfs_config
+                || edited
+                    .files
+                    .iter()
+                    .any(|f| f.ends_with("grub.cfg") || f.contains("loader/entries/"));
             for flag in &edited.autorelabel {
                 self.out.notes.push(
                     tr!(
@@ -709,13 +777,23 @@ impl Run<'_> {
             self.out
                 .edited
                 .extend(edited.files.iter().map(|f| format!("{}:{f}", fs.node)));
+            mounted.push(MountedSeen {
+                node: fs.node.clone(),
+                fstype: fstype.to_string(),
+                key: fs.key.clone(),
+            });
+            for (subdir, config) in found {
+                systems.push(SystemSeen {
+                    node: fs.node.clone(),
+                    fstype: fstype.to_string(),
+                    opts: opts.to_string(),
+                    subdir,
+                    config,
+                    luks_map: fs.luks_map.clone(),
+                });
+            }
         }
-        let changed_kind = |k: IdentityKind| self.out.changed.iter().any(|c| c.kind == k);
-        if initramfs && (changed_kind(IdentityKind::Luks) || changed_kind(IdentityKind::Md)) {
-            self.out
-                .notes
-                .push(tr!("identity_change_linux.rebuild_initramfs").into_owned());
-        }
+        self.initramfs(systems, mounted, boot_config);
         if bios_grub {
             self.out
                 .notes
@@ -725,6 +803,259 @@ impl Run<'_> {
             self.out
                 .notes
                 .push(tr!("identity_change_linux.nothing_to_edit").into_owned());
+        }
+        Ok(())
+    }
+
+    /// Rebuild the initramfs of each restored system whose image keeps a
+    /// changed identity (`initramfs_linux::reasons`), with its own tool; say
+    /// what came of it. Nothing here fails the run.
+    fn initramfs(
+        &mut self,
+        systems: Vec<SystemSeen>,
+        mut mounted: Vec<MountedSeen>,
+        boot_config: bool,
+    ) {
+        let renamed = self.renamed();
+        if systems.is_empty() {
+            // A boot configuration was fixed, and a container identity an
+            // image may keep changed, but no restored root could be looked
+            // into (a LUKS container without its passphrase, a btrfs still
+            // carrying the machine's fsid).
+            let container = self.out.changed.iter().any(|c| {
+                matches!(
+                    c.kind,
+                    IdentityKind::Luks | IdentityKind::Md | IdentityKind::LvmVgName
+                )
+            });
+            if container && boot_config {
+                self.out
+                    .notes
+                    .push(tr!("identity_change_linux.initramfs_root_unreachable").into_owned());
+            }
+            return;
+        }
+        for mut sys in systems {
+            let root_changed = self.out.changed.iter().any(|c| {
+                c.node == sys.node
+                    && matches!(
+                        c.kind,
+                        IdentityKind::Ext | IdentityKind::Xfs | IdentityKind::Btrfs
+                    )
+            });
+            let why = initramfs::reasons(&renamed, root_changed, &sys.config);
+            let system = sys.config.os.shown();
+            if why.is_empty() {
+                info!(%system, node = %sys.node, "the restored system's initramfs keeps none of the changed identities");
+                continue;
+            }
+            info!(%system, node = %sys.node, reasons = ?why, "the restored system's initramfs is to be rebuilt");
+            let Some((tool, program)) = sys.config.tool.clone() else {
+                self.out.notes.push(
+                    tr!(
+                        "identity_change_linux.initramfs_unknown_system",
+                        system = system.as_str()
+                    )
+                    .into_owned(),
+                );
+                continue;
+            };
+            let command = tool.command();
+            // dracut storing the device command line would record the kernel
+            // names this machine gives the restored devices: under the
+            // restore's hold they have no /dev/disk links to record instead.
+            if sys.config.dracut_installed && initramfs::dracut_hostonly_cmdline(&sys.config.dracut)
+            {
+                self.out.notes.push(
+                    tr!(
+                        "identity_change_linux.initramfs_hostonly_cmdline",
+                        system = system.as_str(),
+                        command = command.as_str()
+                    )
+                    .into_owned(),
+                );
+                continue;
+            }
+            if let Some(map) = sys.luks_map.clone() {
+                if let Err(note) = self.luks_by_crypttab_name(
+                    &map,
+                    &sys.config.crypttab,
+                    &mut sys.node,
+                    &mut mounted,
+                    &command,
+                ) {
+                    self.out.notes.push(note);
+                    continue;
+                }
+            }
+            let candidates: Vec<initramfs::Candidate> = mounted
+                .iter()
+                .map(|m| {
+                    let names = self.host.fs_names(&m.node);
+                    initramfs::Candidate {
+                        node: m.node.clone(),
+                        fstype: m.fstype.clone(),
+                        uuid_key: m.key.clone(),
+                        label: names.label,
+                        partuuid: names.partuuid,
+                    }
+                })
+                .collect();
+            let mounts = match initramfs::mount_plan(&sys.config.fstab, &sys.node, &candidates) {
+                Ok(m) => m,
+                Err(source) => {
+                    self.out.notes.push(
+                        tr!(
+                            "identity_change_linux.initramfs_boot_not_restored",
+                            system = system.as_str(),
+                            source = source.as_str(),
+                            command = command.as_str()
+                        )
+                        .into_owned(),
+                    );
+                    continue;
+                }
+            };
+            let req = initramfs::Request {
+                root_node: sys.node.clone(),
+                root_fstype: sys.fstype.clone(),
+                root_opts: sys.opts.clone(),
+                subdir: sys.subdir.clone(),
+                mounts,
+                tool,
+                program,
+            };
+            info!(?req, "rebuilding the restored system's initramfs");
+            let note = match self.host.rebuild_initramfs(&req) {
+                initramfs::Rebuilt::Done { images, output } => {
+                    // cryptsetup's hook says so when it could not tie the
+                    // root's container to a crypttab entry: that image would
+                    // not unlock the system.
+                    let crypt: Vec<&str> = output
+                        .lines()
+                        .map(str::trim)
+                        .filter(|l| {
+                            l.contains("cryptsetup: WARNING") || l.contains("cryptsetup: ERROR")
+                        })
+                        .collect();
+                    if why.contains(&initramfs::Reason::Crypttab) && !crypt.is_empty() {
+                        warn!(?crypt, "the rebuilt image may not unlock the restored root");
+                        let warning = tr!("identity_change_linux.initramfs_crypt_warning");
+                        tr!(
+                            "identity_change_linux.initramfs_failed",
+                            tool = tool.name(),
+                            error = warning,
+                            command = command.as_str(),
+                            output = crypt.join(" / ")
+                        )
+                    } else {
+                        info!(?images, "the restored system's initramfs was rebuilt");
+                        tr!(
+                            "identity_change_linux.initramfs_rebuilt",
+                            tool = tool.name()
+                        )
+                    }
+                }
+                initramfs::Rebuilt::Failed { error, output } => {
+                    warn!(%error, "rebuilding the restored system's initramfs failed");
+                    let last = initramfs::tail(&output, 6);
+                    tr!(
+                        "identity_change_linux.initramfs_failed",
+                        tool = tool.name(),
+                        error = error.as_str(),
+                        command = command.as_str(),
+                        output = if last.is_empty() {
+                            "—".to_string()
+                        } else {
+                            last
+                        }
+                    )
+                }
+            };
+            self.out.notes.push(note.into_owned());
+        }
+    }
+
+    /// The restored root lies in LUKS mapping `map`, opened by this run under
+    /// a temporary name. The system's tool ties the container it must unlock
+    /// to crypttab by the mapping's name (cryptsetup's initramfs hook looks
+    /// it up there), so for the rebuild the mapping takes the name its
+    /// crypttab entry gives it, under a udev hold of its own; `root` and
+    /// `mounted` follow the new node. A name the machine already uses is not
+    /// taken: then no rebuild (`Err` is the note). A container crypttab does
+    /// not list is unlocked some other way, and is left as it is.
+    fn luks_by_crypttab_name(
+        &mut self,
+        map: &str,
+        crypttab: &str,
+        root: &mut String,
+        mounted: &mut [MountedSeen],
+        command: &str,
+    ) -> std::result::Result<(), String> {
+        let Some(key) = self
+            .luks_maps
+            .iter()
+            .find(|(n, _)| n == map)
+            .map(|(_, k)| k.clone())
+        else {
+            return Ok(());
+        };
+        let Some(name) = crypttab_name(crypttab, &key) else {
+            return Ok(());
+        };
+        if name == map {
+            return Ok(());
+        }
+        let usable = !name.starts_with('-')
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "_-.+".contains(c));
+        if !usable || !self.host.dm_name_free(&name) {
+            return Err(tr!(
+                "identity_change_linux.initramfs_luks_name_taken",
+                name = name.as_str(),
+                command = command
+            )
+            .into_owned());
+        }
+        let renamed = (|| -> Result<()> {
+            let guard = self
+                .host
+                .hold(vec![crate::udev_hold_linux::dm_exact_name_rule(&name)])?;
+            self.holds.push(guard);
+            run_ok(self.tools, "dmsetup", &args(["rename", map, &name]))?;
+            Ok(())
+        })();
+        if let Err(e) = renamed {
+            return Err(tr!(
+                "identity_change_linux.initramfs_failed",
+                tool = "dmsetup",
+                error = e,
+                command = command,
+                output = "—"
+            )
+            .into_owned());
+        }
+        self.host.settle();
+        info!(from = map, to = %name, "the restored root's LUKS mapping renamed after its crypttab entry");
+        for o in &mut self.opened {
+            if let Opened::Luks(n) = &mut o.what {
+                if n == map {
+                    *n = name.clone();
+                }
+            }
+        }
+        for (n, _) in &mut self.luks_maps {
+            if n == map {
+                *n = name.clone();
+            }
+        }
+        let (old, new) = (format!("/dev/mapper/{map}"), format!("/dev/mapper/{name}"));
+        if *root == old {
+            root.clone_from(&new);
+        }
+        for m in mounted.iter_mut().filter(|m| m.node == old) {
+            m.node.clone_from(&new);
         }
         Ok(())
     }
@@ -792,6 +1123,24 @@ fn parse_lvs(out: &str, vg: &str) -> Vec<String> {
         .collect()
 }
 
+/// The crypttab name of the container whose UUID has `key`
+/// (`UUID=` or `/dev/disk/by-uuid/` source).
+fn crypttab_name(crypttab: &str, key: &str) -> Option<String> {
+    crypttab.lines().find_map(|l| {
+        let l = l.trim();
+        if l.starts_with('#') {
+            return None;
+        }
+        let mut f = l.split_whitespace();
+        let (name, source) = (f.next()?, f.next()?.trim_matches('"'));
+        let uuid = source
+            .strip_prefix("UUID=")
+            .or_else(|| source.strip_prefix("/dev/disk/by-uuid/"))?
+            .trim_matches('"');
+        (Identity::new(IdentityKind::Luks, uuid).key == key).then(|| name.to_string())
+    })
+}
+
 // --- the machine ------------------------------------------------------------
 
 /// The real machine.
@@ -826,8 +1175,14 @@ impl Host for SystemHost {
     }
 
     fn hold(&mut self, rules: Vec<String>) -> Result<Box<dyn std::any::Any>> {
+        // A file per hold: the rules file is named after its tag and the
+        // process, and one run holds a LUKS mapping, then the LVs inside it,
+        // then an array — a shared name would let each replace the last.
+        static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(Box::new(crate::udev_hold_linux::UdevHold::install_rules(
-            "reid", &rules,
+            &format!("reid{n}"),
+            &rules,
         )?))
     }
 
@@ -860,6 +1215,42 @@ impl Host for SystemHost {
             return 1;
         }
         u64::from_le_bytes(b).max(1)
+    }
+
+    fn fs_names(&mut self, node: &str) -> FsNames {
+        // `-p`: probe the device itself, not the cache or udev's links.
+        let out = std::process::Command::new("blkid")
+            .env("LC_ALL", "C")
+            .args(["-p", "-o", "export", node])
+            .stdin(std::process::Stdio::null())
+            .output();
+        let text = out
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        let value = |key: &str| {
+            text.lines()
+                .find_map(|l| l.strip_prefix(key))
+                .map(|v| v.replace("\\ ", " "))
+                .filter(|v| !v.is_empty())
+        };
+        FsNames {
+            label: value("LABEL="),
+            partuuid: value("PART_ENTRY_UUID="),
+        }
+    }
+
+    fn dm_name_free(&mut self, name: &str) -> bool {
+        let Ok(entries) = std::fs::read_dir("/sys/block") else {
+            return false;
+        };
+        !entries.flatten().any(|e| {
+            e.file_name().to_string_lossy().starts_with("dm-")
+                && std::fs::read_to_string(e.path().join("dm/name")).is_ok_and(|n| n.trim() == name)
+        }) && !Path::new("/dev/mapper").join(name).exists()
+    }
+
+    fn rebuild_initramfs(&mut self, req: &initramfs::Request) -> initramfs::Rebuilt {
+        initramfs::rebuild(req)
     }
 }
 
@@ -922,7 +1313,14 @@ mod tests {
         mounts: Vec<(String, String, String)>,
         holds: Vec<Vec<String>>,
         mount_dir: Option<PathBuf>,
+        /// Per node, before `mount_dir`.
+        mount_dirs: HashMap<String, PathBuf>,
         kernel: Option<KernelVersion>,
+        names: HashMap<String, FsNames>,
+        dm_taken: Vec<String>,
+        rebuilds: Vec<initramfs::Request>,
+        /// What a rebuild returns; a rewritten image when unset.
+        rebuilt: Option<initramfs::Rebuilt>,
     }
 
     struct FakeMount(PathBuf);
@@ -949,8 +1347,10 @@ mod tests {
         fn mount(&mut self, node: &str, fstype: &str, opts: &str) -> Result<Box<dyn MountedFs>> {
             self.mounts.push((node.into(), fstype.into(), opts.into()));
             Ok(Box::new(FakeMount(
-                self.mount_dir
-                    .clone()
+                self.mount_dirs
+                    .get(node)
+                    .or(self.mount_dir.as_ref())
+                    .cloned()
                     .unwrap_or_else(|| PathBuf::from("/nonexistent")),
             )))
         }
@@ -967,6 +1367,19 @@ mod tests {
         }
         fn btrfs_devices(&mut self, _node: &str) -> u64 {
             1
+        }
+        fn fs_names(&mut self, node: &str) -> FsNames {
+            self.names.get(node).cloned().unwrap_or_default()
+        }
+        fn dm_name_free(&mut self, name: &str) -> bool {
+            !self.dm_taken.iter().any(|n| n == name)
+        }
+        fn rebuild_initramfs(&mut self, req: &initramfs::Request) -> initramfs::Rebuilt {
+            self.rebuilds.push(req.clone());
+            self.rebuilt.clone().unwrap_or(initramfs::Rebuilt::Done {
+                images: vec!["/boot/initrd.img-7.0.0-34-generic".into()],
+                output: String::new(),
+            })
         }
     }
 
@@ -1197,6 +1610,15 @@ mod tests {
             fn btrfs_devices(&mut self, _node: &str) -> u64 {
                 1
             }
+            fn fs_names(&mut self, node: &str) -> FsNames {
+                self.inner.fs_names(node)
+            }
+            fn dm_name_free(&mut self, name: &str) -> bool {
+                self.inner.dm_name_free(name)
+            }
+            fn rebuild_initramfs(&mut self, req: &initramfs::Request) -> initramfs::Rebuilt {
+                self.inner.rebuild_initramfs(req)
+            }
         }
         let mut seq = Seq {
             inner: &mut run_host,
@@ -1353,6 +1775,15 @@ mod tests {
             }
             fn btrfs_devices(&mut self, _node: &str) -> u64 {
                 1
+            }
+            fn fs_names(&mut self, _node: &str) -> FsNames {
+                FsNames::default()
+            }
+            fn dm_name_free(&mut self, _name: &str) -> bool {
+                unreachable!()
+            }
+            fn rebuild_initramfs(&mut self, _req: &initramfs::Request) -> initramfs::Rebuilt {
+                unreachable!()
             }
         }
         let mut tools = FakeTools::default();
@@ -1525,6 +1956,316 @@ mod tests {
         let fstab = std::fs::read_to_string(dir.path().join("etc/fstab")).unwrap();
         assert!(fstab.contains(&out.changed[0].new), "{fstab}");
         assert_eq!(host.mounts[0].1, "ext4");
+    }
+
+    const BOOT: &str = "77777777-1111-4222-8333-444444444444";
+
+    /// A restored Ubuntu: its root (`etc/os-release`, `etc/fstab`, the tool)
+    /// and its /boot, as directories the fake mounts hand out by node.
+    fn ubuntu(dir: &Path, root_uuid: &str, extra: &[(&str, String)]) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let root = dir.join("root");
+        let boot = dir.join("boot");
+        for d in ["etc", "usr/sbin", "usr/lib"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::fs::create_dir_all(boot.join("grub")).unwrap();
+        std::fs::write(
+            root.join("usr/lib/os-release"),
+            "PRETTY_NAME=\"Ubuntu 26.04 LTS\"\nID=ubuntu\nID_LIKE=debian\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("../usr/lib/os-release", root.join("etc/os-release")).unwrap();
+        std::fs::write(
+            root.join("etc/fstab"),
+            format!("UUID={root_uuid} / ext4 defaults 0 1\nLABEL=BOOT /boot ext4 defaults 0 2\n"),
+        )
+        .unwrap();
+        let tool = root.join("usr/sbin/update-initramfs");
+        std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for (rel, text) in extra {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            let _ = std::fs::remove_file(&p);
+            std::fs::write(p, text).unwrap();
+        }
+        (root, boot)
+    }
+
+    fn restored_ubuntu(dir: &Path, extra: &[(&str, String)]) -> FakeHost {
+        let (root, boot) = ubuntu(dir, SRC, extra);
+        let mut host = FakeHost::default();
+        host.ids
+            .insert("/dev/sdb1".into(), vec![id(IdentityKind::Ext, SRC)]);
+        host.ids
+            .insert("/dev/sdb16".into(), vec![id(IdentityKind::Ext, BOOT)]);
+        host.mount_dirs.insert("/dev/sdb1".into(), root);
+        host.mount_dirs.insert("/dev/sdb16".into(), boot);
+        host.names.insert(
+            "/dev/sdb16".into(),
+            FsNames {
+                label: Some("BOOT".into()),
+                partuuid: None,
+            },
+        );
+        host
+    }
+
+    fn the_machine() -> BTreeMap<String, Vec<Identity>> {
+        machine(vec![
+            id(IdentityKind::Ext, SRC),
+            id(IdentityKind::Ext, BOOT),
+        ])
+    }
+
+    fn resume_on_root() -> (&'static str, String) {
+        (
+            "etc/initramfs-tools/conf.d/resume",
+            format!("RESUME=UUID={SRC}\n"),
+        )
+    }
+
+    /// The root's new UUID is the resume device the image copies: the
+    /// system's own tool rebuilds it, inside the restored root with its /boot
+    /// — resolved by the restored fstab's LABEL to the restored partition.
+    #[test]
+    fn an_image_keeping_a_changed_uuid_is_rebuilt_by_the_systems_own_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut host = restored_ubuntu(dir.path(), &[resume_on_root()]);
+        let mut tools = FakeTools::default();
+        let out = change_identities(
+            &mut tools,
+            &mut host,
+            &the_machine(),
+            &[dev("/dev/sdb1", 1), dev("/dev/sdb16", 16)],
+            true,
+        );
+        assert_eq!(out.failed, None, "{out:?}");
+        let new_root = &out
+            .changed
+            .iter()
+            .find(|c| c.node == "/dev/sdb1")
+            .unwrap()
+            .new;
+        let resume =
+            std::fs::read_to_string(dir.path().join("root/etc/initramfs-tools/conf.d/resume"))
+                .unwrap();
+        assert!(resume.contains(new_root.as_str()), "fixed first: {resume}");
+        assert_eq!(host.rebuilds.len(), 1, "{:?}", out.notes);
+        let req = &host.rebuilds[0];
+        assert_eq!(
+            (
+                req.root_node.as_str(),
+                req.root_fstype.as_str(),
+                req.root_opts.as_str()
+            ),
+            ("/dev/sdb1", "ext4", "rw")
+        );
+        assert_eq!(req.tool, initramfs::Tool::UpdateInitramfs);
+        assert_eq!(req.program, "/usr/sbin/update-initramfs");
+        assert_eq!(req.mounts.len(), 1);
+        assert_eq!(
+            (req.mounts[0].target.as_str(), req.mounts[0].node.as_str()),
+            ("/boot", "/dev/sdb16")
+        );
+        assert!(
+            out.notes.iter().any(|n| n.contains("(update-initramfs)")),
+            "{:?}",
+            out.notes
+        );
+    }
+
+    /// Without fixing references there is nothing new for an image to keep;
+    /// with nothing of the changes in what the image copies there is no
+    /// reason to rebuild; on an unknown system nothing is guessed.
+    #[test]
+    fn no_rebuild_without_fixed_references_a_reason_or_a_known_tool() {
+        let devices = [dev("/dev/sdb1", 1), dev("/dev/sdb16", 16)];
+        let dir = tempfile::tempdir().unwrap();
+        let mut host = restored_ubuntu(dir.path(), &[resume_on_root()]);
+        let out = change_identities(
+            &mut FakeTools::default(),
+            &mut host,
+            &the_machine(),
+            &devices,
+            false,
+        );
+        assert!(host.rebuilds.is_empty() && out.notes.is_empty(), "{out:?}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut host = restored_ubuntu(dir.path(), &[]);
+        let out = change_identities(
+            &mut FakeTools::default(),
+            &mut host,
+            &the_machine(),
+            &devices,
+            true,
+        );
+        assert!(host.rebuilds.is_empty(), "{out:?}");
+        assert!(
+            !out.notes.iter().any(|n| n.contains("initramfs")),
+            "{:?}",
+            out.notes
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let os = (
+            "usr/lib/os-release",
+            "ID=nixos\nPRETTY_NAME=\"NixOS 26.05\"\n".to_string(),
+        );
+        let mut host = restored_ubuntu(dir.path(), &[resume_on_root(), os]);
+        let out = change_identities(
+            &mut FakeTools::default(),
+            &mut host,
+            &the_machine(),
+            &devices,
+            true,
+        );
+        assert!(host.rebuilds.is_empty());
+        assert!(
+            out.notes.iter().any(|n| n.contains("NixOS 26.05")),
+            "{:?}",
+            out.notes
+        );
+    }
+
+    /// A failed rebuild leaves the run successful — the data is restored —
+    /// and says what to run and what the tool said last.
+    #[test]
+    fn a_failed_rebuild_is_a_follow_up_with_the_command_not_a_failed_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut host = restored_ubuntu(dir.path(), &[resume_on_root()]);
+        host.rebuilt = Some(initramfs::Rebuilt::Failed {
+            error: "exit code 1".into(),
+            output: "update-initramfs: Generating /boot/initrd.img-7.0\nE: no space left\n".into(),
+        });
+        let out = change_identities(
+            &mut FakeTools::default(),
+            &mut host,
+            &the_machine(),
+            &[dev("/dev/sdb1", 1), dev("/dev/sdb16", 16)],
+            true,
+        );
+        assert_eq!(out.failed, None);
+        let note = out
+            .notes
+            .iter()
+            .find(|n| n.contains("update-initramfs -u -k all"))
+            .unwrap_or_else(|| panic!("{:?}", out.notes));
+        assert!(
+            note.contains("E: no space left") && note.contains("exit code 1"),
+            "{note}"
+        );
+    }
+
+    /// A /boot the restored fstab names but the restore did not write: no
+    /// rebuild into the root's empty directory.
+    #[test]
+    fn a_boot_partition_that_was_not_restored_stops_the_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut host = restored_ubuntu(dir.path(), &[resume_on_root()]);
+        let out = change_identities(
+            &mut FakeTools::default(),
+            &mut host,
+            &the_machine(),
+            &[dev("/dev/sdb1", 1)],
+            true,
+        );
+        assert!(host.rebuilds.is_empty());
+        assert!(
+            out.notes.iter().any(|n| n.contains("LABEL=BOOT")),
+            "{:?}",
+            out.notes
+        );
+    }
+
+    /// The root inside a re-encrypted LUKS container: the container's new
+    /// UUID is in crypttab, so the image must be rebuilt, and the mapping
+    /// opened under a temporary name takes the crypttab name first (under a
+    /// hold of its own) — that name is how the system's tool finds it — and
+    /// is closed under it.
+    #[test]
+    fn a_root_in_luks_is_rebuilt_under_its_crypttab_name() {
+        let inner = "22222222-0000-4000-8000-000000000000";
+        let system = |dir: &Path| {
+            let crypttab = ("etc/crypttab", format!("dm_crypt-0 UUID={SRC} none luks\n"));
+            let fstab = ("etc/fstab", format!("UUID={inner} / ext4 defaults 0 1\n"));
+            ubuntu(dir, inner, &[crypttab, fstab]).0
+        };
+        let mapper = format!("/dev/mapper/obk-reid-{}-1", std::process::id());
+        let dir = tempfile::tempdir().unwrap();
+        let root = system(dir.path());
+        let mut host = FakeHost::default();
+        host.ids
+            .insert("/dev/sdb3".into(), vec![id(IdentityKind::Luks, SRC)]);
+        host.ids
+            .insert(mapper.clone(), vec![id(IdentityKind::Ext, inner)]);
+        host.mount_dirs.insert(mapper.clone(), root.clone());
+        let devices = [RestoredDevice {
+            passphrase: Some("pw".into()),
+            ..dev("/dev/sdb3", 3)
+        }];
+        let present = machine(vec![id(IdentityKind::Luks, SRC)]);
+        let mut tools = FakeTools::default();
+        let out = change_identities(&mut tools, &mut host, &present, &devices, true);
+        assert_eq!(out.failed, None, "{out:?}");
+        let crypttab = std::fs::read_to_string(root.join("etc/crypttab")).unwrap();
+        assert!(crypttab.contains(&out.changed[0].new), "{crypttab}");
+        let rename = tools
+            .calls
+            .iter()
+            .find(|(p, _, _)| p == "dmsetup")
+            .expect("renamed");
+        assert_eq!(
+            rename.1,
+            args([
+                "rename",
+                mapper.trim_start_matches("/dev/mapper/"),
+                "dm_crypt-0"
+            ])
+        );
+        assert!(host
+            .holds
+            .iter()
+            .any(|h| h[0].contains("ENV{DM_NAME}==\"dm_crypt-0\"")));
+        assert_eq!(host.rebuilds.len(), 1, "{:?}", out.notes);
+        assert_eq!(host.rebuilds[0].root_node, "/dev/mapper/dm_crypt-0");
+        assert!(host.rebuilds[0].mounts.is_empty());
+        assert_eq!(tools.calls.last().unwrap().1, args(["close", "dm_crypt-0"]));
+
+        // The name is the machine's own: no rename, no rebuild, a note.
+        let dir = tempfile::tempdir().unwrap();
+        host.mount_dirs.insert(mapper.clone(), system(dir.path()));
+        host.rebuilds.clear();
+        host.dm_taken.push("dm_crypt-0".into());
+        let mut tools = FakeTools::default();
+        let out = change_identities(&mut tools, &mut host, &present, &devices, true);
+        assert!(host.rebuilds.is_empty());
+        assert!(!tools.calls.iter().any(|(p, _, _)| p == "dmsetup"));
+        assert!(
+            out.notes.iter().any(|n| n.contains("dm_crypt-0")),
+            "{:?}",
+            out.notes
+        );
+        assert_eq!(
+            tools.calls.last().unwrap().1,
+            args(["close", mapper.trim_start_matches("/dev/mapper/")]),
+            "closed under the temporary name"
+        );
+    }
+
+    #[test]
+    fn crypttab_names_its_container_by_uuid() {
+        let key = Identity::new(IdentityKind::Luks, SRC).key;
+        let text = format!(
+            "# <target> <source>\nswap /dev/sda2 /dev/urandom swap\nluks-x \"UUID={}\" none\n",
+            SRC.to_ascii_uppercase()
+        );
+        assert_eq!(crypttab_name(&text, &key), Some("luks-x".into()));
+        let text = format!("root /dev/disk/by-uuid/{SRC} none luks\n");
+        assert_eq!(crypttab_name(&text, &key), Some("root".into()));
+        assert_eq!(crypttab_name("root /dev/sda3 none\n", &key), None);
     }
 
     #[test]

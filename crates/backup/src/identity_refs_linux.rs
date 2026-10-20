@@ -16,9 +16,10 @@
 //! system, and an absolute link in it (`/etc/fstab -> /run/…`) would resolve
 //! against THIS machine's root.
 //!
-//! Not editable this way, and reported instead: an initramfs that carries a
-//! copy of crypttab or mdadm.conf (it has to be rebuilt by the restored
-//! system), and a BIOS GRUB core image that embeds the `/boot` UUID.
+//! Not editable this way: an initramfs that carries a copy of crypttab,
+//! mdadm.conf or the resume device (`initramfs_linux` has the restored
+//! system's own tool rebuild it), and a BIOS GRUB core image that embeds the
+//! `/boot` UUID (reported).
 
 #![cfg(target_os = "linux")]
 
@@ -205,11 +206,15 @@ pub fn rewrite(text: &str, renamed: &[Renamed]) -> (String, usize) {
 const FILES: &[&str] = &[
     "etc/fstab",
     "etc/crypttab",
+    "etc/crypttab.initramfs",
     "etc/mdadm/mdadm.conf",
     "etc/mdadm.conf",
     "etc/default/grub",
     "etc/kernel/cmdline",
     "etc/initramfs-tools/conf.d/resume",
+    "etc/initramfs-tools/initramfs.conf",
+    "etc/dracut.conf",
+    "etc/dracut.conf.d/*.conf",
     "boot/grub/grub.cfg",
     "boot/grub2/grub.cfg",
     "grub/grub.cfg",
@@ -447,8 +452,8 @@ pub struct Edited {
     /// A BIOS GRUB (`i386-pc` modules) lives here and a `grub.cfg` next to it
     /// was rewritten: its core image may embed an old UUID.
     pub bios_grub: bool,
-    /// A crypttab or mdadm.conf here was rewritten: an initramfs built from
-    /// it still has the old one.
+    /// A crypttab, mdadm.conf or initramfs configuration here was rewritten:
+    /// an initramfs built from it still has the old one.
     pub initramfs_config: bool,
     /// Rewritten files whose extended attributes could not all be kept, and
     /// no relabel was arranged for (`<file> (<attribute>: <error>, …)`).
@@ -499,7 +504,11 @@ pub fn fix_tree(
                             .push(format!("{rel} ({})", lost.join(", "))),
                     }
                 }
-                if rel.ends_with("crypttab") || rel.ends_with("mdadm.conf") {
+                if rel.contains("crypttab")
+                    || rel.ends_with("mdadm.conf")
+                    || rel.contains("initramfs-tools/")
+                    || rel.contains("dracut.conf")
+                {
                     edited.initramfs_config = true;
                 }
                 if rel.ends_with("grub.cfg") {

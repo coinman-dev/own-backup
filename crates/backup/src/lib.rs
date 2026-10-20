@@ -80,6 +80,8 @@ pub mod identity_change_linux;
 pub mod identity_check_linux;
 #[cfg(target_os = "linux")]
 pub mod identity_refs_linux;
+#[cfg(target_os = "linux")]
+pub mod initramfs_linux;
 // The engine's Linux platform: the volume pipeline runs on it.
 #[cfg(target_os = "linux")]
 mod engine_platform_linux;

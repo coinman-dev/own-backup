@@ -85,6 +85,15 @@ pub fn dm_name_rule(prefix: &str) -> String {
     format!("SUBSYSTEM==\"block\", KERNEL==\"dm-[0-9]*\", ENV{{DM_NAME}}==\"{prefix}*\", {STACK_FLAGS}\n")
 }
 
+/// A rule holding the one device-mapper device called `name` (a mapping a
+/// restore renamed after the restored system's crypttab). The name is matched
+/// whole: a prefix could take in the machine's own devices.
+pub fn dm_exact_name_rule(name: &str) -> String {
+    format!(
+        "SUBSYSTEM==\"block\", KERNEL==\"dm-[0-9]*\", ENV{{DM_NAME}}==\"{name}\", {STACK_FLAGS}\n"
+    )
+}
+
 /// A rule holding the logical volumes of the volume group with UUID
 /// `vg_uuid` (dashes dropped, as device-mapper writes it into `DM_UUID`).
 pub fn dm_lvm_vg_rule(vg_uuid: &str) -> String {
