@@ -16,9 +16,11 @@
 //! may only write into partitions nothing uses — each opened `O_EXCL` by
 //! itself — and may not change the table.
 //!
+//! Filesystems are created and grown with the Linux tools after the disk was
+//! let go (`restore_fs_linux`).
+//!
 //! Not done on Linux, and refused before anything is written
-//! ([`linux_refusals`]): creating or extending filesystems, drive letters,
-//! file-by-file restore.
+//! ([`linux_refusals`]): ReFS, drive letters, file-by-file restore.
 
 use chrono::Utc;
 use tracing::{error, info, warn};
@@ -67,8 +69,10 @@ pub fn linux_refusals(plan: &RestorePlan) -> Vec<CheckResult> {
     }
     for op in &plan.ops {
         let what = match op {
-            RestoreOp::Format { .. } => Some(tr!("restore_exec_linux.no_format")),
-            RestoreOp::ExtendFilesystem { .. } => Some(tr!("restore_exec_linux.no_extend")),
+            RestoreOp::Format {
+                fs: own_backup_common::restore_plan::FormatFs::ReFs,
+                ..
+            } => Some(tr!("restore_exec_linux.no_format_refs")),
             RestoreOp::AssignLetter { .. } => Some(tr!("restore_exec_linux.no_letters")),
             RestoreOp::RestorePartition {
                 mode: RestoreMode::Files,
@@ -511,6 +515,17 @@ fn existing_node(device: &str, dst: PartRef) -> Result<String> {
     })
 }
 
+/// The node of partition `dst` for a step that works on it through the
+/// kernel (create or grow a filesystem): it must sit where the plan was
+/// checked and nothing may use it — the guard refuses it mounted, swapped on
+/// or held by LUKS/LVM/md.
+fn free_partition_node(device: &str, dst: PartRef) -> Result<String> {
+    let node = existing_node(device, dst)?;
+    check_partition_slot(&node, dst)?;
+    own_backup_restore::guard_target_volume(&node)?;
+    Ok(node)
+}
+
 /// The partition node must sit exactly where the plan writes: the plan was
 /// checked against offsets, and a number that now names another stretch of
 /// the disk is not the partition that was checked.
@@ -736,8 +751,40 @@ fn run_op(
             })
         }
 
+        RestoreOp::Format {
+            part,
+            fs,
+            label,
+            quick,
+        } if !matches!(fs, own_backup_common::restore_plan::FormatFs::ReFs) => {
+            let node = free_partition_node(device, *part)?;
+            let message = super::fs_linux::format(
+                &mut own_backup_backup::linux_tools::SystemTools,
+                &node,
+                *fs,
+                label,
+                *quick,
+            )?;
+            Ok(OpNote {
+                message,
+                follow_ups: Vec::new(),
+            })
+        }
+
+        RestoreOp::ExtendFilesystem { part } => {
+            let node = free_partition_node(device, *part)?;
+            let message = super::fs_linux::extend(
+                &mut own_backup_backup::linux_tools::SystemTools,
+                &node,
+                || own_backup_backup::identity_check_linux::btrfs_mount_safe(&node),
+            )?;
+            Ok(OpNote {
+                message,
+                follow_ups: Vec::new(),
+            })
+        }
+
         RestoreOp::Format { .. }
-        | RestoreOp::ExtendFilesystem { .. }
         | RestoreOp::AssignLetter { .. }
         | RestoreOp::RestorePartition {
             mode: RestoreMode::Files,
@@ -944,7 +991,7 @@ mod tests {
             vec![
                 RestoreOp::Format {
                     part: part(1),
-                    fs: FormatFs::Ntfs,
+                    fs: FormatFs::ReFs,
                     label: String::new(),
                     quick: true,
                 },

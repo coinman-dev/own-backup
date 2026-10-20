@@ -237,6 +237,12 @@ pub struct CheckContext {
     /// checks can say when one of them will not be created after all.
     #[serde(default)]
     pub requested_formats: Vec<RequestedFormat>,
+    /// The plan runs on Linux. Decides which filesystems can be created and
+    /// grown: Windows formats and extends what `FormatEx` and
+    /// `FSCTL_EXTEND_VOLUME` know, Linux what its `mkfs`/grow tools know. Set
+    /// by the service from where it runs, never by the window.
+    #[serde(default)]
+    pub linux_host: bool,
 }
 
 impl CheckContext {
@@ -627,7 +633,22 @@ fn check_ops(
                     file_targets.push((dst.index, src.filesystem));
                 }
             }
-            RestoreOp::Format { part, fs, .. } => formatted.push((part.index, *fs)),
+            RestoreOp::Format { part, fs, .. } => {
+                formatted.push((part.index, *fs));
+                if fs.is_linux_family() && !ctx.linux_host {
+                    out.push(CheckResult::new(
+                        CheckLevel::Error,
+                        CheckCode::OpUnsupportedHere,
+                        Some(part.index),
+                        crate::tr!(
+                            "restore_check.format_linux_fs_on_windows",
+                            part = ctx.describe_target(part.index, table),
+                            fs = fs.as_str()
+                        )
+                        .into_owned(),
+                    ));
+                }
+            }
             RestoreOp::ExtendFilesystem { part } => {
                 check_extend(
                     plan,
@@ -1235,7 +1256,8 @@ fn check_format_capacity(
     }
 }
 
-/// `FSCTL_EXTEND_VOLUME` only exists for NTFS. Work out which filesystem will
+/// `FSCTL_EXTEND_VOLUME` only exists for NTFS; Linux grows ext2/3/4, XFS and
+/// btrfs too ([`CheckContext::linux_host`]). Work out which filesystem will
 /// actually be on the partition by the time the extend runs: the one the image
 /// brings for a sector restore, the one [`RestoreOp::Format`] creates otherwise.
 fn check_extend(
@@ -1259,9 +1281,19 @@ fn check_extend(
         _ => None,
     });
 
+    // Windows grows NTFS only; Linux also its own filesystems (resize2fs,
+    // xfs_growfs, `btrfs filesystem resize`) and NTFS through ntfsresize.
+    let growable = |fs: FileSystem| {
+        fs == FileSystem::Ntfs
+            || (ctx.linux_host
+                && matches!(fs, FileSystem::Ext4 | FileSystem::Xfs | FileSystem::Btrfs))
+    };
+    let growable_format = |fs: crate::restore_plan::FormatFs| {
+        fs == crate::restore_plan::FormatFs::Ntfs || (ctx.linux_host && fs.is_linux_family())
+    };
     let fs_name = match (from_image, from_format) {
-        (Some(FileSystem::Ntfs), _) => return,
-        (_, Some(crate::restore_plan::FormatFs::Ntfs)) => return,
+        (Some(fs), _) if growable(fs) => return,
+        (None, Some(fs)) if growable_format(fs) => return,
         (Some(fs), _) => fs.label().to_string(),
         (None, Some(fs)) => fs.as_str().to_string(),
         (None, None) => {
@@ -1275,16 +1307,24 @@ fn check_extend(
         }
     };
 
-    out.push(CheckResult::new(
-        CheckLevel::Error,
-        CheckCode::ExtendNotNtfs,
-        Some(part.index),
+    let message = if ctx.linux_host {
+        crate::tr!(
+            "restore_check.extend_unsupported_linux",
+            part = part_txt,
+            fs = fs_name
+        )
+    } else {
         crate::tr!(
             "restore_check.extend_not_ntfs",
             part = part_txt,
             fs = fs_name
         )
-        .into_owned(),
+    };
+    out.push(CheckResult::new(
+        CheckLevel::Error,
+        CheckCode::ExtendNotNtfs,
+        Some(part.index),
+        message.into_owned(),
     ));
 }
 
@@ -1339,6 +1379,7 @@ mod tests {
             protected_parts: vec![],
             targets: vec![],
             requested_formats: vec![],
+            linux_host: false,
         }
     }
 
@@ -1884,6 +1925,84 @@ mod tests {
             &ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]),
         );
         assert!(errors(&results).is_empty(), "{results:#?}");
+    }
+
+    #[test]
+    fn linux_grows_its_own_filesystems_and_ntfs_but_not_fat() {
+        let t = table(vec![entry(1, 1, 200)]);
+        let p1 = part_ref(&t, 1);
+        let plan = plan_with(
+            t,
+            vec![
+                RestoreOp::RestorePartition {
+                    src_index: 1,
+                    dst: p1,
+                    mode: RestoreMode::Sectors,
+                    wipe_free_space: false,
+                    reencrypt: false,
+                },
+                RestoreOp::ExtendFilesystem { part: p1 },
+            ],
+        );
+        for fs in [
+            FileSystem::Ext4,
+            FileSystem::Xfs,
+            FileSystem::Btrfs,
+            FileSystem::Ntfs,
+        ] {
+            let mut c = ctx(vec![source(1, 100 * MIB, 10 * MIB, fs)]);
+            c.linux_host = true;
+            let results = check_plan(&plan, &c);
+            assert!(errors(&results).is_empty(), "{fs:?}: {results:#?}");
+        }
+        let mut c = ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Fat32)]);
+        c.linux_host = true;
+        let results = check_plan(&plan, &c);
+        assert!(
+            errors(&results).contains(&CheckCode::ExtendNotNtfs),
+            "{results:#?}"
+        );
+    }
+
+    #[test]
+    fn a_linux_filesystem_is_formatted_on_linux_only() {
+        let t = table(vec![entry(1, 1, 200)]);
+        let p1 = part_ref(&t, 1);
+        let plan = plan_with(
+            t,
+            vec![
+                RestoreOp::Format {
+                    part: p1,
+                    fs: FormatFs::Xfs,
+                    label: String::new(),
+                    quick: true,
+                },
+                RestoreOp::ExtendFilesystem { part: p1 },
+            ],
+        );
+        let windows = check_plan(&plan, &ctx(Vec::new()));
+        assert!(
+            errors(&windows).contains(&CheckCode::OpUnsupportedHere),
+            "{windows:#?}"
+        );
+        let mut c = ctx(Vec::new());
+        c.linux_host = true;
+        let linux = check_plan(&plan, &c);
+        assert!(errors(&linux).is_empty(), "{linux:#?}");
+    }
+
+    #[test]
+    fn linux_filesystems_have_plain_wire_names() {
+        for (fs, wire) in [
+            (FormatFs::Ext4, "\"ext4\""),
+            (FormatFs::Xfs, "\"xfs\""),
+            (FormatFs::Btrfs, "\"btrfs\""),
+        ] {
+            assert_eq!(serde_json::to_string(&fs).unwrap(), wire);
+            assert!(fs.is_linux_family());
+        }
+        assert!(FormatFs::Ext4.is_same_as(FileSystem::Ext4));
+        assert!(!FormatFs::Ntfs.is_linux_family());
     }
 
     #[test]

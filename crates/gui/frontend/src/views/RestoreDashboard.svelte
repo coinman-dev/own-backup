@@ -1121,7 +1121,8 @@
     // Choosing a Windows filesystem implies a Basic Data partition; "не
     // форматировать" leaves the type alone, since that is the case where the
     // user is most likely aiming at something else (Linux, swap, ESP).
-    if (fs) createDlg.gptType = GPT_TYPES[0].guid;
+    // A Linux filesystem implies the Linux filesystem type.
+    if (fs) createDlg.gptType = ['ext4', 'xfs', 'btrfs'].includes(fs) ? GPT_TYPES[4].guid : GPT_TYPES[0].guid;
   }
   // Create = split that free cell in place: [new partition][leftover free].
   function doCreate() {
@@ -1309,8 +1310,9 @@
     }
   }
 
-  /** The filesystem name as `FormatFs` spells it, or null when we cannot
-   *  create it (Linux filesystems — Windows has no mkfs for them). */
+  /** The filesystem name as `FormatFs` spells it, or null when this system
+   *  cannot create it (Windows has no mkfs for the Linux filesystems, Linux
+   *  no ReFS formatter). */
   function formatFsOf(fs: string): FormatFs | null {
     switch ((fs || '').toLowerCase()) {
       case 'ntfs':
@@ -1320,10 +1322,23 @@
       case 'exfat':
         return 'exfat';
       case 'refs':
-        return 'refs';
+        return isWindows() ? 'refs' : null;
+      case 'ext4':
+        return isWindows() ? null : 'ext4';
+      case 'xfs':
+        return isWindows() ? null : 'xfs';
+      case 'btrfs':
+        return isWindows() ? null : 'btrfs';
       default:
         return null;
     }
+  }
+
+  /** Filesystems the service can grow to a larger partition: NTFS on Windows
+   *  (D2); on Linux also ext2/3/4, XFS and btrfs. */
+  function growable(fs: string): boolean {
+    const f = (fs || '').toLowerCase();
+    return f === 'ntfs' || (!isWindows() && (f === 'ext4' || f === 'xfs' || f === 'btrfs'));
   }
 
   /** Assemble the plan. Returns null when no target disk is chosen. */
@@ -1438,13 +1453,10 @@
         reencrypt: mode === 'sectors' && willReencrypt.includes(m.src),
       });
       // A larger target leaves a tail the filesystem does not know about; only
-      // NTFS can claim it automatically (D2). In file mode the filesystem was
-      // just made at full size, so there is nothing to extend.
-      if (
-        mode === 'sectors' &&
-        dst.size > sp.size_bytes &&
-        (sp.filesystem || '').toLowerCase() === 'ntfs'
-      ) {
+      // some filesystems can claim it automatically (D2, `growable`). In file
+      // mode the filesystem was just made at full size, so there is nothing to
+      // extend.
+      if (mode === 'sectors' && dst.size > sp.size_bytes && growable(sp.filesystem)) {
         ops.push({ op: 'extend_filesystem', part: dst });
       }
     }
@@ -2339,17 +2351,25 @@
       <div class="row2">
         <label class="fld">
           <span>{m.rd_filesystem()}</span>
-          <!-- Only filesystems Windows can actually create (D9). A Linux
-               partition is made by picking the GPT type on the right and
-               leaving this on "не форматировать" — Windows has no mkfs for
-               ext4, and offering it here would produce a partition the queue
-               claims is formatted and that is in fact empty. -->
+          <!-- Only filesystems this system can actually create (D9). On
+               Windows a Linux partition is made by picking the GPT type on the
+               right and leaving this on "не форматировать" — Windows has no
+               mkfs for ext4, and offering it there would produce a partition
+               the queue claims is formatted and that is in fact empty. Linux
+               creates its own filesystems and has no ReFS formatter. -->
           <select value={createDlg.fs} onchange={(e) => onFsChange((e.currentTarget as HTMLSelectElement).value)}>
             <option value="">{m.rd_no_format_opt()}</option>
+            {#if !isWindows()}
+              <option value="ext4">ext4</option>
+              <option value="xfs">XFS</option>
+              <option value="btrfs">Btrfs</option>
+            {/if}
             <option value="ntfs">NTFS</option>
             <option value="fat32">FAT32</option>
             <option value="exfat">exFAT</option>
-            <option value="refs">ReFS</option>
+            {#if isWindows()}
+              <option value="refs">ReFS</option>
+            {/if}
           </select>
         </label>
         {#if isGpt}

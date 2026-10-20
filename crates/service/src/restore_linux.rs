@@ -284,6 +284,7 @@ pub(super) fn live_disk_id(plan: &RestorePlan) -> TargetDiskId {
 /// the plan gives it (a volume copy has no partition table to number it by,
 /// and the executor reads the whole image for it).
 pub(super) fn fill_context(plan: &RestorePlan, ctx: &mut CheckContext, keys: Option<&ArchiveKeys>) {
+    ctx.linux_host = true;
     if ctx.sources.is_empty() {
         ctx.sources = volume_sources(plan, keys);
     }
@@ -355,6 +356,19 @@ fn volume_sources(
         })
         .collect();
     indices.dedup();
+    // What the copy's volume holds decides what can be grown or formatted
+    // over it; the head of the volume says it.
+    let filesystem = identity_check_linux::volume_head(
+        &plan.image_path,
+        keys,
+        &sidecar,
+        own_backup_inventory::fs_probe::PROBE_LEN,
+    )
+    .ok()
+    .flatten()
+    .and_then(|head| own_backup_inventory::fs_probe::identify(&head))
+    .map(|p| p.fs)
+    .unwrap_or(own_backup_common::types::FileSystem::Unknown);
     let captured_plain = sidecar
         .manifest
         .volume_encryption
@@ -366,7 +380,7 @@ fn volume_sources(
             index,
             size_bytes: sidecar.manifest.source_disk.size_bytes,
             used_bytes: 0,
-            filesystem: own_backup_common::types::FileSystem::Unknown,
+            filesystem,
             label: String::new(),
             encrypted_at_source: captured_plain,
             luks_header_available: !sidecar.info.luks_headers.is_empty(),

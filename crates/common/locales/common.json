@@ -172,6 +172,14 @@
     "ru": "Раздел %{part} размечен как %{fs} — автоматически расширить Windows умеет только NTFS. Свободный хвост останется неразмеченным внутри раздела; его придётся дорастить средствами самой системы.",
     "en": "Partition %{part} is formatted as %{fs} — Windows can only extend NTFS automatically. The free tail will stay unallocated inside the partition; it has to be grown with the system's own tools."
   },
+  "restore_check.extend_unsupported_linux": {
+    "ru": "Раздел %{part} размечен как %{fs} — здесь автоматически расширяются только ext2/3/4, XFS, btrfs и NTFS. Свободный хвост останется неразмеченным внутри раздела; его придётся дорастить средствами самой системы.",
+    "en": "Partition %{part} is formatted as %{fs} — only ext2/3/4, XFS, btrfs and NTFS can be extended automatically here. The free tail will stay unallocated inside the partition; it has to be grown with the system's own tools."
+  },
+  "restore_check.format_linux_fs_on_windows": {
+    "ru": "Раздел %{part}: файловую систему %{fs} создаёт только Linux — Windows её не форматирует. Выберите NTFS, FAT32 или exFAT либо выполните восстановление из Linux.",
+    "en": "Partition %{part}: only Linux creates %{fs} — Windows cannot format it. Choose NTFS, FAT32 or exFAT, or run the restore from Linux."
+  },
   "restore_plan.title_write_table": {
     "ru": "Записать разметку %{scheme} (%{count} разд.)",
     "en": "Write the %{scheme} partition table (partitions: %{count})"

@@ -34,6 +34,9 @@ use tracing::{error, info};
 #[path = "restore_boot_linux.rs"]
 mod boot_linux;
 #[cfg(target_os = "linux")]
+#[path = "restore_fs_linux.rs"]
+mod fs_linux;
+#[cfg(target_os = "linux")]
 #[path = "restore_exec_linux.rs"]
 mod linux;
 #[cfg(target_os = "linux")]

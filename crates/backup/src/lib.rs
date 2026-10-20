@@ -82,6 +82,8 @@ mod engine_platform_linux;
 #[cfg(target_os = "linux")]
 pub mod linux_device;
 #[cfg(target_os = "linux")]
+pub mod linux_tools;
+#[cfg(target_os = "linux")]
 pub mod nbd_linux;
 #[cfg(target_os = "linux")]
 pub mod restore_disk_linux;

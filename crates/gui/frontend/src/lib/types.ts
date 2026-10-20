@@ -887,7 +887,7 @@ export interface PartitionTableSpec {
 
 /** Only what we can actually create. "Не форматировать" is the absence of a
  *  `format` operation, not a value here. */
-export type FormatFs = 'ntfs' | 'fat32' | 'exfat' | 'refs';
+export type FormatFs = 'ntfs' | 'fat32' | 'exfat' | 'refs' | 'ext4' | 'xfs' | 'btrfs';
 export type RestoreMode = 'sectors' | 'files';
 
 export interface PartRef {

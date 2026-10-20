@@ -124,9 +124,12 @@ pub struct PartitionTableSpec {
 
 /// Filesystems we can actually create. Deliberately narrower than
 /// [`crate::types::FileSystem`]: "no format" is the absence of a
-/// [`RestoreOp::Format`] operation, not a variant here, and Linux filesystems
-/// are missing because Windows has no `mkfs` (D4 — a Linux partition is
-/// restored sector-by-sector, which brings its filesystem along).
+/// [`RestoreOp::Format`] operation, not a variant here.
+///
+/// Which of them a machine can create depends on where the plan runs: Windows
+/// has no `mkfs` for the Linux ones (D4 — there a Linux partition is restored
+/// sector-by-sector, which brings its filesystem along), and Linux has no ReFS
+/// formatter. The checks say so before anything is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FormatFs {
@@ -138,6 +141,12 @@ pub enum FormatFs {
     ExFat,
     #[serde(rename = "refs")]
     ReFs,
+    /// Linux only (`mkfs.ext4`).
+    Ext4,
+    /// Linux only (`mkfs.xfs`).
+    Xfs,
+    /// Linux only (`mkfs.btrfs`).
+    Btrfs,
 }
 
 impl FormatFs {
@@ -154,16 +163,28 @@ impl FormatFs {
                 | (FormatFs::Fat32, FileSystem::Fat32)
                 | (FormatFs::ExFat, FileSystem::ExFat)
                 | (FormatFs::ReFs, FileSystem::ReFs)
+                | (FormatFs::Ext4, FileSystem::Ext4)
+                | (FormatFs::Xfs, FileSystem::Xfs)
+                | (FormatFs::Btrfs, FileSystem::Btrfs)
         )
     }
 
-    /// Name as `FormatEx` / `format.com` expect it.
+    /// The filesystems only Linux can create.
+    pub fn is_linux_family(self) -> bool {
+        matches!(self, FormatFs::Ext4 | FormatFs::Xfs | FormatFs::Btrfs)
+    }
+
+    /// Name as `FormatEx` / `format.com` expect it; the Linux ones as
+    /// [`crate::types::FileSystem::label`] spells them.
     pub fn as_str(self) -> &'static str {
         match self {
             FormatFs::Ntfs => "NTFS",
             FormatFs::Fat32 => "FAT32",
             FormatFs::ExFat => "exFAT",
             FormatFs::ReFs => "ReFS",
+            FormatFs::Ext4 => "ext4",
+            FormatFs::Xfs => "XFS",
+            FormatFs::Btrfs => "Btrfs",
         }
     }
 }
@@ -235,8 +256,9 @@ pub enum RestoreOp {
         #[serde(default)]
         reencrypt: bool,
     },
-    /// Grow an NTFS filesystem to fill its partition, after a sector restore
-    /// into a larger target (D2).
+    /// Grow the filesystem to fill its partition, after a sector restore into
+    /// a larger target (D2). NTFS on Windows; on Linux also ext2/3/4, XFS and
+    /// btrfs.
     ExtendFilesystem { part: PartRef },
     /// Mount the volume under a drive letter.
     AssignLetter { part: PartRef, letter: char },

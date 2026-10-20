@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use own_backup_backup::efivars_linux::{safety_copy_dir, Action, Efivarfs};
+use own_backup_backup::linux_tools::TempMount;
 use own_backup_backup::restore_disk_linux::partition_node;
 use own_backup_common::restore_plan::{PartRef, RestoreOp, RestorePlan};
 use own_backup_common::{tr, OwnBackupError, Result};
@@ -56,74 +57,6 @@ pub(super) fn run_boot_op(
             "not a boot step: {}",
             op.kind()
         ))),
-    }
-}
-
-/// A filesystem mounted for one step. Unmounted on drop.
-struct TempMount {
-    dir: PathBuf,
-}
-
-impl TempMount {
-    /// Mount `node` with the first of `types` that takes it.
-    fn mount(node: &str, types: &[(&str, &str)]) -> Result<Self> {
-        let name = Path::new(node)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "part".into());
-        let dir = Path::new("/run/own-backup/restore-mnt").join(name);
-        std::fs::create_dir_all(&dir)?;
-        let mut tried = Vec::new();
-        for (fstype, opts) in types {
-            let out = std::process::Command::new("mount")
-                .args(["-t", fstype, "-o", &format!("{opts},nosuid,nodev,noexec")])
-                .arg(node)
-                .arg(&dir)
-                .output();
-            match out {
-                Ok(o) if o.status.success() => {
-                    info!(node, fstype, dir = %dir.display(), "partition mounted for a boot step");
-                    return Ok(Self { dir });
-                }
-                Ok(o) => tried.push(format!(
-                    "{fstype}: {}",
-                    String::from_utf8_lossy(&o.stderr).trim()
-                )),
-                Err(e) => tried.push(format!("{fstype}: {e}")),
-            }
-        }
-        let _ = std::fs::remove_dir(&dir);
-        Err(OwnBackupError::Device(
-            tr!(
-                "restore_boot_linux.mount_failed",
-                node = node,
-                tried = tried.join("; ")
-            )
-            .into_owned(),
-        ))
-    }
-
-    fn path(&self) -> &Path {
-        &self.dir
-    }
-}
-
-impl Drop for TempMount {
-    fn drop(&mut self) {
-        let ok = std::process::Command::new("umount")
-            .arg(&self.dir)
-            .status()
-            .is_ok_and(|s| s.success());
-        if !ok {
-            // Busy for a moment (a scan that has not let go): detach it now,
-            // the kernel finishes when the last user leaves.
-            warn!(dir = %self.dir.display(), "umount refused — detaching lazily");
-            let _ = std::process::Command::new("umount")
-                .arg("-l")
-                .arg(&self.dir)
-                .status();
-        }
-        let _ = std::fs::remove_dir(&self.dir);
     }
 }
 

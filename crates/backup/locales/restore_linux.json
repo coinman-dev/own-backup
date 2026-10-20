@@ -19,5 +19,21 @@
   "restore_disk_linux.udev_not_settled": {
     "ru": "Диск записан, но система не успела показать его разделы (%{error}). Если их не видно, переподключите диск или перезагрузитесь.",
     "en": "The disk is written, but the system did not finish showing its partitions (%{error}). If they are not visible, reconnect the disk or restart."
+  },
+  "linux_tools.missing": {
+    "ru": "Не найдена программа %{tool}: установите пакет %{package}.",
+    "en": "The program %{tool} was not found: install the %{package} package."
+  },
+  "linux_tools.failed": {
+    "ru": "%{tool} завершилась с ошибкой (код %{code}): %{text}",
+    "en": "%{tool} failed (code %{code}): %{text}"
+  },
+  "linux_tools.mount_failed": {
+    "ru": "Не удалось смонтировать %{node}: %{tried}.",
+    "en": "Could not mount %{node}: %{tried}."
+  },
+  "linux_tools.umount_failed": {
+    "ru": "Не удалось отмонтировать %{dir}: изменения могли не попасть на диск.",
+    "en": "Could not unmount %{dir}: the changes may not have reached the disk."
   }
 }

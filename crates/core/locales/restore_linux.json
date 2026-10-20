@@ -4,13 +4,9 @@
     "ru": "В плане не указано устройство диска назначения. В Linux диски не опознаются по номеру — обновите окно программы и составьте план заново.",
     "en": "The plan does not name the target disk's device. On Linux disks are not identified by number — update the program window and build the plan again."
   },
-  "restore_exec_linux.no_format": {
-    "ru": "Создание файловой системы при восстановлении в Linux пока не сделано: восстановите раздел посекторно.",
-    "en": "Creating a filesystem during a restore is not implemented on Linux yet: restore the partition sector by sector."
-  },
-  "restore_exec_linux.no_extend": {
-    "ru": "Расширение файловой системы при восстановлении в Linux пока не сделано: расширьте её после восстановления (resize2fs, xfs_growfs, btrfs filesystem resize).",
-    "en": "Extending a filesystem during a restore is not implemented on Linux yet: extend it after the restore (resize2fs, xfs_growfs, btrfs filesystem resize)."
+  "restore_exec_linux.no_format_refs": {
+    "ru": "ReFS в Linux не создать: выберите для раздела ext4, XFS, btrfs, NTFS, FAT32 или exFAT.",
+    "en": "ReFS cannot be created on Linux: choose ext4, XFS, btrfs, NTFS, FAT32 or exFAT for the partition."
   },
   "restore_exec_linux.no_letters": {
     "ru": "Буквы дисков — понятие Windows; в Linux назначить букву нельзя. Уберите этот шаг из плана.",
@@ -43,10 +39,6 @@
   "restore_exec_linux.disk_reread": {
     "ru": "Ядро и udev показывают новую разметку %{disk}.",
     "en": "The kernel and udev show the new layout of %{disk}."
-  },
-  "restore_boot_linux.mount_failed": {
-    "ru": "Не удалось смонтировать %{node} для загрузочного шага: %{tried}.",
-    "en": "Could not mount %{node} for the boot step: %{tried}."
   },
   "restore_boot_linux.boot_step_on_live_partition": {
     "ru": "Загрузочный шаг не выполнен: раздел %{part} (%{node}) использует работающая система (например, это раздел EFI, с которого она загрузилась), а план его не восстанавливает.",
@@ -99,5 +91,25 @@
   "restore_boot_linux.windows_not_disk_copy": {
     "ru": "Подготовить Windows к загрузке из Linux можно только из копии целого диска: по копии тома не узнать, на какие разделы указывает BCD. Выполните bcdboot из среды восстановления Windows.",
     "en": "Windows can be made bootable from Linux only from a whole-disk copy: a volume copy does not say which partitions its BCD names. Run bcdboot from the Windows recovery environment."
+  },
+  "restore_fs_linux.no_refs": {
+    "ru": "ReFS в Linux не создать.",
+    "en": "ReFS cannot be created on Linux."
+  },
+  "restore_fs_linux.formatted": {
+    "ru": "На %{node} создана файловая система %{fs}.",
+    "en": "Created a %{fs} filesystem on %{node}."
+  },
+  "restore_fs_linux.grown": {
+    "ru": "Файловая система на %{node} расширена на весь раздел.",
+    "en": "The filesystem on %{node} was grown to fill its partition."
+  },
+  "restore_fs_linux.cannot_grow": {
+    "ru": "Файловую систему на %{node} (%{fs}) здесь не расширить: умеем ext2/3/4, XFS, btrfs и NTFS.",
+    "en": "The filesystem on %{node} (%{fs}) cannot be grown here: ext2/3/4, XFS, btrfs and NTFS can."
+  },
+  "restore_fs_linux.btrfs_clone_mounted": {
+    "ru": "btrfs на %{node} повторяет файловую систему, которая уже есть на этой машине, а ядро старше 6.7 приняло бы её за оригинал — расширение не выполнено. Смените идентификаторы при восстановлении или расширьте её на другой машине.",
+    "en": "The btrfs on %{node} duplicates a filesystem this machine already has, and a kernel older than 6.7 would take it for the original — it was not grown. Change the identities during the restore, or grow it on another machine."
   }
 }
