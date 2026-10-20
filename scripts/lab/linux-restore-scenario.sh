@@ -134,12 +134,15 @@ DISK_IMG=$COPIES/source-disk.qcow2
 # ---------------------------------------------------------------------------
 # verify: VerifyImage through the service; a damaged copy is said to be one.
 # ---------------------------------------------------------------------------
-stage_verify() {
+copy_source() { # NAME: a whole-disk copy of the source into $DISK_IMG
     local boot=()
     [[ $UEFI -eq 1 ]] && boot=(--bootable)
     rm -f "$DISK_IMG"
-    run v-copy "$CLI" backup-disk --device "$SOURCE" -o "$DISK_IMG" --format qcow2 "${boot[@]}"
-    check v-copy "$(verdict $?)" "whole-disk copy of the source system ($SRC_PARTS)"
+    run "$1" "$CLI" backup-disk --device "$SOURCE" -o "$DISK_IMG" --format qcow2 "${boot[@]}"
+    check "$1" "$(verdict $?)" "whole-disk copy of the source system ($SRC_PARTS)"
+}
+stage_verify() {
+    copy_source v-copy
     run v-ok "$RPC" verify-image "$DISK_IMG"
     [[ $? -eq 0 && $(field v-ok "['valid']") == True ]]
     check v-ok "$(verdict $?)" "VerifyImage: the copy is whole"
@@ -531,7 +534,10 @@ stage_stack() {
 # change: the source restored again with identity_choice change. First
 # RestoreDisk without fixing references (the system's files stay as they
 # were), then the plan with fix_references — that one stays on the target for
-# the host to boot (`linux-restore-boot.py boot data-2.qcow2`).
+# the host to boot (`linux-restore-boot.py boot data-2.qcow2`). Before the
+# copy, the source's initramfs is made to keep its root's UUID (a resume
+# device, as for a swap file on /), so the plan must also have the restored
+# system's own tool rebuild that image (owner decision 13).
 # ---------------------------------------------------------------------------
 # What the disk holds, read from the kernel and the devices themselves (no
 # udev database needed).
@@ -564,11 +570,95 @@ partuuids_of() { # disk: "<partition> <PARTUUID>"
         printf '%s %s\n' "$n" "$(blkid -p -o value -s PART_ENTRY_UUID "$p")"
     done
 }
+label_part() { # disk label: the number of its partition with that filesystem label
+    local n p
+    for n in $(part_numbers "$1"); do
+        p=$(part "$1" "$n") || continue
+        [[ $(blkid -p -o value -s LABEL "$p") == "$2" ]] && { echo "$n"; return; }
+    done
+    return 1
+}
+initrd_confs() { # image out: the configuration files an initramfs carries
+    # (dracut's etc/cmdline.d, initramfs-tools' conf/conf.d), concatenated
+    local img=$1 out=$2 f x=$WORK/initrd-x
+    : >"$out"
+    if command -v lsinitrd >/dev/null; then
+        for f in $(lsinitrd "$img" 2>/dev/null | awk '{print $NF}' | grep -E '^(etc/cmdline\.d/|conf/conf\.d/)'); do
+            lsinitrd -f "$f" "$img" >>"$out" 2>/dev/null
+        done
+    else
+        rm -rf "$x" && mkdir -p "$x"
+        unmkinitramfs "$img" "$x" >/dev/null 2>&1
+        find "$x" -type f \( -path '*/conf/conf.d/*' -o -path '*/etc/cmdline.d/*' \) -exec cat {} + >>"$out"
+        rm -rf "$x"
+    fi
+}
+# The source's root and /boot partitions (the Ubuntu cloud image names them
+# by label), set by source_resume.
+SRC_ROOT_N=
+SRC_BOOT_N=
+source_resume() { # 0: the source was changed (copy it again); 2: it already was; else failed
+    local root boot uuid mnt=$WORK/m-src rc conf=etc/dracut.conf.d/90-obk-lab-resume.conf d
+    SRC_ROOT_N=$(label_part "$SOURCE" cloudimg-rootfs) && SRC_BOOT_N=$(label_part "$SOURCE" BOOT) || {
+        check ch-src-resume FAIL "the source's root/BOOT partitions not found by label"
+        return 1
+    }
+    root=$(part "$SOURCE" "$SRC_ROOT_N")
+    boot=$(part "$SOURCE" "$SRC_BOOT_N")
+    uuid=$(blkid -p -o value -s UUID "$root")
+    mkdir -p "$mnt" && mount "$root" "$mnt" || return 1
+    if grep -qs "resume=UUID=$uuid" "$mnt/$conf"; then
+        umount "$mnt"
+        check ch-src-resume PASS "the source's initramfs already keeps its root UUID (resume=UUID=$uuid)"
+        return 2
+    fi
+    mount "$boot" "$mnt/boot" || { umount "$mnt"; return 1; }
+    # dracut (Ubuntu 26.04) copies kernel_cmdline into the image;
+    # initramfs-tools its resume configuration.
+    printf 'kernel_cmdline="resume=UUID=%s"\n' "$uuid" >"$mnt/$conf"
+    mkdir -p "$mnt/etc/initramfs-tools/conf.d"
+    printf 'RESUME=UUID=%s\n' "$uuid" >"$mnt/etc/initramfs-tools/conf.d/resume"
+    for d in dev proc sys; do mount --bind /$d "$mnt/$d"; done
+    chroot "$mnt" update-initramfs -u -k all >"$EV/ch-src-initramfs.out" 2>&1
+    rc=$?
+    for d in sys proc dev; do umount "$mnt/$d"; done
+    umount "$mnt/boot"
+    umount "$mnt"
+    check ch-src-resume "$(verdict $rc)" "the source's initramfs keeps its root UUID (resume=UUID=$uuid)"
+    return $rc
+}
+initramfs_rebuilt() { # the restored image differs from the source's and names the new root UUID, not the old
+    local tm=$WORK/m-tboot sm=$WORK/m-sboot img name new old n=0 bad=0
+    new=$(awk -v n="$SRC_ROOT_N" '$1==n{print $3}' "$WORK/uuids.target")
+    old=$(awk -v n="$SRC_ROOT_N" '$1==n{print $3}' "$WORK/uuids.source")
+    [[ -n $new && -n $old && $new != "$old" ]] || return 1
+    mkdir -p "$tm" "$sm"
+    mount -o ro,noload "$(part "$TARGET" "$SRC_BOOT_N")" "$tm" || return 1
+    mount -o ro,noload "$(part "$SOURCE" "$SRC_BOOT_N")" "$sm" || { umount "$tm"; return 1; }
+    for img in "$tm"/initrd.img-* "$tm"/initramfs-*.img; do
+        [[ -f $img && ! -L $img ]] || continue
+        name=$(basename "$img")
+        n=$((n + 1))
+        cmp -s "$img" "$sm/$name" && { bad=1; echo "$name: the same as the source's" >>"$EV/ch-initramfs.txt"; }
+        initrd_confs "$img" "$WORK/initrd.target.conf"
+        cp "$WORK/initrd.target.conf" "$EV/ch-initramfs-$name.conf"
+        grep -qi -- "$new" "$WORK/initrd.target.conf" || { bad=1; echo "$name: no $new" >>"$EV/ch-initramfs.txt"; }
+        grep -qi -- "$old" "$WORK/initrd.target.conf" && { bad=1; echo "$name: still $old" >>"$EV/ch-initramfs.txt"; }
+    done
+    umount "$sm"
+    umount "$tm"
+    [[ $n -gt 0 && $bad -eq 0 ]]
+}
 reply_counts() { # NAME: "<identity_changes> <edited_files>" of a JSON reply
     python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(len(d.get('identity_changes',[])),len(d.get('edited_files',[])))" "$EV/$1.out"
 }
 stage_change() {
-    [[ -f $DISK_IMG ]] || stage_verify
+    source_resume
+    case $? in
+        0) copy_source ch-copy ;;
+        2) [[ -f $DISK_IMG ]] || copy_source ch-copy ;;
+        *) [[ -f $DISK_IMG ]] || stage_verify ;;
+    esac
     uuids_of "$SOURCE" >"$WORK/uuids.source"
     partuuids_of "$SOURCE" >"$WORK/partuuids.source"
     local changed edited p n mnt=$WORK/m-ch old bad=0 refs=0 f root
@@ -581,6 +671,8 @@ stage_change() {
     read -r changed edited < <(reply_counts ch-disk)
     [[ ${changed:-0} -gt 0 && ${edited:-1} -eq 0 ]]
     check ch-disk-report "$(verdict $?)" "the reply lists ${changed:-0} changed identities and no edited file (not asked)"
+    ! grep -q 'пересобран\|was rebuilt' "$EV/ch-disk.out"
+    check ch-disk-no-initramfs "$(verdict $?)" "no initramfs rebuild without fixed references"
     uuids_of "$TARGET" >"$WORK/uuids.disk"
     ! grep -Fxf <(awk '$3!=""' "$WORK/uuids.source") "$WORK/uuids.disk" >"$EV/ch-disk-same.txt"
     check ch-disk-new "$(verdict $?)" "no restored filesystem carries the source's UUID"
@@ -622,8 +714,17 @@ stage_change() {
     root=$(part "$TARGET" "$(awk '$2=="ext4"{print $1; exit}' "$WORK/uuids.target")")
     e2fsck -fn "$root" >"$EV/ch-fsck.out" 2>&1
     check ch-fsck "$(verdict $?)" "the restored root checks clean after its UUID change and edits"
-    [[ -z $(ls /run/udev/rules.d/59-own-backup-hold-* 2>/dev/null) && -z $(ls /dev/mapper/obk-reid-* 2>/dev/null) ]]
-    check ch-hold "$(verdict $?)" "no udev hold and no temporary mapping is left"
+    if [[ -n $SRC_ROOT_N && -n $SRC_BOOT_N ]]; then
+        grep -q 'initramfs восстановленной системы пересобран (update-initramfs)\|initramfs was rebuilt (update-initramfs)' "$EV/ch-apply.out"
+        check ch-initramfs-note "$(verdict $?)" "the plan step reports the restored system's initramfs rebuilt"
+        initramfs_rebuilt
+        check ch-initramfs "$(verdict $?)" "the restored /boot's initramfs is new and names the new root UUID, not the old"
+    else
+        check ch-initramfs SKIP "the source's initramfs could not be prepared"
+    fi
+    [[ -z $(ls /run/udev/rules.d/59-own-backup-hold-* 2>/dev/null) && -z $(ls /dev/mapper/obk-reid-* 2>/dev/null) \
+        && -z $(ls -d /run/own-backup/initramfs-* 2>/dev/null) ]] && ! grep -q ' /run/own-backup/' /proc/self/mounts
+    check ch-hold "$(verdict $?)" "no udev hold, temporary mapping or rebuild mount is left"
     check ch-boot SKIP "host: linux-vm.py down; linux-restore-boot.py boot data-2.qcow2 [--with data-1.qcow2]"
 }
 
