@@ -899,12 +899,47 @@ fn emit_engine<T: serde::Serialize>(
 /// the wizard says what the save would say. `placement` is decided on, the
 /// texts are only shown.
 fn destination_answer(sources: &[String], dest_folder: &str) -> serde_json::Value {
-    let answer = |placement: &str, source: &str, reason: &str| serde_json::json!({ "placement": placement, "source": source, "reason": reason });
     let sources: Vec<String> = sources
         .iter()
         .filter(|s| !s.trim().is_empty())
         .cloned()
         .collect();
+    let mut answer = placement_answer(&sources, dest_folder);
+    answer["key_store_unknown"] = key_store_unknown(&sources);
+    answer
+}
+
+/// The sources on which it cannot be told whether the service's key
+/// directory lies (ZFS, overlayfs): the engine treats them as holding it
+/// (decision 6/E4) — a copy that cannot leave it out is refused — and the
+/// wizard says so before the run. `[{ source, reason }]`; empty off Linux.
+fn key_store_unknown(sources: &[String]) -> serde_json::Value {
+    #[cfg(target_os = "linux")]
+    {
+        use own_backup_backup::seal::local::{key_store_placement, KeyStorePlacement};
+        // Linux sources are device paths; anything else is not one to place.
+        sources
+            .iter()
+            .filter(|s| s.starts_with('/'))
+            .filter_map(|s| match key_store_placement(s) {
+                KeyStorePlacement::CannotTell(why) => {
+                    Some(serde_json::json!({ "source": s, "reason": why }))
+                }
+                KeyStorePlacement::Clear | KeyStorePlacement::Here => None,
+            })
+            .collect()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = sources;
+        serde_json::json!([])
+    }
+}
+
+/// Where the destination sits: `{ placement, source, reason }`.
+fn placement_answer(sources: &[String], dest_folder: &str) -> serde_json::Value {
+    let answer = |placement: &str, source: &str, reason: &str| serde_json::json!({ "placement": placement, "source": source, "reason": reason });
+    let sources = sources.to_vec();
     if sources.is_empty() || dest_folder.trim().is_empty() {
         return answer("clear", "", "");
     }
@@ -3589,6 +3624,8 @@ mod tests {
         let on = destination_answer(&["C:".into()], r"C:\Backups");
         assert_eq!(on["placement"], "on_source");
         assert_eq!(on["source"], "C:");
+        // A drive letter is not a Linux device: nothing to warn about.
+        assert_eq!(on["key_store_unknown"], serde_json::json!([]));
         // Nothing to compare yet: no answer to give, and no refusal either.
         assert_eq!(destination_answer(&[], r"C:\Backups")["placement"], "clear");
         assert_eq!(

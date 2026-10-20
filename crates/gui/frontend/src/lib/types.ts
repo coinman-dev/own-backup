@@ -306,6 +306,11 @@ export interface DestinationCheck {
   source: string;
   /** Why it could not be told, in the service's words (`cannot_tell`). */
   reason: string;
+  /** Linux: sources where it cannot be told whether the service's key
+   *  directory lies on them (ZFS, overlayfs). The engine treats them as
+   *  holding it: a copy that cannot leave it out is refused. Missing from an
+   *  older service. */
+  key_store_unknown?: { source: string; reason: string }[];
 }
 
 /** A command failure with a kind to act on (`CodedError` in the GUI crate):

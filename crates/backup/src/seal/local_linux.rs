@@ -767,16 +767,40 @@ pub fn register_data_dir(data_dir: &Path) {
     }
 }
 
+/// Where this machine's key directory is relative to a source volume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyStorePlacement {
+    /// No key directory with anything in it is on this source.
+    Clear,
+    /// One is: its bytes lie on this source.
+    Here,
+    /// Where one lies cannot be told (ZFS, overlayfs, a device that cannot
+    /// be followed): the engine treats it as [`Self::Here`], and the wizard
+    /// warns before the run. The reason, in words.
+    CannotTell(String),
+}
+
 /// Does the volume `source` hold a key directory of this machine that has
 /// anything in it? Decision 6/E4: such a volume is copied only with that
 /// directory left out, whatever the job's rules say.
 ///
 /// Answered by where the directory's bytes lie (`source_identity`: the same
 /// extent comparison as "destination on the source", through LUKS, LVM and
-/// partitions alike). When that cannot be told, the answer is yes: the cost
-/// of a wrong yes is one scan for a name, of a wrong no a copy carrying the
-/// keys.
+/// partitions alike — an LVM volume by the extents its device-mapper table
+/// gives it). When that cannot be told, the answer is yes: the cost of a
+/// wrong yes is one scan for a name, of a wrong no a copy carrying the keys.
 pub fn key_store_on_source(source: &str) -> bool {
+    key_store_placement(source) != KeyStorePlacement::Clear
+}
+
+/// [`key_store_on_source`], with "cannot tell" kept apart for the wizard.
+pub fn key_store_placement(source: &str) -> KeyStorePlacement {
+    key_store_in(source, &key_store_data_dirs())
+}
+
+/// Every data directory whose key directory counts: those registered in this
+/// process, the configured one.
+fn key_store_data_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = KEY_STORE_DATA_DIRS
         .lock()
         .map(|d| d.clone())
@@ -791,28 +815,40 @@ pub fn key_store_on_source(source: &str) -> bool {
             dirs.push(configured);
         }
     }
-    key_store_in(source, &dirs)
+    dirs
 }
 
-/// [`key_store_on_source`] over the data directories given.
-fn key_store_in(source: &str, dirs: &[PathBuf]) -> bool {
+/// [`key_store_placement`] over the data directories given.
+fn key_store_in(source: &str, dirs: &[PathBuf]) -> KeyStorePlacement {
+    use crate::source_identity::DestPlacement;
     use std::os::unix::fs::FileTypeExt;
     // A volume is a block device. A regular file read as a source (an image
     // the CLI is pointed at, the engine's own tests) is not where this
     // machine's key directory lives, and must not be refused for it.
     if std::fs::metadata(source).is_ok_and(|m| !m.file_type().is_block_device()) {
-        return false;
+        return KeyStorePlacement::Clear;
     }
-    dirs.iter()
-        .map(|d| d.join(KEY_DIRECTORY_NAME))
-        .filter(|d| holds_anything(d))
-        .any(|d| {
-            let Some(path) = d.to_str() else { return true };
-            !matches!(
-                crate::source_identity::where_the_destination_sits(&[source.to_string()], path),
-                crate::source_identity::DestPlacement::Clear
-            )
-        })
+    let mut unknown = None;
+    for dir in dirs.iter().map(|d| d.join(KEY_DIRECTORY_NAME)) {
+        if !holds_anything(&dir) {
+            continue;
+        }
+        let Some(path) = dir.to_str() else {
+            unknown.get_or_insert_with(|| dir.display().to_string());
+            continue;
+        };
+        match crate::source_identity::where_the_destination_sits(&[source.to_string()], path) {
+            DestPlacement::Clear => {}
+            DestPlacement::OnSource(_) => return KeyStorePlacement::Here,
+            DestPlacement::CannotTell(why) => {
+                unknown.get_or_insert(why);
+            }
+        }
+    }
+    match unknown {
+        Some(why) => KeyStorePlacement::CannotTell(why),
+        None => KeyStorePlacement::Clear,
+    }
 }
 
 /// An entry of any kind in `dir`; an unreadable directory counts as full.
@@ -1100,12 +1136,23 @@ pub(super) mod tests {
         let data = data_dir();
         let dirs = [data.path().to_path_buf()];
         let nowhere = "/dev/own-backup-test-no-such-device";
-        assert!(!key_store_in(nowhere, &dirs), "no key directory yet");
+        let clear = KeyStorePlacement::Clear;
+        assert_eq!(key_store_in(nowhere, &dirs), clear, "no key directory yet");
         let root = data.path().join(KEY_DIRECTORY_NAME);
         std::fs::create_dir(&root).unwrap();
-        assert!(!key_store_in(nowhere, &dirs), "an empty one holds nothing");
+        assert_eq!(key_store_in(nowhere, &dirs), clear, "an empty one");
         std::fs::write(root.join(MACHINE_KEY_FILE), b"x").unwrap();
-        assert!(key_store_in(nowhere, &dirs), "fail closed");
+        assert!(
+            matches!(
+                key_store_in(nowhere, &dirs),
+                KeyStorePlacement::CannotTell(_)
+            ),
+            "fail closed, and said so"
+        );
+        // A regular file is not a volume with keys on it.
+        let file = data.path().join("image.raw");
+        std::fs::write(&file, b"").unwrap();
+        assert_eq!(key_store_in(file.to_str().unwrap(), &dirs), clear);
     }
 
     /// The real `systemd-creds`, host key: only as root, where it is present.

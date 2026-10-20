@@ -55,7 +55,10 @@ service BackupService {
   // wizard is open — the same check SaveJob and RunJob make.
   // JSON in: { "sources": [string], "dest_folder": string }
   // JSON out: { "placement": "clear" | "on_source" | "cannot_tell",
-  //             "source": string, "reason": string }
+  //             "source": string, "reason": string,
+  //             "key_store_unknown": [{ "source": string, "reason": string }] }
+  // key_store_unknown (Linux): sources where it cannot be told whether the
+  // service's key directory lies on them; the engine treats them as holding it.
   rpc CheckDestination(JsonRequest) returns (JsonReply);
 
   // --- Settings (config.toml) ---

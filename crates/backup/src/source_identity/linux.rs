@@ -224,6 +224,99 @@ pub struct Host {
     /// `/sys`, or its fake.
     sys: PathBuf,
     mounts: Vec<MountEntry>,
+    /// The live table of a device-mapper device, by its device-mapper name;
+    /// `None` when it cannot be read (not root, no `/dev/mapper/control`).
+    dm_table: Box<DmTableReader>,
+}
+
+/// Reads one device-mapper table: a line per target, as [`DmSegment::parse`]
+/// takes it apart.
+type DmTableReader = dyn Fn(&str) -> Option<Vec<DmSegment>>;
+
+/// One target of a device-mapper table, as far as where its bytes lie is
+/// concerned. Offsets and lengths are in 512-byte sectors, as in the table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DmSegment {
+    /// Where the target starts in the mapped device.
+    start: u64,
+    length: u64,
+    map: DmMap,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DmMap {
+    /// `linear` and `crypt`: one device, from `offset` on, byte for byte in
+    /// place (a `crypt` sector is the same sector, enciphered).
+    Linear { dev: (u32, u32), offset: u64 },
+    /// `striped`: `chunk` sectors in turn on each device.
+    Striped {
+        chunk: u64,
+        devs: Vec<((u32, u32), u64)>,
+    },
+    /// `zero` and `error`: no device behind it at all.
+    Nothing,
+    /// Anything else (thin, snapshot, cache, raid, mirror…): its bytes are
+    /// somewhere on what it is stacked on, and nobody here knows where.
+    Unknown,
+}
+
+impl DmSegment {
+    /// A target as the kernel reports it (`DM_TABLE_STATUS`, `dmsetup
+    /// table`). The key of a `crypt` target is skipped over, never kept.
+    pub(crate) fn parse(start: u64, length: u64, kind: &str, params: &str) -> Self {
+        let p: Vec<&str> = params.split_whitespace().collect();
+        let dev = |s: &str| -> Option<(u32, u32)> {
+            let (a, b) = s.split_once(':')?;
+            Some((a.parse().ok()?, b.parse().ok()?))
+        };
+        let num = |s: &str| s.parse::<u64>().ok();
+        let map = match kind {
+            "linear" => p
+                .first()
+                .and_then(|d| dev(d))
+                .zip(p.get(1).and_then(|o| num(o)))
+                .map(|(dev, offset)| DmMap::Linear { dev, offset }),
+            // <cipher> <key> <iv_offset> <device> <offset> [<options>]
+            "crypt" => p
+                .get(3)
+                .and_then(|d| dev(d))
+                .zip(p.get(4).and_then(|o| num(o)))
+                .map(|(dev, offset)| DmMap::Linear { dev, offset }),
+            // <stripes> <chunk size> (<device> <offset>)…
+            "striped" => (|| {
+                let n = usize::try_from(num(p.first()?)?).ok()?;
+                let chunk = num(p.get(1)?)?;
+                if n == 0 || chunk == 0 || p.len() != 2 + 2 * n {
+                    return None;
+                }
+                let devs = p[2..]
+                    .chunks(2)
+                    .map(|c| Some((dev(c[0])?, num(c[1])?)))
+                    .collect::<Option<Vec<_>>>()?;
+                Some(DmMap::Striped { chunk, devs })
+            })(),
+            "zero" | "error" => Some(DmMap::Nothing),
+            _ => None,
+        };
+        DmSegment {
+            start,
+            length,
+            map: map.unwrap_or(DmMap::Unknown),
+        }
+    }
+}
+
+/// The live table of the device-mapper device `name`, through
+/// `/dev/mapper/control` (root only).
+fn read_dm_table(name: &str) -> Option<Vec<DmSegment>> {
+    let control = own_backup_snapshot::dm_ioctl::Control::open().ok()?;
+    let targets = control.table(name).ok()?;
+    Some(
+        targets
+            .iter()
+            .map(|t| DmSegment::parse(t.start, t.length, &t.kind, &t.params))
+            .collect(),
+    )
 }
 
 impl Host {
@@ -235,16 +328,43 @@ impl Host {
             root: PathBuf::from("/"),
             sys: PathBuf::from("/sys"),
             mounts: parse_mountinfo(&mountinfo),
+            dm_table: Box::new(read_dm_table),
         }
     }
 
-    /// A made-up machine: `root` holds `dev/…`, `sys` holds `class/block/…`.
+    /// A made-up machine: `root` holds `dev/…`, `sys` holds `class/block/…`;
+    /// a device-mapper table, where the test gives one, is the text file
+    /// `dm/table` beside the device's `dm/name` (`dmsetup table` lines).
     #[cfg(test)]
     fn fake(root: &Path, sys: &Path, mountinfo: &str) -> Self {
+        let class = sys.join("class/block");
         Host {
             root: std::fs::canonicalize(root).unwrap(),
             sys: sys.to_path_buf(),
             mounts: parse_mountinfo(mountinfo),
+            dm_table: Box::new(move |dm_name: &str| {
+                for entry in std::fs::read_dir(&class).ok()?.flatten() {
+                    let dm = entry.path().join("dm");
+                    if read_trimmed(&dm.join("name")).as_deref() != Some(dm_name) {
+                        continue;
+                    }
+                    let text = std::fs::read_to_string(dm.join("table")).ok()?;
+                    return text
+                        .lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .map(|l| {
+                            let f: Vec<&str> = l.splitn(4, ' ').collect();
+                            Some(DmSegment::parse(
+                                f.first()?.parse().ok()?,
+                                f.get(1)?.parse().ok()?,
+                                f.get(2)?,
+                                f.get(3).copied().unwrap_or(""),
+                            ))
+                        })
+                        .collect();
+                }
+                None
+            }),
         }
     }
 
@@ -318,21 +438,43 @@ impl Host {
     /// * a partition — its range on its disk (`start`/`size` in sysfs are in
     ///   512-byte units whatever the sector size);
     /// * a whole disk — all of it;
-    /// * a device-mapper or md device (LUKS, LVM, RAID) — everything under it.
-    ///   For an LVM volume that is the whole physical volume, not the ranges
-    ///   the logical volume really uses: the device-mapper table is not in
-    ///   sysfs. Too much, never too little — two volumes of one physical
-    ///   volume are reported as overlapping;
+    /// * a device-mapper device whose table can be read and is made of
+    ///   `linear`, `crypt`, `striped`, `zero` and `error` targets — the
+    ///   ranges those targets really use, followed down: an LVM volume is
+    ///   where its extents are, not its whole physical volume, so two volumes
+    ///   of one physical volume are two places;
+    /// * any other device-mapper or md device (thin, snapshot, raid, a table
+    ///   that cannot be read) — everything under it: too much, never too
+    ///   little;
     /// * a loop device — the filesystem its backing file is on, likewise whole;
     /// * an NBD device — `None`: it is served by a process (our own image
     ///   mount), and what that process reads is not visible here.
     fn extents_of_block(&self, name: &str, depth: u32) -> Option<Vec<Extent>> {
+        let size = read_u64(&self.class_dir(name).join("size"))?.checked_mul(512)?;
+        self.extents_of_range(name, 0, size, depth)
+    }
+
+    /// Where the bytes `offset..offset + length` of the block device `name`
+    /// lie on whole disks — see [`Self::extents_of_block`].
+    fn extents_of_range(
+        &self,
+        name: &str,
+        offset: u64,
+        length: u64,
+        depth: u32,
+    ) -> Option<Vec<Extent>> {
         if depth > MAX_DEPTH {
             return None;
         }
         let dir = self.class_dir(name);
         if !dir.is_dir() || name.starts_with("nbd") {
             return None;
+        }
+        if length == 0 {
+            return Some(Vec::new());
+        }
+        if let Some(out) = self.extents_through_dm_table(name, offset, length, depth) {
+            return out;
         }
         let slaves = self.slaves(name);
         if !slaves.is_empty() {
@@ -348,30 +490,99 @@ impl Host {
                 DestLocation::Network | DestLocation::Unknown(_) => None,
             };
         }
+        let size = read_u64(&dir.join("size"))?.checked_mul(512)?;
+        if offset >= size {
+            return Some(Vec::new());
+        }
+        let length = length.min(size - offset);
         if dir.join("partition").is_file() {
-            let start = read_u64(&dir.join("start"))?;
-            let size = read_u64(&dir.join("size"))?;
+            let start = read_u64(&dir.join("start"))?.checked_mul(512)?;
             let disk_dir = std::fs::canonicalize(&dir).ok()?.parent()?.to_path_buf();
             let disk = disk_dir.file_name()?.to_str()?.to_string();
             // A partition of something that is itself somewhere else (a
-            // partitioned loop file, an md array): all of that.
+            // partitioned loop file, an md array): that range of it.
             if !self.slaves(&disk).is_empty() || self.loop_backing_file(&disk).is_some() {
-                return self.extents_of_block(&disk, depth + 1);
+                return self.extents_of_range(&disk, start.checked_add(offset)?, length, depth + 1);
             }
             let (major, minor) = read_dev(&disk_dir.join("dev"))?;
             return Some(vec![Extent {
                 disk: disk_key(major, minor),
-                offset: start.checked_mul(512)?,
-                length: size.checked_mul(512)?,
+                offset: start.checked_add(offset)?,
+                length,
             }]);
         }
-        let size = read_u64(&dir.join("size"))?;
         let (major, minor) = read_dev(&dir.join("dev"))?;
         Some(vec![Extent {
             disk: disk_key(major, minor),
-            offset: 0,
-            length: size.checked_mul(512)?,
+            offset,
+            length,
         }])
+    }
+
+    /// [`Self::extents_of_range`] of a device-mapper device through its
+    /// table. `None` when the table does not say (not a device-mapper device,
+    /// unreadable, a target of a kind not followed); `Some(None)` when it
+    /// does, and what it points at cannot be located.
+    fn extents_through_dm_table(
+        &self,
+        name: &str,
+        offset: u64,
+        length: u64,
+        depth: u32,
+    ) -> Option<Option<Vec<Extent>>> {
+        let dm_name = read_trimmed(&self.class_dir(name).join("dm/name"))?;
+        let table = (self.dm_table)(&dm_name)?;
+        if table.iter().any(|t| t.map == DmMap::Unknown) {
+            return None;
+        }
+        let end = offset.checked_add(length)?;
+        let mut out = Vec::new();
+        for t in &table {
+            let t_start = t.start.checked_mul(512)?;
+            let t_end = t_start.checked_add(t.length.checked_mul(512)?)?;
+            let (from, to) = (offset.max(t_start), end.min(t_end));
+            if from >= to {
+                continue;
+            }
+            // Bytes into this target.
+            let within = from - t_start;
+            match &t.map {
+                DmMap::Nothing | DmMap::Unknown => {}
+                DmMap::Linear { dev, offset: at } => {
+                    let Some(under) = self.block_by_number(dev.0, dev.1) else {
+                        return Some(None);
+                    };
+                    let at = at.checked_mul(512)?.checked_add(within)?;
+                    match self.extents_of_range(&under, at, to - from, depth + 1) {
+                        Some(e) => out.extend(e),
+                        None => return Some(None),
+                    }
+                }
+                DmMap::Striped { chunk, devs } => {
+                    // Each device holds whole rows of chunks: rows `first`
+                    // to `last` of every device cover the range — a little
+                    // more at its ends, never less.
+                    let chunk = chunk.checked_mul(512)?;
+                    let row = chunk.checked_mul(devs.len() as u64)?;
+                    let first = within / row;
+                    let last = (to - t_start).div_ceil(row);
+                    for (dev, base) in devs {
+                        let Some(under) = self.block_by_number(dev.0, dev.1) else {
+                            return Some(None);
+                        };
+                        let at = base
+                            .checked_mul(512)?
+                            .checked_add(first.checked_mul(chunk)?)?;
+                        let take = (last - first).checked_mul(chunk)?;
+                        match self.extents_of_range(&under, at, take, depth + 1) {
+                            Some(e) => out.extend(e),
+                            None => return Some(None),
+                        }
+                    }
+                }
+            }
+        }
+        Some(Some(out))
     }
 
     /// The sectors a source device occupies. `part:<disk>:<offset>:<len>` is
@@ -1040,6 +1251,152 @@ mod tests {
                 .extents_of_source(s)),
             DestPlacement::OnSource("/dev/mapper/vg0-root".into())
         );
+    }
+
+    /// With its table read, a logical volume is where its extents are: two
+    /// volumes of one physical volume are two places, a volume spread over
+    /// two physical volumes is its pieces of each, and LVM on LUKS is
+    /// followed through the container's data offset. A target whose bytes
+    /// cannot be placed (thin) is everything under it, as before.
+    #[test]
+    fn a_logical_volume_is_where_its_table_puts_it() {
+        let f = Fake::new();
+        let a = f.disk("ata/sda", "sda", "8:0", 100_000);
+        let pv1 = f.part(&a, "sda2", "8:2", 2048, 80_000);
+        let b = f.disk("ata/sdb", "sdb", "8:16", 100_000);
+        let pv2 = f.part(&b, "sdb1", "8:17", 2048, 90_000);
+        // vg0-root: 10 000 sectors at PV extent offset 2048 on sda2.
+        let root = f.dm("dm-3", "252:3", "vg0-root", "LVM-AAAACCCC", &[&pv1]);
+        f.write(&root.join("dm/table"), "0 10000 linear 8:2 2048\n");
+        f.write(&root.join("size"), "10000\n");
+        // vg0-data: the rest of sda2, then a piece of sdb1.
+        let data = f.dm("dm-4", "252:4", "vg0-data", "LVM-AAAABBBB", &[&pv1, &pv2]);
+        f.write(
+            &data.join("dm/table"),
+            "0 60000 linear 8:2 12048\n60000 5000 linear 8:17 2048\n",
+        );
+        f.write(&data.join("size"), "65000\n");
+        f.dir("/srv");
+        f.dir("/keys");
+        let host = f.host(
+            "1 0 252:4 / /srv rw - xfs /dev/mapper/vg0-data rw\n\
+             2 0 252:3 / /keys rw - ext4 /dev/mapper/vg0-root rw\n",
+        );
+        assert_eq!(
+            host.extents_of_source("/dev/mapper/vg0-root"),
+            Some(vec![range((8, 0), 2048 + 2048, 10_000)])
+        );
+        assert_eq!(
+            host.extents_of_source("/dev/mapper/vg0-data"),
+            Some(vec![
+                range((8, 0), 2048 + 12_048, 60_000),
+                range((8, 16), 2048 + 2048, 5000)
+            ])
+        );
+        let on = |sources: &[&str], dest: &str| {
+            let sources: Vec<String> = sources.iter().map(|s| s.to_string()).collect();
+            placement(&sources, host.locate_destination(dest), |s| {
+                host.extents_of_source(s)
+            })
+        };
+        // The other volume of the same PV is clear of it…
+        assert_eq!(on(&["/dev/mapper/vg0-root"], "/srv"), DestPlacement::Clear);
+        // …the PV partition holding it is not, nor the disk…
+        assert_eq!(
+            on(&["/dev/sda2"], "/keys"),
+            DestPlacement::OnSource("/dev/sda2".into())
+        );
+        assert_eq!(
+            on(&["/dev/sda"], "/keys"),
+            DestPlacement::OnSource("/dev/sda".into())
+        );
+        // …and the second disk, which holds a piece of vg0-data only, is.
+        assert_eq!(on(&["/dev/sdb"], "/keys"), DestPlacement::Clear);
+        assert_eq!(
+            on(&["/dev/sdb"], "/srv"),
+            DestPlacement::OnSource("/dev/sdb".into())
+        );
+
+        // A thin volume: its bytes are somewhere in the pool, so everything
+        // under it counts — including where vg0-root is.
+        let thin = f.dm("dm-5", "252:5", "vg0-thin", "LVM-AAAADDDD", &[&pv1]);
+        f.write(&thin.join("dm/table"), "0 2000 thin 252:9 1\n");
+        let host = f.host("");
+        assert_eq!(
+            host.extents_of_source("/dev/mapper/vg0-thin"),
+            Some(vec![range((8, 0), 2048, 80_000)])
+        );
+    }
+
+    #[test]
+    fn lvm_on_luks_and_striped_volumes_are_followed_to_their_disks() {
+        let f = Fake::new();
+        let a = f.disk("ata/sda", "sda", "8:0", 1_000_000);
+        let part = f.part(&a, "sda3", "8:3", 4096, 900_000);
+        // LUKS2 with a 32 MiB header: data from sector 32 768 of sda3.
+        let crypt = f.dm(
+            "dm-0",
+            "252:0",
+            "dm_crypt-0",
+            "CRYPT-LUKS2-0000-dm_crypt-0",
+            &[&part],
+        );
+        f.write(
+            &crypt.join("dm/table"),
+            "0 867232 crypt aes-xts-plain64 :64:logon:cryptsetup:x 0 8:3 32768\n",
+        );
+        f.write(&crypt.join("size"), "867232\n");
+        let lv = f.dm("dm-1", "252:1", "ubuntu--vg-ubuntu--lv", "LVM-X", &[&crypt]);
+        f.write(&lv.join("dm/table"), "0 100000 linear 252:0 2048\n");
+        f.write(&lv.join("size"), "100000\n");
+        let host = f.host("");
+        assert_eq!(
+            host.extents_of_source("/dev/mapper/ubuntu--vg-ubuntu--lv"),
+            Some(vec![range((8, 0), 4096 + 32_768 + 2048, 100_000)])
+        );
+
+        // Two stripes of 8 sectors: 40 sectors are rows 0–2 of each device.
+        let b = f.disk("ata/sdb", "sdb", "8:16", 10_000);
+        let c = f.disk("ata/sdc", "sdc", "8:32", 10_000);
+        let striped = f.dm("dm-2", "252:2", "vg1-s", "LVM-S", &[&b, &c]);
+        f.write(
+            &striped.join("dm/table"),
+            "0 40 striped 2 8 8:16 2048 8:32 4096\n",
+        );
+        f.write(&striped.join("size"), "40\n");
+        let host = f.host("");
+        assert_eq!(
+            host.extents_of_source("/dev/mapper/vg1-s"),
+            Some(vec![range((8, 16), 2048, 24), range((8, 32), 4096, 24)])
+        );
+    }
+
+    #[test]
+    fn a_dm_target_is_read_without_keeping_its_key() {
+        assert_eq!(
+            DmSegment::parse(
+                0,
+                8,
+                "crypt",
+                "aes-xts-plain64 deadbeef 0 8:3 4096 1 discard"
+            ),
+            DmSegment {
+                start: 0,
+                length: 8,
+                map: DmMap::Linear {
+                    dev: (8, 3),
+                    offset: 4096
+                }
+            }
+        );
+        assert_eq!(DmSegment::parse(0, 8, "zero", "").map, DmMap::Nothing);
+        assert_eq!(DmSegment::parse(0, 8, "linear", "8:3").map, DmMap::Unknown);
+        assert_eq!(
+            DmSegment::parse(0, 8, "striped", "2 8 8:16 0").map,
+            DmMap::Unknown,
+            "two stripes need two devices"
+        );
+        assert_eq!(DmSegment::parse(0, 8, "thin-pool", "x").map, DmMap::Unknown);
     }
 
     #[test]

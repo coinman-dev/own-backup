@@ -1845,6 +1845,9 @@
           {:else if destCheck?.placement === 'cannot_tell'}
             <div class="note">{m.wiz_dest_cannot_tell({ reason: destCheck.reason })}</div>
           {/if}
+          {#each destCheck?.key_store_unknown ?? [] as k (k.source)}
+            <div class="note">{m.wiz_key_store_unknown({ source: k.source, reason: k.reason })}</div>
+          {/each}
           {#if !sourceReadonly && activeDisk && !diskWhole(activeDisk)}
             {#if wholeDisk && !mapperKind(activeDisk)}
               <div class="note">{m.wiz_volumes_separate_no_id()}</div>
