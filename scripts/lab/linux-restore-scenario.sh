@@ -324,6 +324,11 @@ stage_mbr() {
     mkfs.ext4 -q -F -L mbr-root "$p1"
     mkdir -p "$mnt" && mount "$p1" "$mnt" && MOUNTS+=("$mnt")
     rsync -aHAXx --exclude='/var/tmp/*' / "$mnt"/ >"$EV/mbr-rsync.out" 2>&1
+    # /boot is a partition of its own in the cloud image: -x left it out, and
+    # the system had no kernel (GRUB then listed only os-prober's entries).
+    rsync -aHAXx --exclude='/efi/*' /boot/ "$mnt"/boot/ >>"$EV/mbr-rsync.out" 2>&1
+    printf 'GRUB_DISABLE_OS_PROBER=true\nGRUB_TIMEOUT=3\nGRUB_TIMEOUT_STYLE=menu\n' \
+        >"$mnt/etc/default/grub.d/99-obk-lab.cfg"
     local uuid
     uuid=$(blkid -s UUID -o value "$p1")
     printf 'UUID=%s / ext4 defaults 0 1\n' "$uuid" >"$mnt/etc/fstab"
