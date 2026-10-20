@@ -522,14 +522,32 @@ fn existing_node(device: &str, dst: PartRef) -> Result<String> {
 }
 
 /// The node of partition `dst` for a step that works on it through the
-/// kernel (create or grow a filesystem): it must sit where the plan was
-/// checked and nothing may use it — the guard refuses it mounted, swapped on
-/// or held by LUKS/LVM/md.
-fn free_partition_node(device: &str, dst: PartRef) -> Result<String> {
+/// kernel (create or grow a filesystem, change its identities): it must sit
+/// where the plan was checked and nothing may use it — the guard refuses it
+/// mounted, swapped on or held by LUKS/LVM/md. Whether it is the ESP this
+/// machine booted through was settled before the plan wrote anything for a
+/// partition the plan touches ([`boot_esp_settled`]); any other is asked
+/// again.
+fn free_partition_node(plan: &RestorePlan, device: &str, dst: PartRef) -> Result<String> {
     let node = existing_node(device, dst)?;
     check_partition_slot(&node, dst)?;
-    own_backup_restore::guard_target_volume(&node)?;
+    if boot_esp_settled(plan, dst.index) {
+        own_backup_restore::guard_plan_volume(&node)?;
+    } else {
+        own_backup_restore::guard_target_volume(&node)?;
+    }
     Ok(node)
+}
+
+/// Did the check before the run (`protection_of_device` against
+/// `touched_partitions_with`) already clear partition `index` of being the
+/// running system's boot ESP? True for every partition the plan restores,
+/// formats or finishes boot on: it was either checked then, or did not exist
+/// yet. After a whole-disk restore of this machine's own system disk the
+/// copy's ESP carries the running ESP's PARTUUID, and asking by PARTUUID
+/// again would mistake the copy for the original (`guard_plan_volume`).
+fn boot_esp_settled(plan: &RestorePlan, index: u32) -> bool {
+    plan.touched_partitions().contains(&index)
 }
 
 /// The partition node must sit exactly where the plan writes: the plan was
@@ -772,7 +790,7 @@ fn run_op(
             label,
             quick,
         } if !matches!(fs, own_backup_common::restore_plan::FormatFs::ReFs) => {
-            let node = free_partition_node(device, *part)?;
+            let node = free_partition_node(plan, device, *part)?;
             let message = super::fs_linux::format(
                 &mut own_backup_backup::linux_tools::SystemTools,
                 &node,
@@ -788,7 +806,7 @@ fn run_op(
         }
 
         RestoreOp::ExtendFilesystem { part } => {
-            let node = free_partition_node(device, *part)?;
+            let node = free_partition_node(plan, device, *part)?;
             let message = super::fs_linux::extend(
                 &mut own_backup_backup::linux_tools::SystemTools,
                 &node,
@@ -836,7 +854,7 @@ fn change_identities(
     let written = written_partitions(plan);
     let mut devices = Vec::new();
     for part in parts.iter().filter(|p| written.contains(&p.index)) {
-        let node = free_partition_node(device, *part)?;
+        let node = free_partition_node(plan, device, *part)?;
         let passphrase = plan.ops.iter().find_map(|op| match op {
             RestoreOp::RestorePartition {
                 src_index,
@@ -1133,6 +1151,42 @@ mod tests {
         plan.target_device = Some("/dev/disk/by-id/virtio-target".into());
         plan.ops.clear();
         assert!(linux_refusals(&plan).is_empty());
+    }
+
+    /// The partitions a plan restores or formats were cleared of being the
+    /// boot ESP before it wrote anything; a partition it only grows was not,
+    /// and is asked again.
+    #[test]
+    fn only_partitions_checked_before_the_run_skip_the_boot_esp_question() {
+        let plan = RestorePlan::new(
+            0,
+            "/tmp/copy.qcow2".into(),
+            vec![
+                RestoreOp::RestorePartition {
+                    src_index: 1,
+                    dst: part(1),
+                    mode: RestoreMode::Sectors,
+                    wipe_free_space: false,
+                    reencrypt: false,
+                },
+                RestoreOp::Format {
+                    part: part(2),
+                    fs: FormatFs::Ext4,
+                    label: String::new(),
+                    quick: true,
+                },
+                RestoreOp::ExtendFilesystem { part: part(1) },
+                RestoreOp::ExtendFilesystem { part: part(3) },
+                RestoreOp::ChangeIdentities {
+                    parts: vec![part(1), part(3)],
+                    fix_references: true,
+                },
+            ],
+        );
+        assert!(boot_esp_settled(&plan, 1), "restored");
+        assert!(boot_esp_settled(&plan, 2), "formatted");
+        assert!(!boot_esp_settled(&plan, 3), "only grown");
+        assert!(!boot_esp_settled(&plan, 4), "not in the plan");
     }
 
     /// A plan that restores partition 1 and then puts the fallback loader on

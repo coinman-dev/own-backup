@@ -282,6 +282,40 @@ pub fn guard_target_volume(target: &str) -> Result<()> {
 /// for as long as it writes.
 #[cfg(target_os = "linux")]
 pub fn guard_target_volume(target: &str) -> Result<()> {
+    guard_linux_volume(target, BootEspRule::Identify)
+}
+
+/// [`guard_target_volume`] for a partition a restore plan writes, formats or
+/// grows on the disk it holds, after the plan has started.
+///
+/// What runs on it is checked as always. The boot-ESP rule is not asked
+/// again: the plan checked every partition it touches against
+/// [`protection_of_device`] before writing anything, and the ESP this machine
+/// booted through was not among them (a plan that rewrites the table of a
+/// disk with anything protected on it does not start at all). Asked again
+/// after the restore it would be wrong: a whole-disk copy of this machine's
+/// own system disk carries the running ESP's PARTUUID (PARTUUIDs are never
+/// changed), so by PARTUUID alone the copy IS "the ESP this computer booted
+/// from" — and every later step on it (identity change, format, grow) would
+/// be refused. The real boot ESP stays protected: it is not on this plan's
+/// list, so it gets [`guard_target_volume`].
+#[cfg(target_os = "linux")]
+pub fn guard_plan_volume(target: &str) -> Result<()> {
+    guard_linux_volume(target, BootEspRule::SettledByPlan)
+}
+
+/// Whether [`guard_linux_volume`] identifies the boot ESP itself.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BootEspRule {
+    /// Refuse the boot ESP (or any possible one when it is unknown).
+    Identify,
+    /// A restore plan settled it before writing — see [`guard_plan_volume`].
+    SettledByPlan,
+}
+
+#[cfg(target_os = "linux")]
+fn guard_linux_volume(target: &str, rule: BootEspRule) -> Result<()> {
     use own_backup_common::linux_block as lb;
     use std::path::Path;
 
@@ -314,40 +348,55 @@ pub fn guard_target_volume(target: &str) -> Result<()> {
             tr!("guard.target_unrecognised", target = target).into_owned(),
         ));
     };
+    if rule == BootEspRule::SettledByPlan {
+        return Ok(());
+    }
     let stack = lb::stack_above(sys, &name);
-    match linux_boot_esp() {
-        LinuxBootEsp::NotUefi => {}
-        LinuxBootEsp::PartUuid(boot) => {
-            if stack
-                .iter()
-                .any(|n| lb::partuuid(sys, n).as_deref() == Some(boot.as_str()))
-            {
-                return Err(OwnBackupError::RestoreIncompatible(
-                    tr!("guard.linux_target_is_boot_esp").into_owned(),
-                ));
-            }
-        }
+    match boot_esp_refusal(
+        sys,
+        Path::new(lb::UDEV_DATA),
+        &stack,
+        &linux_boot_esp(),
+        is_boot_media(),
+    ) {
+        Some(message) => Err(OwnBackupError::RestoreIncompatible(message)),
+        None => Ok(()),
+    }
+}
+
+/// Why writing over `stack` (a device and what is stacked on it) would hit the
+/// ESP the machine booted through, if it would.
+#[cfg(target_os = "linux")]
+fn boot_esp_refusal(
+    sys: &std::path::Path,
+    udev: &std::path::Path,
+    stack: &[String],
+    esp: &LinuxBootEsp,
+    boot_media: bool,
+) -> Option<String> {
+    use own_backup_common::linux_block as lb;
+    match esp {
+        LinuxBootEsp::NotUefi => None,
+        LinuxBootEsp::PartUuid(boot) => stack
+            .iter()
+            .any(|n| lb::partuuid(sys, n).as_deref() == Some(boot.as_str()))
+            .then(|| tr!("guard.linux_target_is_boot_esp").into_owned()),
         // The medium booted from its own ESP (inside the ISO, or a CD with
         // none); the disks here are the machines being rescued, whose ESPs
         // are exactly what a restore writes.
-        LinuxBootEsp::Unknown if is_boot_media() => {}
-        LinuxBootEsp::Unknown => {
-            // Which ESP started the machine is not known: any ESP — or any
-            // partition whose type udev does not know — might be it.
-            let udev = Path::new(lb::UDEV_DATA);
-            let maybe_esp = stack.iter().filter(|n| lb::is_partition(sys, n)).any(|n| {
+        LinuxBootEsp::Unknown if boot_media => None,
+        // Which ESP started the machine is not known: any ESP — or any
+        // partition whose type udev does not know — might be it.
+        LinuxBootEsp::Unknown => stack
+            .iter()
+            .filter(|n| lb::is_partition(sys, n))
+            .any(|n| {
                 lb::dev_numbers(sys, n)
                     .and_then(|(ma, mi)| lb::partition_type(udev, ma, mi))
                     .is_none_or(|t| t == lb::ESP_TYPE_GUID)
-            });
-            if maybe_esp {
-                return Err(OwnBackupError::RestoreIncompatible(
-                    tr!("guard.linux_boot_esp_unknown").into_owned(),
-                ));
-            }
-        }
+            })
+            .then(|| tr!("guard.linux_boot_esp_unknown").into_owned()),
     }
-    Ok(())
 }
 
 /// Mount points, swap and stacked devices, for a refusal.
@@ -889,6 +938,56 @@ mod tests {
         out.extend_from_slice(&node);
         out.extend_from_slice(&[0x7F, 0xFF, 0x04, 0x00]); // end of path
         out
+    }
+
+    /// A fake `/sys/class/block` with one partition `name` (`dev` numbers,
+    /// PARTUUID) and a udev database giving it `part_type`.
+    #[cfg(target_os = "linux")]
+    fn fake_partition(
+        dir: &std::path::Path,
+        name: &str,
+        partuuid: &str,
+        part_type: Option<&str>,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
+        let sys = dir.join("sys");
+        let udev = dir.join("udev");
+        std::fs::create_dir_all(sys.join(name)).unwrap();
+        std::fs::create_dir_all(&udev).unwrap();
+        std::fs::write(sys.join(name).join("partition"), "1\n").unwrap();
+        std::fs::write(sys.join(name).join("dev"), "8:17\n").unwrap();
+        std::fs::write(
+            sys.join(name).join("uevent"),
+            format!("MAJOR=8\nMINOR=17\nDEVNAME={name}\nPARTUUID={partuuid}\n"),
+        )
+        .unwrap();
+        if let Some(t) = part_type {
+            std::fs::write(udev.join("b8:17"), format!("E:ID_PART_ENTRY_TYPE={t}\n")).unwrap();
+        }
+        (sys, udev)
+    }
+
+    /// The boot ESP is refused by its PARTUUID, and — firmware variables
+    /// unreadable — any ESP is; a BIOS machine or the boot medium has none
+    /// to protect.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_boot_esp_is_refused_by_partuuid_and_any_esp_when_unknown() {
+        use own_backup_common::linux_block::ESP_TYPE_GUID;
+        let dir = tempfile::tempdir().unwrap();
+        let boot = "2d272048-0d61-4a8c-a715-08d35535ed93";
+        let (sys, udev) = fake_partition(dir.path(), "sdb1", boot, Some(ESP_TYPE_GUID));
+        let stack = vec!["sdb1".to_string()];
+        let refused = |esp: &LinuxBootEsp, media: bool| {
+            boot_esp_refusal(&sys, &udev, &stack, esp, media).is_some()
+        };
+        assert!(refused(&LinuxBootEsp::PartUuid(boot.into()), false));
+        assert!(!refused(
+            &LinuxBootEsp::PartUuid("245ef510-a193-458d-b01f-d13738760455".into()),
+            false
+        ));
+        assert!(refused(&LinuxBootEsp::Unknown, false));
+        assert!(!refused(&LinuxBootEsp::Unknown, true));
+        assert!(!refused(&LinuxBootEsp::NotUefi, false));
     }
 
     #[cfg(target_os = "windows")]

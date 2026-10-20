@@ -9,4 +9,4 @@ pub use guard::{
     protected_partitions, protection, system_disk_number, Protection,
 };
 #[cfg(target_os = "linux")]
-pub use guard::{guard_target_disk_device, protection_of_device};
+pub use guard::{guard_plan_volume, guard_target_disk_device, protection_of_device};
