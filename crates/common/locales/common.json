@@ -180,6 +180,10 @@
     "ru": "Раздел %{part}: файловую систему %{fs} создаёт только Linux — Windows её не форматирует. Выберите NTFS, FAT32 или exFAT либо выполните восстановление из Linux.",
     "en": "Partition %{part}: only Linux creates %{fs} — Windows cannot format it. Choose NTFS, FAT32 or exFAT, or run the restore from Linux."
   },
+  "restore_check.change_identities_linux_only": {
+    "ru": "Смена идентификаторов восстановленной копии есть только в Linux.",
+    "en": "Changing the restored copy's identities exists on Linux only."
+  },
   "restore_plan.title_write_table": {
     "ru": "Записать разметку %{scheme} (%{count} разд.)",
     "en": "Write the %{scheme} partition table (partitions: %{count})"
@@ -227,6 +231,14 @@
   "restore_plan.title_restore_boot_entries": {
     "ru": "Вернуть записи загрузки UEFI из копии в память материнской платы",
     "en": "Write the UEFI boot entries from the backup back to the firmware"
+  },
+  "restore_plan.title_change_identities": {
+    "ru": "Сменить повторяющиеся идентификаторы восстановленной копии",
+    "en": "Change the restored copy's duplicate identities"
+  },
+  "restore_plan.title_change_identities_and_fix": {
+    "ru": "Сменить повторяющиеся идентификаторы и исправить fstab, crypttab и загрузчик восстановленной системы",
+    "en": "Change the duplicate identities and fix the restored system's fstab, crypttab and boot loader"
   },
   "restore_plan.title_refresh_disks": {
     "ru": "Обновить состояние дисков",

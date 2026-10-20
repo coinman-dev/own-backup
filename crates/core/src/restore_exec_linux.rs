@@ -49,6 +49,10 @@ use super::{
 pub(super) struct OpNote {
     pub(super) message: String,
     pub(super) follow_ups: Vec<String>,
+    /// Identities the step changed, and files of the restored system it
+    /// edited ([`RestoreOp::ChangeIdentities`]).
+    pub(super) identity_changes: Vec<own_backup_common::engine_dto::IdentityChangeDto>,
+    pub(super) edited_files: Vec<String>,
 }
 
 /// What a plan asks that this engine does not do, as refusals for the plan
@@ -360,6 +364,8 @@ pub fn execute_plan(
                 state.ops[index].percent = 100;
                 state.ops[index].message = note.message;
                 state.follow_ups.extend(note.follow_ups);
+                state.identity_changes.extend(note.identity_changes);
+                state.edited_files.extend(note.edited_files);
                 info!(op = %op.kind(), index, note = %state.ops[index].message, "restore operation done");
             }
             Err(OwnBackupError::Cancelled) => {
@@ -725,13 +731,20 @@ fn run_op(
                 return Ok(OpNote {
                     message: tr!("restore_exec.container_restored").into_owned(),
                     follow_ups: Vec::new(),
+                    ..Default::default()
                 });
             }
             Ok(OpNote {
                 message: String::new(),
                 follow_ups: encryption_follow_up(sidecar, dst.index),
+                ..Default::default()
             })
         }
+
+        RestoreOp::ChangeIdentities {
+            parts,
+            fix_references,
+        } => change_identities(plan, passphrases, device, parts, *fix_references),
 
         RestoreOp::RefreshDiskState => {
             // The session's release already waited for the kernel and udev
@@ -739,6 +752,7 @@ fn run_op(
             Ok(OpNote {
                 message: tr!("restore_exec_linux.disk_reread", disk = device).into_owned(),
                 follow_ups: Vec::new(),
+                ..Default::default()
             })
         }
 
@@ -748,6 +762,7 @@ fn run_op(
             super::boot_linux::run_boot_op(op, plan, sidecar, device).map(|n| OpNote {
                 message: n.message,
                 follow_ups: n.follow_ups,
+                ..Default::default()
             })
         }
 
@@ -768,6 +783,7 @@ fn run_op(
             Ok(OpNote {
                 message,
                 follow_ups: Vec::new(),
+                ..Default::default()
             })
         }
 
@@ -781,6 +797,7 @@ fn run_op(
             Ok(OpNote {
                 message,
                 follow_ups: Vec::new(),
+                ..Default::default()
             })
         }
 
@@ -801,6 +818,90 @@ fn run_op(
             .unwrap_or_default(),
         )),
     }
+}
+
+/// Give what the plan restored on `parts` identities of its own
+/// (`identity_change_linux`), and with `fix_references` edit the restored
+/// system to match. Only partitions this plan wrote are touched, each free
+/// of mounts and holders; the machine's identities are compared without them.
+fn change_identities(
+    plan: &RestorePlan,
+    passphrases: &std::collections::HashMap<u32, String>,
+    device: &str,
+    parts: &[PartRef],
+    fix_references: bool,
+) -> Result<OpNote> {
+    use own_backup_backup::identity_change_linux as change;
+
+    let written = written_partitions(plan);
+    let mut devices = Vec::new();
+    for part in parts.iter().filter(|p| written.contains(&p.index)) {
+        let node = free_partition_node(device, *part)?;
+        let passphrase = plan.ops.iter().find_map(|op| match op {
+            RestoreOp::RestorePartition {
+                src_index,
+                dst,
+                reencrypt: true,
+                ..
+            } if dst.index == part.index => passphrases.get(src_index).cloned(),
+            _ => None,
+        });
+        devices.push(change::RestoredDevice {
+            node,
+            part_index: Some(part.index),
+            passphrase,
+        });
+    }
+    let kernel =
+        |path: &str| own_backup_common::linux_block::kernel_name(std::path::Path::new(path));
+    let mut restored: Vec<String> = devices.iter().filter_map(|d| kernel(&d.node)).collect();
+    if plan.touches_partition_table() {
+        restored.extend(kernel(device));
+    }
+    let present = change::present_except(&restored);
+    let nodes: Vec<&str> = devices.iter().map(|d| d.node.as_str()).collect();
+    info!(
+        ?nodes,
+        fix_references, "changing the restored copy's duplicate identities"
+    );
+    let outcome = change::change_identities(
+        &mut own_backup_backup::linux_tools::SystemTools,
+        &mut change::SystemHost,
+        &present,
+        &devices,
+        fix_references,
+    );
+    if let Some(error) = &outcome.failed {
+        let done = outcome.describe();
+        return Err(OwnBackupError::Device(
+            tr!(
+                "restore_exec_linux.identity_change_failed",
+                error = error.as_str(),
+                done = if done.is_empty() {
+                    "—".to_string()
+                } else {
+                    done
+                }
+            )
+            .into_owned(),
+        ));
+    }
+    let message = if outcome.changed.is_empty() {
+        tr!("restore_exec_linux.identities_unchanged").into_owned()
+    } else {
+        tr!(
+            "restore_exec_linux.identities_changed",
+            count = outcome.changed.len(),
+            list = outcome.describe()
+        )
+        .into_owned()
+    };
+    Ok(OpNote {
+        message,
+        follow_ups: outcome.notes.clone(),
+        identity_changes: outcome.dtos(),
+        edited_files: outcome.edited.clone(),
+    })
 }
 
 /// Read back every sector-restored partition through the current hold and

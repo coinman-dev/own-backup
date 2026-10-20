@@ -209,15 +209,20 @@ export const api = {
     plan: RestorePlan,
     passphrases?: Record<number, string>,
     secret?: ArchiveSecret,
-    /** Linux: 'keep' once the preview showed duplicate identities and the
-     *  person went ahead with them in front of them. */
-    identityChoice?: 'keep',
+    /** Linux: once the preview showed duplicate identities, what the person
+     *  chose with them in front of them — keep them, or change them on the
+     *  restored copy. */
+    identityChoice?: 'keep' | 'change',
+    /** With 'change': also fix the restored system's fstab, crypttab and
+     *  boot loader. */
+    fixReferences?: boolean,
   ) =>
     invoke<RestoreRunState>('apply_restore_plan', {
       plan,
       passphrases,
       ...secretArgs(secret),
       identityChoice,
+      fixReferences,
     }),
   /** The restore in progress, or the last one that finished. Survives closing
    *  and reopening the window, and a service restart. */

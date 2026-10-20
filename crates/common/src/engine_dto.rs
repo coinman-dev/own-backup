@@ -343,9 +343,55 @@ pub struct IdentityClashDto {
 pub enum IdentityChoice {
     /// Restore or mount the copy as it is; the duplicates stay.
     Keep,
-    /// Give the restored copy new identities (and edit its fstab, crypttab
-    /// and boot configuration to match).
+    /// Give the restored copy new identities. Editing its fstab, crypttab
+    /// and boot configuration to match is a separate choice
+    /// (`fix_references` in the request). Restores only: a mounted copy is
+    /// read, not changed.
     Change,
+}
+
+/// The person's decision about duplicate identities, as a restore request
+/// carries it: the choice, and — with [`IdentityChoice::Change`] — whether the
+/// restored system's fstab, crypttab and boot configuration are edited too.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IdentityDecision {
+    pub choice: Option<IdentityChoice>,
+    pub fix_references: bool,
+}
+
+impl From<Option<IdentityChoice>> for IdentityDecision {
+    fn from(choice: Option<IdentityChoice>) -> Self {
+        Self {
+            choice,
+            fix_references: false,
+        }
+    }
+}
+
+impl IdentityDecision {
+    /// Change the duplicates; `fix_references` edits the restored system too.
+    pub fn change(fix_references: bool) -> Self {
+        Self {
+            choice: Some(IdentityChoice::Change),
+            fix_references,
+        }
+    }
+}
+
+/// One identity a restore changed on the restored copy (Linux,
+/// [`IdentityChoice::Change`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentityChangeDto {
+    /// Same slugs as [`IdentityClashDto::kind`].
+    pub kind: String,
+    pub old: String,
+    pub new: String,
+    /// The device it was changed on (a partition, or a device the restore
+    /// opened on it: `/dev/mapper/…`, `/dev/md…`).
+    pub device: String,
+    /// The partition number on the target, when it is one.
+    #[serde(default)]
+    pub part_index: Option<u32>,
 }
 
 /// Key of the JSON object carried in the details of the `FAILED_PRECONDITION`

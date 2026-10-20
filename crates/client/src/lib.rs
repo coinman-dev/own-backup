@@ -442,19 +442,22 @@ impl BackupClient {
     }
 
     /// A volume restore with the person's choice about duplicate identities
-    /// (Linux). The reply is the summary plus the `identity_clashes` kept.
+    /// (Linux). The reply is the summary plus the `identity_clashes` left, and
+    /// after a change `identity_changes`, `edited_files` and `notes`.
     #[allow(clippy::result_large_err)] // the caller reads the status's details
     pub async fn restore_volume_choosing(
         &mut self,
         image_path: &str,
         target: &str,
-        identity_choice: Option<own_backup_common::engine_dto::IdentityChoice>,
+        identity_choice: impl Into<own_backup_common::engine_dto::IdentityDecision>,
         secret: &ArchiveSecret,
     ) -> std::result::Result<serde_json::Value, tonic::Status> {
+        let decision = identity_choice.into();
         let mut body = serde_json::json!({
             "image_path": image_path,
             "target": target,
-            "identity_choice": identity_choice,
+            "identity_choice": decision.choice,
+            "fix_references": decision.fix_references,
         });
         secret.add_to(&mut body);
         let json = body.to_string();
@@ -794,13 +797,15 @@ impl BackupClient {
         &mut self,
         image_path: &str,
         target_device: &str,
-        identity_choice: Option<own_backup_common::engine_dto::IdentityChoice>,
+        identity_choice: impl Into<own_backup_common::engine_dto::IdentityDecision>,
         secret: &ArchiveSecret,
     ) -> std::result::Result<serde_json::Value, tonic::Status> {
+        let decision = identity_choice.into();
         let mut body = serde_json::json!({
             "manifest_path": image_path,
             "target_device": target_device,
-            "identity_choice": identity_choice,
+            "identity_choice": decision.choice,
+            "fix_references": decision.fix_references,
         });
         secret.add_to(&mut body);
         let json = body.to_string();
@@ -945,7 +950,7 @@ impl BackupClient {
         plan: &own_backup_common::restore_plan::RestorePlan,
         passphrases: &std::collections::HashMap<u32, String>,
         secret: &ArchiveSecret,
-        identity_choice: Option<own_backup_common::engine_dto::IdentityChoice>,
+        identity_choice: impl Into<own_backup_common::engine_dto::IdentityDecision>,
     ) -> Result<own_backup_common::restore_state::RestoreRunState> {
         self.apply_restore_plan_with_status(plan, passphrases, secret, identity_choice)
             .await
@@ -960,12 +965,14 @@ impl BackupClient {
         plan: &own_backup_common::restore_plan::RestorePlan,
         passphrases: &std::collections::HashMap<u32, String>,
         secret: &ArchiveSecret,
-        identity_choice: Option<own_backup_common::engine_dto::IdentityChoice>,
+        identity_choice: impl Into<own_backup_common::engine_dto::IdentityDecision>,
     ) -> std::result::Result<own_backup_common::restore_state::RestoreRunState, tonic::Status> {
+        let decision = identity_choice.into();
         let mut body = serde_json::json!({
             "plan": plan,
             "passphrases": passphrases,
-            "identity_choice": identity_choice,
+            "identity_choice": decision.choice,
+            "fix_references": decision.fix_references,
         });
         secret.add_to(&mut body);
         let json = serde_json::to_string(&body)

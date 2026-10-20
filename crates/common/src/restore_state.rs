@@ -97,6 +97,13 @@ pub struct RestoreRunState {
     /// names it by. Empty in runs recorded before 2026-09-26.
     #[serde(default)]
     pub image_file: String,
+    /// Identities the run gave the restored copy (Linux, when the person
+    /// chose to change the duplicates), and the files of the restored system
+    /// it edited to match.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub identity_changes: Vec<crate::engine_dto::IdentityChangeDto>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edited_files: Vec<String>,
 }
 
 impl RestoreRunState {

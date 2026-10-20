@@ -111,5 +111,21 @@
   "restore_fs_linux.btrfs_clone_mounted": {
     "ru": "btrfs на %{node} повторяет файловую систему, которая уже есть на этой машине, а ядро старше 6.7 приняло бы её за оригинал — расширение не выполнено. Смените идентификаторы при восстановлении или расширьте её на другой машине.",
     "en": "The btrfs on %{node} duplicates a filesystem this machine already has, and a kernel older than 6.7 would take it for the original — it was not grown. Change the identities during the restore, or grow it on another machine."
+  },
+  "restore_exec.change_identities_linux_only": {
+    "ru": "Смена идентификаторов восстановленной копии есть только в Linux; этот план составлен не для этой машины.",
+    "en": "Changing the restored copy's identities exists on Linux only; this plan was not made for this machine."
+  },
+  "restore_exec_linux.identities_changed": {
+    "ru": "Идентификаторов сменено: %{count} — %{list}.",
+    "en": "Identities changed: %{count} — %{list}."
+  },
+  "restore_exec_linux.identities_unchanged": {
+    "ru": "Повторяющихся идентификаторов на восстановленных разделах не осталось — менять нечего.",
+    "en": "No duplicate identities are left on the restored partitions — nothing to change."
+  },
+  "restore_exec_linux.identity_change_failed": {
+    "ru": "Данные восстановлены и проверены, но смена идентификаторов не завершена: %{error}. Уже сменено: %{done}.",
+    "en": "The data is restored and checked, but changing the identities did not finish: %{error}. Already changed: %{done}."
   }
 }

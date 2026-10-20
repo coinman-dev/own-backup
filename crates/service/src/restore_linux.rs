@@ -22,7 +22,8 @@
 use std::path::{Path, PathBuf};
 
 use own_backup_common::engine_dto::{
-    EngineProgress, IdentityChoice, IdentityClashDto, RestoreSummaryDto, IDENTITY_CLASHES_DETAIL,
+    EngineProgress, IdentityChangeDto, IdentityChoice, IdentityClashDto, RestoreSummaryDto,
+    IDENTITY_CLASHES_DETAIL,
 };
 use own_backup_common::tr;
 use tonic::{Request, Response, Status};
@@ -35,13 +36,13 @@ use super::{
 use own_backup_backup::identity_check_linux;
 use own_backup_backup::seal::context::ArchiveKeys;
 
-/// Ask for a choice about `clashes`, or carry out the one made.
+/// Ask for a choice about `clashes`, or let the one made through.
 ///
 /// Nothing found: nothing to ask. Found and no choice: refused with the list
-/// in the status details. `Change`: not done yet — re-identifying a restored
-/// system also means editing its fstab, crypttab and boot configuration, and
-/// a half-done job of that leaves a system that does not boot; the refusal
-/// says how to proceed. `Keep`: the duplicates stay, and are reported back.
+/// in the status details. `Keep`: the duplicates stay, and are reported
+/// back. `Change`: the restore changes them once the data is written
+/// (`identity_change_linux`); the caller does that, and reports what a change
+/// leaves ([`left_by_change`]).
 pub(super) fn identity_gate(
     clashes: Vec<IdentityClashDto>,
     choice: Option<IdentityChoice>,
@@ -60,12 +61,98 @@ pub(super) fn identity_gate(
                 serde_json::to_vec(&details).unwrap_or_default().into(),
             ))
         }
-        Some(IdentityChoice::Change) => Err(Status::failed_precondition(
-            tr!("restore_linux.identity_change_unsupported", clashes = list).into_owned(),
-        )),
+        Some(IdentityChoice::Change) => {
+            info!(clashes = %list, "duplicate identities to be changed, as the person chose");
+            Ok(clashes)
+        }
         Some(IdentityChoice::Keep) => {
             warn!(clashes = %list, "duplicate identities kept, as the person chose");
             Ok(clashes)
+        }
+    }
+}
+
+/// The duplicates a change leaves as they are: a PARTUUID is never changed
+/// (`root=PARTUUID=` may name it, and the restore keeps the copy's table).
+pub(super) fn left_by_change(clashes: &[IdentityClashDto]) -> Vec<IdentityClashDto> {
+    clashes
+        .iter()
+        .filter(|c| c.kind == "partuuid")
+        .cloned()
+        .collect()
+}
+
+/// A mounted copy is read, not changed: `Change` is a restore's choice.
+pub(super) fn mount_choice_allowed(choice: Option<IdentityChoice>) -> Result<(), Status> {
+    match choice {
+        Some(IdentityChoice::Change) => Err(Status::invalid_argument(
+            tr!("restore_linux.mount_cannot_change").into_owned(),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// The identity step of a plan is the service's to add: drop one the client
+/// sent, and add it when the person chose to change the duplicates found —
+/// over every partition the plan restores.
+pub(super) fn set_identity_step(
+    plan: &mut RestorePlan,
+    choice: Option<IdentityChoice>,
+    clashes: &[IdentityClashDto],
+    fix_references: bool,
+) {
+    plan.ops
+        .retain(|op| !matches!(op, RestoreOp::ChangeIdentities { .. }));
+    let changeable = clashes.iter().any(|c| c.kind != "partuuid");
+    if choice != Some(IdentityChoice::Change) || !changeable {
+        return;
+    }
+    let parts: Vec<_> = plan
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            RestoreOp::RestorePartition { dst, .. } => Some(*dst),
+            _ => None,
+        })
+        .collect();
+    if !parts.is_empty() {
+        plan.ops.push(RestoreOp::ChangeIdentities {
+            parts,
+            fix_references,
+        });
+    }
+}
+
+/// Change the duplicates on what a volume or disk restore wrote, while its
+/// udev hold still stands; `restored` are the kernel names it wrote.
+fn change_restored(
+    devices: &[own_backup_backup::identity_change_linux::RestoredDevice],
+    restored: &[String],
+    fix_references: bool,
+) -> Result<own_backup_backup::identity_change_linux::Outcome, String> {
+    use own_backup_backup::identity_change_linux as change;
+    let present = change::present_except(restored);
+    let outcome = change::change_identities(
+        &mut own_backup_backup::linux_tools::SystemTools,
+        &mut change::SystemHost,
+        &present,
+        devices,
+        fix_references,
+    );
+    match &outcome.failed {
+        None => Ok(outcome),
+        Some(error) => {
+            let done = outcome.describe();
+            Err(tr!(
+                "restore_linux.identity_change_failed",
+                error = error.as_str(),
+                done = if done.is_empty() {
+                    "—".to_string()
+                } else {
+                    done
+                }
+            )
+            .into_owned())
         }
     }
 }
@@ -108,14 +195,21 @@ pub(super) fn image_clashes(image: &Path) -> own_backup_common::Result<Vec<Ident
     volume_clashes_against(image, None, &[], false)
 }
 
-/// The volume restore's reply: the shared summary, and the duplicates the
-/// person chose to keep.
+/// The volume restore's reply: the shared summary, the duplicates left as
+/// they are (chosen to keep, or a PARTUUID a change does not touch), and what
+/// a change did.
 #[derive(serde::Serialize)]
 struct VolumeRestoreReply {
     #[serde(flatten)]
     summary: RestoreSummaryDto,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     identity_clashes: Vec<IdentityClashDto>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    identity_changes: Vec<IdentityChangeDto>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    edited_files: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    notes: Vec<String>,
 }
 
 impl BackupServiceImpl {
@@ -133,6 +227,10 @@ impl BackupServiceImpl {
             target: String,
             #[serde(default)]
             identity_choice: Option<IdentityChoice>,
+            /// With `change`: also edit the restored system's fstab, crypttab
+            /// and boot configuration.
+            #[serde(default)]
+            fix_references: bool,
             #[serde(flatten)]
             secret: ManualSecret,
         }
@@ -158,7 +256,14 @@ impl BackupServiceImpl {
             .map_err(|e| Status::internal(format!("identity check panicked: {e}")))?
         };
         let clashes = clashes.map_err(|e| Status::internal(e.to_string()))?;
-        let kept = identity_gate(clashes, p.identity_choice)?;
+        let found = identity_gate(clashes, p.identity_choice)?;
+        let change = p.identity_choice == Some(IdentityChoice::Change) && !found.is_empty();
+        let kept = if change {
+            left_by_change(&found)
+        } else {
+            found
+        };
+        let fix_references = p.fix_references;
 
         let slot = self.reserve(&tr!("grpc_server.busy_volume_restore"), &p.target)?;
         let cancel = slot.cancel();
@@ -190,7 +295,7 @@ impl BackupServiceImpl {
             };
             let mut last_permille = u64::MAX;
             let mut last_emit = std::time::Instant::now();
-            restore_volume(&request, |pr| {
+            let summary = restore_volume(&request, |pr| {
                 if cancel.is_cancelled() {
                     return Err(own_backup_common::OwnBackupError::Cancelled);
                 }
@@ -213,7 +318,21 @@ impl BackupServiceImpl {
                     );
                 }
                 Ok(())
-            })
+            })?;
+            // Under the hold still: the machine must not meet the clone
+            // under the source's names.
+            let changed = if change {
+                let device = own_backup_backup::identity_change_linux::RestoredDevice {
+                    node: request.target.clone(),
+                    part_index: None,
+                    passphrase: None,
+                };
+                let held: Vec<String> = held.iter().map(|s| s.to_string()).collect();
+                Some(change_restored(&[device], &held, fix_references))
+            } else {
+                None
+            };
+            Ok::<_, own_backup_common::OwnBackupError>((summary, changed))
         })
         .await
         .map_err(|e| Status::internal(format!("restore task panicked: {e}")))?
@@ -221,6 +340,12 @@ impl BackupServiceImpl {
             own_backup_common::OwnBackupError::Cancelled => Status::cancelled(e.to_string()),
             other => Status::internal(other.to_string()),
         })?;
+        let (summary, changed) = summary;
+        let outcome = match changed {
+            Some(Err(text)) => return Err(Status::internal(text)),
+            Some(Ok(o)) => o,
+            None => Default::default(),
+        };
 
         json_reply(&VolumeRestoreReply {
             summary: RestoreSummaryDto {
@@ -229,6 +354,9 @@ impl BackupServiceImpl {
                 duration_secs: summary.duration.as_secs_f64(),
             },
             identity_clashes: kept,
+            identity_changes: outcome.dtos(),
+            edited_files: outcome.edited,
+            notes: outcome.notes,
         })
     }
 }
@@ -493,6 +621,10 @@ impl BackupServiceImpl {
             target_device: String,
             #[serde(default)]
             identity_choice: Option<IdentityChoice>,
+            /// With `change`: also edit the restored system's fstab, crypttab
+            /// and boot configuration.
+            #[serde(default)]
+            fix_references: bool,
             #[serde(flatten)]
             secret: ManualSecret,
         }
@@ -524,7 +656,14 @@ impl BackupServiceImpl {
             .map_err(|e| Status::internal(format!("identity check panicked: {e}")))?
         };
         let clashes = clashes.map_err(|e| Status::internal(e.to_string()))?;
-        let kept = identity_gate(clashes, p.identity_choice)?;
+        let found = identity_gate(clashes, p.identity_choice)?;
+        let change = p.identity_choice == Some(IdentityChoice::Change) && !found.is_empty();
+        let kept = if change {
+            left_by_change(&found)
+        } else {
+            found
+        };
+        let fix_references = p.fix_references;
 
         let slot = self.reserve(&tr!("grpc_server.busy_disk_restore"), &p.target_device)?;
         let cancel = slot.cancel();
@@ -543,7 +682,7 @@ impl BackupServiceImpl {
                 .map_err(|e| warn!(error = %e, "udev hold not installed"))
                 .ok();
             let mut last = String::new();
-            restore_disk(&request, |pr| {
+            let summary = restore_disk(&request, |pr| {
                 if cancel.is_cancelled() {
                     return Err(own_backup_common::OwnBackupError::Cancelled);
                 }
@@ -567,7 +706,44 @@ impl BackupServiceImpl {
                     );
                 }
                 Ok(())
-            })
+            })?;
+            // Under the hold still, on every partition the copy's table put
+            // back.
+            let changed = if change {
+                let sidecar = own_backup_backup::sidecar::read_sidecar_with_keys(
+                    &request.image_path,
+                    request.encryption.as_ref(),
+                )?;
+                let indices: Vec<u32> = sidecar
+                    .disk_manifest
+                    .map(|d| d.layout.partitions.iter().map(|p| p.index).collect())
+                    .unwrap_or_default();
+                let devices: Vec<_> = indices
+                    .into_iter()
+                    .filter_map(|i| {
+                        own_backup_backup::restore_disk_linux::partition_node(
+                            &request.target_device,
+                            i,
+                        )
+                        .map(|node| {
+                            own_backup_backup::identity_change_linux::RestoredDevice {
+                                node,
+                                part_index: Some(i),
+                                passphrase: None,
+                            }
+                        })
+                    })
+                    .collect();
+                let mut restored: Vec<String> = devices
+                    .iter()
+                    .filter_map(|d| own_backup_common::linux_block::kernel_name(Path::new(&d.node)))
+                    .collect();
+                restored.push(disk.clone());
+                Some(change_restored(&devices, &restored, fix_references))
+            } else {
+                None
+            };
+            Ok::<_, own_backup_common::OwnBackupError>((summary, changed))
         })
         .await
         .map_err(|e| Status::internal(format!("disk restore task panicked: {e}")))?
@@ -575,6 +751,12 @@ impl BackupServiceImpl {
             own_backup_common::OwnBackupError::Cancelled => Status::cancelled(e.to_string()),
             other => Status::internal(other.to_string()),
         })?;
+        let (summary, changed) = summary;
+        let outcome = match changed {
+            Some(Err(text)) => return Err(Status::internal(text)),
+            Some(Ok(o)) => o,
+            None => Default::default(),
+        };
 
         #[derive(serde::Serialize)]
         struct Out {
@@ -582,6 +764,10 @@ impl BackupServiceImpl {
             summary: DiskRestoreSummaryDto,
             #[serde(skip_serializing_if = "Vec::is_empty")]
             identity_clashes: Vec<IdentityClashDto>,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            identity_changes: Vec<IdentityChangeDto>,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            edited_files: Vec<String>,
             #[serde(skip_serializing_if = "Vec::is_empty")]
             warnings: Vec<String>,
         }
@@ -592,7 +778,9 @@ impl BackupServiceImpl {
                 duration_secs: summary.duration.as_secs_f64(),
             },
             identity_clashes: kept,
-            warnings: summary.warnings,
+            identity_changes: outcome.dtos(),
+            edited_files: outcome.edited,
+            warnings: summary.warnings.into_iter().chain(outcome.notes).collect(),
         })
     }
 }
@@ -629,11 +817,87 @@ mod tests {
     }
 
     #[test]
-    fn changing_identities_is_refused_and_keeping_them_reports_them() {
-        let status = identity_gate(vec![clash()], Some(IdentityChoice::Change)).unwrap_err();
-        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
-        assert!(status.details().is_empty());
+    fn a_choice_lets_the_restore_through_and_a_change_leaves_only_partuuids() {
+        let found = identity_gate(vec![clash()], Some(IdentityChoice::Change)).unwrap();
+        assert_eq!(found, vec![clash()]);
         let kept = identity_gate(vec![clash()], Some(IdentityChoice::Keep)).unwrap();
         assert_eq!(kept, vec![clash()]);
+        let partuuid = IdentityClashDto {
+            kind: "partuuid".into(),
+            ..clash()
+        };
+        assert_eq!(left_by_change(&[clash(), partuuid.clone()]), vec![partuuid]);
+    }
+
+    #[test]
+    fn a_mount_cannot_change_identities() {
+        assert!(mount_choice_allowed(Some(IdentityChoice::Keep)).is_ok());
+        assert!(mount_choice_allowed(None).is_ok());
+        let status = mount_choice_allowed(Some(IdentityChoice::Change)).unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    fn pref(index: u32) -> own_backup_common::restore_plan::PartRef {
+        own_backup_common::restore_plan::PartRef {
+            index,
+            offset: index as u64 * 1024 * 1024,
+            size: 1024 * 1024,
+        }
+    }
+
+    fn plan_restoring(parts: &[u32]) -> RestorePlan {
+        RestorePlan::new(
+            0,
+            "/tmp/copy.qcow2".into(),
+            parts
+                .iter()
+                .map(|&i| RestoreOp::RestorePartition {
+                    src_index: i,
+                    dst: pref(i),
+                    mode: own_backup_common::restore_plan::RestoreMode::Sectors,
+                    wipe_free_space: false,
+                    reencrypt: false,
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn the_identity_step_is_the_services_to_add() {
+        // A client's own step is dropped, whatever it asked for.
+        let mut plan = plan_restoring(&[1, 2]);
+        plan.ops.push(RestoreOp::ChangeIdentities {
+            parts: vec![pref(7)],
+            fix_references: true,
+        });
+        set_identity_step(&mut plan, Some(IdentityChoice::Keep), &[clash()], true);
+        assert!(!plan
+            .ops
+            .iter()
+            .any(|o| matches!(o, RestoreOp::ChangeIdentities { .. })));
+
+        // Changing adds one step over every restored partition.
+        set_identity_step(&mut plan, Some(IdentityChoice::Change), &[clash()], true);
+        let steps: Vec<_> = plan
+            .ops
+            .iter()
+            .filter_map(|o| match o {
+                RestoreOp::ChangeIdentities {
+                    parts,
+                    fix_references,
+                } => Some((parts.clone(), *fix_references)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(steps, vec![(vec![pref(1), pref(2)], true)]);
+
+        // Only a PARTUUID: nothing a change would do.
+        let mut plan = plan_restoring(&[1]);
+        let partuuid = IdentityClashDto {
+            kind: "partuuid".into(),
+            ..clash()
+        };
+        set_identity_step(&mut plan, Some(IdentityChoice::Change), &[partuuid], false);
+        assert_eq!(plan.ops.len(), 1);
     }
 }

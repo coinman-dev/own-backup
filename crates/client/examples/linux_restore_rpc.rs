@@ -3,13 +3,14 @@
 //!
 //!     linux_restore_rpc verify-image IMG
 //!     linux_restore_rpc verify-job JOB_ID [--all]
-//!     linux_restore_rpc restore-volume IMG TARGET [--keep]
-//!     linux_restore_rpc restore-disk IMG DEVICE [--keep]
+//!     linux_restore_rpc restore-volume IMG TARGET [--keep | --change [--fix-references]]
+//!     linux_restore_rpc restore-disk IMG DEVICE [--keep | --change [--fix-references]]
 //!     linux_restore_rpc mount IMG [--keep] | unmount IMG
 //!     linux_restore_rpc plan-disk IMG TARGET_DISK OUT.json [--entries]
-//!     linux_restore_rpc plan-volume IMG TARGET_DISK PART OUT.json
+//!     linux_restore_rpc plan-volume IMG TARGET_DISK PART OUT.json [--extend]
+//!     linux_restore_rpc plan-format IMG TARGET_DISK PART FS OUT.json
 //!     linux_restore_rpc dry-run PLAN.json
-//!     linux_restore_rpc apply PLAN.json [--keep]
+//!     linux_restore_rpc apply PLAN.json [--keep | --change [--fix-references]]
 //!
 //! A reply is printed as JSON and exits 0. A refusal prints
 //! `{"code", "message", "identity_clashes"}` and exits 3 for
@@ -18,12 +19,16 @@
 //! table out on the target, the way the window's designer starts;
 //! `plan-volume` keeps the target's current table (read straight off the
 //! device: GPT or primary MBR entries, 512-byte sectors) and puts the volume
-//! into one of its partitions.
+//! into one of its partitions (and with `--extend` grows its filesystem to
+//! the partition); `plan-format` creates a filesystem (`ext4`, `xfs`,
+//! `btrfs`, `ntfs`, `fat32`, `exfat`) on one partition of the target and
+//! writes nothing of the copy (which the plan still names, as every plan
+//! does).
 use std::io::{Read, Seek, SeekFrom};
 use std::time::Duration;
 
 use own_backup_client::{identity_clashes_in, ArchiveSecret, BackupClient};
-use own_backup_common::engine_dto::IdentityChoice;
+use own_backup_common::engine_dto::{IdentityChoice, IdentityDecision};
 use own_backup_common::restore_plan::{
     PartRef, PartitionKind, PartitionScheme, PartitionSpec, PartitionTableSpec, RestoreMode,
     RestoreOp, RestorePlan,
@@ -189,7 +194,11 @@ async fn main() {
         .filter(|a| !a.starts_with("--"))
         .map(String::as_str)
         .collect();
-    let choice = flag("--keep").then_some(IdentityChoice::Keep);
+    let choice = if flag("--change") {
+        IdentityDecision::change(flag("--fix-references"))
+    } else {
+        flag("--keep").then_some(IdentityChoice::Keep).into()
+    };
     let secret = ArchiveSecret::default();
     let cmd = pos.first().copied().unwrap_or_default();
 
@@ -264,16 +273,46 @@ async fn main() {
                 .find(|e| e.index == part)
                 .unwrap_or_else(|| failed(format!("{target} has no partition {part}")))
                 .clone();
+            let mut ops = vec![
+                RestoreOp::WritePartitionTable { table },
+                restore_op(1, part_ref(&e)),
+            ];
+            if flag("--extend") {
+                ops.push(RestoreOp::ExtendFilesystem { part: part_ref(&e) });
+            }
+            ops.push(RestoreOp::RefreshDiskState);
+            let mut plan = RestorePlan::new(0, image.into(), ops);
+            plan.verify_after = true;
+            plan.target_device = Some(target.to_string());
+            return save(&plan, out);
+        }
+        "plan-format" => {
+            let [_, image, target, part, fs, out] = pos[..] else {
+                failed("plan-format IMG TARGET_DISK PART FS OUT.json".into())
+            };
+            let table = read_table(target);
+            let part: u32 = part
+                .parse()
+                .unwrap_or_else(|_| failed("PART is a number".into()));
+            let e = table
+                .entries
+                .iter()
+                .find(|e| e.index == part)
+                .unwrap_or_else(|| failed(format!("{target} has no partition {part}")))
+                .clone();
+            let fs: own_backup_common::restore_plan::FormatFs =
+                serde_json::from_value(serde_json::json!(fs))
+                    .unwrap_or_else(|e| failed(format!("{fs}: {e}")));
             let mut plan = RestorePlan::new(
                 0,
                 image.into(),
-                vec![
-                    RestoreOp::WritePartitionTable { table },
-                    restore_op(1, part_ref(&e)),
-                    RestoreOp::RefreshDiskState,
-                ],
+                vec![RestoreOp::Format {
+                    part: part_ref(&e),
+                    fs,
+                    label: "restored".into(),
+                    quick: true,
+                }],
             );
-            plan.verify_after = true;
             plan.target_device = Some(target.to_string());
             return save(&plan, out);
         }
@@ -316,7 +355,7 @@ async fn main() {
             }
         }
         ("mount", [image]) => match client
-            .mount_image_choosing(image, false, choice, &secret)
+            .mount_image_choosing(image, false, choice.choice, &secret)
             .await
         {
             Ok(at) => print(&serde_json::json!({ "mount_point": at })),

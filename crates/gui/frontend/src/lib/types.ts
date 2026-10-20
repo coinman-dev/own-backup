@@ -934,6 +934,8 @@ export type RestoreOp =
       reencrypt: boolean;
     }
   | { op: 'extend_filesystem'; part: PartRef }
+  /** Added by the service on Linux, never by the window. */
+  | { op: 'change_identities'; parts: PartRef[]; fix_references: boolean }
   | { op: 'assign_letter'; part: PartRef; letter: string }
   | { op: 'finalize_boot'; windows_part: PartRef; esp: PartRef | null; uefi: boolean }
   /** Copy the bootloader to `\EFI\BOOT\BOOTX64.EFI` — the only path UEFI tries
@@ -1069,6 +1071,20 @@ export interface RestoreRunState {
   acknowledged?: boolean;
   /** File name of the copy restored ('' in runs recorded before 2026-09-26). */
   image_file?: string;
+  /** Linux: identities the run gave the restored copy, when the person chose
+   *  to change the duplicates. */
+  identity_changes?: IdentityChange[];
+  /** Linux: files of the restored system edited to name the new identities,
+   *  as `<device>:<path>`. */
+  edited_files?: string[];
+}
+
+export interface IdentityChange {
+  kind: string;
+  old: string;
+  new: string;
+  device: string;
+  part_index?: number | null;
 }
 
 /** One row in the built-in file browser (see commands/files.rs). */

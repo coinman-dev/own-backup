@@ -942,8 +942,10 @@ pub async fn apply_restore_plan(
     // `passphrases`, which put a source volume's own container back.
     password: Option<String>,
     recovery_key: Option<String>,
-    // Linux: what to do about identities the restore would duplicate here.
+    // Linux: what to do about identities the restore would duplicate here,
+    // and with `change` whether the restored system's references are fixed.
     identity_choice: Option<own_backup_common::engine_dto::IdentityChoice>,
+    fix_references: Option<bool>,
 ) -> Result<RestoreRunState, String> {
     state
         .link
@@ -953,7 +955,10 @@ pub async fn apply_restore_plan(
             &plan,
             &passphrases.unwrap_or_default(),
             &secret_of(password, recovery_key),
-            identity_choice,
+            own_backup_common::engine_dto::IdentityDecision {
+                choice: identity_choice,
+                fix_references: fix_references.unwrap_or(false),
+            },
         )
         .await
 }

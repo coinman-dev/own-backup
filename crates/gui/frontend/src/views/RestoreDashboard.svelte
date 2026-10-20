@@ -714,6 +714,10 @@
   /** The last preview showed identities the restore would duplicate here
    *  (Linux); going ahead after seeing them is the choice to keep them. */
   let identityClashesShown = $state(false);
+  /** Linux: what to do about the duplicates the preview showed — keep them,
+   *  change them on the restored copy, or change them and fix the restored
+   *  system's fstab, crypttab and boot loader to match. */
+  let identityAction = $state<'keep' | 'change' | 'change_fix'>('keep');
   let checking = $state(false);
   let checkError: string | null = $state(null);
   /** D16 — off by default: a sector restore writes only the used blocks, so old
@@ -1726,6 +1730,7 @@
       checks = res.results;
       letterChanges = res.letter_changes;
       identityClashesShown = (res.identity_clashes?.length ?? 0) > 0;
+      identityAction = 'keep';
       // Apply the plan that came BACK: the dry run resolves drive-letter
       // conflicts by editing it, and applying the one we sent would throw the
       // fix away.
@@ -1845,8 +1850,10 @@
         { ...checkedPlan, verify_after: verifyAfter },
         passphrases,
         archiveSecretFor(checkedPlan.image_path),
-        // The duplicates were in the checks the person confirmed.
-        identityClashesShown ? 'keep' : undefined,
+        // The duplicates were in the checks the person confirmed, with the
+        // choice next to them.
+        identityClashesShown ? (identityAction === 'keep' ? 'keep' : 'change') : undefined,
+        identityClashesShown && identityAction === 'change_fix',
       );
     } catch (e) {
       applyError = String(e);
@@ -2227,6 +2234,12 @@
           </li>
         {/each}
       </ol>
+      {#if (planRun.edited_files?.length ?? 0) > 0}
+        <div class="run-followups">
+          <div class="run-fu-head">{m.rd_edited_files_head()}</div>
+          {#each planRun.edited_files ?? [] as f}<div class="finding info">{f}</div>{/each}
+        </div>
+      {/if}
       {#if planRun.follow_ups.length > 0}
         <div class="run-followups">
           <div class="run-fu-head">{m.rd_followups_head()}</div>
@@ -2473,6 +2486,21 @@
         <input type="checkbox" bind:checked={verifyAfter} />
         <span>{m.rd_verify_after()}</span>
       </label>
+      {#if identityClashesShown}
+        <div class="dialog-title sub">{m.rd_identity_title()}</div>
+        <label class="opt">
+          <input type="radio" bind:group={identityAction} value="keep" />
+          <span>{m.rd_identity_keep()}</span>
+        </label>
+        <label class="opt">
+          <input type="radio" bind:group={identityAction} value="change" />
+          <span>{m.rd_identity_change()}</span>
+        </label>
+        <label class="opt">
+          <input type="radio" bind:group={identityAction} value="change_fix" />
+          <span>{m.rd_identity_change_fix()} <em>{m.rd_identity_change_fix_note()}</em></span>
+        </label>
+      {/if}
 
       <!-- The password field is not repeated here. It lives on the page, next
            to the "вернуть шифрование" checkbox that raises the question, and a

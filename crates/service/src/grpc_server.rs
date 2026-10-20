@@ -2101,6 +2101,7 @@ impl BackupService for BackupServiceImpl {
             }
             let p: In = serde_json::from_str(&req.into_inner().json)
                 .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+            restore_linux::mount_choice_allowed(p.identity_choice)?;
             let path = std::path::PathBuf::from(&p.image_path);
             let rw = p.read_write.unwrap_or(false);
             let image_path = p.image_path.clone();
@@ -3004,6 +3005,11 @@ impl BackupService for BackupServiceImpl {
             #[serde(default)]
             #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
             identity_choice: Option<own_backup_common::engine_dto::IdentityChoice>,
+            /// Linux, with `change`: also edit the restored system's fstab,
+            /// crypttab and boot configuration.
+            #[serde(default)]
+            #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+            fix_references: bool,
         }
         let raw = req.into_inner().json;
         // A bare plan is still accepted — nothing needs a passphrase unless it
@@ -3013,6 +3019,7 @@ impl BackupService for BackupServiceImpl {
             passphrases,
             secret,
             identity_choice,
+            fix_references,
         } = serde_json::from_str::<In>(&raw)
             .or_else(|_| {
                 serde_json::from_str::<RestorePlan>(&raw).map(|plan| In {
@@ -3020,9 +3027,13 @@ impl BackupService for BackupServiceImpl {
                     passphrases: Default::default(),
                     secret: Default::default(),
                     identity_choice: None,
+                    fix_references: false,
                 })
             })
             .map_err(|e| Status::invalid_argument(format!("bad plan JSON: {e}")))?;
+        // The identity step is the service's to add (below), never the client's.
+        #[cfg(target_os = "linux")]
+        restore_linux::set_identity_step(&mut plan, None, &[], false);
 
         // Before the machine is reserved: deriving the key is seconds, and a
         // mistyped password must not hold the one slot the machine has.
@@ -3057,11 +3068,12 @@ impl BackupService for BackupServiceImpl {
             .await
             .map_err(|e| Status::internal(format!("identity check panicked: {e}")))?;
             let found = found.map_err(|e| Status::internal(e.to_string()))?;
-            restore_linux::identity_gate(found, identity_choice)?;
+            let found = restore_linux::identity_gate(found, identity_choice)?;
+            restore_linux::set_identity_step(&mut plan, identity_choice, &found, fix_references);
             archive
         };
         #[cfg(not(target_os = "linux"))]
-        let _ = identity_choice;
+        let _ = (identity_choice, fix_references);
 
         // One destructive operation at a time, and the check IS the taking.
         // The old version read `restore_run` under one lock and wrote the new

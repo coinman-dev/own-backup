@@ -686,9 +686,18 @@ fn check_ops(
                 None,
                 crate::tr!("restore_check.boot_entries_will_be_written").into_owned(),
             )),
+            // Windows has none of the tools; on Linux the service adds it
+            // itself, for partitions the plan restores.
+            RestoreOp::ChangeIdentities { .. } if !ctx.linux_host => out.push(CheckResult::new(
+                CheckLevel::Error,
+                CheckCode::OpUnsupportedHere,
+                None,
+                crate::tr!("restore_check.change_identities_linux_only").into_owned(),
+            )),
             RestoreOp::WritePartitionTable { .. }
             | RestoreOp::AssignLetter { .. }
             | RestoreOp::EnsureFallbackBootloader { .. }
+            | RestoreOp::ChangeIdentities { .. }
             | RestoreOp::RefreshDiskState => {}
         }
     }

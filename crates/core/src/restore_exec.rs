@@ -247,6 +247,8 @@ pub fn initial_state(plan: &RestorePlan) -> RestoreRunState {
         cancellable: true,
         follow_ups: Vec::new(),
         acknowledged: false,
+        identity_changes: Vec::new(),
+        edited_files: Vec::new(),
         image_file: plan
             .image_path
             .file_name()
@@ -1738,6 +1740,12 @@ fn run_op(
             }
             Ok(note)
         }
+
+        // Linux only: there the service adds it. A plan carrying it was not
+        // made for this machine.
+        RestoreOp::ChangeIdentities { .. } => Err(OwnBackupError::RestoreIncompatible(
+            tr!("restore_exec.change_identities_linux_only").into_owned(),
+        )),
 
         RestoreOp::RefreshDiskState => {
             use own_backup_backup::disk_session_win::DiskSession;

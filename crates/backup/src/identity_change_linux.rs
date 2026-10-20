@@ -769,6 +769,31 @@ impl Host for SystemHost {
     }
 }
 
+impl Outcome {
+    /// The changes as the RPCs report them.
+    pub fn dtos(&self) -> Vec<own_backup_common::engine_dto::IdentityChangeDto> {
+        self.changed
+            .iter()
+            .map(|c| own_backup_common::engine_dto::IdentityChangeDto {
+                kind: kind_slug(c.kind).to_string(),
+                old: c.old.clone(),
+                new: c.new.clone(),
+                device: c.node.clone(),
+                part_index: c.part_index,
+            })
+            .collect()
+    }
+
+    /// One line per change, for a summary or an error.
+    pub fn describe(&self) -> String {
+        self.changed
+            .iter()
+            .map(|c| format!("{} {} → {} ({})", kind_slug(c.kind), c.old, c.new, c.node))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+}
+
 /// The machine's identities without the `restored` devices (kernel names)
 /// and everything stacked on them — what a changed identity must differ
 /// from.

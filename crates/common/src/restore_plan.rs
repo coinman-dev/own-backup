@@ -301,6 +301,21 @@ pub enum RestoreOp {
     /// menu back on a machine whose disks have moved and it boots to nothing.
     RestoreBootEntries,
 
+    /// Give the restored copy identities of its own (Linux): every
+    /// filesystem, LUKS, LVM or md identity on `parts` that another device of
+    /// this machine already carries is replaced, and with `fix_references`
+    /// the restored system's fstab, crypttab and boot configuration are
+    /// edited to match. Never in a plan the window builds: the service adds
+    /// it when the person chose to change the duplicates the preview showed.
+    /// Runs right after the sectors are checked, while the restore still
+    /// holds the target away from udev, so the machine never acts on the
+    /// clone under the source's names.
+    ChangeIdentities {
+        parts: Vec<PartRef>,
+        #[serde(default)]
+        fix_references: bool,
+    },
+
     /// Re-read the disk, so Windows and the app stop describing the disk that
     /// used to be there.
     ///
@@ -321,14 +336,15 @@ pub enum RestoreOp {
 impl RestoreOp {
     const ORDER_TABLE: u8 = 0;
     const ORDER_RAW: u8 = 1;
-    const ORDER_FORMAT: u8 = 2;
-    const ORDER_FILES: u8 = 3;
-    const ORDER_EXTEND: u8 = 4;
-    const ORDER_LETTER: u8 = 5;
-    const ORDER_BOOT: u8 = 6;
-    const ORDER_FALLBACK: u8 = 7;
-    const ORDER_FIRMWARE: u8 = 8;
-    const ORDER_REFRESH: u8 = 9;
+    const ORDER_IDENTITY: u8 = 2;
+    const ORDER_FORMAT: u8 = 3;
+    const ORDER_FILES: u8 = 4;
+    const ORDER_EXTEND: u8 = 5;
+    const ORDER_LETTER: u8 = 6;
+    const ORDER_BOOT: u8 = 7;
+    const ORDER_FALLBACK: u8 = 8;
+    const ORDER_FIRMWARE: u8 = 9;
+    const ORDER_REFRESH: u8 = 10;
 
     pub fn order_key(&self) -> u8 {
         match self {
@@ -337,6 +353,11 @@ impl RestoreOp {
                 mode: RestoreMode::Sectors,
                 ..
             } => Self::ORDER_RAW,
+            // First after the sectors: what follows (growing, the boot
+            // steps, the fallback loader that reads the restored UUIDs) then
+            // works with the new identities, and mounts no clone of a mounted
+            // filesystem.
+            RestoreOp::ChangeIdentities { .. } => Self::ORDER_IDENTITY,
             RestoreOp::Format { .. } => Self::ORDER_FORMAT,
             RestoreOp::RestorePartition {
                 mode: RestoreMode::Files,
@@ -370,6 +391,7 @@ impl RestoreOp {
             RestoreOp::FinalizeBoot { windows_part, .. } => Some(*windows_part),
             RestoreOp::EnsureFallbackBootloader { esp } => Some(*esp),
             RestoreOp::RestoreBootEntries => None,
+            RestoreOp::ChangeIdentities { .. } => None,
             RestoreOp::RefreshDiskState => None,
         }
     }
@@ -393,6 +415,7 @@ impl RestoreOp {
             RestoreOp::FinalizeBoot { .. } => "finalize_boot",
             RestoreOp::EnsureFallbackBootloader { .. } => "ensure_fallback_bootloader",
             RestoreOp::RestoreBootEntries => "restore_boot_entries",
+            RestoreOp::ChangeIdentities { .. } => "change_identities",
             RestoreOp::RefreshDiskState => "refresh_disk_state",
         }
     }
@@ -474,6 +497,13 @@ impl RestoreOp {
                 crate::tr!("restore_plan.title_fallback_bootloader")
             }
             RestoreOp::RestoreBootEntries => crate::tr!("restore_plan.title_restore_boot_entries"),
+            RestoreOp::ChangeIdentities { fix_references, .. } => {
+                if *fix_references {
+                    crate::tr!("restore_plan.title_change_identities_and_fix")
+                } else {
+                    crate::tr!("restore_plan.title_change_identities")
+                }
+            }
             RestoreOp::RefreshDiskState => crate::tr!("restore_plan.title_refresh_disks"),
         };
         title.into_owned()
@@ -497,6 +527,7 @@ impl RestoreOp {
                 | RestoreOp::AssignLetter { .. }
                 | RestoreOp::FinalizeBoot { .. }
                 | RestoreOp::EnsureFallbackBootloader { .. }
+                | RestoreOp::ChangeIdentities { .. }
                 | RestoreOp::RefreshDiskState
         )
     }
@@ -825,7 +856,29 @@ mod tests {
         );
 
         let keys: Vec<u8> = plan.ordered().iter().map(|op| op.order_key()).collect();
-        assert_eq!(keys, vec![0, 1, 2, 3, 5, 6]);
+        assert_eq!(keys, vec![0, 1, 3, 4, 6, 7]);
+    }
+
+    #[test]
+    fn identities_change_right_after_the_sectors_and_before_anything_mounts_them() {
+        let change = RestoreOp::ChangeIdentities {
+            parts: vec![part(1, 0)],
+            fix_references: false,
+        };
+        let raw = RestoreOp::RestorePartition {
+            src_index: 1,
+            dst: part(1, 0),
+            mode: RestoreMode::Sectors,
+            wipe_free_space: false,
+            reencrypt: false,
+        };
+        let grow = RestoreOp::ExtendFilesystem { part: part(1, 0) };
+        let fallback = RestoreOp::EnsureFallbackBootloader { esp: part(2, 0) };
+        assert!(raw.order_key() < change.order_key());
+        assert!(change.order_key() < grow.order_key());
+        assert!(change.order_key() < fallback.order_key());
+        assert!(change.needs_disk_online() && !change.cancellable() && !change.destroys_data());
+        assert_eq!(change.kind(), "change_identities");
     }
 
     #[test]
