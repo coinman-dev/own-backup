@@ -270,7 +270,7 @@ pub fn execute_plan(
     // Installed before the disk is touched and kept to the end of the run;
     // without it the restore still works, the desktop just reacts to it.
     let held = held_device_names(plan, &device, live_disk);
-    let _hold = (!held.is_empty())
+    let udev_hold = (!held.is_empty())
         .then(|| {
             let names: Vec<&str> = held.iter().map(String::as_str).collect();
             own_backup_backup::udev_hold_linux::UdevHold::install(&names)
@@ -415,6 +415,10 @@ pub fn execute_plan(
         );
     }
     release(&mut hold, &mut expected, &mut state);
+    // The hold goes (and udev gives the devices their links back) before the
+    // run says it is over: a client acting on «completed» looks the disk up
+    // by its persistent name at once (stand 20.10: /dev/disk/by-id missing).
+    drop(udev_hold);
 
     if cancel.is_cancelled() {
         let after_last = state.ops.len();
