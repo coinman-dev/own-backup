@@ -781,9 +781,15 @@ pub fn key_store_on_source(source: &str) -> bool {
         .lock()
         .map(|d| d.clone())
         .unwrap_or_default();
-    let configured = own_backup_common::config::AppConfig::load_or_default().data_dir;
-    if !dirs.contains(&configured) {
-        dirs.push(configured);
+    // The crate's own tests see only what they register: whether this
+    // machine has the package (and a root-only key directory, which reads as
+    // full) installed must not change their answer.
+    #[cfg(not(test))]
+    {
+        let configured = own_backup_common::config::AppConfig::load_or_default().data_dir;
+        if !dirs.contains(&configured) {
+            dirs.push(configured);
+        }
     }
     key_store_in(source, &dirs)
 }
