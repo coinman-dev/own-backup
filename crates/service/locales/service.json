@@ -459,6 +459,10 @@
     "ru": "Папку для копии журнала нужно указать полным путём, без «.» и «..»: «%{path}».",
     "en": "The log mirror folder must be a full path, without “.” or “..”: “%{path}”."
   },
+  "settings.mirror_not_local": {
+    "ru": "Папку для копии журнала нужно указать на диске с буквой, например «E:\\Журналы»: служба не пишет в сетевые папки от вашего имени — «%{path}».",
+    "en": "The log mirror folder must be on a drive with a letter, such as “E:\\Logs”: the service does not write to network folders on your behalf — “%{path}”."
+  },
   "settings.mirror_unknown_caller": {
     "ru": "Не удалось определить, кто меняет папку копии журнала, — служба пишет туда от имени администратора, поэтому изменение не принято. Выключить копию можно и так.",
     "en": "Could not tell who is changing the log mirror folder — the service writes there as an administrator, so the change was not accepted. Switching the mirror off is still possible."

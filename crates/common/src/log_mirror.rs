@@ -35,6 +35,14 @@
 //! never a second name of another file, and a folder named in the config is
 //! not created: a missing one is a stick that is not plugged in, and creating
 //! its path would put directories on the root filesystem in its place.
+//!
+//! On Windows the service is SYSTEM, and every user may create files in
+//! `ProgramData\OwnBackup` — so `config.toml` used to belong to whoever made it
+//! first. The folder is now taken from the file only when SYSTEM, the
+//! Administrators or this process's own user owns it (the service re-owns an
+//! old file at start, `crates/service/src/settings.rs`), it is not created
+//! either, and the file is opened by a handle that is checked to be a plain
+//! file at exactly the named path ([`crate::win_acl::open_append_checked`]).
 
 use std::fs::File;
 use std::io::{self, Write};
@@ -119,6 +127,10 @@ impl MirrorLog {
         self.next_check = now + RECHECK;
 
         let wanted = self.fixed_dir.clone().or_else(|| {
+            #[cfg(windows)]
+            if !config_may_steer(&self.config_path) {
+                return None;
+            }
             AppConfig::load_from_file(&self.config_path)
                 .ok()
                 .map(|c| c.log_mirror_dir)
@@ -164,8 +176,47 @@ impl MirrorLog {
     }
 }
 
+/// Whether the settings file at `path` may name the mirror folder for this
+/// process (see the module note on Windows).
+#[cfg(windows)]
+fn config_may_steer(path: &Path) -> bool {
+    crate::win_acl::owner_sid(path)
+        .ok()
+        .flatten()
+        .is_some_and(|owner| crate::win_acl::owner_may_steer(&owner))
+}
+
+/// Open (and rotate) `<dir>\<name>` by a checked handle, or `None` if it is not
+/// there or is not a plain file of its own at exactly that path.
+#[cfg(windows)]
+fn open_mirror(dir: &Path, name: &str, create: bool) -> Option<File> {
+    use crate::win_acl::{open_append_checked, rename_in_place};
+
+    if create {
+        std::fs::create_dir_all(dir).ok()?;
+    }
+    let path = dir.join(name);
+    let old = Path::new(name).with_extension("log.old");
+    let old = old.to_str()?;
+    // The second round only follows a rotation.
+    for _ in 0..2 {
+        let (file, _) = open_append_checked(&path).ok()?;
+        if file
+            .metadata()
+            .map(|m| m.len() > ROTATE_AT)
+            .unwrap_or(false)
+        {
+            // Renamed through the handle, within its own folder.
+            rename_in_place(&file, old).ok()?;
+            continue;
+        }
+        return Some(file);
+    }
+    None
+}
+
 /// Open (and rotate) `<dir>/<name>`, or `None` if the drive is not there.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 fn open_mirror(dir: &Path, name: &str, _create: bool) -> Option<File> {
     std::fs::create_dir_all(dir).ok()?;
     let path = dir.join(name);

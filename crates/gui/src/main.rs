@@ -503,7 +503,6 @@ fn main() {
     // Read config.toml. This used to be `AppConfig::default()` with a comment
     // claiming otherwise: settings were written to a file nothing ever opened,
     // so nothing the user changed survived a restart.
-    let config_path = AppConfig::default_path();
     let config = AppConfig::load_or_default();
     // This process's own messages, until the window says which language it
     // resolved (`set_ui_language`, sent as soon as it starts). Never chosen
@@ -514,11 +513,9 @@ fn main() {
         &config.ui_language
     });
 
-    // Ensure data directory exists (config.toml is written here). Windows
-    // only: on Linux it is root's, made by the service, which also writes
-    // the config (`commands::settings`).
-    #[cfg(target_os = "windows")]
-    let _ = std::fs::create_dir_all(&config.data_dir);
+    // The data directory is not made here: it is the service's, which also
+    // writes the config (`commands::settings`). A folder the window made
+    // would be the user's, with everything the service later keeps in it.
 
     // The icon beside the clock and its logon entry. Not on the medium: there
     // is no notification area there and no logon to come back to.
@@ -535,7 +532,7 @@ fn main() {
     // service; connect to it, spawning a private foreground instance if none is
     // installed/running so the GUI still works standalone.
     let link = Arc::new(ServiceLink::new(&config.grpc_address, config.token_path()));
-    let gui_state = GuiState::new(config, config_path, link.clone());
+    let gui_state = GuiState::new(config, link.clone());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())

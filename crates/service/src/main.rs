@@ -658,6 +658,9 @@ pub async fn run_main_loop(
     let config = AppConfig::default();
 
     prepare_data_dir(&config.data_dir)?;
+    // A config.toml that a user owns stops steering the service here.
+    #[cfg(windows)]
+    settings::adopt_config_file(&AppConfig::default_path());
 
     // Everyone's logs, swept by the one process that is always here.
     start_log_housekeeping();
@@ -1372,12 +1375,26 @@ async fn serve_uds(
 /// pipe is a byte stream just like a socket, so read/write delegate straight to
 /// the inner [`NamedPipeServer`].
 #[cfg(windows)]
-struct NamedPipeConn(tokio::net::windows::named_pipe::NamedPipeServer);
+struct NamedPipeConn(tokio::net::windows::named_pipe::NamedPipeServer, PipeCaller);
+
+/// Who is at the other end of a named-pipe connection, found when it was
+/// accepted (`client_in_active_console`); every request on it carries this in
+/// its extensions, which is how `settings::caller_of` knows the user.
+#[cfg(windows)]
+#[derive(Debug, Clone)]
+pub(crate) struct PipeCaller {
+    /// The client process's user, `S-1-5-…`.
+    pub sid: String,
+    /// SYSTEM, or a token elevated as an administrator.
+    pub elevated: bool,
+}
 
 #[cfg(windows)]
 impl tonic::transport::server::Connected for NamedPipeConn {
-    type ConnectInfo = ();
-    fn connect_info(&self) -> Self::ConnectInfo {}
+    type ConnectInfo = PipeCaller;
+    fn connect_info(&self) -> Self::ConnectInfo {
+        self.1.clone()
+    }
 }
 
 #[cfg(windows)]
@@ -1419,12 +1436,17 @@ impl tokio::io::AsyncWrite for NamedPipeConn {
 #[cfg(windows)]
 struct PipeSecurity(windows::Win32::Security::PSECURITY_DESCRIPTOR);
 
+/// The client, if it runs in the active console session as the user logged on
+/// there (`None` refuses the connection).
 #[cfg(windows)]
-fn client_in_active_console(server: &tokio::net::windows::named_pipe::NamedPipeServer) -> bool {
+fn client_in_active_console(
+    server: &tokio::net::windows::named_pipe::NamedPipeServer,
+) -> Option<PipeCaller> {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::Security::{
-        EqualSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
+        EqualSid, GetTokenInformation, TokenElevation, TokenUser, TOKEN_ELEVATION, TOKEN_QUERY,
+        TOKEN_USER,
     };
     use windows::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeClientSessionId};
     use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
@@ -1460,43 +1482,54 @@ fn client_in_active_console(server: &tokio::net::windows::named_pipe::NamedPipeS
 
     let active = unsafe { WTSGetActiveConsoleSessionId() };
     if active == u32::MAX {
-        return false;
+        return None;
     }
     let mut client = u32::MAX;
     let pipe = HANDLE(server.as_raw_handle());
     if unsafe { GetNamedPipeClientSessionId(pipe, &mut client) }.is_err() || client != active {
-        return false;
+        return None;
     }
     let mut process_id = 0u32;
     if unsafe { GetNamedPipeClientProcessId(pipe, &mut process_id) }.is_err() {
-        return false;
+        return None;
     }
-    let Ok(process) =
-        (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) })
-    else {
-        return false;
-    };
-    let process = Owned(process);
+    let process =
+        Owned(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) }.ok()?);
     let mut client_token = HANDLE::default();
     if unsafe { OpenProcessToken(process.0, TOKEN_QUERY, &mut client_token) }.is_err() {
-        return false;
+        return None;
     }
     let client_token = Owned(client_token);
+    let a = user_sid(client_token.0)?;
+    // TOKEN_USER is pointer-aligned in the API buffer; read_unaligned avoids
+    // assuming Vec<u8>'s alignment. The pointed-to SID lives in `a`.
+    let a_user = unsafe { std::ptr::read_unaligned(a.as_ptr().cast::<TOKEN_USER>()) };
+    let sid = unsafe { own_backup_common::win_acl::sid_string(a_user.User.Sid) }?;
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut len = 0u32;
+    let elevated = sid == own_backup_common::win_acl::SYSTEM_SID
+        || (unsafe {
+            GetTokenInformation(
+                client_token.0,
+                TokenElevation,
+                Some(std::ptr::addr_of_mut!(elevation).cast()),
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut len,
+            )
+        }
+        .is_ok()
+            && elevation.TokenIsElevated != 0);
+    let caller = PipeCaller { sid, elevated };
     let mut console_token = HANDLE::default();
     if unsafe { WTSQueryUserToken(active, &mut console_token) }.is_err() {
         // A stripped WinPE may have no WTS token; its single temporary console
         // session is still distinguished by the check above.
-        return own_backup_common::media_mode::is_media_mode();
+        return own_backup_common::media_mode::is_media_mode().then_some(caller);
     }
     let console_token = Owned(console_token);
-    let (Some(a), Some(b)) = (user_sid(client_token.0), user_sid(console_token.0)) else {
-        return false;
-    };
-    // TOKEN_USER is pointer-aligned in the API buffer; read_unaligned avoids
-    // assuming Vec<u8>'s alignment. Both pointed-to SIDs live in a/b below.
-    let a_user = unsafe { std::ptr::read_unaligned(a.as_ptr().cast::<TOKEN_USER>()) };
+    let b = user_sid(console_token.0)?;
     let b_user = unsafe { std::ptr::read_unaligned(b.as_ptr().cast::<TOKEN_USER>()) };
-    unsafe { EqualSid(a_user.User.Sid, b_user.User.Sid).is_ok() }
+    unsafe { EqualSid(a_user.User.Sid, b_user.User.Sid).is_ok() }.then_some(caller)
 }
 
 // The descriptor is immutable after construction; only a raw pointer prevents
@@ -1618,16 +1651,18 @@ async fn serve_named_pipe(
                     } {
                         Ok(s) => s,
                         Err(e) => {
-                            yield Ok(NamedPipeConn(connected));
+                            if let Some(caller) = client_in_active_console(&connected) {
+                                yield Ok(NamedPipeConn(connected, caller));
+                            }
                             yield Err(e);
                             return;
                         }
                     };
-                    if !client_in_active_console(&connected) {
+                    let Some(caller) = client_in_active_console(&connected) else {
                         tracing::warn!(target: "security", "named-pipe client outside the active console session rejected");
                         continue;
-                    }
-                    yield Ok(NamedPipeConn(connected));
+                    };
+                    yield Ok(NamedPipeConn(connected, caller));
                 }
                 Err(e) => {
                     // Recreate the instance and keep serving.

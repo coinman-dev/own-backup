@@ -3,25 +3,24 @@ use tauri::State;
 
 use crate::state::GuiState;
 
-// Where the settings are written differs by platform, and only Linux moved.
+// The settings are written by the service, on both systems: the window asks
+// (`GetSettings` / `SaveSettings`), and the service checks the one field that
+// is more than a preference — the log mirror folder, a place it creates a
+// file in as root or SYSTEM.
 //
-// Windows: the window writes `C:\ProgramData\OwnBackup\config.toml` itself,
-// as it always has — ProgramData lets the person at the console create and
-// replace files there, it works without the service, and that path has its
-// native acceptance behind it. Nothing about it changes here.
+// Linux: the data folder is root's (0750 with the access group), so the
+// window's own write ended in «Permission denied».
 //
-// Linux: the data folder is root's (0750 with the access group), so the same
-// write ended in «Permission denied», and the language never reached the
-// service. The service owns the file there and is asked (`GetSettings` /
-// `SaveSettings`); it also checks the one field that is more than a
-// preference — the log mirror folder, a place root creates a file in.
+// Windows: the window used to write `C:\ProgramData\OwnBackup\config.toml`
+// itself. Every user may create files there, so the file belonged to whoever
+// made it first, and any of them could have SYSTEM append its log wherever
+// they liked. The service now owns the file (`service/src/settings.rs`).
 
 #[tauri::command]
 pub async fn get_config(state: State<'_, GuiState>) -> Result<AppConfig, String> {
     // The service's copy is the one that counts; the window's is what it read
     // at start, kept for when the service cannot be asked. Not started and
     // waited for: the page has an answer either way.
-    #[cfg(not(target_os = "windows"))]
     match state.link.connected().await {
         Some(mut client) => match client.get_settings().await {
             Ok(fresh) => {
@@ -37,54 +36,21 @@ pub async fn get_config(state: State<'_, GuiState>) -> Result<AppConfig, String>
 
 #[tauri::command]
 pub async fn save_config(state: State<'_, GuiState>, config: AppConfig) -> Result<(), String> {
-    // The language is not a field of the settings form: it is switched on its
-    // own (`set_ui_language`), and a form loaded before the switch would
-    // otherwise save the old one back.
-    #[cfg(target_os = "windows")]
-    {
-        let mut current = state.config.lock().map_err(|e| e.to_string())?;
-        let before = current.clone();
-        let saved = AppConfig::update_file(&state.config_path, |fresh| {
-            if config.data_dir != before.data_dir {
-                fresh.data_dir = config.data_dir.clone();
-            }
-            if config.grpc_address != before.grpc_address {
-                fresh.grpc_address = config.grpc_address.clone();
-            }
-            if config.log_level != before.log_level {
-                fresh.log_level = config.log_level.clone();
-            }
-            if config.log_mirror_dir != before.log_mirror_dir {
-                fresh.log_mirror_dir = config.log_mirror_dir.clone();
-            }
-            if config.default_compression_level != before.default_compression_level {
-                fresh.default_compression_level = config.default_compression_level;
-            }
-            if config.remembered_backups != before.remembered_backups {
-                fresh.remembered_backups = config.remembered_backups.clone();
-            }
-        })
-        .map_err(|e| e.to_string())?;
-        // The in-memory copy has to move too. Writing only the file left
-        // `get_config` handing back what was loaded at startup, so anything saved
-        // came back missing as soon as the user navigated away and returned.
-        *current = saved;
-        Ok(())
-    }
     // Only what the person changed travels, so a second window saving another
-    // field is not undone. The language is left out for the reason above.
-    #[cfg(not(target_os = "windows"))]
-    {
-        let before = state.config.lock().map_err(|e| e.to_string())?.clone();
-        let mut patch = own_backup_common::config::SettingsPatch::between(&before, &config);
-        patch.ui_language = None;
-        if patch.is_empty() {
-            return Ok(());
-        }
-        let saved = state.link.client().await?.save_settings(&patch).await?;
-        *state.config.lock().map_err(|e| e.to_string())? = saved;
-        Ok(())
+    // field is not undone. The language is not a field of the settings form:
+    // it is switched on its own (`set_ui_language`), and a form loaded before
+    // the switch would otherwise save the old one back.
+    let before = state.config.lock().map_err(|e| e.to_string())?.clone();
+    let mut patch = own_backup_common::config::SettingsPatch::between(&before, &config);
+    patch.ui_language = None;
+    if patch.is_empty() {
+        return Ok(());
     }
+    let saved = state.link.client().await?.save_settings(&patch).await?;
+    // The in-memory copy has to move too, or `get_config` without a service
+    // would hand back what was loaded at startup.
+    *state.config.lock().map_err(|e| e.to_string())? = saved;
+    Ok(())
 }
 
 /// The window's language, already resolved («Как в системе» → `ru`/`en`).
@@ -98,37 +64,19 @@ pub async fn set_ui_language(state: State<'_, GuiState>, lang: String) -> Result
     } else {
         "ru"
     };
-    #[cfg(target_os = "windows")]
-    {
-        let mut config = state.config.lock().map_err(|e| e.to_string())?;
-        if config.ui_language == code {
-            own_backup_common::lang::set(code);
-            return Ok(());
-        }
-        let saved = AppConfig::update_file(&state.config_path, |fresh| {
-            fresh.ui_language = code.to_string();
-        })
-        .map_err(|e| e.to_string())?;
-        *config = saved;
-        own_backup_common::lang::set(code);
-        Ok(())
-    }
     // Through the service, which switches its own messages the moment it has
     // written the file.
-    #[cfg(not(target_os = "windows"))]
-    {
-        own_backup_common::lang::set(code);
-        if state.config.lock().map_err(|e| e.to_string())?.ui_language == code {
-            return Ok(());
-        }
-        let patch = own_backup_common::config::SettingsPatch {
-            ui_language: Some(code.to_string()),
-            ..Default::default()
-        };
-        let saved = state.link.client().await?.save_settings(&patch).await?;
-        *state.config.lock().map_err(|e| e.to_string())? = saved;
-        Ok(())
+    own_backup_common::lang::set(code);
+    if state.config.lock().map_err(|e| e.to_string())?.ui_language == code {
+        return Ok(());
     }
+    let patch = own_backup_common::config::SettingsPatch {
+        ui_language: Some(code.to_string()),
+        ..Default::default()
+    };
+    let saved = state.link.client().await?.save_settings(&patch).await?;
+    *state.config.lock().map_err(|e| e.to_string())? = saved;
+    Ok(())
 }
 
 /// Where the window runs, for the parts of the screen that differ by system.

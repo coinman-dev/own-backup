@@ -1,24 +1,28 @@
 //! Settings changed through the service (`GetSettings` / `SaveSettings`).
 //!
-//! On Linux `config.toml` lives in root's data folder (0750, the access
-//! group), so the window can read it but not write it; it asks here instead,
-//! and the service writes the file under the same lock and atomic replace
-//! every writer uses (`AppConfig::update_file`). The window on Windows still
-//! writes `C:\ProgramData\OwnBackup\config.toml` itself, as it always has; the
-//! call answers there too, but nothing on Windows uses it.
+//! The window cannot write `config.toml` itself on either system, and asks
+//! here; the service writes the file under the same lock and atomic replace
+//! every writer uses (`AppConfig::update_file`). On Linux the file lives in
+//! root's data folder (0750, the access group). On Windows every user may
+//! create files in `C:\ProgramData\OwnBackup`, and the window used to write
+//! the file itself, so whoever made it first owned it; a file written here is
+//! SYSTEM's, and an older one is taken over at start ([`adopt_config_file`]).
 //!
 //! One field is more than a preference. `log_mirror_dir` names a folder in
-//! which the service — root — creates a file and appends to it for as long as
-//! it runs, so a client that may change settings must not be able to point it
-//! at `/etc`. The rule, on Unix:
+//! which the service — root, SYSTEM — creates a file and appends to it for as
+//! long as it runs, so a client that may change settings must not be able to
+//! point it at `/etc` or `C:\Windows`. The rule:
 //!
-//! * an absolute path, without `.` or `..`;
-//! * no symbolic link anywhere along it, and the end an existing directory —
-//!   a stick that is not plugged in is named once it is;
-//! * unless the caller is root: a directory the caller owns, i.e. one they
-//!   could create that file in themselves (their home, a stick the desktop
-//!   mounted for them). A caller whose identity is not known (the loopback
-//!   TCP of a development run) may only switch the mirror off.
+//! * an absolute path, without `.` or `..`; on Windows on a drive letter;
+//! * no symbolic link (on Windows no junction, mount point or other reparse
+//!   point) anywhere along it, and the end an existing directory — a stick
+//!   that is not plugged in is named once it is;
+//! * unless the caller is root (an elevated administrator or SYSTEM): a
+//!   directory the caller owns, i.e. one they could create that file in
+//!   themselves (their home, a stick the desktop mounted for them). On a FAT
+//!   or exFAT stick, which keeps no owners and lets everyone write, any
+//!   folder. A caller whose identity is not known (the loopback TCP of a
+//!   development run) may only switch the mirror off.
 //!
 //! Checking a path once is not enough on its own: the owner of a folder can
 //! swap it for a link afterwards. The writer (`common::log_mirror`) therefore
@@ -31,18 +35,23 @@ use own_backup_common::config::{AppConfig, SettingsPatch};
 use own_backup_common::tr;
 use tonic::{Request, Status};
 
+/// A user as the transport names one: a uid on Unix, a SID (`S-1-5-…`) on
+/// Windows.
+#[cfg(unix)]
+pub(crate) type UserId = u32;
+#[cfg(not(unix))]
+pub(crate) type UserId = String;
+
 /// Who is asking, as far as the transport can tell.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Caller {
-    /// Root over the Unix socket. On Windows every caller: the console user
-    /// there writes `config.toml` directly anyway, so asking the service gives
-    /// them nothing they do not already have.
+    /// Root over the Unix socket; an elevated administrator or SYSTEM over
+    /// the named pipe.
     Unrestricted,
-    /// A user over the Unix socket, by uid (`SO_PEERCRED`).
-    #[cfg_attr(not(unix), allow(dead_code))]
-    User(u32),
+    /// Any other user: by uid over the Unix socket (`SO_PEERCRED`), by SID
+    /// over the named pipe (the client process's token).
+    User(UserId),
     /// No credentials: the loopback TCP of a `--foreground` development run.
-    #[cfg_attr(not(unix), allow(dead_code))]
     Unknown,
 }
 
@@ -60,10 +69,18 @@ pub(crate) fn caller_of<T>(req: &Request<T>) -> Caller {
             None => Caller::Unknown,
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        match req.extensions().get::<crate::PipeCaller>() {
+            Some(c) if c.elevated => Caller::Unrestricted,
+            Some(c) => Caller::User(c.sid.clone()),
+            None => Caller::Unknown,
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = req;
-        Caller::Unrestricted
+        Caller::Unknown
     }
 }
 
@@ -76,7 +93,7 @@ pub(crate) fn save(
     caller: Caller,
 ) -> Result<AppConfig, Status> {
     if let Some(dir) = &patch.log_mirror_dir {
-        check_mirror_dir(dir, caller)?;
+        check_mirror_dir(dir, caller.clone())?;
     }
     let saved = AppConfig::update_file(path, |config| patch.apply(config))
         .map_err(|e| Status::internal(tr!("settings.not_saved", error = e).into_owned()))?;
@@ -120,10 +137,140 @@ pub(crate) fn check_mirror_dir(dir: &str, caller: Caller) -> Result<(), Status> 
     {
         check_mirror_dir_unix(path, dir, caller)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        check_mirror_dir_windows(path, dir, caller)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = caller;
         Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn check_mirror_dir_windows(path: &Path, shown: &str, caller: Caller) -> Result<(), Status> {
+    use std::os::windows::fs::MetadataExt;
+    use std::path::{Component, Prefix};
+
+    const REPARSE_POINT: u32 = 0x400;
+    if caller == Caller::Unknown {
+        return Err(Status::permission_denied(
+            tr!("settings.mirror_unknown_caller").into_owned(),
+        ));
+    }
+    // A drive letter: a network share is reached as the machine, not as the
+    // person who named it.
+    match path.components().next() {
+        Some(Component::Prefix(p))
+            if matches!(p.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)) => {}
+        _ => {
+            return Err(Status::invalid_argument(
+                tr!("settings.mirror_not_local", path = shown).into_owned(),
+            ))
+        }
+    }
+    // Every step looked at itself, not followed: a junction or a link
+    // anywhere means the folder is not where the path says it is.
+    let mut at = std::path::PathBuf::new();
+    for part in path.components() {
+        at.push(part);
+        if matches!(part, Component::Prefix(_)) {
+            continue;
+        }
+        let meta = match std::fs::symlink_metadata(&at) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(Status::failed_precondition(
+                    tr!("settings.mirror_missing", path = shown).into_owned(),
+                ))
+            }
+            Err(e) => {
+                return Err(Status::failed_precondition(
+                    tr!("settings.mirror_unreadable", path = shown, error = e).into_owned(),
+                ))
+            }
+        };
+        if meta.file_attributes() & REPARSE_POINT != 0 {
+            return Err(Status::invalid_argument(
+                tr!("settings.mirror_symlink", path = shown, link = at.display()).into_owned(),
+            ));
+        }
+        if !meta.is_dir() {
+            return Err(Status::invalid_argument(
+                tr!("settings.mirror_not_dir", path = shown).into_owned(),
+            ));
+        }
+    }
+    let Caller::User(sid) = caller else {
+        return Ok(());
+    };
+    let unreadable = |e: std::io::Error| {
+        Status::failed_precondition(
+            tr!("settings.mirror_unreadable", path = shown, error = e).into_owned(),
+        )
+    };
+    // FAT/exFAT: no owners, and every user writes anywhere on it already.
+    if !own_backup_common::win_acl::has_persistent_acls(path).map_err(unreadable)? {
+        return Ok(());
+    }
+    match own_backup_common::win_acl::owner_sid(path).map_err(unreadable)? {
+        Some(owner) if owner == sid => Ok(()),
+        _ => Err(Status::permission_denied(
+            tr!("settings.mirror_not_yours", path = shown).into_owned(),
+        )),
+    }
+}
+
+/// Take over a `config.toml` that a user owns — written by the window of an
+/// earlier version, or planted before the service first wrote one — so that
+/// only the service writes it from now on. The mirror folder in it is kept
+/// only if its owner could have named it through the service; the file is
+/// then written anew by the service (SYSTEM's, inheriting the folder's
+/// read-only access for users), and a lock file of theirs is replaced too.
+#[cfg(windows)]
+pub(crate) fn adopt_config_file(path: &Path) {
+    use own_backup_common::win_acl::{owner_sid, ADMINISTRATORS_SID, SYSTEM_SID};
+
+    let trusted = |sid: &str| sid == SYSTEM_SID || sid == ADMINISTRATORS_SID;
+    let owner = match owner_sid(path) {
+        Ok(Some(owner)) => owner,
+        Ok(None) => String::new(),
+        // No file yet: the first write will be the service's.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            tracing::warn!(error = %e, "config.toml: owner unreadable, left as it is");
+            return;
+        }
+    };
+    if trusted(&owner) {
+        return;
+    }
+    let lock = path.with_extension("toml.lock");
+    if owner_sid(&lock)
+        .ok()
+        .flatten()
+        .is_some_and(|o| !trusted(&o))
+    {
+        let _ = std::fs::remove_file(&lock);
+    }
+    let result = AppConfig::update_file(path, |config| {
+        let dir = config.log_mirror_dir.clone();
+        if !dir.trim().is_empty() {
+            if let Err(why) = check_mirror_dir(&dir, Caller::User(owner.clone())) {
+                tracing::warn!(
+                    folder = %dir,
+                    %owner,
+                    reason = %why.message(),
+                    "config.toml: the log mirror folder is not its owner's — switched off"
+                );
+                config.log_mirror_dir.clear();
+            }
+        }
+    });
+    match result {
+        Ok(_) => tracing::info!(previous_owner = %owner, "config.toml taken over by the service"),
+        Err(e) => tracing::warn!(error = %e, %owner, "config.toml could not be taken over"),
     }
 }
 
@@ -187,7 +334,7 @@ mod tests {
     #[test]
     fn switching_the_mirror_off_is_always_allowed() {
         assert!(check_mirror_dir("", Caller::Unknown).is_ok());
-        assert!(check_mirror_dir("  ", Caller::User(1000)).is_ok());
+        assert!(check_mirror_dir("  ", Caller::User(Default::default())).is_ok());
     }
 
     #[test]

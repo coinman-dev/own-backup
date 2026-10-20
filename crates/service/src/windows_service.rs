@@ -110,6 +110,13 @@ mod imp {
         // (`--foreground`) still uses loopback TCP.
         let runtime = tokio::runtime::Runtime::new()?;
         let run_result = runtime.block_on(crate::run_main_loop(shutdown_signal, false, os_rx));
+        // Said before Stopped is reported: after that "the service process can
+        // be terminated at any time" (SetServiceStatus), and with the log
+        // mirrored to a stick the line used to be lost that way.
+        match &run_result {
+            Ok(()) => info!("Service stopped"),
+            Err(e) => tracing::error!(error = %e, "Service stopped after an error"),
+        }
 
         // Startup can fail after Running was reported (for example, when the
         // job store is unreadable). Report Stopped on that path too so the SCM
@@ -125,7 +132,6 @@ mod imp {
         })?;
 
         run_result?;
-        info!("Service stopped");
         Ok(())
     }
 }

@@ -116,7 +116,6 @@ impl ServiceLink {
     /// fresh attempt — without starting it and waiting the way
     /// [`client`](Self::client) does. For reads that have an answer of their
     /// own to fall back on, where five seconds of «Загрузка…» buy nothing.
-    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub async fn connected(&self) -> Option<BackupClient> {
         if let Some(c) = self.cached().await {
             return Some(c);

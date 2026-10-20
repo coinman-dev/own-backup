@@ -16,10 +16,14 @@ rust-i18n = { workspace = true }
 [target.'cfg(target_os = "windows")'.dependencies]
 # Three small questions asked of Windows from here: is this WinPE (one
 # registry key), where a program keeps its settings (the same), and is the
-# medium's desktop running (one named object, opened and closed).
+# medium's desktop running (one named object, opened and closed). And who
+# owns a file, and a file opened by a checked handle (`win_acl`).
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Globalization",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
     "Win32_System_Registry",
     "Win32_System_Threading",
 ] }
