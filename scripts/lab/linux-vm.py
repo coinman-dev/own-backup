@@ -47,6 +47,7 @@ case growth of the run, a run of at most 20 GiB, the lab at most 65 GiB.
 Python standard library only.
 """
 import argparse
+import re
 import hashlib
 import http.server
 import json
@@ -891,10 +892,16 @@ def cmd_media(args) -> int:
             fail(f'no self-test after {args.timeout} s (VM left running; see {serial}, '
                  f"evidence/media-{label}.png, then `down`)")
         time.sleep(3)
-    # The page is drawn by now (the self-test waited for it); a moment for the
-    # compositor to put the last frame on the screen.
-    time.sleep(3)
-    lines.append(shot(label))
+    # The page is drawn by now (the self-test waited for it), but WebKit may
+    # still show its white background for a while (stand 20.10: one boot of
+    # four caught it): look again for up to 30 s before judging the screen.
+    for _ in range(10):
+        time.sleep(3)
+        screen = shot(label)
+        m = re.search(r'colours=(\d+) dominant=(\d+)', screen)
+        if m and int(m.group(1)) >= 16 and int(m.group(2)) <= 90:
+            break
+    lines.append(screen)
     (RUN / 'evidence' / f'media-{label}.txt').write_text('\n'.join(lines) + '\n')
     for ln in lines:
         print(ln, flush=True)
