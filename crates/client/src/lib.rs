@@ -167,6 +167,15 @@ impl BackupClient {
     }
 
     /// Connect over loopback TCP (a dev/foreground service run).
+    /// Loopback TCP at `endpoint` and nothing else — for a test server, which
+    /// must not be mistaken for an installed service listening on its socket.
+    pub async fn connect_tcp_only(
+        endpoint: impl Into<String>,
+        token: impl Into<String>,
+    ) -> Result<Self> {
+        Self::connect_tcp(endpoint.into(), token.into()).await
+    }
+
     async fn connect_tcp(endpoint: String, token: String) -> Result<Self> {
         let channel = Channel::from_shared(endpoint)
             .map_err(|e| format!("bad endpoint: {e}"))?

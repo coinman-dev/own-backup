@@ -3879,9 +3879,12 @@ mod tests {
                 .add_service(svc.into_service())
                 .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
         );
-        let mut client = own_backup_client::BackupClient::connect(format!("http://{addr}"), "")
-            .await
-            .unwrap();
+        // Straight to this server: `connect` tries the service socket first,
+        // and on a machine with the package installed that is another service.
+        let mut client =
+            own_backup_client::BackupClient::connect_tcp_only(format!("http://{addr}"), "")
+                .await
+                .unwrap();
         let mut big = own_backup_core::Job {
             name: "big".into(),
             source: "C:".into(),
