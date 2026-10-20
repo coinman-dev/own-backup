@@ -836,14 +836,24 @@ impl Run<'_> {
             return;
         }
         for mut sys in systems {
-            let root_changed = self.out.changed.iter().any(|c| {
-                c.node == sys.node
+            // A host-only dracut image records the root, /boot and the ESP:
+            // did one of their UUIDs change?
+            let candidates = self.candidates(&mounted);
+            let boot_nodes: Vec<String> =
+                initramfs::mount_plan(&sys.config.fstab, &sys.node, &candidates)
+                    .map(|plan| plan.into_iter().map(|m| m.node).collect())
+                    .unwrap_or_default();
+            let recorded_changed = self.out.changed.iter().any(|c| {
+                (c.node == sys.node || boot_nodes.contains(&c.node))
                     && matches!(
                         c.kind,
-                        IdentityKind::Ext | IdentityKind::Xfs | IdentityKind::Btrfs
+                        IdentityKind::Ext
+                            | IdentityKind::Xfs
+                            | IdentityKind::Btrfs
+                            | IdentityKind::Fat
                     )
             });
-            let why = initramfs::reasons(&renamed, root_changed, &sys.config);
+            let why = initramfs::reasons(&renamed, recorded_changed, &sys.config);
             let system = sys.config.os.shown();
             if why.is_empty() {
                 info!(%system, node = %sys.node, "the restored system's initramfs keeps none of the changed identities");
@@ -861,21 +871,6 @@ impl Run<'_> {
                 continue;
             };
             let command = tool.command();
-            // dracut storing the device command line would record the kernel
-            // names this machine gives the restored devices: under the
-            // restore's hold they have no /dev/disk links to record instead.
-            if sys.config.dracut_installed && initramfs::dracut_hostonly_cmdline(&sys.config.dracut)
-            {
-                self.out.notes.push(
-                    tr!(
-                        "identity_change_linux.initramfs_hostonly_cmdline",
-                        system = system.as_str(),
-                        command = command.as_str()
-                    )
-                    .into_owned(),
-                );
-                continue;
-            }
             if let Some(map) = sys.luks_map.clone() {
                 if let Err(note) = self.luks_by_crypttab_name(
                     &map,
@@ -888,19 +883,7 @@ impl Run<'_> {
                     continue;
                 }
             }
-            let candidates: Vec<initramfs::Candidate> = mounted
-                .iter()
-                .map(|m| {
-                    let names = self.host.fs_names(&m.node);
-                    initramfs::Candidate {
-                        node: m.node.clone(),
-                        fstype: m.fstype.clone(),
-                        uuid_key: m.key.clone(),
-                        label: names.label,
-                        partuuid: names.partuuid,
-                    }
-                })
-                .collect();
+            let candidates = self.candidates(&mounted);
             let mounts = match initramfs::mount_plan(&sys.config.fstab, &sys.node, &candidates) {
                 Ok(m) => m,
                 Err(source) => {
@@ -974,6 +957,24 @@ impl Run<'_> {
             };
             self.out.notes.push(note.into_owned());
         }
+    }
+
+    /// The restored filesystems a rebuild may mount, with the names its
+    /// fstab may use for them, read from the devices.
+    fn candidates(&mut self, mounted: &[MountedSeen]) -> Vec<initramfs::Candidate> {
+        mounted
+            .iter()
+            .map(|m| {
+                let names = self.host.fs_names(&m.node);
+                initramfs::Candidate {
+                    node: m.node.clone(),
+                    fstype: m.fstype.clone(),
+                    uuid_key: m.key.clone(),
+                    label: names.label,
+                    partuuid: names.partuuid,
+                }
+            })
+            .collect()
     }
 
     /// The restored root lies in LUKS mapping `map`, opened by this run under
@@ -2074,6 +2075,51 @@ mod tests {
             "{:?}",
             out.notes
         );
+    }
+
+    /// dracut 109 and later build host-only images unless told otherwise, and
+    /// those wait for /boot by its UUID: a /boot whose UUID changed alone
+    /// makes the restored system's image stale, so it is rebuilt — the image
+    /// stores the device command line, which the rebuild now records by
+    /// by-uuid links (no longer a reason to leave it). An older dracut that
+    /// is not configured host-only builds generic images: nothing to do.
+    #[test]
+    fn a_hostonly_dracut_image_is_rebuilt_when_boots_uuid_changed() {
+        use std::os::unix::fs::PermissionsExt;
+        let only_boot = || machine(vec![id(IdentityKind::Ext, BOOT)]);
+        let devices = [dev("/dev/sdb1", 1), dev("/dev/sdb16", 16)];
+        for (version, rebuilt) in [("110-11ubuntu0.1", true), ("108", false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let dracut = (
+                "usr/bin/dracut",
+                format!("#!/bin/bash\nDRACUT_VERSION=\"{version}\"\n"),
+            );
+            let mut host = restored_ubuntu(dir.path(), &[dracut]);
+            std::fs::set_permissions(
+                dir.path().join("root/usr/bin/dracut"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+            let out = change_identities(
+                &mut FakeTools::default(),
+                &mut host,
+                &only_boot(),
+                &devices,
+                true,
+            );
+            assert_eq!(out.failed, None, "{out:?}");
+            assert!(
+                out.changed.iter().all(|c| c.node == "/dev/sdb16"),
+                "{:?}",
+                out.changed
+            );
+            assert_eq!(
+                host.rebuilds.len(),
+                usize::from(rebuilt),
+                "dracut {version}: {:?}",
+                out.notes
+            );
+        }
     }
 
     /// Without fixing references there is nothing new for an image to keep;

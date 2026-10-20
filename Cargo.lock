@@ -3149,6 +3149,7 @@ dependencies = [
  "bech32",
  "chrono",
  "crc32fast",
+ "flate2",
  "getrandom 0.2.17",
  "ghash",
  "gpt",

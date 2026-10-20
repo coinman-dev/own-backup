@@ -25,6 +25,20 @@
 //! tool exited 0 AND an image under `/boot` was actually rewritten; a tool
 //! that "succeeds" writing an image the boot loader does not load is not a
 //! rebuild.
+//!
+//! The restored devices are under the restore's udev hold, which leaves them
+//! without `/dev/disk` links; dracut then records the devices the boot waits
+//! for (host-only images wait for /boot and the ESP) by the kernel names this
+//! machine gave them — `/dev/sdb2`, which the restored machine does not have,
+//! and its boot stops. So the filesystems the rebuild reads get their
+//! `/dev/disk/by-uuid` links for its duration (their UUIDs are their own by
+//! then; labels and PARTUUIDs are still the source's and get none:
+//! `udev_hold_linux::UuidLinks`). And every image is checked after it was
+//! built (`initramfs_image_linux`): one that names this machine's devices,
+//! or that cannot be read, is not kept — the images are put back as they were
+//! from copies taken before the tool ran (`<image>.obk-prev`), as they are
+//! after any failure. A rebuild never leaves the system's images worse than
+//! the restore found them.
 
 #![cfg(target_os = "linux")]
 
@@ -42,6 +56,7 @@ use own_backup_common::tr;
 
 use crate::identity_clash::{Identity, IdentityKind};
 use crate::identity_refs_linux::Renamed;
+use crate::initramfs_image_linux as image;
 
 /// How long the system's tool may take: dracut on a slow disk with every
 /// kernel takes minutes, a hang must not hold the restore forever.
@@ -282,6 +297,8 @@ pub struct SystemConfig {
     /// dracut's configuration in the order dracut reads it.
     pub dracut: String,
     pub dracut_installed: bool,
+    /// Its version number (`110` of `110-11ubuntu0.1`), when it says.
+    pub dracut_version: Option<u32>,
     /// The tool to run and its path inside the system.
     pub tool: Option<(Tool, String)>,
 }
@@ -309,7 +326,14 @@ pub fn read_system(root: &Path) -> Option<SystemConfig> {
             dracut.push_str(&t);
         }
     }
-    let dracut_installed = find_program(root, "dracut").is_some();
+    let dracut_program = find_program(root, "dracut");
+    let dracut_installed = dracut_program.is_some();
+    let dracut_version = dracut_program
+        .iter()
+        .map(|p| p.trim_start_matches('/'))
+        .chain(["usr/lib/dracut/dracut-version.sh"])
+        .filter_map(|p| read_text(root, p))
+        .find_map(|t| parse_dracut_version(&t));
     let tool = select_tool(family(&os), |t| find_program(root, t.name()));
     Some(SystemConfig {
         os,
@@ -323,6 +347,7 @@ pub fn read_system(root: &Path) -> Option<SystemConfig> {
         kernel_cmdline: texts(&["etc/kernel/cmdline"]),
         dracut,
         dracut_installed,
+        dracut_version,
         tool,
     })
 }
@@ -365,9 +390,10 @@ pub enum Reason {
     /// A new identity is in what the image copies verbatim: the resume
     /// configuration, `/etc/kernel/cmdline`, dracut's configuration.
     Embedded,
-    /// The root filesystem's UUID changed and dracut builds host-only images,
-    /// which record the root device.
-    HostonlyRoot,
+    /// dracut builds host-only images, which record the devices of the root,
+    /// /boot and the ESP (the root on the command line they store, the others
+    /// as devices the boot waits for), and one of their UUIDs changed.
+    Hostonly,
 }
 
 /// How a changed identity may be written in a file.
@@ -423,22 +449,36 @@ pub fn dracut_option(text: &str, key: &str) -> Option<String> {
         .next_back()
 }
 
-pub fn dracut_hostonly(text: &str) -> bool {
-    dracut_option(text, "hostonly").as_deref() == Some("yes")
+/// The dracut release (dracut-ng 109) from which an unset `hostonly` means
+/// yes; before it, no.
+pub const DRACUT_HOSTONLY_BY_DEFAULT: u32 = 109;
+
+/// `DRACUT_VERSION=` of dracut's script or its version file, as a number.
+pub fn parse_dracut_version(text: &str) -> Option<u32> {
+    text.lines().find_map(|l| {
+        let l = l.trim();
+        let l = l.strip_prefix("readonly ").unwrap_or(l);
+        let v = l.strip_prefix("DRACUT_VERSION=")?;
+        let v = v.trim_matches(['"', '\'']);
+        let digits: String = v.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse().ok()
+    })
 }
 
-/// Does dracut store the device command line (`root=`, `rd.lvm.lv=`…) in the
-/// image? dracut.conf(5): when `hostonly_cmdline` is not set, it follows
-/// `hostonly`.
-pub fn dracut_hostonly_cmdline(text: &str) -> bool {
-    match dracut_option(text, "hostonly_cmdline") {
+/// Does this dracut build host-only images? Its configuration says so, or
+/// — not set — its version does; a version it does not tell counts as
+/// recent (the side of rebuilding).
+pub fn dracut_hostonly(text: &str, version: Option<u32>) -> bool {
+    match dracut_option(text, "hostonly").as_deref() {
         Some(v) => v == "yes",
-        None => dracut_hostonly(text),
+        None => version.is_none_or(|v| v >= DRACUT_HOSTONLY_BY_DEFAULT),
     }
 }
 
 /// Why the restored system's image must be built again after `changed`
 /// (its references already fixed); empty when it need not be.
+/// `recorded_changed`: the UUID of its root, /boot or ESP changed — what a
+/// host-only dracut image records.
 ///
 /// Deliberately on the side of rebuilding: the tool makes the image the
 /// system's next kernel update would make anyway, while an image left with
@@ -446,7 +486,7 @@ pub fn dracut_hostonly_cmdline(text: &str) -> bool {
 /// actually names count, so a data disk restored beside a system does not
 /// rebuild it. Not counted: LVM PV and VG UUIDs (LVM finds those by
 /// scanning), a PARTUUID (never changed).
-pub fn reasons(changed: &[Renamed], root_changed: bool, sys: &SystemConfig) -> Vec<Reason> {
+pub fn reasons(changed: &[Renamed], recorded_changed: bool, sys: &SystemConfig) -> Vec<Reason> {
     let embedded = [
         sys.resume.as_str(),
         sys.kernel_cmdline.as_str(),
@@ -486,8 +526,9 @@ pub fn reasons(changed: &[Renamed], root_changed: bool, sys: &SystemConfig) -> V
             add(Reason::Embedded);
         }
     }
-    if root_changed && sys.dracut_installed && dracut_hostonly(&sys.dracut) {
-        add(Reason::HostonlyRoot);
+    if recorded_changed && sys.dracut_installed && dracut_hostonly(&sys.dracut, sys.dracut_version)
+    {
+        add(Reason::Hostonly);
     }
     out
 }
@@ -807,10 +848,13 @@ fn real_dir(root: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(p)
 }
 
+/// What tells a rewritten image: modification time, inode, size.
+type ImageStamp = (i64, i64, u64, u64);
+
 /// The initramfs images under the system's `/boot` (not following links),
-/// with what tells a rewritten one: modification time, inode, size.
-fn images(sysroot: &Path) -> BTreeMap<String, (i64, i64, u64, u64)> {
-    fn walk(dir: &Path, rel: &str, depth: u32, out: &mut BTreeMap<String, (i64, i64, u64, u64)>) {
+/// with their [`ImageStamp`]; the copies [`Backup`] takes are not images.
+fn images(sysroot: &Path) -> BTreeMap<String, ImageStamp> {
+    fn walk(dir: &Path, rel: &str, depth: u32, out: &mut BTreeMap<String, ImageStamp>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
@@ -822,7 +866,8 @@ fn images(sysroot: &Path) -> BTreeMap<String, (i64, i64, u64, u64)> {
                 walk(&e.path(), &r, depth + 1, out);
             } else if ft.is_file() {
                 let lower = name.to_ascii_lowercase();
-                if lower.starts_with("initrd") || lower.starts_with("initramfs") {
+                let image = lower.starts_with("initrd") || lower.starts_with("initramfs");
+                if image && !lower.ends_with(PREV_SUFFIX) {
                     if let Ok(m) = e.metadata() {
                         out.insert(r, (m.mtime(), m.mtime_nsec(), m.ino(), m.size()));
                     }
@@ -833,6 +878,199 @@ fn images(sysroot: &Path) -> BTreeMap<String, (i64, i64, u64, u64)> {
     let mut out = BTreeMap::new();
     walk(&sysroot.join("boot"), "/boot", 1, &mut out);
     out
+}
+
+/// What a copy of an image taken before the rebuild is called, beside it.
+const PREV_SUFFIX: &str = ".obk-prev";
+
+/// The images as they were before the tool ran: a copy of each beside it
+/// (the same filesystem, so putting one back is a rename).
+struct Backup {
+    /// `(path inside the system, image, copy)`.
+    copies: Vec<(String, PathBuf, PathBuf)>,
+}
+
+impl Backup {
+    /// Copy every image in `images` (paths inside the system under
+    /// `sysroot`). On an error nothing is left behind.
+    fn take<'a>(
+        sysroot: &Path,
+        images: impl IntoIterator<Item = &'a String>,
+    ) -> Result<Self, String> {
+        let mut b = Backup { copies: Vec::new() };
+        for rel in images {
+            let img = sysroot.join(rel.trim_start_matches('/'));
+            let mut name = img.file_name().unwrap_or_default().to_os_string();
+            name.push(PREV_SUFFIX);
+            let copy = img.with_file_name(name);
+            let copied = std::fs::copy(&img, &copy)
+                .and_then(|_| std::fs::File::open(&copy))
+                .and_then(|f| f.sync_all());
+            if let Err(e) = copied {
+                let _ = std::fs::remove_file(&copy);
+                b.discard();
+                return Err(format!("{rel}: {e}"));
+            }
+            b.copies.push((rel.clone(), img, copy));
+        }
+        Ok(b)
+    }
+
+    /// The copy of the image at `rel` (a path inside the system).
+    fn copy_of(&self, rel: &str) -> Option<&Path> {
+        self.copies
+            .iter()
+            .find(|(r, _, _)| r == rel)
+            .map(|(_, _, c)| c.as_path())
+    }
+
+    /// The rebuild is kept: the copies go.
+    fn discard(self) {
+        for (rel, _, copy) in &self.copies {
+            if let Err(e) = std::fs::remove_file(copy) {
+                warn!(image = %rel, error = %e, "the copy of the previous image could not be removed");
+            }
+        }
+    }
+
+    /// Every image as it was (`before`): each copy renamed back over what the
+    /// tool wrote, an image the tool created removed. `Err` names what could
+    /// not be put back; those copies stay.
+    fn put_back(self, sysroot: &Path, before: &BTreeMap<String, ImageStamp>) -> Result<(), String> {
+        let mut failed = Vec::new();
+        for (rel, img, copy) in &self.copies {
+            if let Err(e) = std::fs::rename(copy, img) {
+                failed.push(format!("{rel}: {e}"));
+            }
+        }
+        for rel in images(sysroot).keys().filter(|r| !before.contains_key(*r)) {
+            if let Err(e) = std::fs::remove_file(sysroot.join(rel.trim_start_matches('/'))) {
+                failed.push(format!("{rel}: {e}"));
+            }
+        }
+        if failed.is_empty() {
+            info!("the previous initramfs images were put back");
+            Ok(())
+        } else {
+            Err(failed.join("; "))
+        }
+    }
+}
+
+/// Check the images the tool rewrote: each must be readable and name none of
+/// this machine's devices that the image it replaced did not name already.
+fn check_images(
+    sysroot: &Path,
+    rewritten: &[String],
+    backup: &Backup,
+    devices: &image::MachineDevices,
+) -> Result<(), String> {
+    let mut names: Vec<String> = Vec::new();
+    for rel in rewritten {
+        let path = sysroot.join(rel.trim_start_matches('/'));
+        let new = image::read_image(&path).map_err(|e| {
+            tr!(
+                "initramfs_linux.unverifiable",
+                image = rel.as_str(),
+                error = e
+            )
+            .into_owned()
+        })?;
+        let previous = backup
+            .copy_of(rel)
+            .and_then(|c| match image::read_image(c) {
+                Ok(entries) => Some(entries),
+                Err(e) => {
+                    warn!(image = %rel, error = %e, "the previous image could not be read: every name counts");
+                    None
+                }
+            });
+        let found = image::new_device_refs(&new, previous.as_deref(), devices);
+        for (entry, device) in &found {
+            warn!(image = %rel, entry = %entry, device = %device, "the rebuilt image names a device by this machine's name");
+        }
+        for (_, device) in found {
+            if !names.contains(&device) {
+                names.push(device);
+            }
+        }
+        info!(image = %rel, files = new.len(), "rebuilt image checked");
+    }
+    if names.is_empty() {
+        Ok(())
+    } else {
+        Err(tr!("initramfs_linux.device_names", names = names.join(", ")).into_owned())
+    }
+}
+
+/// The restored devices under `nodes` — those and the ones they are built
+/// on (sysfs `slaves`: the LUKS container under its mapping, md members) —
+/// by kernel name.
+fn devices_under(nodes: &[&str]) -> Vec<String> {
+    let mut todo: Vec<String> = nodes
+        .iter()
+        .filter_map(|n| std::fs::canonicalize(n).ok())
+        .filter_map(|p| p.file_name().map(|f| f.to_string_lossy().into_owned()))
+        .collect();
+    let mut out: Vec<String> = Vec::new();
+    while let Some(k) = todo.pop() {
+        if out.contains(&k) {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(format!("/sys/class/block/{k}/slaves")) {
+            todo.extend(
+                entries
+                    .flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned()),
+            );
+        }
+        out.push(k);
+    }
+    out
+}
+
+/// The `/dev/disk/by-uuid` name udev gives a device, from `blkid -p -o
+/// export`: the UUID of a filesystem or a LUKS container.
+pub fn by_uuid_name(export: &str) -> Option<String> {
+    let value = |key: &str| {
+        export
+            .lines()
+            .find_map(|l| l.strip_prefix(key))
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    };
+    matches!(value("USAGE="), Some("filesystem" | "crypto"))
+        .then(|| value("UUID="))
+        .flatten()
+        .map(str::to_string)
+}
+
+/// `(kernel name, UUID)` of the restored devices under `nodes` that get a
+/// by-uuid link for the rebuild. A UUID another device's link already has is
+/// not taken from it: that device keeps its link, and the check after the
+/// rebuild sees what the tool recorded instead.
+fn uuid_links(nodes: &[&str]) -> Vec<(String, String)> {
+    devices_under(nodes)
+        .into_iter()
+        .filter_map(|k| {
+            let out = Command::new("blkid")
+                .env("LC_ALL", "C")
+                .args(["-p", "-o", "export"])
+                .arg(format!("/dev/{k}"))
+                .stdin(Stdio::null())
+                .output()
+                .ok()?;
+            let uuid = by_uuid_name(&String::from_utf8_lossy(&out.stdout))?;
+            let link = Path::new("/dev/disk/by-uuid").join(&uuid);
+            if let Ok(to) = std::fs::canonicalize(&link) {
+                if to != Path::new("/dev").join(&k) {
+                    warn!(device = %k, uuid, other = %to.display(), "another device has this by-uuid link: none for the rebuild");
+                    return None;
+                }
+            }
+            Some((k, uuid))
+        })
+        .collect()
 }
 
 /// What a finished child printed and how it ended.
@@ -932,8 +1170,29 @@ fn run_in_root(
     })
 }
 
-/// Mount the restored system as `req` says, run its tool inside it, unmount.
+/// Mount the restored system as `req` says, run its tool inside it, check
+/// what it built, unmount.
 pub fn rebuild(req: &Request) -> Rebuilt {
+    let nodes: Vec<&str> = std::iter::once(req.root_node.as_str())
+        .chain(req.mounts.iter().map(|m| m.node.as_str()))
+        .collect();
+    let wanted = uuid_links(&nodes);
+    // Removed (and the devices announced again) when the rebuild is over.
+    let _links = match crate::udev_hold_linux::UuidLinks::install(&wanted) {
+        Ok(l) => Some(l),
+        Err(e) => {
+            warn!(error = %e, "by-uuid links for the rebuild not installed; the check decides");
+            None
+        }
+    };
+    for (k, uuid) in &wanted {
+        let to = std::fs::canonicalize(Path::new("/dev/disk/by-uuid").join(uuid)).ok();
+        if to.as_deref() == Some(&Path::new("/dev").join(k)) {
+            info!(device = %k, uuid, "by-uuid link for the rebuild");
+        } else {
+            warn!(device = %k, uuid, "udev made no by-uuid link; the check decides");
+        }
+    }
     let mut stack = match MountStack::new() {
         Ok(s) => s,
         Err(e) => {
@@ -1016,20 +1275,84 @@ fn rebuild_in(stack: &mut MountStack, req: &Request) -> Result<Rebuilt, String> 
     }
 
     let before = images(&sysroot);
+    let backup = Backup::take(&sysroot, before.keys())
+        .map_err(|e| tr!("initramfs_linux.backup_failed", error = e).into_owned())?;
+    let ran = run_tool(&sysroot, req, &before);
+    Ok(finish(
+        &sysroot,
+        &before,
+        backup,
+        ran,
+        &image::MachineDevices::read(),
+    ))
+}
+
+/// Keep what the tool built only when it rewrote images and they pass
+/// [`check_images`]; otherwise put the previous images back (`before`, from
+/// `backup`) and say so in the error.
+fn finish(
+    sysroot: &Path,
+    before: &BTreeMap<String, ImageStamp>,
+    backup: Backup,
+    ran: Rebuilt,
+    devices: &image::MachineDevices,
+) -> Rebuilt {
+    let checked = match ran {
+        Rebuilt::Done { images, output } => {
+            match check_images(sysroot, &images, &backup, devices) {
+                Ok(()) => Rebuilt::Done { images, output },
+                Err(error) => Rebuilt::Failed { error, output },
+            }
+        }
+        failed => failed,
+    };
+    match checked {
+        Rebuilt::Done { images, output } => {
+            backup.discard();
+            info!(images = ?images, "initramfs rebuilt");
+            Rebuilt::Done { images, output }
+        }
+        Rebuilt::Failed { error, output } => {
+            let error = match backup.put_back(sysroot, before) {
+                Ok(()) => tr!("initramfs_linux.previous_restored", error = error),
+                Err(e) => tr!(
+                    "initramfs_linux.previous_not_restored",
+                    error = error,
+                    restore_error = e
+                ),
+            };
+            Rebuilt::Failed {
+                error: error.into_owned(),
+                output,
+            }
+        }
+    }
+}
+
+/// Run the system's tool in `sysroot` and say whether it rewrote an image
+/// (of those `before` lists).
+fn run_tool(sysroot: &Path, req: &Request, before: &BTreeMap<String, ImageStamp>) -> Rebuilt {
     info!(program = %req.program, args = ?req.tool.args(), root = %sysroot.display(), "running the restored system's initramfs tool");
-    let end = run_in_root(&sysroot, &req.program, req.tool.args(), TIMEOUT)
-        .map_err(|e| format!("{}: {e}", req.program))?;
+    let end = match run_in_root(sysroot, &req.program, req.tool.args(), TIMEOUT) {
+        Ok(end) => end,
+        Err(e) => {
+            return Rebuilt::Failed {
+                error: format!("{}: {e}", req.program),
+                output: String::new(),
+            }
+        }
+    };
     for line in end.output.lines() {
         info!(tool = req.tool.name(), "{line}");
     }
     if end.timed_out {
-        return Ok(Rebuilt::Failed {
+        return Rebuilt::Failed {
             error: tr!("initramfs_linux.timeout", minutes = TIMEOUT.as_secs() / 60).into_owned(),
             output: end.output,
-        });
+        };
     }
     if end.code != Some(0) {
-        return Ok(Rebuilt::Failed {
+        return Rebuilt::Failed {
             error: tr!(
                 "initramfs_linux.exit_code",
                 code = end
@@ -1039,25 +1362,24 @@ fn rebuild_in(stack: &mut MountStack, req: &Request) -> Result<Rebuilt, String> 
             )
             .into_owned(),
             output: end.output,
-        });
+        };
     }
-    let after = images(&sysroot);
+    let after = images(sysroot);
     let rewritten: Vec<String> = after
         .iter()
         .filter(|(p, v)| before.get(*p) != Some(v))
         .map(|(p, _)| p.clone())
         .collect();
     if rewritten.is_empty() {
-        return Ok(Rebuilt::Failed {
+        return Rebuilt::Failed {
             error: tr!("initramfs_linux.no_image_rewritten").into_owned(),
             output: end.output,
-        });
+        };
     }
-    info!(images = ?rewritten, "initramfs rebuilt");
-    Ok(Rebuilt::Done {
+    Rebuilt::Done {
         images: rewritten,
         output: end.output,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -1157,17 +1479,27 @@ mod tests {
         s.dracut = format!("kernel_cmdline=\"resume=UUID={NEW}\"\n");
         assert_eq!(reasons(&root, true, &s), vec![Reason::Embedded]);
 
-        // ... or dracut builds host-only images, which record the root.
+        // ... or dracut builds host-only images, which record the root,
+        // /boot and the ESP.
         let mut s = sys();
         s.dracut = "hostonly=\"yes\"\nhostonly_cmdline=\"no\"\n".into();
         s.dracut_installed = true;
-        assert_eq!(reasons(&root, true, &s), vec![Reason::HostonlyRoot]);
+        s.dracut_version = Some(59);
+        assert_eq!(reasons(&root, true, &s), vec![Reason::Hostonly]);
         assert!(reasons(&root, false, &s).is_empty(), "not the root's");
         s.dracut = "hostonly=\"yes\"\nhostonly=\"no\"\n".into();
         assert!(
             reasons(&root, true, &s).is_empty(),
             "the last assignment counts"
         );
+        // Not set: dracut-ng 109 and later (Ubuntu 26.04 has 110) build
+        // host-only images by default.
+        s.dracut = String::new();
+        assert!(reasons(&root, true, &s).is_empty(), "dracut 059: generic");
+        s.dracut_version = Some(110);
+        assert_eq!(reasons(&root, true, &s), vec![Reason::Hostonly]);
+        s.dracut_version = None;
+        assert_eq!(reasons(&root, true, &s), vec![Reason::Hostonly]);
 
         // LUKS: only a container the system unlocks from crypttab.
         let luks = [renamed(IdentityKind::Luks, OLD, NEW)];
@@ -1211,17 +1543,21 @@ mod tests {
     }
 
     #[test]
-    fn dracut_command_line_follows_hostonly_unless_set() {
-        assert!(!dracut_hostonly_cmdline(""));
-        assert!(dracut_hostonly_cmdline("hostonly=yes\n"));
-        assert!(!dracut_hostonly_cmdline(
-            "hostonly=\"yes\"\nhostonly_cmdline=\"no\"\n"
-        ));
-        assert!(dracut_hostonly_cmdline("hostonly_cmdline='yes'\n"));
+    fn dracut_hostonly_follows_its_configuration_then_its_version() {
+        assert!(!dracut_hostonly("", Some(108)));
+        assert!(dracut_hostonly("", Some(109)));
+        assert!(dracut_hostonly("hostonly=yes\n", Some(59)));
+        assert!(!dracut_hostonly("hostonly='no'\n", Some(110)));
         assert_eq!(
             dracut_option("add_dracutmodules+=\" crypt \"\n", "add_dracutmodules"),
             None
         );
+        assert_eq!(
+            parse_dracut_version("#!/bin/bash\nDRACUT_VERSION=\"110-11ubuntu0.1\"\n"),
+            Some(110)
+        );
+        assert_eq!(parse_dracut_version("DRACUT_VERSION=059\n"), Some(59));
+        assert_eq!(parse_dracut_version("echo $DRACUT_VERSION\n"), None);
     }
 
     fn cand(
@@ -1408,7 +1744,7 @@ mod tests {
         )
         .unwrap();
         let dracut = root.join("usr/bin/dracut");
-        std::fs::write(&dracut, "#!/bin/sh\n").unwrap();
+        std::fs::write(&dracut, "#!/bin/bash\nDRACUT_VERSION=\"110\"\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&dracut, std::fs::Permissions::from_mode(0o755)).unwrap();
 
@@ -1421,8 +1757,13 @@ mod tests {
         let (sub, s) = &found[0];
         assert_eq!(sub, Path::new("@"));
         assert_eq!(s.tool, Some((Tool::Dracut, "/usr/bin/dracut".into())));
-        assert!(s.dracut_installed && dracut_hostonly(&s.dracut));
-        assert!(dracut_hostonly_cmdline(&s.dracut), "the /etc drop-in wins");
+        assert_eq!(s.dracut_version, Some(110));
+        assert!(s.dracut_installed && dracut_hostonly(&s.dracut, None));
+        assert_eq!(
+            dracut_option(&s.dracut, "hostonly_cmdline").as_deref(),
+            Some("yes"),
+            "the /etc drop-in wins"
+        );
     }
 
     #[test]
@@ -1453,6 +1794,133 @@ mod tests {
             .map(|(p, _)| p)
             .collect();
         assert_eq!(changed, vec!["/boot/initrd.img-7.0.0-34-generic"]);
+    }
+
+    /// The stand's failure, decided: a rebuilt image waiting for the kernel
+    /// names the restored /boot and ESP had here is not kept — the previous
+    /// image is put back — and one waiting for by-uuid links is. A failed
+    /// tool's images are put back too, and an image it created goes.
+    #[test]
+    fn a_rebuilt_image_naming_this_machines_devices_is_replaced_by_the_previous_one() {
+        use image::fixtures::waiting_for;
+        let devices = image::MachineDevices {
+            paths: ["/dev/vdb", "/dev/vdb13", "/dev/vdb15", "/dev/block/252:29"]
+                .map(String::from)
+                .to_vec(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("boot/efi")).unwrap();
+        let img = root.join("boot/initrd.img-7.0.0-15-generic");
+        let rel = "/boot/initrd.img-7.0.0-15-generic".to_string();
+        let old = waiting_for(&["/dev/disk/by-uuid/1a2b"]);
+        let by_uuid = waiting_for(&["/dev/disk/by-uuid/7777", "/dev/disk/by-uuid/0F0E-0D0C"]);
+        let by_name = waiting_for(&["/dev/vdb13", "/dev/vdb15"]);
+        let copies = |root: &Path| -> Vec<String> {
+            let mut v: Vec<String> = std::fs::read_dir(root.join("boot"))
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.ends_with(PREV_SUFFIX))
+                .collect();
+            v.sort();
+            v
+        };
+        let rebuild = |new: Option<&[u8]>, extra: Option<&str>, ok: bool| {
+            std::fs::write(&img, &old).unwrap();
+            let before = images(root);
+            let backup = Backup::take(root, before.keys()).unwrap();
+            assert_eq!(copies(root), vec!["initrd.img-7.0.0-15-generic.obk-prev"]);
+            // The tool writes a new file and renames it over the image.
+            let mut rewritten = Vec::new();
+            if let Some(new) = new {
+                let tmp = root.join("boot/.tmp");
+                std::fs::write(&tmp, new).unwrap();
+                std::fs::rename(&tmp, &img).unwrap();
+                rewritten.push(rel.clone());
+            }
+            if let Some(extra) = extra {
+                std::fs::write(root.join("boot").join(extra), &by_name).unwrap();
+                rewritten.push(format!("/boot/{extra}"));
+            }
+            let ran = if ok {
+                Rebuilt::Done {
+                    images: rewritten,
+                    output: "dracut: done".into(),
+                }
+            } else {
+                Rebuilt::Failed {
+                    error: "exit code 1".into(),
+                    output: String::new(),
+                }
+            };
+            finish(root, &before, backup, ran, &devices)
+        };
+
+        match rebuild(Some(&by_uuid), None, true) {
+            Rebuilt::Done { images, .. } => assert_eq!(images, vec![rel.clone()]),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(std::fs::read(&img).unwrap(), by_uuid, "kept");
+        assert!(copies(root).is_empty());
+
+        match rebuild(Some(&by_name), None, true) {
+            Rebuilt::Failed { error, output } => {
+                assert!(
+                    error.contains("/dev/vdb13") && error.contains("/dev/vdb15"),
+                    "{error}"
+                );
+                assert!(
+                    error.contains("прежние образы возвращены")
+                        || error.contains("previous images were put back"),
+                    "{error}"
+                );
+                assert_eq!(output, "dracut: done");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(std::fs::read(&img).unwrap(), old, "put back");
+        assert!(copies(root).is_empty());
+
+        // Unreadable: not kept either.
+        match rebuild(Some(b"\x7fELF"), None, true) {
+            Rebuilt::Failed { error, .. } => assert!(error.contains(&rel), "{error}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(std::fs::read(&img).unwrap(), old);
+
+        // The tool failed half-way: the image it rewrote is put back, the
+        // one it created is removed.
+        match rebuild(Some(&by_uuid), Some("initrd.img-7.1.0-1-generic"), false) {
+            Rebuilt::Failed { error, .. } => assert!(error.contains("exit code 1"), "{error}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(std::fs::read(&img).unwrap(), old);
+        assert!(!root.join("boot/initrd.img-7.1.0-1-generic").exists());
+        assert!(copies(root).is_empty());
+        assert_eq!(images(root).len(), 1, "a copy is not an image");
+    }
+
+    #[test]
+    fn the_by_uuid_name_is_a_filesystems_or_a_containers_uuid() {
+        let export = |usage: &str, uuid: &str| {
+            format!("DEVNAME=/dev/vdb15\nUUID={uuid}\nBLOCK_SIZE=512\nTYPE=vfat\nUSAGE={usage}\nPART_ENTRY_UUID=0a0b\n")
+        };
+        assert_eq!(
+            by_uuid_name(&export("filesystem", "0F0E-0D0C")).as_deref(),
+            Some("0F0E-0D0C")
+        );
+        assert_eq!(
+            by_uuid_name(&export("crypto", "1a2b")).as_deref(),
+            Some("1a2b")
+        );
+        assert_eq!(
+            by_uuid_name(&export("raid", "1a2b")),
+            None,
+            "md members share theirs"
+        );
+        assert_eq!(by_uuid_name(&export("filesystem", "")), None);
+        assert_eq!(by_uuid_name("PART_ENTRY_UUID=0a0b\n"), None);
     }
 
     #[test]
@@ -1514,7 +1982,8 @@ mod tests {
 
     /// As root: a tiny system (a static busybox and a fake tool) on loop
     /// devices — root and a separate /boot — is mounted, the tool runs inside
-    /// it and rewrites the image on /boot, and nothing stays mounted.
+    /// it and rewrites the image on /boot with one that passes the check, and
+    /// nothing stays mounted, no copy and no link rule is left.
     #[test]
     #[ignore = "root: loop devices, mount, chroot"]
     fn real_chroot_rebuild_writes_the_image_on_the_restored_boot() {
@@ -1538,14 +2007,23 @@ mod tests {
         let tool = tree.join("usr/sbin/update-initramfs");
         std::fs::write(
             &tool,
-            "#!/bin/sh\n/bin/busybox echo \"args: $*\"\n/bin/busybox test -e /proc/self/mounts || exit 3\n/bin/busybox echo new > /boot/initrd.img-1.tmp && /bin/busybox mv /boot/initrd.img-1.tmp /boot/initrd.img-1\n",
+            "#!/bin/sh\n/bin/busybox echo \"args: $*\"\n/bin/busybox test -e /proc/self/mounts || exit 3\n/bin/busybox cp /etc/new-initrd /boot/initrd.img-1.tmp && /bin/busybox mv /boot/initrd.img-1.tmp /boot/initrd.img-1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tree.join("etc/new-initrd"),
+            image::fixtures::waiting_for(&["/dev/disk/by-uuid/1a2b"]),
         )
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
         let boot_tree = dir.path().join("boot");
         std::fs::create_dir_all(&boot_tree).unwrap();
-        std::fs::write(boot_tree.join("initrd.img-1"), "old").unwrap();
+        std::fs::write(
+            boot_tree.join("initrd.img-1"),
+            image::fixtures::waiting_for(&[]),
+        )
+        .unwrap();
         let img = |name: &str, src: &Path| {
             let p = dir.path().join(name);
             std::fs::File::create(&p)
@@ -1585,6 +2063,26 @@ mod tests {
         };
         let result = rebuild(&req);
         let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap();
+        let left: Vec<_> = std::fs::read_dir(crate::udev_hold_linux::RULES_DIR)
+            .map(|d| {
+                d.flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .filter(|n| n.contains("-links"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(left.is_empty(), "{left:?}");
+        let boot_mnt = dir.path().join("boot-mnt");
+        std::fs::create_dir_all(&boot_mnt).unwrap();
+        assert!(Command::new("mount")
+            .args(["-o", "ro", &boot_dev])
+            .arg(&boot_mnt)
+            .status()
+            .unwrap()
+            .success());
+        let copies = boot_mnt.join(format!("initrd.img-1{PREV_SUFFIX}")).exists();
+        let _ = Command::new("umount").arg(&boot_mnt).status();
+        assert!(!copies, "the copy of the previous image is gone");
         let _ = Command::new("losetup")
             .args(["-d", &root_dev, &boot_dev])
             .status();

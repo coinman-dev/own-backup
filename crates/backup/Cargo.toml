@@ -42,6 +42,8 @@ tempfile = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+# Reading back a rebuilt initramfs (initramfs_image_linux): gzip images.
+flate2 = "1"
 # systemd-logind over D-Bus (power_linux): sleep inhibitors, suspend, the
 # scheduled poweroff after a copy, shutdown and session signals.
 zbus = "5"

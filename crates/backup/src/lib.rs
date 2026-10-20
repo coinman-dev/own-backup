@@ -81,6 +81,8 @@ pub mod identity_check_linux;
 #[cfg(target_os = "linux")]
 pub mod identity_refs_linux;
 #[cfg(target_os = "linux")]
+pub mod initramfs_image_linux;
+#[cfg(target_os = "linux")]
 pub mod initramfs_linux;
 // The engine's Linux platform: the volume pipeline runs on it.
 #[cfg(target_os = "linux")]
@@ -128,8 +130,8 @@ pub mod fat_writer;
 pub mod file_restore_win;
 #[cfg(target_os = "windows")]
 pub mod format_win;
-pub mod iscsi_win;
 pub mod image_fold;
+pub mod iscsi_win;
 pub mod iso9660;
 #[cfg(target_os = "windows")]
 pub mod letters_win;

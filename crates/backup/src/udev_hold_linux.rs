@@ -23,6 +23,13 @@
 //!   device names it by its kernel node (`/dev/sdb`), resolved before the
 //!   hold, never by a `/dev/disk/by-*` link.
 //!
+//! One exception, made on purpose and for minutes: while a restored system's
+//! own tool rebuilds its initramfs, the restored filesystems it builds from
+//! get their `/dev/disk/by-uuid` link — and no other — once the restore has
+//! given them UUIDs of their own ([`UuidLinks`]). dracut records the devices
+//! the boot waits for by such a link, and without one by the kernel name this
+//! machine gave them (`/dev/sdb2`), which the restored machine does not have.
+//!
 //! A hold is one rules file in `/run/udev/rules.d`, numbered before all of
 //! those rule sets, matching the target disk and its partitions by kernel name.
 //! It is removed when the hold drops, and the devices are then re-announced
@@ -107,6 +114,112 @@ pub fn md_rule(name: &str) -> String {
         "SUBSYSTEM==\"block\", KERNEL==\"{name}\", {STACK_FLAGS}\n\
          SUBSYSTEM==\"block\", KERNEL==\"{name}p[0-9]*\", {STACK_FLAGS}\n"
     )
+}
+
+/// A rule giving the one device with kernel name `kernel` the link
+/// `/dev/disk/by-uuid/<uuid>` — only that link: the hold's flags stay, so
+/// its labels and PARTUUIDs (still the source's) get none. `None` when either
+/// is not a plain name: the rule must not be able to say anything else.
+pub fn uuid_link_rule(kernel: &str, uuid: &str) -> Option<String> {
+    let plain = |s: &str| {
+        !s.is_empty()
+            && !s.starts_with('.')
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+    };
+    (plain(kernel) && plain(uuid)).then(|| {
+        format!("SUBSYSTEM==\"block\", KERNEL==\"{kernel}\", SYMLINK+=\"disk/by-uuid/{uuid}\"\n")
+    })
+}
+
+/// `/dev/disk/by-uuid` links ([`uuid_link_rule`]) for held devices, for as
+/// long as this lives. Installing announces the devices again and waits for
+/// udev, so the links exist when it returns; dropping removes the rules and
+/// announces the devices again, so the links go while their holds stay.
+pub struct UuidLinks {
+    path: Option<PathBuf>,
+    names: Vec<String>,
+    run: bool,
+}
+
+impl UuidLinks {
+    /// Links for `(kernel name, UUID)` pairs.
+    pub fn install(links: &[(String, String)]) -> Result<Self> {
+        Self::install_in(Path::new(RULES_DIR), links, true)
+    }
+
+    /// [`Self::install`] under `dir` (tests); `run` runs `udevadm`.
+    pub fn install_in(dir: &Path, links: &[(String, String)], run: bool) -> Result<Self> {
+        let mut text = String::from(
+            "# Own Backup: by-uuid links of held restored devices while their system's\n\
+             # initramfs is rebuilt. Removed when the rebuild ends; /run is cleared on reboot.\n",
+        );
+        let mut names = Vec::new();
+        for (kernel, uuid) in links {
+            if let Some(rule) = uuid_link_rule(kernel, uuid) {
+                text.push_str(&rule);
+                names.push(kernel.clone());
+            }
+        }
+        if names.is_empty() {
+            return Ok(Self {
+                path: None,
+                names,
+                run,
+            });
+        }
+        static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join(file_name_for(&[&format!("links{n}")]));
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(&tmp, &path)?;
+        info!(rules = %path.display(), devices = ?names, "by-uuid links for the initramfs rebuild");
+        let links = Self {
+            path: Some(path),
+            names,
+            run,
+        };
+        if run {
+            udevadm(&["control", "--reload"]);
+            links.announce();
+        }
+        Ok(links)
+    }
+
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    fn announce(&self) {
+        let mut args = vec![
+            "trigger".to_string(),
+            "--action=change".into(),
+            "--subsystem-match=block".into(),
+        ];
+        args.extend(self.names.iter().map(|n| format!("--sysname-match={n}")));
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        udevadm(&args);
+        udevadm(&["settle", "--timeout=30"]);
+    }
+}
+
+impl Drop for UuidLinks {
+    fn drop(&mut self) {
+        let Some(path) = self.path.take() else {
+            return;
+        };
+        if let Err(e) = std::fs::remove_file(&path) {
+            warn!(rules = %path.display(), error = %e, "by-uuid link rules could not be removed");
+            return;
+        }
+        if self.run {
+            udevadm(&["control", "--reload"]);
+            self.announce();
+        }
+        debug!(rules = %path.display(), "by-uuid links removed");
+    }
 }
 
 /// Kernel names of the partitions of disk `name`: a name ending in a digit
@@ -348,6 +461,56 @@ mod tests {
         let path = hold.path().to_path_buf();
         drop(hold);
         assert!(!path.exists());
+    }
+
+    /// The rebuild's links: one by-uuid link per device, nothing that could
+    /// carry another assignment, removed with their owner.
+    #[test]
+    fn by_uuid_links_name_one_device_each_and_go_with_their_owner() {
+        assert_eq!(
+            uuid_link_rule("vdb13", "77777777-1111-4222-8333-444444444444").unwrap(),
+            "SUBSYSTEM==\"block\", KERNEL==\"vdb13\", \
+             SYMLINK+=\"disk/by-uuid/77777777-1111-4222-8333-444444444444\"\n"
+        );
+        assert!(uuid_link_rule("dm-3", "0F0E-0D0C").is_some());
+        assert_eq!(uuid_link_rule("vdb1", "x\", OPTIONS+=\"y"), None);
+        assert_eq!(uuid_link_rule("vdb*", "abcd"), None);
+        assert_eq!(uuid_link_rule("vdb1", ".."), None);
+        assert_eq!(uuid_link_rule("vdb1", ""), None);
+
+        let dir = tempfile::tempdir().unwrap();
+        let links = UuidLinks::install_in(
+            dir.path(),
+            &[
+                (
+                    "vdb13".into(),
+                    "77777777-1111-4222-8333-444444444444".into(),
+                ),
+                ("vdb15".into(), "0F0E-0D0C".into()),
+                ("vdb1".into(), "bad uuid".into()),
+            ],
+            false,
+        )
+        .unwrap();
+        let path = links.path().unwrap().to_path_buf();
+        assert!(
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(PREFIX),
+            "swept like a hold if left behind"
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            text.lines().filter(|l| l.starts_with("SUBSYSTEM")).count(),
+            2
+        );
+        assert!(!text.contains("vdb1\""));
+        assert_eq!(held_names(&text), vec!["vdb13", "vdb15"]);
+        drop(links);
+        assert!(!path.exists());
+        let none = UuidLinks::install_in(dir.path(), &[], false).unwrap();
+        assert!(none.path().is_none());
     }
 
     #[test]

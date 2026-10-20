@@ -88,10 +88,6 @@
     "ru": "Средство сборки initramfs восстановленной системы (%{system}) не распознано, поэтому initramfs не пересобран и может искать прежние UUID. Загрузите её с живого носителя и пересоберите initramfs её средством в chroot.",
     "en": "The initramfs tool of the restored system (%{system}) was not recognised, so its initramfs was not rebuilt and may look for the old UUIDs. Start it from a live medium and rebuild the initramfs with its own tool in a chroot."
   },
-  "identity_change_linux.initramfs_hostonly_cmdline": {
-    "ru": "dracut восстановленной системы (%{system}) записывает в образ командную строку устройств (hostonly_cmdline), а здесь у восстановленных устройств нет постоянных имён — пересборка записала бы имена этого компьютера. initramfs не пересобран; загрузите систему с живого носителя и выполните в chroot «%{command}».",
-    "en": "The restored system's dracut (%{system}) writes the device command line into its image (hostonly_cmdline), and here the restored devices have no persistent names — a rebuild would record this computer's names. The initramfs was not rebuilt; start the system from a live medium and run «%{command}» in a chroot."
-  },
   "identity_change_linux.initramfs_luks_name_taken": {
     "ru": "Корень восстановленной системы внутри LUKS, который её crypttab называет «%{name}», но на этом компьютере это имя занято (или недопустимо), а без него средство сборки не свяжет контейнер с crypttab. initramfs не пересобран; загрузите систему с живого носителя и выполните в chroot «%{command}».",
     "en": "The restored system's root is inside LUKS that its crypttab calls «%{name}», but this computer already uses that name (or it is not usable), and without it the tool cannot tie the container to crypttab. The initramfs was not rebuilt; start the system from a live medium and run «%{command}» in a chroot."
@@ -119,6 +115,26 @@
   "initramfs_linux.no_image_rewritten": {
     "ru": "средство завершилось успешно, но ни один образ initramfs в /boot не изменился",
     "en": "the tool reported success, but no initramfs image in /boot changed"
+  },
+  "initramfs_linux.backup_failed": {
+    "ru": "не удалось сохранить копии текущих образов (%{error}), средство не запускалось",
+    "en": "could not keep copies of the current images (%{error}); the tool was not run"
+  },
+  "initramfs_linux.unverifiable": {
+    "ru": "новый образ %{image} не удалось проверить: %{error}",
+    "en": "the new image %{image} could not be checked: %{error}"
+  },
+  "initramfs_linux.device_names": {
+    "ru": "новый образ называет устройства именами этого компьютера (%{names}), которых у восстановленной системы при загрузке не будет",
+    "en": "the new image names devices by this computer's names (%{names}), which the restored system will not have at boot"
+  },
+  "initramfs_linux.previous_restored": {
+    "ru": "%{error}; прежние образы возвращены",
+    "en": "%{error}; the previous images were put back"
+  },
+  "initramfs_linux.previous_not_restored": {
+    "ru": "%{error}; прежние образы вернуть не удалось (%{restore_error}), их копии остались рядом с ними в /boot как *.obk-prev",
+    "en": "%{error}; the previous images could not be put back (%{restore_error}); their copies are kept beside them in /boot as *.obk-prev"
   },
   "identity_change_linux.reinstall_bios_grub": {
     "ru": "В восстановленной системе есть GRUB для BIOS: его загрузочный образ может содержать прежний UUID /boot. Если она не загрузится, выполните grub-install на её диск из неё самой или с живого носителя.",
