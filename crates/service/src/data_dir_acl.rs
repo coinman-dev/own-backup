@@ -252,10 +252,12 @@ mod win {
     use windows::Win32::Security::{
         AdjustTokenPrivileges, GetAce, GetKernelObjectSecurity, GetSecurityDescriptorControl,
         GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, LookupPrivilegeValueW,
-        SetKernelObjectSecurity, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, LUID_AND_ATTRIBUTES,
-        OBJECT_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-        SE_BACKUP_NAME, SE_DACL_PROTECTED, SE_PRIVILEGE_ENABLED, SE_RESTORE_NAME,
-        SE_TAKE_OWNERSHIP_NAME, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+        SetKernelObjectSecurity, SetSecurityDescriptorControl, ACE_HEADER, ACL,
+        DACL_SECURITY_INFORMATION, LUID_AND_ATTRIBUTES, OBJECT_SECURITY_INFORMATION,
+        OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_BACKUP_NAME,
+        SE_DACL_AUTO_INHERITED, SE_DACL_AUTO_INHERIT_REQ, SE_DACL_PROTECTED, SE_PRIVILEGE_ENABLED,
+        SE_RESTORE_NAME, SE_TAKE_OWNERSHIP_NAME, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES,
+        TOKEN_QUERY,
     };
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FileAttributeTagInfo, GetFileInformationByHandle,
@@ -490,7 +492,13 @@ mod win {
     /// which grant exactly these rights whatever the DACL says.
     fn open_owned(path: &Path, privilege: &mut Privileges) -> io::Result<File> {
         match open(path, FULL) {
-            Err(e) if e.raw_os_error() == Some(ERROR_ACCESS_DENIED.0 as i32) => {
+            // A `windows::core::Error` turned into an `io::Error` carries the
+            // HRESULT (0x80070005), not the Win32 code: matching only 5 never
+            // took this branch (stand, datadir6a, 2026-10-22).
+            Err(e)
+                if e.raw_os_error() == Some(ERROR_ACCESS_DENIED.0 as i32)
+                    || e.raw_os_error() == Some(ERROR_ACCESS_DENIED.to_hresult().0) =>
+            {
                 privilege.enable()?;
                 let file = open(path, FULL)?;
                 warn!(path = %path.display(), "data folder: an entry that shut SYSTEM out opened with the backup and restore privileges");
@@ -637,6 +645,19 @@ mod win {
                 &mut sd,
                 None,
             )?;
+            // "AI" in the text is kept only when the descriptor asks for it:
+            // without AUTO_INHERIT_REQ the folder came out `D:P`, not `D:PAI`.
+            let mut control = 0u16;
+            let mut revision = 0u32;
+            let asked = GetSecurityDescriptorControl(sd, &mut control, &mut revision).is_ok()
+                && control & SE_DACL_AUTO_INHERITED.0 != 0;
+            if asked {
+                let _ = SetSecurityDescriptorControl(
+                    sd,
+                    SE_DACL_AUTO_INHERIT_REQ,
+                    SE_DACL_AUTO_INHERIT_REQ,
+                );
+            }
             let result = SetKernelObjectSecurity(raw(file), what, sd);
             let _ = LocalFree(HLOCAL(sd.0));
             result?;
