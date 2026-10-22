@@ -9,9 +9,10 @@
 # line is what puts the engine, the window and the CLI into media mode
 # (crates/common/src/media_mode.rs). Nothing else marks the medium.
 #
-# Run by `lb config` in a copy of this directory made by
-# scripts/build-linux-media.sh, which also sets the mirror and the package
-# of ours (config/packages.chroot). Not meant to be run in the repository.
+# Run by `lb config` in a copy of this directory made by build-media.sh
+# (packaging/linux/media; installed as /usr/libexec/own-backup/build-linux-media),
+# which also sets the mirror and the package of ours (config/packages.chroot).
+# Not meant to be run in the repository.
 #
 # Why live-build and not mkosi: mkosi has no ISO output, and the medium has
 # to be an ISO that is also a bootable disk (CD, VM, `dd` to a stick, the

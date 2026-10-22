@@ -1,6 +1,6 @@
 #!/bin/sh
-# `lb build` with its log kept beside the result (scripts/build-linux-media.sh
-# shows its end when the build fails). The status is lb's, not tee's.
+# `lb build` with its log kept beside the result (build-media.sh passes the
+# output on as it comes). The status is lb's, not tee's.
 set -e
 status=build.status
 {

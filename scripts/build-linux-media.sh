@@ -13,12 +13,13 @@
 # boot medium → Linux) or `own-backup-cli media write-stick`; boot it in the
 # stand with scripts/lab/linux-media-scenario.sh.
 #
-# How: the build runs inside a minimal Debian trixie tree made by debootstrap
-# (target/linux-media/builder), with Debian's own live-build. The host's
-# live-build is not used: Ubuntu ships an old fork (3.0~a57) that cannot build
-# a trixie medium with Secure Boot. The tree and the package cache are kept
-# between runs, so a rebuild after changing only the program downloads
-# nothing but updates.
+# How: packaging/linux/media/build-media.sh does the build — the same script
+# the service runs when the window builds the medium (installed as
+# /usr/libexec/own-backup/build-linux-media). This one adds what a developer
+# needs around it: the package built from this checkout, the space rule of
+# AGENTS.md, and the result in target/dist. The builder tree
+# (target/linux-media/builder) and its package cache are kept between runs, so
+# a rebuild after changing only the program downloads nothing but updates.
 #
 # Needs: root through sudo (debootstrap, chroot, mounts), debootstrap and
 # debian-archive-keyring on the host (`sudo apt install debootstrap
@@ -50,10 +51,7 @@ done
 
 target_dir="${CARGO_TARGET_DIR:-$root/target}"
 work="$target_dir/linux-media"
-builder="$work/builder"
-mirror="${OBK_MEDIA_MIRROR:-http://deb.debian.org/debian/}"
-security="${OBK_MEDIA_SECURITY_MIRROR:-http://security.debian.org/debian-security/}"
-suite=trixie
+shared="$root/packaging/linux/media/build-media.sh"
 
 sudo_() {
     if [[ "$(id -u)" -eq 0 ]]; then "$@"; else sudo "$@"; fi
@@ -63,45 +61,15 @@ say() {
     echo "[linux-media] $*"
 }
 
-# --- the mounts of the builder tree, always undone ----------------------------
-mounted=()
-unmount_all() {
-    local i
-    for ((i = ${#mounted[@]} - 1; i >= 0; i--)); do
-        sudo_ umount -l "${mounted[$i]}" 2>/dev/null || true
-    done
-    mounted=()
-}
-trap unmount_all EXIT INT TERM
-
-bind() {
-    sudo_ mkdir -p "$2"
-    sudo_ mount --bind "$1" "$2"
-    mounted+=("$2")
+# The mirror settings go through sudo, which drops the environment.
+shared_() {
+    sudo_ env OBK_MEDIA_MIRROR="${OBK_MEDIA_MIRROR:-}" \
+        OBK_MEDIA_SECURITY_MIRROR="${OBK_MEDIA_SECURITY_MIRROR:-}" "$shared" "$@"
 }
 
 if [[ "$clean" -eq 1 ]]; then
-    if [[ -d "$builder/build" ]]; then
-        say "removing the build tree (the builder and the package cache stay)"
-        sudo_ rm -rf --one-file-system "$builder/build"
-    fi
+    shared_ clean --work "$work"
     exit 0
-fi
-
-for tool in debootstrap realpath df dpkg-deb; do
-    if ! command -v "$tool" >/dev/null; then
-        echo "$tool not found; see the requirements at the top of $0" >&2
-        exit 1
-    fi
-done
-keyring=/usr/share/keyrings/debian-archive-keyring.gpg
-if [[ ! -r "$keyring" ]]; then
-    echo "$keyring not found: sudo apt install debian-archive-keyring" >&2
-    exit 1
-fi
-if [[ "$(dpkg --print-architecture)" != amd64 ]]; then
-    echo "only amd64 is supported" >&2
-    exit 1
 fi
 
 # --- space (AGENTS.md "Stand resource limits") ---------------------------------
@@ -128,69 +96,18 @@ if [[ ! -f "$deb" ]]; then
     echo "package not found: $deb" >&2
     exit 1
 fi
-pkg_version="$(dpkg-deb -f "$deb" Version)"
-say "package: $(basename "$deb") ($pkg_version)"
 
-# --- the builder: Debian trixie with Debian's live-build --------------------------
-if [[ ! -x "$builder/usr/bin/lb" ]]; then
-    say "making the builder (debootstrap $suite from $mirror)"
-    sudo_ rm -rf --one-file-system "$builder"
-    sudo_ debootstrap --variant=minbase --keyring="$keyring" \
-        --include=live-build,debootstrap,debian-archive-keyring,xorriso,squashfs-tools,mtools,dosfstools,ca-certificates,cpio,wget \
-        "$suite" "$builder" "$mirror"
-fi
-sudo_ tee "$builder/etc/apt/sources.list" >/dev/null <<EOF
-deb $mirror $suite main non-free-firmware
-deb $mirror $suite-updates main non-free-firmware
-deb $security $suite-security main non-free-firmware
-EOF
-for fs in proc sys dev dev/pts; do
-    bind "/$fs" "$builder/$fs"
-done
-sudo_ cp /etc/resolv.conf "$builder/etc/resolv.conf"
-in_builder() {
-    sudo_ chroot "$builder" /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
-        LANG=C.UTF-8 HOME=/root OBK_MEDIA_MIRROR="$mirror" \
-        OBK_MEDIA_SECURITY_MIRROR="$security" "$@"
-}
-say "updating the builder"
-in_builder apt-get -qq update
-in_builder apt-get -qq -y full-upgrade
-# shellcheck disable=SC2016 # ${Version} is dpkg-query's, not the shell's
-say "live-build $(in_builder dpkg-query -W -f='${Version}' live-build)"
-
-# --- does our package install on trixie? ------------------------------------------
-sudo_ install -D -m644 "$deb" "$builder/tmp/own-backup.deb"
-if ! in_builder apt-get -s -qq install /tmp/own-backup.deb >"$work/apt-check.log" 2>&1; then
-    cat "$work/apt-check.log" >&2
-    echo "the package does not install on Debian $suite (above: apt's reason). A .deb" \
-        "built on a newer system than the Ubuntu 24.04 baseline needs a newer glibc" \
-        "or WebKitGTK than Debian 13 has." >&2
-    exit 1
-fi
-say "the package installs on $suite"
-
-# --- the build ---------------------------------------------------------------------
-# A fresh copy of the configuration each time; live-build's cache/ stays.
-build="$builder/build"
-sudo_ mkdir -p "$build"
-sudo_ find "$build" -mindepth 1 -maxdepth 1 ! -name cache -exec rm -rf --one-file-system {} +
-sudo_ cp -a packaging/linux/media/auto packaging/linux/media/config "$build/"
-sudo_ install -D -m644 "$deb" "$build/config/packages.chroot/own-backup_${pkg_version}_amd64.deb"
-say "lb config"
-in_builder sh -c 'cd /build && lb config'
-say "lb build (long; the log is $build/build.log)"
-if ! in_builder sh -c 'cd /build && lb build'; then
-    tail -n 40 "$build/build.log" >&2 || true
-    echo "the medium was not built; the whole log: $build/build.log" >&2
-    exit 1
-fi
-
-iso="$(find "$build" -maxdepth 1 -name '*.hybrid.iso' -print -quit)"
+# --- the build (the shared script) -------------------------------------------------
+# Its own lines (OBK-*) are for the service; here they are shown as they come,
+# and OBK-ISO names the result.
+log="$work/build-output.log"
+shared_ build --config "$root/packaging/linux/media" --deb "$deb" --work "$work" | tee "$log"
+iso="$(sed -n 's/^OBK-ISO //p' "$log" | tail -1)"
 if [[ -z "$iso" ]]; then
-    echo "lb build finished without an ISO (see $build/build.log)" >&2
+    echo "the medium was not built (see above; OBK-ERROR names the reason)" >&2
     exit 1
 fi
+pkg_version="$(dpkg-deb -f "$deb" Version)"
 version="${pkg_version%-*}"
 output="${OUTPUT:-$target_dir/dist/own-backup-media_${version}_amd64.iso}"
 mkdir -p "$(dirname "$output")"

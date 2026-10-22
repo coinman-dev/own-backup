@@ -25,6 +25,15 @@ if [ "$1" = "purge" ]; then
         echo "own-backup: an engine still holds its socket; /var/lib/own-backup was kept" >&2
     else
         rm -rf --one-file-system /var/lib/own-backup /var/log/own-backup
+        # The boot medium's builder and package cache (a few GiB), unless a
+        # build stopped by force left something mounted inside it.
+        if [ -d /var/cache/own-backup ]; then
+            if grep -q ' /var/cache/own-backup/' /proc/self/mountinfo 2>/dev/null; then
+                echo "own-backup: something is still mounted under /var/cache/own-backup; kept" >&2
+            else
+                rm -rf --one-file-system /var/cache/own-backup
+            fi
+        fi
         # A marker in /run/own-backup/frozen is the only record of a file
         # system a killed engine left frozen or read-only; keep it for
         # `own-backup-cli cleanup-snapshots` (or a reboot). An image still

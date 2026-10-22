@@ -92,6 +92,17 @@ strip --strip-unneeded --remove-section=.comment --remove-section=.note \
     "$stage/usr/bin/own-backup-gui" "$stage/usr/bin/own-backup-cli" \
     "$stage/usr/libexec/own-backup/own-backup-service"
 
+# --- the boot medium's builder ---------------------------------------------------
+# The window builds the Linux boot medium through the service (Tools → boot
+# medium → Linux): the shared build script and the live-build configuration it
+# copies, exactly as scripts/build-linux-media.sh uses them from the checkout.
+install -D -m755 "$pkg/media/build-media.sh" "$stage/usr/libexec/own-backup/build-linux-media"
+install -d -m755 "$stage/usr/share/own-backup/media"
+cp -r --no-preserve=ownership "$pkg/media/auto" "$pkg/media/config" "$stage/usr/share/own-backup/media/"
+# Modes as committed (the hooks and auto/ scripts are executable), nothing
+# writable by others whatever the checkout's umask was.
+chmod -R go-w "$stage/usr/share/own-backup"
+
 # --- system integration -------------------------------------------------------
 install -D -m644 "$pkg/own-backup.service" "$stage/usr/lib/systemd/system/own-backup.service"
 install -D -m644 "$pkg/own-backup.sysusers" "$stage/usr/lib/sysusers.d/own-backup.conf"
@@ -182,7 +193,8 @@ Architecture: $arch
 Maintainer: $holder
 Installed-Size: $installed_size
 Depends: $shlibs, libayatana-appindicator3-1, systemd, dbus, polkitd | policykit-1, mount, kmod
-Recommends: lvm2, cryptsetup-bin, pkexec, ntfs-3g, libtss2-rc0t64 | libtss2-rc0
+Recommends: lvm2, cryptsetup-bin, pkexec, ntfs-3g, libtss2-rc0t64 | libtss2-rc0,
+ debootstrap, debian-archive-keyring
 Section: admin
 Priority: optional
 Homepage: https://github.com/coinman-dev/own-backup
@@ -195,6 +207,9 @@ Description: block-level backup of disks and partitions
  Source-available under the PolyForm Noncommercial License 1.0.0; commercial
  use needs a separate licence. It is not open-source software.
 EOF
+# debootstrap and debian-archive-keyring: building the Linux boot medium
+# (both are in Ubuntu's universe and in Debian main); without them the build is
+# refused with the apt command that installs them.
 # libayatana-appindicator3-1 is loaded with dlopen by the window's tray
 # support, so dpkg-shlibdeps cannot see it.
 
