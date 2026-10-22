@@ -465,7 +465,10 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
         _ => std::path::PathBuf::from("."),
     };
+    // A partition that is an LVM physical volume in use is held through
+    // snapshots of all its logical volumes at once.
     let provider = own_backup_snapshot::LinuxSnapshotProvider::with_cow_dir(&out_dir)
+        .whole_disk()
         .container_key(container_key_from(
             args.password.clone().map(zeroize::Zeroizing::new),
         ));

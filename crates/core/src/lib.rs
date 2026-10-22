@@ -4367,13 +4367,15 @@ async fn perform_disk_backup(
 
     // Every partition held before a block is copied; one that cannot be is
     // the end of the run, and those already held are let go.
-    let provider = Arc::new(own_backup_snapshot::LinuxSnapshotProvider::with_cow_dir(
-        &folder,
-    ));
+    // A whole disk: a partition that is an LVM physical volume in use is held
+    // through snapshots of all its logical volumes at once.
+    let provider =
+        Arc::new(own_backup_snapshot::LinuxSnapshotProvider::with_cow_dir(&folder).whole_disk());
     let mut snapshots: Vec<own_backup_snapshot::Snapshot> = Vec::new();
     for part in &ds.parts {
         let token = source_token(&part.device);
         let provider_for_part = own_backup_snapshot::LinuxSnapshotProvider::with_cow_dir(&folder)
+            .whole_disk()
             .container_key(container_key_from(passwords.resolve(&token)));
         match provider_for_part.create_snapshot(&part.device).await {
             Ok(s) => {
@@ -4397,7 +4399,7 @@ async fn perform_disk_backup(
     run.vss_used = snapshots.iter().any(|s| {
         matches!(
             s.metadata.get("mode").map(String::as_str),
-            Some("lvm" | "dm")
+            Some("lvm" | "dm" | "pv")
         )
     });
 
