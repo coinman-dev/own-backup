@@ -23,9 +23,10 @@ rules say: the stand VM must be down.
 not to boot from: `--with data-1.qcow2` after the scenario's `change` stage
 puts the source system beside its restored copy, as on the machine the copy
 came from. The restored system then has to find its own filesystems by their
-new UUIDs. What the change leaves duplicated by design — the PARTUUIDs, and
-filesystem LABELs, which are not identities a restore changes — can still
-resolve to either disk; the serial log says which root was mounted.
+new UUIDs and labels (`cloudimg-rootf-r`, `BOOT-r`, `UEFI-R` for the cloud
+image's `cloudimg-rootfs`, `BOOT`, `UEFI`). What the change leaves duplicated
+by design — the PARTUUIDs — can still resolve to either disk; the serial log
+says which root was mounted.
 
 Python standard library only.
 """

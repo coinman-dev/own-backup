@@ -201,6 +201,22 @@ stage_clash() {
     check c-ask "$(verdict $?)" "duplicate identities need a choice; the list names PARTUUIDs"
     grep -Eq '"kind": "(ext|btrfs|xfs)"' "$EV/c-ask.out"
     check c-ask-fs "$(verdict $?)" "…and the filesystem UUIDs"
+    labels_of "$SOURCE" >"$WORK/labels.clash"
+    if [[ -s $WORK/labels.clash ]]; then
+        # Every source label is on this machine (the source is attached).
+        python3 - "$EV/c-ask.out" "$WORK/labels.clash" <<'PY'
+import json, sys
+clashes = json.load(open(sys.argv[1])).get("identity_clashes") or []
+want = {l.split(None, 1)[1] for l in open(sys.argv[2]).read().splitlines() if l.strip()}
+got = {c["value"] for c in clashes if c.get("kind") == "label" and c.get("change_command")}
+missing = want - got
+print("labels asked about: %s; missing: %s" % (sorted(got), sorted(missing)))
+sys.exit(1 if missing else 0)
+PY
+        check c-ask-label "$(verdict $?)" "…and every filesystem label of the source ($(awk '{print $2}' "$WORK/labels.clash" | tr '\n' ' '))"
+    else
+        check c-ask-label SKIP "the source has no filesystem labels"
+    fi
     [[ -z $(blkid -p "$TARGET" 2>/dev/null) ]]
     check c-ask-nothing "$(verdict $?)" "asking wrote nothing"
 }
@@ -498,6 +514,8 @@ stage_stack() {
     udevadm settle
     [[ -b /dev/obkstack_restored/data && $(blkid -p -o value -s UUID /dev/obkstack_restored/data) != "$lv_old" ]]
     check st-lv-fs "$(verdict $?)" "the filesystem inside the restored LV has a new UUID"
+    [[ $(blkid -p -o value -s LABEL /dev/obkstack_restored/data 2>/dev/null) == st-lv-r ]]
+    check st-lv-label "$(verdict $?)" "…and the label st-lv-r instead of the machine's st-lv"
     vgchange -an obkstack_restored >/dev/null 2>&1
     [[ -n $t3 && $(mdadm --examine --export "$t3" | sed -n 's/^MD_UUID=//p') != "$md_old" ]] \
         && [[ $(mdadm --examine --export "$t3" | sed -n 's/^MD_UUID=//p') == $(mdadm --examine --export "$t4" | sed -n 's/^MD_UUID=//p') ]]
@@ -521,6 +539,8 @@ stage_stack() {
     [[ -n $arr ]] && blkid -p "$arr" >>"$EV/st-md-assemble.out" 2>&1
     [[ -n $arr && -n $(blkid -p -o value -s UUID "$arr") && $(blkid -p -o value -s UUID "$arr") != "$mdfs_old" ]]
     check st-md-fs "$(verdict $?)" "the filesystem inside the restored array has a new UUID"
+    [[ -n $arr && $(blkid -p -o value -s LABEL "$arr") == st-md-r ]]
+    check st-md-label "$(verdict $?)" "…and the label st-md-r instead of the machine's st-md"
     [[ -n $arr ]] && mdadm --stop "$arr" >/dev/null 2>&1
     [[ -n $(cryptsetup luksUUID "$l1") && $(blkid -p -o value -s UUID /dev/obkstack/data) == "$lv_old" \
         && $(blkid -p -o value -s UUID /dev/md/obkstack) == "$mdfs_old" ]]
@@ -577,6 +597,92 @@ label_part() { # disk label: the number of its partition with that filesystem la
         [[ $(blkid -p -o value -s LABEL "$p") == "$2" ]] && { echo "$n"; return; }
     done
     return 1
+}
+labels_of() { # disk: "<partition> <LABEL>" for every labelled filesystem on it
+    local n p l
+    for n in $(part_numbers "$1"); do
+        p=$(part "$1" "$n") || continue
+        l=$(blkid -p -o value -s LABEL "$p")
+        [[ -n $l ]] && printf '%s %s\n' "$n" "$l"
+    done
+}
+labels_changed() { # source-labels target-labels: every source label is gone from the
+    # target, its partition carrying the old one with -r/-R (a number while taken),
+    # shortened to fit; and no target label is another device's on this machine
+    local src=$1 tgt=$2 n old new others bad=0
+    while read -r n old; do
+        new=$(awk -v n="$n" '$1==n{print $2}' "$tgt")
+        if [[ -z $new || $new == "$old" ]] || ! grep -qiE -- '-r[0-9]*$' <<<"$new"; then
+            bad=1
+            echo "partition $n: '$old' -> '$new'" >>"$EV/labels.txt"
+        fi
+        awk '{print $2}' "$tgt" | grep -qxF -- "$old" && { bad=1; echo "the target still has '$old'" >>"$EV/labels.txt"; }
+    done <"$src"
+    others=$(lsblk -nrpo NAME,LABEL | awk -v d="$(readlink -f "$TARGET")" 'index($1, d) != 1 && $2 != "" {print $2}')
+    while read -r n new; do
+        grep -qxF -- "$new" <<<"$others" && { bad=1; echo "'$new' is another device's label too" >>"$EV/labels.txt"; }
+    done <"$tgt"
+    [[ -s $src && $bad -eq 0 ]]
+}
+by_label_kept() { # source-labels: each old label's by-label link still leads to the source
+    local n old want bad=0
+    while read -r n old; do
+        want=$(readlink -f "$(part "$SOURCE" "$n")")
+        [[ $(readlink -f "/dev/disk/by-label/$old") == "$want" ]] \
+            || { bad=1; echo "by-label/$old -> $(readlink -f "/dev/disk/by-label/$old"), not $want" >>"$EV/labels.txt"; }
+    done <"$1"
+    [[ -s $1 && $bad -eq 0 ]]
+}
+label_refs() { # source-labels target-labels mountpoint: the restored files there name
+    # no old label (LABEL=, /dev/disk/by-label/, GRUB search by label) and print how
+    # many references to the new labels they hold; exit 1 on an old one
+    python3 - "$@" <<'PY'
+import glob, os, re, sys
+src, tgt, mnt = sys.argv[1:4]
+read = lambda p: dict(l.split(None, 1) for l in open(p).read().splitlines() if l.strip())
+old, new = read(src), read(tgt)
+files = []
+for pat in ("etc/fstab", "etc/crypttab", "etc/default/grub", "etc/default/grub.d/*.cfg",
+            "etc/kernel/cmdline", "etc/initramfs-tools/conf.d/resume", "boot/grub/grub.cfg",
+            "grub/grub.cfg", "EFI/*/grub.cfg", "loader/entries/*.conf", "boot/loader/entries/*.conf"):
+    files += [f for f in glob.glob(os.path.join(mnt, pat)) if os.path.isfile(f) and not os.path.islink(f)]
+def named(label):
+    l = re.escape(label)
+    end = r"""(?=["'\s,;]|$)"""
+    return [re.compile(r"(?<![A-Za-z0-9_])LABEL=[\"']?" + l + end, re.M),
+            re.compile(r"/dev/disk/by-label/" + l + end, re.M),
+            re.compile(r"^\s*search\.fs_label\s+[\"']?" + l + end, re.M),
+            re.compile(r"^\s*search\s(?=.*\s(?:--label|-l)\s).*?\s[\"']?" + l + end, re.M)]
+bad, good = 0, 0
+for f in files:
+    text = open(f, encoding="latin-1").read()
+    rel = os.path.relpath(f, mnt)
+    for n, label in old.items():
+        if label != new.get(n) and any(rx.search(text) for rx in named(label)):
+            print("%s still names label %s" % (rel, label), file=sys.stderr)
+            bad = 1
+    for label in new.values():
+        good += sum(len(rx.findall(text)) for rx in named(label))
+print(good)
+sys.exit(bad)
+PY
+}
+label_ref_count() { # disk old-labels new-labels: how many references to the new
+    # labels the files of every filesystem on disk hold; exit 1 when one names an old one
+    local n p m=$WORK/m-lr total=0 got rc=0
+    for n in $(part_numbers "$1"); do
+        p=$(part "$1" "$n") || continue
+        case $(blkid -p -o value -s TYPE "$p") in
+            ext4 | vfat | xfs | btrfs) ;;
+            *) continue ;;
+        esac
+        mkdir -p "$m" && mount -o ro "$p" "$m" 2>/dev/null || continue
+        got=$(label_refs "$2" "$3" "$m" 2>>"$EV/ch-label-refs.txt") || rc=1
+        total=$((total + ${got:-0}))
+        umount "$m"
+    done
+    echo "$total"
+    return $rc
 }
 initrd_confs() { # image out: the configuration files an initramfs carries
     # (dracut's etc/cmdline.d, initramfs-tools' conf/conf.d), concatenated
@@ -737,7 +843,9 @@ stage_change() {
     esac
     uuids_of "$SOURCE" >"$WORK/uuids.source"
     partuuids_of "$SOURCE" >"$WORK/partuuids.source"
-    local changed edited p n mnt=$WORK/m-ch old bad=0 refs=0 f root
+    labels_of "$SOURCE" >"$WORK/labels.source"
+    cp "$WORK/labels.source" "$EV/labels.source"
+    local changed edited p n mnt=$WORK/m-ch old bad=0 refs=0 f root lbad lrefs got
 
     wipefs -aq "$TARGET"
     reread "$TARGET"
@@ -752,6 +860,17 @@ stage_change() {
     uuids_of "$TARGET" >"$WORK/uuids.disk"
     ! grep -Fxf <(awk '$3!=""' "$WORK/uuids.source") "$WORK/uuids.disk" >"$EV/ch-disk-same.txt"
     check ch-disk-new "$(verdict $?)" "no restored filesystem carries the source's UUID"
+    if [[ -s $WORK/labels.source ]]; then
+        labels_of "$TARGET" >"$WORK/labels.disk"
+        cp "$WORK/labels.disk" "$EV/labels.disk"
+        labels_changed "$WORK/labels.source" "$WORK/labels.disk"
+        check ch-disk-labels "$(verdict $?)" "every label is new: $(tr '\n' ' ' <"$WORK/labels.disk")(was: $(tr '\n' ' ' <"$WORK/labels.source"))"
+        python3 -c "import json,sys;d=json.load(open(sys.argv[1]));sys.exit(0 if sum(c.get('kind')=='label' for c in d.get('identity_changes',[]))==int(sys.argv[2]) else 1)" \
+            "$EV/ch-disk.out" "$(wc -l <"$WORK/labels.source")"
+        check ch-disk-label-reply "$(verdict $?)" "the reply lists each label change (kind \"label\")"
+    else
+        check ch-disk-labels SKIP "the source has no filesystem labels"
+    fi
 
     wipefs -aq "$TARGET"
     reread "$TARGET"
@@ -766,6 +885,21 @@ stage_change() {
     check ch-uuids "$(verdict $?)" "every filesystem UUID (and the ESP serial) is new"
     [[ -s $WORK/partuuids.source && $(partuuids_of "$TARGET") == "$(cat "$WORK/partuuids.source")" ]]
     check ch-partuuid "$(verdict $?)" "PARTUUIDs are the copy's — never changed silently"
+    labels_of "$TARGET" >"$WORK/labels.target"
+    cp "$WORK/labels.target" "$EV/labels.target"
+    if [[ -s $WORK/labels.source ]]; then
+        labels_changed "$WORK/labels.source" "$WORK/labels.target"
+        check ch-labels "$(verdict $?)" "every filesystem label is new and unique here: $(tr '\n' ' ' <"$WORK/labels.target")"
+        by_label_kept "$WORK/labels.source"
+        check ch-bylabel "$(verdict $?)" "/dev/disk/by-label/<old> still leads to the source's partitions"
+    else
+        check ch-labels SKIP "the source has no filesystem labels"
+    fi
+    p=$(lsblk -nro PARTN,PARTTYPE "$TARGET" | awk 'tolower($2)=="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"{print $1}')
+    if [[ -n $p ]]; then
+        fsck.fat -n "$(part "$TARGET" "$p")" >"$EV/ch-esp-fsck.out" 2>&1
+        check ch-esp-fsck "$(verdict $?)" "the restored ESP checks clean after its serial and label change"
+    fi
     for n in $(part_numbers "$TARGET"); do
         p=$(part "$TARGET" "$n")
         case $(blkid -p -o value -s TYPE "$p") in
@@ -784,6 +918,20 @@ stage_change() {
     done
     [[ $bad -eq 0 && $refs -gt 0 ]]
     check ch-refs "$(verdict $?)" "fstab/crypttab/grub.cfg/ESP stubs ($refs files) name none of the old UUIDs"
+    if [[ -s $WORK/labels.source ]]; then
+        # As many references to the new labels in the copy as the source
+        # has to its own, and none left to an old one.
+        lrefs=$(label_ref_count "$SOURCE" "$WORK/labels.source" "$WORK/labels.source")
+        got=$(label_ref_count "$TARGET" "$WORK/labels.source" "$WORK/labels.target")
+        lbad=$?
+        if [[ ${lrefs:-0} -gt 0 ]]; then
+            [[ $lbad -eq 0 && $got -eq $lrefs ]]
+            check ch-label-refs "$(verdict $?)" "no restored fstab/GRUB/cmdline names an old label; ${got:-0} of the source's $lrefs label references name the new ones"
+        else
+            [[ $lbad -eq 0 ]]
+            check ch-label-refs "$(verdict $?)" "no restored file names an old label (the source names none of its labels)"
+        fi
+    fi
     read -r changed edited < <(reply_counts ch-apply)
     [[ ${edited:-0} -gt 0 ]]
     check ch-edited "$(verdict $?)" "the run reports the ${edited:-0} files it edited"
@@ -803,7 +951,7 @@ stage_change() {
     [[ -z $(ls /run/udev/rules.d/59-own-backup-hold-* 2>/dev/null) && -z $(ls /dev/mapper/obk-reid-* 2>/dev/null) \
         && -z $(ls -d /run/own-backup/initramfs-* 2>/dev/null) ]] && ! grep -q ' /run/own-backup/' /proc/self/mounts
     check ch-hold "$(verdict $?)" "no udev hold, temporary mapping or rebuild mount is left"
-    check ch-boot SKIP "host: linux-vm.py down; linux-restore-boot.py boot data-2.qcow2 [--with data-1.qcow2]"
+    check ch-boot SKIP "host: linux-vm.py down; linux-restore-boot.py boot data-2.qcow2 [--with data-1.qcow2] (with the source beside it, the root must be the target's: its new UUIDs and labels)"
 }
 
 # ---------------------------------------------------------------------------
