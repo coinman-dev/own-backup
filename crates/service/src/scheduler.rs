@@ -128,10 +128,7 @@ fn tick(
         let Some(sched) = own_backup_scheduler::config_schedule::parse(&cron) else {
             continue;
         };
-        let last_fired = job
-            .last_run
-            .as_ref()
-            .and_then(|r| chrono::DateTime::parse_from_rfc3339(&r.started_at).ok());
+        let last_fired = last_fired(&job, store);
 
         // Catching up missed runs waits `missed_delay_min` after startup so the
         // machine can settle after boot; on-time slots still fire immediately.
@@ -158,6 +155,21 @@ fn tick(
             enqueue(queue, job_tx, &job.id, &job.name);
         }
     }
+}
+
+/// When the job's schedule was last served. A run the service's own stop cut
+/// off did not serve its slot: the schedule counts from the run before it, so
+/// a missed copy is made after the next start (2026-10-21, a weekly copy lost
+/// to a restart a second after it began).
+fn last_fired(job: &Job, store: &JobStore) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    let started = match job.last_run.as_ref() {
+        Some(r) if r.interrupted => store.last_scheduled_start(&job.id),
+        Some(r) => Some(r.started_at.clone()),
+        None => None,
+    };
+    started
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
 }
 
 /// Handle a `kind = event` job on the minute tick — the `startup` trigger: N
@@ -461,8 +473,10 @@ fn ran_today(job: &Job) -> bool {
 /// the calendar day is taken. Which zone that is does not matter; that it is
 /// one zone does.
 fn started_on_the_same_day<Tz: chrono::TimeZone>(job: &Job, now: chrono::DateTime<Tz>) -> bool {
+    // A run cut off by the service stopping is not today's run.
     job.last_run
         .as_ref()
+        .filter(|r| !r.interrupted)
         .and_then(|r| chrono::DateTime::parse_from_rfc3339(&r.started_at).ok())
         .is_some_and(|started| {
             started.with_timezone(&now.timezone()).date_naive() == now.date_naive()
@@ -597,6 +611,77 @@ mod tests {
         let job = job_started_at("2026-09-19T06:00:00Z"); // 09:00 in Moscow
         let now = moscow.with_ymd_and_hms(2026, 9, 19, 23, 59, 0).unwrap();
         assert!(started_on_the_same_day(&job, now));
+    }
+
+    /// 2026-10-21: the weekly 15:00 copy, missed while the machine was off,
+    /// started at 16:17 and was cut off by a restart a second later. After the
+    /// next start the slot is still due — counted from the week before.
+    #[test]
+    fn a_weekly_copy_cut_off_by_a_restart_is_still_due() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::load(dir.path());
+        let mut job = Job {
+            id: "c".into(),
+            name: "Disk_C_Win11".into(),
+            ..Default::default()
+        };
+        job.schedule.kind = "weekly".into();
+        job.schedule.time = "15:00".into();
+        job.schedule.days = vec!["wed".into()];
+        job.schedule.run_missed = true;
+        store.upsert(job).unwrap();
+        for (id, started, interrupted) in [
+            ("week-before", "2026-10-14T12:00:05Z", false),
+            ("cut-off", "2026-10-21T13:17:08Z", true),
+        ] {
+            store
+                .record_run(own_backup_core::JobRun {
+                    id: id.into(),
+                    job_id: "c".into(),
+                    job_name: "Disk_C_Win11".into(),
+                    started_at: started.into(),
+                    status: if interrupted { "cancelled" } else { "success" }.into(),
+                    interrupted,
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        let job = store.get("c").unwrap();
+        let fired = last_fired(&job, &store).unwrap();
+        assert_eq!(fired.to_rfc3339(), "2026-10-14T12:00:05+00:00");
+
+        let cron = own_backup_scheduler::schedule_to_cron(&job.schedule).unwrap();
+        let sched = own_backup_scheduler::config_schedule::parse(&cron).unwrap();
+        let moscow = FixedOffset::east_opt(3 * 3600).unwrap();
+        let after_restart = moscow.with_ymd_and_hms(2026, 10, 21, 16, 47, 0).unwrap();
+        let fresh = ChronoDuration::seconds(120);
+        assert!(own_backup_scheduler::is_due(
+            &sched,
+            after_restart,
+            Some(fired),
+            true,
+            fresh
+        ));
+        // Counted from the cut-off run instead, as before: nothing due.
+        let cut = chrono::DateTime::parse_from_rfc3339("2026-10-21T13:17:08Z").unwrap();
+        assert!(!own_backup_scheduler::is_due(
+            &sched,
+            after_restart,
+            Some(cut),
+            true,
+            fresh
+        ));
+    }
+
+    /// A run the service's stop cut off is not today's run: the copy is made
+    /// at the next trigger.
+    #[test]
+    fn an_interrupted_run_is_not_todays_run() {
+        let moscow = FixedOffset::east_opt(3 * 3600).unwrap();
+        let mut job = job_started_at("2026-10-21T13:17:08Z");
+        job.last_run.as_mut().unwrap().interrupted = true;
+        let now = moscow.with_ymd_and_hms(2026, 10, 21, 17, 0, 0).unwrap();
+        assert!(!started_on_the_same_day(&job, now));
     }
 
     #[test]

@@ -870,6 +870,55 @@ function DataDir6a {
     shutdown.exe /s /t 5 | Out-Null
 }
 
+# Mode 'interrupt' (2026-10-21): a scheduled copy cut off by the service
+# stopping (as at a restart) is recorded as interrupted, not as a person's
+# cancel, and the scheduler makes the missed copy after the next start.
+function Interrupt {
+    Ask 'purge' 'purge'
+    $now = Get-Date
+    $day = @('sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat')[[int]$now.DayOfWeek]
+    $slot = $now.AddMinutes(-2).ToString('HH:mm')
+    if ($now.AddMinutes(-2).Date -ne $now.Date) { throw 'too close to midnight for a same-day slot' }
+    $job = Rpc 'create' @{ op = 'create'; encrypted = $false; job = @{ name = $jobName; source = 'P:'; sources = @('P:'); dest_folder = $store
+        image_format = 'vhdx'
+        schedule = @{ kind = 'weekly'; days = @($day); time = $slot; run_missed = $true; missed_delay_min = 1 }
+        scheme = @{ method = 'full'; keep_chains = 5 }
+        exclusions = @{ enabled = $false; patterns = @(); patterns_linux = @() }
+        advanced = @{ validate_after = $false; retry_attempts = 0; after_backup = 'none'; speed_limit_mbps = 15 } } }
+    Say "KILLX-NOTE weekly $day $slot, run_missed"
+    # The scheduler catches the slot up within a minute; the copy is slow.
+    $copying = $false
+    for ($i = 0; $i -lt 600 -and -not $copying; $i++) {
+        $copying = [bool](Get-ChildItem -LiteralPath $store -Force -Filter $private -ErrorAction SilentlyContinue)
+        if (-not $copying) { Start-Sleep -Milliseconds 300 }
+    }
+    Check $copying 'the scheduled copy started by itself'
+    Start-Sleep -Seconds 3
+    Ask 'svc-stop' 'svc-stop' -Stopped
+    Ask 'svc-start' 'svc-start'
+    $j = Rpc 'get1' @{ op = 'get'; id = $job.id }
+    $cut = $j.last_run
+    Check ($cut.status -eq 'cancelled' -and $cut.interrupted -eq $true) "the cut-off run is interrupted, not cancelled by a person ($($cut.status), interrupted=$($cut.interrupted))"
+    Check ([bool]$cut.error) "it says why: $($cut.error)"
+    # Missed-run catch-up waits a minute after the start, then the copy runs.
+    $done = $null
+    for ($i = 0; $i -lt 120 -and -not $done; $i++) {
+        Start-Sleep -Seconds 5
+        $j = Rpc -Quiet "poll$i" @{ op = 'get'; id = $job.id }
+        if ($j.last_run -and $j.last_run.id -ne $cut.id -and $j.last_run.finished_at) { $done = $j.last_run }
+    }
+    Check ([bool]$done) 'the scheduler made the copy again after the start'
+    Check ($done.status -eq 'success') "the new copy succeeded ($($done.status) $($done.error))"
+    Check (Test-Path -LiteralPath $done.image_path) "its image is there ($($done.image_path))"
+    Report 'interrupt' @{ cut = $cut; done = $done }
+
+    [IO.File]::WriteAllText("$work\kills.done", 'done')
+    [IO.File]::WriteAllText("$work\passed.txt", 'pass')
+    Report 'result' @{ pass = $true }
+    Say "KILLX-PASS format=$format"
+    shutdown.exe /s /t 5 | Out-Null
+}
+
 # Mode 'aliases' (CHECKS 9): one source named by its letter, its volume GUID
 # path and a mount point continues one chain; a destination on that volume is
 # refused whichever name either side uses, one on another volume is not.
@@ -1792,6 +1841,7 @@ if ($media) {
         if ($format -eq 'aliases') { Aliases; return }
         if ($format -eq 'fatx') { FatX; return }
         if ($format -eq 'settings6a') { Settings6a; return }
+        if ($format -eq 'interrupt') { Interrupt; return }
         if ($format -eq 'datadir6a') { DataDir6a; return }
         if ($format -in @('refsbl', 'ntfsbl')) { RefsBitLocker; return }
         if ($format -eq 'deletejob') { DeleteJob; return }

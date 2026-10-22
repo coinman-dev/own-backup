@@ -594,6 +594,13 @@ pub struct JobRun {
     /// of the job can.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub refused: bool,
+    /// A `cancelled` run that nobody cancelled: the service was stopping —
+    /// Windows shutting down or restarting, the program being updated. The
+    /// scheduler does not count it as the slot's run, so a job that catches
+    /// up missed runs makes this copy after the next start (2026-10-21: a
+    /// weekly copy cut off by a restart was taken as done and skipped).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted: bool,
     /// What kind of failure `error` is, for the window to act on — decided by
     /// the error's structure, never by its words. Empty for every failure
     /// without a kind of its own. `archive_reauthorize`: the job's local
@@ -1233,6 +1240,18 @@ impl JobStore {
             .iter()
             .find(|r| r.job_id == job_id && r.status == "success" && r.operation != "verify")
             .cloned()
+    }
+
+    /// When the job's schedule was last served: the start of its newest backup
+    /// run that was not [`JobRun::interrupted`]. A run cut off by the service
+    /// stopping did not serve its slot.
+    pub fn last_scheduled_start(&self, job_id: &str) -> Option<String> {
+        self.activity
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|r| r.job_id == job_id && r.operation != "verify" && !r.interrupted)
+            .map(|r| r.started_at.clone())
     }
 }
 
@@ -2151,6 +2170,12 @@ pub async fn run_queue_worker(
         };
         let mut run = run;
         run.layout_changed = layout_note;
+        // Cancelled because the service is stopping, not by a person: said
+        // so, and not counted as the schedule's run (`interrupted`).
+        if run.status == "cancelled" && busy.stopping() {
+            run.interrupted = true;
+            run.error = tr!("lib.interrupted_by_stop").into_owned();
+        }
         // How the run ended goes into the log as well as into its record. A
         // failure used to be written only to the record: on 2026-09-25 the log
         // said "Starting queued backup" and then nothing at all, and the reason
@@ -4968,6 +4993,90 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(store.activity()[0].status, "cancelled");
+        worker.abort();
+    }
+
+    /// The same run stopped by the service itself (shutdown, restart, update):
+    /// recorded as interrupted, in words that say so, and not taken by the
+    /// schedule as its slot's run.
+    #[tokio::test]
+    async fn a_run_stopped_by_the_service_is_interrupted_not_cancelled_by_a_person() {
+        struct QuietSink;
+        impl EventSink for QuietSink {
+            fn job_progress(&self, _: JobProgress) {}
+            fn queue_changed(&self, _: QueueSnapshot) {}
+            fn job_finished(&self, _: JobRun) {}
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::load(dir.path());
+        let mut job = Job {
+            id: "weekly".into(),
+            name: "weekly".into(),
+            ..Default::default()
+        };
+        job.advanced.retry_attempts = 0;
+        store.upsert(job).unwrap();
+        // The week before: a copy that did serve its slot.
+        store
+            .record_run(JobRun {
+                id: "earlier".into(),
+                job_id: "weekly".into(),
+                job_name: "weekly".into(),
+                started_at: "2026-10-14T12:00:00+00:00".into(),
+                status: "success".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let queue = RunQueue::new();
+        let busy = crate::busy::Busy::new();
+        let held = busy
+            .reserve(crate::busy::Doing::new("other", "probe"))
+            .unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let worker = tokio::spawn(run_queue_worker(
+            Arc::new(QuietSink),
+            store.clone(),
+            queue.clone(),
+            busy.clone(),
+            cancel.clone(),
+            Arc::new(NoPasswords),
+            rx,
+            tx.downgrade(),
+            stop_rx,
+        ));
+        queue.enqueue("weekly");
+        tx.send("weekly".into()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while queue.snapshot().current.as_deref() != Some("weekly") {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        // What the service does when it stops: the stop first, then cancel.
+        busy.cancel_for_stop();
+        cancel.store(true, Ordering::SeqCst);
+        drop(held);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while store.activity().len() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let run = &store.activity()[0];
+        assert_eq!(run.status, "cancelled");
+        assert!(run.interrupted);
+        assert_eq!(run.error, tr!("lib.interrupted_by_stop"));
+        assert!(store.get("weekly").unwrap().last_run.unwrap().interrupted);
+        assert_eq!(
+            store.last_scheduled_start("weekly").as_deref(),
+            Some("2026-10-14T12:00:00+00:00"),
+            "the schedule counts from the run that served its slot"
+        );
         worker.abort();
     }
 

@@ -520,6 +520,8 @@ export interface JobRun {
   started_at: string;
   finished_at: string;
   status: 'success' | 'error' | 'cancelled' | string;
+  /** Cancelled because the service stopped (shutdown, restart, update), not by a person. */
+  interrupted?: boolean;
   image_path: string;
   source_bytes: number;
   bytes_copied: number;

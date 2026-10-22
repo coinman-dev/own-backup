@@ -158,11 +158,11 @@
             <div class="title">
               {r.operation === 'verify'
                 ? (r.status === 'success' ? m.act_verify_done() : r.status === 'cancelled' ? m.act_verify_cancelled() : m.act_verify_failed())
-                : (r.status === 'success' ? m.act_backup_done() : r.status === 'cancelled' ? m.act_backup_cancelled() : m.act_backup_failed())}
+                : (r.status === 'success' ? m.act_backup_done() : r.interrupted ? m.act_backup_interrupted() : r.status === 'cancelled' ? m.act_backup_cancelled() : m.act_backup_failed())}
               — {r.job_name}
               <span class="time">{formatDate(r.finished_at || r.started_at)}</span>
             </div>
-            {#if r.status === 'error' && r.error}
+            {#if (r.status === 'error' || r.interrupted) && r.error}
               <div class="note">{r.error}</div>
             {/if}
             {#if r.status === 'error' && r.error_kind === 'key_protection'}

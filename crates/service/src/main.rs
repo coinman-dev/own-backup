@@ -949,8 +949,10 @@ pub async fn run_main_loop(
     let shutdown_watcher = tokio::spawn(async move {
         worker_shutdown.wait_for_shutdown().await;
         worker_stop.send_replace(true);
+        // The stop is marked before anything is cancelled: a run that ends
+        // cancelled now is recorded as interrupted, not as a person's cancel.
+        worker_busy.cancel_for_stop();
         worker_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
-        worker_busy.cancel_whatever_is_running();
     });
     info!(
         "Backup orchestrator ready ({} job(s) loaded)",
@@ -1043,7 +1045,7 @@ pub async fn run_main_loop(
         .add_service(service)
         .serve_with_shutdown(addr, async move {
             shutdown.wait_for_shutdown().await;
-            busy.cancel_whatever_is_running();
+            busy.cancel_for_stop();
             busy.wait_until_idle().await;
         })
         .await;
@@ -1073,8 +1075,8 @@ async fn stop_worker(
     watcher: tokio::task::JoinHandle<()>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     stop.send_replace(true);
+    busy.cancel_for_stop();
     cancel.store(true, std::sync::atomic::Ordering::SeqCst);
-    busy.cancel_whatever_is_running();
     watcher.abort();
     // The worker owns the backup result and writes its final history before
     // returning. Aborting it here would release its busy guard while the
@@ -1392,7 +1394,7 @@ async fn serve_uds(
         .add_service(service)
         .serve_with_incoming_shutdown(UnixListenerStream::new(uds), async move {
             shutdown.wait_for_shutdown().await;
-            busy.cancel_whatever_is_running();
+            busy.cancel_for_stop();
             busy.wait_until_idle().await;
         })
         .await;
@@ -1726,7 +1728,7 @@ async fn serve_named_pipe(
         .add_service(service)
         .serve_with_incoming_shutdown(incoming, async move {
             shutdown.wait_for_shutdown().await;
-            busy.cancel_whatever_is_running();
+            busy.cancel_for_stop();
             busy.wait_until_idle().await;
         })
         .await?;

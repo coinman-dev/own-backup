@@ -28,6 +28,7 @@
 //! endings that matter equally: success, an early `return` on error, and a
 //! panic unwinding out of a `spawn_blocking` closure.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -55,6 +56,10 @@ pub struct Busy {
     /// live, so that a panic in the engine releases it.
     slot: Arc<tokio::sync::Semaphore>,
     doing: Mutex<Option<Doing>>,
+    /// The service is stopping, set before its cancel: whatever ends as
+    /// cancelled from here on was not cancelled by a person
+    /// ([`Self::cancel_for_stop`]).
+    stopping: AtomicBool,
 }
 
 impl Busy {
@@ -62,7 +67,22 @@ impl Busy {
         Arc::new(Self {
             slot: Arc::new(tokio::sync::Semaphore::new(1)),
             doing: Mutex::new(None),
+            stopping: AtomicBool::new(false),
         })
+    }
+
+    /// Cancel whatever is running because the service is stopping (Windows
+    /// shutting down or restarting, an update, `systemctl stop`). Marked first,
+    /// so the run that ends cancelled is recorded as interrupted, not as a
+    /// person's cancel, and its slot is caught up after the next start.
+    pub fn cancel_for_stop(&self) -> bool {
+        self.stopping.store(true, Ordering::SeqCst);
+        self.cancel_whatever_is_running()
+    }
+
+    /// Whether [`Self::cancel_for_stop`] has been called.
+    pub fn stopping(&self) -> bool {
+        self.stopping.load(Ordering::SeqCst)
     }
 
     /// Take the machine, or say who has it. Never waits — a client asking for a
