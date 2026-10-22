@@ -59,7 +59,9 @@ pub struct BuildLinuxArgs {
     #[arg(long)]
     pub stick: Option<String>,
 
-    /// Разработка: этот .deb вместо установленного пакета
+    /// Разработка: этот .deb вместо установленного пакета. Только под
+    /// sudo (его сценарии выполняются при сборке от root) или со службой,
+    /// запущенной с --foreground
     #[arg(long)]
     pub deb: Option<String>,
 

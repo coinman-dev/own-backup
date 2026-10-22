@@ -33,7 +33,7 @@ pub(crate) enum Action {
     /// Building the Linux boot medium: a root build (debootstrap, chroot,
     /// packages from the network) that fills gigabytes of the cache and
     /// writes the ISO into the caller's folder. Writing it onto a stick as
-    /// well erases a disk and asks `Restore` instead.
+    /// well erases a disk and asks `Restore` after this.
     BuildMedia,
     /// The boot configuration has no Linux RPC yet; a plan's boot steps are
     /// covered by `Restore`.
@@ -50,6 +50,16 @@ impl Action {
             Action::BuildMedia => "com.ownbackup.build-media",
             Action::BootConfig => "com.ownbackup.boot-config",
         }
+    }
+}
+
+/// What building the Linux boot medium asks, in order: the build, then —
+/// when it is also written onto a stick — erasing that stick.
+pub(crate) fn media_build_actions(with_stick: bool) -> &'static [Action] {
+    if with_stick {
+        &[Action::BuildMedia, Action::Restore]
+    } else {
+        &[Action::BuildMedia]
     }
 }
 
@@ -192,6 +202,15 @@ mod tests {
     fn our_own_start_time_reads_from_proc() {
         let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
         assert!(process_start_time(&stat).is_some(), "{stat}");
+    }
+
+    #[test]
+    fn a_medium_with_a_stick_asks_for_the_build_and_then_the_erase() {
+        assert_eq!(media_build_actions(false), [Action::BuildMedia]);
+        assert_eq!(
+            media_build_actions(true),
+            [Action::BuildMedia, Action::Restore]
+        );
     }
 
     #[test]

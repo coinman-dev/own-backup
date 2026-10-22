@@ -308,6 +308,21 @@ pub fn write_stick(
     write_image(iso, &stick.device, Some(expect), cancel, progress)
 }
 
+/// [`write_stick`] from an ISO already open (`label` names it in the log):
+/// what the build checked is what gets written, whatever its path is now.
+pub fn write_stick_file(
+    iso: &std::fs::File,
+    label: &Path,
+    device: &str,
+    expect: &MediaStickIdentityDto,
+    cancel: &CancelToken,
+    progress: &mut dyn FnMut(StickStage, u64),
+) -> Result<StickReport> {
+    let stick = check_stick(device)?;
+    same_stick(device, expect, &stick.identity())?;
+    write_image_file(iso, label, &stick.device, Some(expect), cancel, progress)
+}
+
 fn mkfs_vfat() -> Option<PathBuf> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&path)
@@ -337,6 +352,18 @@ pub fn write_image(
             .into_owned(),
         )
     })?;
+    write_image_file(&file, iso, device, expect, cancel, progress)
+}
+
+/// [`write_image`] from an ISO already open; `iso` names it in the log.
+fn write_image_file(
+    file: &std::fs::File,
+    iso: &Path,
+    device: &str,
+    expect: Option<&MediaStickIdentityDto>,
+    cancel: &CancelToken,
+    progress: &mut dyn FnMut(StickStage, u64),
+) -> Result<StickReport> {
     let len = file.metadata()?.len();
     let mut head = vec![0u8; ISO_HEAD_BYTES];
     if len < ISO_HEAD_BYTES as u64 {
@@ -378,7 +405,7 @@ pub fn write_image(
     // bootable and fail somewhere in the middle of the boot; an unverified one
     // is not known to be better. Whatever stops the copy or its check —
     // cancel, a write or read error, a mismatch — the stick's start is wiped.
-    if let Err(e) = copy_and_verify(&file, &mut session, len, device, cancel, progress) {
+    if let Err(e) = copy_and_verify(file, &mut session, len, device, cancel, progress) {
         let wipe = vec![0u8; (1 << 20).min(len as usize)];
         let wiped = session
             .device_mut()

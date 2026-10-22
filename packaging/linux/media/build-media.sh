@@ -37,8 +37,9 @@
 #                                  arch NAME, network HOST, bad-deb, apt-check,
 #                                  no-iso
 #   OBK-ISO <path>                 the finished image, inside DIR
-# Signals (TERM, INT, HUP) stop it: the builder's mounts are undone and the
-# half-built tree is removed; the builder and the package cache stay.
+# Signals (TERM, INT, HUP, and PIPE when the reader is gone) stop it: the
+# builder's mounts are undone and the half-built tree is removed; the builder
+# and the package cache stay.
 set -euo pipefail
 exec 2>&1
 
@@ -106,16 +107,24 @@ state=running
 # processes until no new ones appear, and would kill the umount and rm this
 # forks — the stand's first cancel left the half-built tree mounted (22.10).
 # TimeoutStopSec of the transient unit bounds it.
+#
+# A reader that went away (the service killed or upgraded mid-build: the unit
+# outlives it, its output pipe does not) must not kill the script before this
+# runs: SIGPIPE's default action ends bash without its EXIT trap, leaving the
+# builder's binds mounted. So it is caught, not ignored — an ignored signal
+# would be inherited by every tool, whose own pipelines rely on it — and
+# treated as a stop; the clean-up's messages then just fail to be written.
 on_exit() {
-    trap '' TERM INT HUP
+    trap '' TERM INT HUP PIPE
     unmount_under "$builder"
     if [[ $state == stopped ]]; then
         drop_build
-        say "stopped; the half-built tree was removed"
+        say "stopped; the half-built tree was removed" || true
     fi
 }
 trap on_exit EXIT
-trap "trap '' TERM INT HUP; state=stopped; exit 143" TERM INT HUP
+trap "trap '' TERM INT HUP PIPE; state=stopped; exit 143" TERM INT HUP
+trap "trap '' TERM INT HUP PIPE; state=stopped; exit 141" PIPE
 
 case "$cmd" in
     clean)

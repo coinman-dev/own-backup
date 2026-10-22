@@ -147,5 +147,25 @@
   "media_linux.stick_failed": {
     "ru": "ISO сохранён (%{path}), но флешка не записана: %{error}",
     "en": "The ISO was saved (%{path}), but the stick was not written: %{error}"
+    },
+  "media_linux.deb_root_only": {
+    "ru": "Свой пакет .deb для носителя принимается только от root (sudo own-backup-cli media build-linux --deb …) или службой разработчика, запущенной с --foreground: сценарии пакета выполняются при сборке от root.",
+    "en": "A .deb of your own for the medium is accepted only from root (sudo own-backup-cli media build-linux --deb …) or by a developer's service run with --foreground: the package's scripts run as root during the build."
+  },
+  "media_linux.deb_too_large": {
+    "ru": "%{path} больше %{max} МиБ — это не пакет own-backup.",
+    "en": "%{path} is larger than %{max} MiB — it is not the own-backup package."
+  },
+  "media_linux.iso_outside": {
+    "ru": "Сборка назвала образ %{path} не в своей папке или не обычным файлом; он не сохранён.",
+    "en": "The build named the image %{path} outside its own folder or not as a regular file; it was not saved."
+  },
+  "media_linux.iso_unreadable": {
+    "ru": "Не открывается собранный образ %{path}: %{error}",
+    "en": "The built image %{path} cannot be opened: %{error}"
+  },
+  "media_linux.conffiles_deleted": {
+    "ru": "Удалённые администратором файлы настроек не вошли на носитель: %{files}",
+    "en": "Configuration files the administrator deleted are not on the medium: %{files}"
   }
 }

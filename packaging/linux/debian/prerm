@@ -9,6 +9,10 @@ set -e
 # new engine.
 if [ -d /run/systemd/system ] && { [ "$1" = "remove" ] || [ "$1" = "upgrade" ] || [ "$1" = "deconfigure" ]; }; then
     deb-systemd-invoke stop own-backup.service >/dev/null || true
+    # A boot-medium build runs as a transient unit of its own and outlives
+    # the engine; its trap undoes the builder's mounts on the stop. The next
+    # engine cleans what is left (media_linux_build::recover_abandoned_build).
+    systemctl stop own-backup-media-build.service >/dev/null 2>&1 || true
 fi
 
 exit 0

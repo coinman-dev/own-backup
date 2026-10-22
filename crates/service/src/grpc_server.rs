@@ -2630,21 +2630,35 @@ impl BackupService for BackupServiceImpl {
                 }
             }
 
-            let (uid, gid) = crate::peer_access::caller_ids(
-                req.extensions()
-                    .get::<tonic::transport::server::UdsConnectInfo>(),
-            )?;
+            let info = req
+                .extensions()
+                .get::<tonic::transport::server::UdsConnectInfo>();
+            let over_socket = info.is_some();
+            let (uid, gid) = crate::peer_access::caller_ids(info)?;
             let p: LinuxMediaBuildDto = serde_json::from_str(&req.get_ref().json)
                 .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
             let with_stick = !p.stick_device.trim().is_empty();
-            // Erasing a stick is the restore question; a build alone writes
-            // only into the cache and the caller's own folder.
-            let action = if with_stick {
-                crate::polkit::Action::Restore
-            } else {
-                crate::polkit::Action::BuildMedia
-            };
-            crate::polkit::authorize(&req, action).await?;
+            // A .deb of the caller's runs its maintainer scripts as root in
+            // the build: root's (the CLI under sudo) or a foreground
+            // development run's only, and refused before any password is asked.
+            if !p.deb_path.trim().is_empty() {
+                own_backup_backup::media_linux_build::given_deb_allowed(over_socket, uid)
+                    .map_err(|e| {
+                        tracing::warn!(target: "security", uid, "a .deb for the medium refused from a non-root caller");
+                        match e {
+                            OwnBackupError::Config(m) => Status::permission_denied(m),
+                            other => Status::permission_denied(other.to_string()),
+                        }
+                    })?;
+            }
+            // The build itself, then — with a stick — erasing it, which is
+            // the restore question. polkit answers one action per check and
+            // keeps an `auth_admin_keep` answer per action, so without a
+            // kept answer the person is asked twice; an administrator's
+            // polkit rule may grant both at once.
+            for action in crate::polkit::media_build_actions(with_stick) {
+                crate::polkit::authorize(&req, *action).await?;
+            }
 
             let stick = if with_stick {
                 // Which stick the person chose, as listed (see write_media_stick).

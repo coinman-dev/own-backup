@@ -398,6 +398,10 @@
     "ru": "Папку %{path} не удалось удалить целиком: не поддалось записей — %{count}.",
     "en": "Folder %{path} could not be deleted completely: entries that would not go — %{count}."
   },
+  "main.busy_media_cleanup": {
+    "ru": "уборка после прерванной сборки носителя",
+    "en": "cleaning up after an interrupted medium build"
+  },
   "main.info_background": {
     "ru": "Это фоновая служба «%{name}». Обычно ею управляет система (автозапуск при загрузке).",
     "en": "This is the background service “%{name}”. It is normally managed by the system (starts automatically at boot)."

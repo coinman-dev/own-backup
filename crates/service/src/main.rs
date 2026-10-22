@@ -868,6 +868,22 @@ pub async fn run_main_loop(
         own_backup_backup::udev_hold_linux::sweep_stale_holds(std::path::Path::new(
             own_backup_backup::udev_hold_linux::RULES_DIR,
         ));
+        // A medium build runs as a transient unit outside this cgroup, so
+        // an engine killed or upgraded mid-build leaves it running, its
+        // binds under the cache mounted. Stopped and cleaned before any
+        // build may start: the slot is held until then.
+        let slot = busy
+            .reserve(own_backup_core::busy::Doing::new(
+                tr!("main.busy_media_cleanup"),
+                own_backup_backup::media_linux_build::CACHE_DIR,
+            ))
+            .ok();
+        std::thread::spawn(move || {
+            let _slot = slot;
+            if own_backup_backup::media_linux_build::recover_abandoned_build() {
+                info!("a medium build left by an earlier run was stopped and cleaned");
+            }
+        });
     }
     // The installed Linux service keeps remembered volume passwords (an
     // opened LUKS mapping's among them) in its root-only key directory —

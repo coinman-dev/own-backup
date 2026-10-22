@@ -36,11 +36,12 @@
 
 #![cfg(target_os = "linux")]
 
-use std::collections::HashMap;
-use std::ffi::CString;
+use std::collections::{HashMap, HashSet};
+use std::ffi::{CString, OsStr};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -57,7 +58,7 @@ use crate::media_linux::{
     classify_failure, gib, iso_file_name, need_bytes, refusal, url_host, LinuxStage, ToolFailure,
     Tracker, DEST_MIN_BYTES,
 };
-use crate::media_stick_linux::{write_stick, StickReport, StickStage};
+use crate::media_stick_linux::{write_stick_file, StickReport, StickStage};
 
 /// The package the medium is made of.
 pub const PACKAGE: &str = "own-backup";
@@ -85,6 +86,9 @@ const STOP_GRACE: Duration = Duration::from_secs(90);
 
 /// Copy in pieces of this size.
 const CHUNK: usize = 4 << 20;
+
+/// The largest .deb a caller may give: ours is about 30 MiB.
+pub const MAX_DEB_BYTES: u64 = 1 << 30;
 
 // --- the installed package as a .deb ------------------------------------------------
 
@@ -241,6 +245,60 @@ pub struct Repacked {
     /// Configuration files that differ from the installed ones; they went on
     /// as they are now.
     pub changed_conffiles: Vec<String>,
+    /// Configuration files the administrator deleted; the medium goes
+    /// without them, as the installed program does.
+    pub deleted_conffiles: Vec<String>,
+}
+
+/// Where a symlink of the package may point. dpkg records no target for a
+/// symlink (`md5sums` covers regular files only) and the original .deb is
+/// not kept, so a changed target cannot be told from the installed one;
+/// what can be refused is a link that leads out of the package and the
+/// system's own directories — into a home, `/root`, `/tmp` or `/proc`.
+const SYMLINK_DIRS: &[&str] = &["/usr", "/etc", "/lib", "/lib64", "/bin", "/sbin", "/run"];
+
+/// `target` of the symlink at `link`, made absolute and without `.`/`..`,
+/// the way the medium's tree will resolve it (`..` stops at the root).
+fn symlink_destination(link: &str, target: &Path) -> String {
+    let joined = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        Path::new(link)
+            .parent()
+            .unwrap_or(Path::new("/"))
+            .join(target)
+    };
+    let mut parts: Vec<&OsStr> = Vec::new();
+    for c in joined.components() {
+        match c {
+            std::path::Component::Normal(n) => parts.push(n),
+            std::path::Component::ParentDir => {
+                parts.pop();
+            }
+            _ => {}
+        }
+    }
+    let mut out = String::new();
+    for p in parts {
+        out.push('/');
+        out.push_str(&p.to_string_lossy());
+    }
+    if out.is_empty() {
+        out.push('/');
+    }
+    out
+}
+
+/// May the package's symlink at `link` point at `target`? Into the package's
+/// own paths, the system's directories ([`SYMLINK_DIRS`]) or `/dev/null` (a
+/// masked unit).
+fn symlink_target_allowed(link: &str, target: &Path, own: &HashSet<&str>) -> bool {
+    let dest = symlink_destination(link, target);
+    own.contains(dest.as_str())
+        || dest == "/dev/null"
+        || SYMLINK_DIRS
+            .iter()
+            .any(|d| dest == *d || dest.strip_prefix(d).is_some_and(|r| r.starts_with('/')))
 }
 
 fn md5_copy(src: &Path, dst: &Path, mode: u32) -> std::io::Result<String> {
@@ -295,9 +353,12 @@ pub fn stage_installed(root: &Path, package: &str, stage: &Path) -> Result<Repac
         .map(|(p, s)| (p.as_str(), s.as_str()))
         .collect();
 
+    let own: HashSet<&str> = list.lines().map(str::trim).collect();
+
     std::fs::create_dir_all(stage)?;
     let mut modified: Vec<String> = Vec::new();
     let mut changed_conffiles = Vec::new();
+    let mut deleted_conffiles: Vec<String> = Vec::new();
     // Modes are given to directories at the end: one without its owner's
     // write bit would refuse the files that go into it (outside root).
     let mut dir_modes: Vec<(PathBuf, u32)> = Vec::new();
@@ -311,7 +372,13 @@ pub fn stage_installed(root: &Path, package: &str, stage: &Path) -> Result<Repac
         let meta = match std::fs::symlink_metadata(&src) {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                modified.push(path.to_string());
+                // A configuration file is the administrator's to delete (a
+                // tray that should not start, say); a program file is not.
+                if conffiles.contains_key(path) {
+                    deleted_conffiles.push(path.to_string());
+                } else {
+                    modified.push(path.to_string());
+                }
                 continue;
             }
             Err(e) => return Err(e.into()),
@@ -324,7 +391,12 @@ pub fn stage_installed(root: &Path, package: &str, stage: &Path) -> Result<Repac
             if let Some(parent) = dst.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::os::unix::fs::symlink(std::fs::read_link(&src)?, &dst)?;
+            let target = std::fs::read_link(&src)?;
+            if !symlink_target_allowed(path, &target, &own) {
+                modified.push(format!("{path} -> {}", target.display()));
+                continue;
+            }
+            std::os::unix::fs::symlink(&target, &dst)?;
         } else if kind.is_file() {
             if let Some(parent) = dst.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -366,16 +438,29 @@ pub fn stage_installed(root: &Path, package: &str, stage: &Path) -> Result<Repac
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode))
     };
     write("control", &pkg.control, 0o644)?;
-    if !md5sums_text.is_empty() {
-        write("md5sums", &md5sums_text, 0o644)?;
+    // A deleted configuration file is not in the package: dpkg-deb refuses a
+    // conffile it cannot find, and dpkg --verify would miss its checksum.
+    let deleted: HashSet<&str> = deleted_conffiles.iter().map(String::as_str).collect();
+    let md5sums_kept: String = md5sums_text
+        .lines()
+        .filter(|l| {
+            l.split_once(char::is_whitespace)
+                .map(|(_, p)| format!("/{}", p.trim_start()))
+                .is_none_or(|p| !deleted.contains(p.as_str()))
+        })
+        .map(|l| format!("{l}\n"))
+        .collect();
+    if !md5sums_kept.is_empty() {
+        write("md5sums", &md5sums_kept, 0o644)?;
     }
-    if !pkg.conffiles.is_empty() {
-        let list: String = pkg
-            .conffiles
-            .iter()
-            .map(|(p, _)| format!("{p}\n"))
-            .collect();
-        write("conffiles", &list, 0o644)?;
+    let conffiles_kept: String = pkg
+        .conffiles
+        .iter()
+        .filter(|(p, _)| !deleted.contains(p.as_str()))
+        .map(|(p, _)| format!("{p}\n"))
+        .collect();
+    if !conffiles_kept.is_empty() {
+        write("conffiles", &conffiles_kept, 0o644)?;
     }
     for (name, mode) in [
         ("preinst", 0o755),
@@ -398,6 +483,7 @@ pub fn stage_installed(root: &Path, package: &str, stage: &Path) -> Result<Repac
     Ok(Repacked {
         version: pkg.version,
         changed_conffiles,
+        deleted_conffiles,
     })
 }
 
@@ -580,18 +666,20 @@ impl OutputDir {
         free_bytes_fd(&self.dir)
     }
 
-    /// Copy `src` into the folder as `OwnBackup-Linux-<version>.iso` (or
-    /// ` (2)` and so on when that exists), the caller's own file. `progress`
-    /// gets the percentage copied. Nothing is left behind on failure.
+    /// Copy `input` (read from its start) into the folder as
+    /// `OwnBackup-Linux-<version>.iso` (or ` (2)` and so on when that
+    /// exists), the caller's own file. `progress` gets the percentage
+    /// copied. Nothing is left behind on failure.
     pub fn save(
         &self,
-        src: &Path,
+        input: &File,
         version: &str,
         cancel: &CancelToken,
         progress: &mut dyn FnMut(u64),
     ) -> Result<PathBuf> {
-        let mut input = File::open(src)?;
         let len = input.metadata()?.len();
+        let mut input = input;
+        input.seek(SeekFrom::Start(0))?;
         let tmp_name = format!(".{}.part-{}", iso_file_name(version, 1), std::process::id());
         let tmp = cstr(&tmp_name)?;
         // SAFETY: openat on a held directory descriptor; the new descriptor
@@ -702,12 +790,30 @@ impl OutputDir {
     }
 }
 
-/// A file the caller named (a development .deb): a regular file, opened
-/// without following a symlink, owned by the caller unless the caller is root.
+/// May this caller give a .deb of its own? The package's maintainer scripts
+/// run as root inside the build (`lb build`, with the host's `/proc`, `/sys`
+/// and `/dev` bound into the builder), so a .deb is root's code: it is taken
+/// from root (the CLI under sudo) over the socket, or from anyone reaching a
+/// development service run in the foreground over loopback TCP
+/// (`over_socket` false), which is not a protected engine anyway.
+pub fn given_deb_allowed(over_socket: bool, uid: u32) -> Result<()> {
+    if !over_socket || uid == 0 {
+        return Ok(());
+    }
+    Err(OwnBackupError::Config(
+        tr!("media_linux.deb_root_only").into_owned(),
+    ))
+}
+
+/// A file the caller named (a development .deb): a regular file of at most
+/// [`MAX_DEB_BYTES`], opened without following a symlink and without
+/// blocking on a FIFO or taking a terminal, owned by the caller unless the
+/// caller is root. Whether this caller may give one at all is
+/// [`given_deb_allowed`].
 pub fn open_callers_file(path: &str, uid: u32) -> Result<File> {
     let file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
         .open(path)
         .map_err(|e| {
             OwnBackupError::Config(
@@ -719,6 +825,113 @@ pub fn open_callers_file(path: &str, uid: u32) -> Result<File> {
         return Err(OwnBackupError::Config(
             tr!("media_linux.deb_not_owner", path = path).into_owned(),
         ));
+    }
+    if meta.len() > MAX_DEB_BYTES {
+        return Err(deb_too_large(path));
+    }
+    Ok(file)
+}
+
+fn deb_too_large(path: &str) -> OwnBackupError {
+    OwnBackupError::Config(
+        tr!(
+            "media_linux.deb_too_large",
+            path = path,
+            max = MAX_DEB_BYTES >> 20
+        )
+        .into_owned(),
+    )
+}
+
+/// Copy a given .deb to `out`, refusing one that grew past
+/// [`MAX_DEB_BYTES`] since it was checked.
+fn copy_given_deb(given: &mut File, out: &Path) -> Result<()> {
+    let mut dst = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(out)?;
+    let copied = std::io::copy(&mut given.take(MAX_DEB_BYTES + 1), &mut dst)?;
+    if copied > MAX_DEB_BYTES {
+        drop(dst);
+        let _ = std::fs::remove_file(out);
+        return Err(deb_too_large(&out.display().to_string()));
+    }
+    dst.sync_all()?;
+    Ok(())
+}
+
+/// `name` in the directory `dir`, opened without following a symlink.
+fn open_at(dir: &File, name: &OsStr, flags: libc::c_int) -> std::io::Result<File> {
+    let name = CString::new(name.as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    // SAFETY: openat on a held directory descriptor and a C string; the new
+    // descriptor is owned by the File below.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: fd is a fresh descriptor nobody else owns.
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+/// The ISO the script reported (`OBK-ISO <path>`), opened for reading — or a
+/// refusal when it is not a regular file directly in `<cache>/builder/build`.
+/// The build runs packages' maintainer scripts as root, so its output is not
+/// trusted to name a file: the path must be that directory plus one plain
+/// name (no `..`, no further component), and `builder`, `build` and the
+/// file are each opened from the one before without following a symlink. A
+/// link to another root file — or a directory swapped for one — is refused
+/// rather than copied into the person's folder or onto a stick.
+pub fn open_built_iso(cache: &Path, reported: &str) -> Result<File> {
+    let outside =
+        || OwnBackupError::Config(tr!("media_linux.iso_outside", path = reported).into_owned());
+    let path = Path::new(reported);
+    // `Path` drops a `.` inside the path (the same directory) but keeps `..`.
+    let plain = path.is_absolute()
+        && path.components().all(|c| {
+            matches!(
+                c,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )
+        });
+    let name = path.file_name().ok_or_else(outside)?;
+    if !plain
+        || path.parent() != Some(cache.join("builder").join("build").as_path())
+        || !name.as_bytes().ends_with(b".iso")
+    {
+        return Err(outside());
+    }
+    let unreadable = |e: std::io::Error| {
+        OwnBackupError::Config(
+            tr!("media_linux.iso_unreadable", path = reported, error = e).into_owned(),
+        )
+    };
+    let top = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .open(cache)
+        .map_err(unreadable)?;
+    let dir_flags = libc::O_RDONLY | libc::O_DIRECTORY;
+    let opened = open_at(&top, OsStr::new("builder"), dir_flags)
+        .and_then(|b| open_at(&b, OsStr::new("build"), dir_flags))
+        .and_then(|b| open_at(&b, name, libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOCTTY));
+    let file = match opened {
+        Ok(f) => f,
+        // A symlink where a directory or the file should be.
+        Err(e) if matches!(e.raw_os_error(), Some(libc::ELOOP) | Some(libc::ENOTDIR)) => {
+            return Err(outside())
+        }
+        Err(e) => return Err(unreadable(e)),
+    };
+    if !file.metadata().map_err(unreadable)?.is_file() {
+        return Err(outside());
     }
     Ok(file)
 }
@@ -1166,6 +1379,59 @@ fn clean_build_tree(paths: &Paths) {
     }
 }
 
+/// What the build unit [`UNIT`], by its `ActiveState`, needs when the
+/// service starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Leftover {
+    /// No unit: nothing to do.
+    Nothing,
+    /// Still running, starting or stopping: stop it, then clean.
+    Stop,
+    /// Ended in failure and kept by systemd: forget it, then clean.
+    Reset,
+}
+
+pub fn leftover(active_state: &str) -> Leftover {
+    match active_state.trim() {
+        // systemctl says "inactive" for a unit it does not know.
+        "" | "inactive" => Leftover::Nothing,
+        "failed" => Leftover::Reset,
+        _ => Leftover::Stop,
+    }
+}
+
+/// At the service's start: a build unit an earlier service left behind (it
+/// was killed, or an upgrade stopped it mid-build — the unit is not in the
+/// service's cgroup and outlives it) is stopped, its trap undoing its
+/// mounts, and the script's `clean` runs once: whatever is still mounted
+/// under the builder is unmounted and the build tree goes; the builder and
+/// the package cache stay. Says whether there was such a unit.
+pub fn recover_abandoned_build() -> bool {
+    if !have_systemd() {
+        return false;
+    }
+    let unit = format!("{UNIT}.service");
+    let state = Command::new("systemctl")
+        .args(["show", "--property=ActiveState", "--value", &unit])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    match leftover(&state) {
+        Leftover::Nothing => return false,
+        Leftover::Stop => systemctl(&["stop", &unit]),
+        Leftover::Reset => {}
+    }
+    systemctl(&["reset-failed", &unit]);
+    let paths = Paths::locate();
+    if paths.script.is_file() {
+        clean_build_tree(&paths);
+    }
+    let _ = remove_tree(&paths.cache.join("input"));
+    true
+}
+
 /// Remove the builder, the package cache and everything else of the build.
 /// Returns the bytes freed.
 pub fn clear_cache() -> Result<u64> {
@@ -1268,11 +1534,7 @@ pub fn build(
     let mut warnings = Vec::new();
     let from_installed = req.deb.is_none();
     match req.deb {
-        Some(mut given) => {
-            let mut out = File::create(&deb)?;
-            std::io::copy(&mut given, &mut out)?;
-            out.sync_all()?;
-        }
+        Some(mut given) => copy_given_deb(&mut given, &deb)?,
         None => {
             let repacked = repack_with(
                 Path::new("/"),
@@ -1282,6 +1544,15 @@ pub fn build(
                 &mut |s, o| dpkg_deb_unsandboxed(s, o),
             )?;
             info!(version = %repacked.version, "installed package packed for the medium");
+            if !repacked.deleted_conffiles.is_empty() {
+                warnings.push(
+                    tr!(
+                        "media_linux.conffiles_deleted",
+                        files = repacked.deleted_conffiles.join(", ")
+                    )
+                    .into_owned(),
+                );
+            }
             if !repacked.changed_conffiles.is_empty() {
                 warnings.push(
                     tr!(
@@ -1329,9 +1600,15 @@ pub fn build(
         clean_build_tree(&paths);
         return Err(OwnBackupError::Cancelled);
     }
-    let iso = tracker.iso.clone().map(PathBuf::from);
-    let iso = match (ended.ok, iso) {
-        (true, Some(iso)) if iso.starts_with(&paths.cache) && iso.is_file() => iso,
+    let (iso_path, iso) = match (ended.ok, tracker.iso.clone()) {
+        (true, Some(reported)) => match open_built_iso(&paths.cache, &reported) {
+            Ok(file) => (PathBuf::from(reported), file),
+            Err(e) => {
+                warn!(error = %e, "the build's ISO was refused");
+                clean_build_tree(&paths);
+                return Err(e);
+            }
+        },
         _ => {
             let why = failure_text(&tracker, &paths);
             warn!(%why, "the medium was not built");
@@ -1363,21 +1640,28 @@ pub fn build(
             return Err(e);
         }
     };
-    let iso_bytes = std::fs::metadata(&iso).map(|m| m.len()).unwrap_or(0);
+    let iso_bytes = iso.metadata().map(|m| m.len()).unwrap_or(0);
     info!(path = %saved.display(), mb = iso_bytes >> 20, "medium saved");
     progress(LinuxStage::Iso, 100, "");
 
     let stick = match &req.stick {
         None => None,
         Some((device, expect)) => {
-            let written = write_stick(&iso, device, expect, cancel, &mut |stage, pct| {
-                let stage = match stage {
-                    StickStage::Write => LinuxStage::Write,
-                    StickStage::Verify => LinuxStage::Verify,
-                    StickStage::Logs => LinuxStage::Logs,
-                };
-                progress(stage, pct, "");
-            });
+            let written = write_stick_file(
+                &iso,
+                &iso_path,
+                device,
+                expect,
+                cancel,
+                &mut |stage, pct| {
+                    let stage = match stage {
+                        StickStage::Write => LinuxStage::Write,
+                        StickStage::Verify => LinuxStage::Verify,
+                        StickStage::Logs => LinuxStage::Logs,
+                    };
+                    progress(stage, pct, "");
+                },
+            );
             match written {
                 Ok(r) => Some(r),
                 Err(OwnBackupError::Cancelled) => {
@@ -1741,6 +2025,7 @@ mod tests {
         let src_dir = tempfile::tempdir().unwrap();
         let iso = src_dir.path().join("x.hybrid.iso");
         std::fs::write(&iso, vec![7u8; 3 * CHUNK + 5]).unwrap();
+        let iso = File::open(&iso).unwrap();
         let out = open_output_dir(dir.path().to_str().unwrap(), uid, gid).unwrap();
         let mut seen = Vec::new();
         let first = out
@@ -1791,6 +2076,183 @@ mod tests {
         std::os::unix::fs::symlink(&deb, &link).unwrap();
         assert!(open_callers_file(link.to_str().unwrap(), uid).is_err());
         assert!(open_callers_file(dir.path().to_str().unwrap(), uid).is_err());
+        // A FIFO neither blocks the open nor passes as a package.
+        let fifo = dir.path().join("fifo.deb");
+        let c = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: mkfifo with a C string.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let e = open_callers_file(fifo.to_str().unwrap(), uid)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("fifo.deb"), "{e}");
+        // Larger than any package of ours (sparse: no space taken).
+        let big = dir.path().join("big.deb");
+        File::create(&big)
+            .unwrap()
+            .set_len(MAX_DEB_BYTES + 1)
+            .unwrap();
+        let e = open_callers_file(big.to_str().unwrap(), uid)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains(&format!("{}", MAX_DEB_BYTES >> 20)), "{e}");
+        let exact = dir.path().join("exact.deb");
+        File::create(&exact)
+            .unwrap()
+            .set_len(MAX_DEB_BYTES)
+            .unwrap();
+        assert!(open_callers_file(exact.to_str().unwrap(), uid).is_ok());
+    }
+
+    #[test]
+    fn a_given_deb_is_taken_from_root_or_a_foreground_run_only() {
+        assert!(given_deb_allowed(true, 0).is_ok(), "the CLI under sudo");
+        assert!(given_deb_allowed(false, 1000).is_ok(), "loopback TCP");
+        assert!(given_deb_allowed(false, 0).is_ok());
+        let e = given_deb_allowed(true, 1000).unwrap_err().to_string();
+        assert!(e.contains("--deb"), "{e}");
+    }
+
+    #[test]
+    fn a_given_deb_that_grew_past_the_limit_is_not_copied() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("x.deb");
+        std::fs::write(&src, b"package").unwrap();
+        let out = dir.path().join("copy.deb");
+        copy_given_deb(&mut File::open(&src).unwrap(), &out).unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), b"package");
+        let big = dir.path().join("big.deb");
+        File::create(&big)
+            .unwrap()
+            .set_len(MAX_DEB_BYTES + 1)
+            .unwrap();
+        let out2 = dir.path().join("copy2.deb");
+        assert!(copy_given_deb(&mut File::open(&big).unwrap(), &out2).is_err());
+        assert!(!out2.exists());
+    }
+
+    /// `<cache>/builder/build` with a finished image in it.
+    fn fake_build(cache: &Path) -> PathBuf {
+        let build = cache.join("builder/build");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(build.join("live-image-amd64.hybrid.iso"), b"iso").unwrap();
+        build
+    }
+
+    #[test]
+    fn the_built_iso_is_opened_only_directly_in_the_build_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let build = fake_build(&cache);
+        let good = build.join("live-image-amd64.hybrid.iso");
+        let mut text = String::new();
+        open_built_iso(&cache, good.to_str().unwrap())
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        assert_eq!(text, "iso");
+
+        let refused = |reported: &str| match open_built_iso(&cache, reported) {
+            Ok(_) => panic!("{reported} was accepted"),
+            Err(e) => e.to_string(),
+        };
+        // Another root file the build named, with and without `..`.
+        let secret = dir.path().join("secret.iso");
+        std::fs::write(&secret, b"secret").unwrap();
+        refused(secret.to_str().unwrap());
+        refused(&format!("{}/../../../secret.iso", build.display()));
+        // `.` names the same directory (Path drops it); `..` never passes.
+        assert!(open_built_iso(
+            &cache,
+            &format!("{}/./live-image-amd64.hybrid.iso", build.display())
+        )
+        .is_ok());
+        refused(&format!(
+            "{}/../build/live-image-amd64.hybrid.iso",
+            build.display()
+        ));
+        refused(&format!("{}/sub/x.iso", build.display()));
+        refused("live-image-amd64.hybrid.iso");
+        refused(&format!("{}/build.log", build.display()));
+        // A symlink in the build tree to that file.
+        let link = build.join("link.hybrid.iso");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+        let e = refused(link.to_str().unwrap());
+        assert!(e.contains("link.hybrid.iso"), "{e}");
+        // A directory with the image's name.
+        std::fs::create_dir(build.join("dir.iso")).unwrap();
+        refused(&format!("{}/dir.iso", build.display()));
+        // The build directory itself swapped for a symlink elsewhere.
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("live-image-amd64.hybrid.iso"), b"x").unwrap();
+        std::fs::rename(&build, dir.path().join("old-build")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &build).unwrap();
+        refused(good.to_str().unwrap());
+    }
+
+    #[test]
+    fn a_leftover_build_unit_is_stopped_or_reset_at_start() {
+        assert_eq!(leftover("inactive\n"), Leftover::Nothing);
+        assert_eq!(leftover(""), Leftover::Nothing);
+        assert_eq!(leftover("active\n"), Leftover::Stop);
+        assert_eq!(leftover("activating"), Leftover::Stop);
+        assert_eq!(leftover("deactivating"), Leftover::Stop);
+        assert_eq!(leftover("failed\n"), Leftover::Reset);
+    }
+
+    #[test]
+    fn symlinks_may_point_into_the_package_or_the_system_only() {
+        let own: HashSet<&str> = ["/usr/bin/own-backup-cli", "/opt/own/x"].into();
+        let ok = |link: &str, target: &str| symlink_target_allowed(link, Path::new(target), &own);
+        assert!(ok("/usr/bin/obk", "own-backup-cli"));
+        assert!(ok("/opt/own/y", "x"), "the package's own path");
+        assert!(ok("/usr/lib/x/libfoo.so", "../../lib/libfoo.so.1"));
+        assert!(ok("/etc/systemd/system/foo.service", "/dev/null"));
+        assert!(ok("/usr/bin/a", "/usr/libexec/own-backup/b"));
+        assert!(!ok("/usr/bin/a", "/home/someone/evil"));
+        assert!(!ok("/usr/bin/a", "/root/.ssh/id_rsa"));
+        assert!(!ok("/usr/bin/a", "../../../../tmp/x"));
+        assert!(!ok("/usr/bin/a", "/proc/self/root/etc/shadow"));
+        assert!(!ok("/usr/bin/a", "/usrx/y"));
+        assert!(
+            !ok("/opt/own/y", "z"),
+            "beside the package's path is not it"
+        );
+        assert_eq!(
+            symlink_destination("/usr/bin/a", Path::new("../../../../x")),
+            "/x"
+        );
+    }
+
+    #[test]
+    fn a_symlink_out_of_the_system_refuses_the_repack() {
+        let dir = tempfile::tempdir().unwrap();
+        fake_dpkg(dir.path());
+        let link = dir.path().join("usr/bin/obk");
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink("/home/someone/obk", &link).unwrap();
+        let e = stage_installed(dir.path(), PACKAGE, &dir.path().join("s"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("/usr/bin/obk -> /home/someone/obk"), "{e}");
+    }
+
+    #[test]
+    fn a_deleted_conffile_is_a_warning_and_leaves_the_package() {
+        let dir = tempfile::tempdir().unwrap();
+        fake_dpkg(dir.path());
+        std::fs::remove_file(dir.path().join("etc/xdg/autostart/own-backup-tray.desktop")).unwrap();
+        let stage = dir.path().join("s");
+        let r = stage_installed(dir.path(), PACKAGE, &stage).unwrap();
+        assert_eq!(
+            r.deleted_conffiles,
+            ["/etc/xdg/autostart/own-backup-tray.desktop"]
+        );
+        assert!(r.changed_conffiles.is_empty());
+        assert!(!stage.join("DEBIAN/conffiles").exists());
+        let md5sums = std::fs::read_to_string(stage.join("DEBIAN/md5sums")).unwrap();
+        assert!(!md5sums.contains("own-backup-tray"), "{md5sums}");
+        assert!(md5sums.contains("usr/bin/own-backup-cli"), "{md5sums}");
     }
 
     #[test]
