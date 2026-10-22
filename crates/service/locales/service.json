@@ -207,8 +207,8 @@
     "en": "building the Linux boot medium"
   },
   "grpc_server.busy_media_cache": {
-    "ru": "удаление кэша сборки носителя",
-    "en": "removing the medium's build cache"
+    "ru": "удаление остатков сборки носителя",
+    "en": "removing what medium builds left"
   },
   "grpc_server.media_linux_cancelled": {
     "ru": "сборка носителя отменена; незаконченные файлы удалены",

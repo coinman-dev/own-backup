@@ -31,8 +31,16 @@
 //! caller, then renamed without replacing anything — an existing ISO keeps
 //! its name and the new one gets ` (2)`.
 //!
-//! The builder and live-build's package cache stay in [`CACHE_DIR`] between
-//! builds (about 2 GiB); [`clear_cache`] removes them.
+//! **Everything is temporary, as on Windows.** A build gets a folder of its
+//! own, `/var/tmp/own-backup-media.XXXXXX` (root's, 0700; [`WORK_PARENTS`]):
+//! the builder, the package cache, the repacked .deb, the ISO. When the build
+//! ends — finished, failed or cancelled — the script undoes its mounts and
+//! the whole folder goes; nothing stays between builds, so every build
+//! downloads its packages again. Not `/tmp`: it is usually tmpfs, and a
+//! build's ~10 GiB would sit in memory. Only the log of the last build stays,
+//! in `/var/log/own-backup`. A folder a killed service left behind is
+//! removed at its next start ([`recover_abandoned_build`]), and so is the
+//! cache older versions kept in [`LEGACY_CACHE_DIR`].
 
 #![cfg(target_os = "linux")]
 
@@ -63,8 +71,21 @@ use crate::media_stick_linux::{write_stick_file, StickReport, StickStage};
 /// The package the medium is made of.
 pub const PACKAGE: &str = "own-backup";
 
-/// The builder tree, live-build's package cache, the last build's log.
-pub const CACHE_DIR: &str = "/var/cache/own-backup/media";
+/// Where a build's temporary folder is made: the first of these on a file
+/// system that allows programs and device files (`/var/tmp` mounted
+/// `noexec` by hardening falls back to the service's state directory).
+pub const WORK_PARENTS: [&str; 2] = ["/var/tmp", "/var/lib/own-backup"];
+
+/// The temporary folder's name: this and six random characters.
+const WORK_PREFIX: &str = "own-backup-media.";
+
+/// Where versions before 22.10 kept the builder and the package cache
+/// between builds; removed at the service's start.
+pub const LEGACY_CACHE_DIR: &str = "/var/cache/own-backup/media";
+
+/// The last build's log stays here; the folder of the build does not.
+pub const LOG_DIR: &str = "/var/log/own-backup";
+const LOG_NAME: &str = "linux-media-build.log";
 
 /// The shared build script as the package installs it.
 pub const SCRIPT: &str = "/usr/libexec/own-backup/build-linux-media";
@@ -882,14 +903,14 @@ fn open_at(dir: &File, name: &OsStr, flags: libc::c_int) -> std::io::Result<File
 }
 
 /// The ISO the script reported (`OBK-ISO <path>`), opened for reading — or a
-/// refusal when it is not a regular file directly in `<cache>/builder/build`.
+/// refusal when it is not a regular file directly in `<work>/builder/build`.
 /// The build runs packages' maintainer scripts as root, so its output is not
 /// trusted to name a file: the path must be that directory plus one plain
 /// name (no `..`, no further component), and `builder`, `build` and the
 /// file are each opened from the one before without following a symlink. A
 /// link to another root file — or a directory swapped for one — is refused
 /// rather than copied into the person's folder or onto a stick.
-pub fn open_built_iso(cache: &Path, reported: &str) -> Result<File> {
+pub fn open_built_iso(work: &Path, reported: &str) -> Result<File> {
     let outside =
         || OwnBackupError::Config(tr!("media_linux.iso_outside", path = reported).into_owned());
     let path = Path::new(reported);
@@ -903,7 +924,7 @@ pub fn open_built_iso(cache: &Path, reported: &str) -> Result<File> {
         });
     let name = path.file_name().ok_or_else(outside)?;
     if !plain
-        || path.parent() != Some(cache.join("builder").join("build").as_path())
+        || path.parent() != Some(work.join("builder").join("build").as_path())
         || !name.as_bytes().ends_with(b".iso")
     {
         return Err(outside());
@@ -916,7 +937,7 @@ pub fn open_built_iso(cache: &Path, reported: &str) -> Result<File> {
     let top = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
-        .open(cache)
+        .open(work)
         .map_err(unreadable)?;
     let dir_flags = libc::O_RDONLY | libc::O_DIRECTORY;
     let opened = open_at(&top, OsStr::new("builder"), dir_flags)
@@ -936,7 +957,7 @@ pub fn open_built_iso(cache: &Path, reported: &str) -> Result<File> {
     Ok(file)
 }
 
-// --- the cache ---------------------------------------------------------------------------
+// --- the build's folder -----------------------------------------------------------------
 
 /// Bytes a tree takes on disk, staying on its file system and never
 /// following a symlink (the builder holds a whole Debian).
@@ -967,28 +988,32 @@ pub fn dir_bytes(path: &Path) -> u64 {
     total
 }
 
-/// Where the build's script, configuration and cache are: the package's
-/// places, or (a development service) `OBK_MEDIA_SCRIPT`, `OBK_MEDIA_CONFIG`
-/// and `OBK_MEDIA_CACHE` — the service's own environment, set by root.
+/// Where the build's script and configuration are, where its temporary
+/// folder is made and where its log goes: the package's places, or (a
+/// development service) `OBK_MEDIA_SCRIPT`, `OBK_MEDIA_CONFIG`,
+/// `OBK_MEDIA_TMP` and `OBK_MEDIA_LOG_DIR` — the service's own environment,
+/// set by root.
 #[derive(Debug, Clone)]
 pub struct Paths {
     pub script: PathBuf,
     pub config: PathBuf,
-    pub cache: PathBuf,
+    /// The folder a build's temporary folder is made in.
+    pub work_parent: PathBuf,
+    pub log_dir: PathBuf,
 }
 
 impl Paths {
     pub fn locate() -> Paths {
-        let env = |name: &str, default: &str| {
+        let env = |name: &str| {
             std::env::var_os(name)
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(default))
         };
         Paths {
-            script: env("OBK_MEDIA_SCRIPT", SCRIPT),
-            config: env("OBK_MEDIA_CONFIG", CONFIG_DIR),
-            cache: env("OBK_MEDIA_CACHE", CACHE_DIR),
+            script: env("OBK_MEDIA_SCRIPT").unwrap_or_else(|| PathBuf::from(SCRIPT)),
+            config: env("OBK_MEDIA_CONFIG").unwrap_or_else(|| PathBuf::from(CONFIG_DIR)),
+            work_parent: env("OBK_MEDIA_TMP").unwrap_or_else(work_parent),
+            log_dir: env("OBK_MEDIA_LOG_DIR").unwrap_or_else(|| PathBuf::from(LOG_DIR)),
         }
     }
 
@@ -1005,8 +1030,127 @@ impl Paths {
     }
 
     fn log(&self) -> PathBuf {
-        self.cache.join("last-build.log")
+        self.log_dir.join(LOG_NAME)
     }
+
+    /// Where temporary folders of builds may be: this run's parent and the
+    /// package's, which a development run may have changed.
+    fn work_parents(&self) -> Vec<PathBuf> {
+        let mut out = vec![self.work_parent.clone()];
+        for p in WORK_PARENTS.map(PathBuf::from) {
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+        out
+    }
+}
+
+/// The first of [`WORK_PARENTS`] whose file system lets the builder run
+/// programs and use device files; the first one when none does (the build
+/// then fails in the tools' words rather than not starting).
+fn work_parent() -> PathBuf {
+    WORK_PARENTS
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| usable_for_build(p))
+        .unwrap_or_else(|| PathBuf::from(WORK_PARENTS[0]))
+}
+
+fn usable_for_build(dir: &Path) -> bool {
+    let Ok(c) = CString::new(dir.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: a valid C string and a zeroed out-structure.
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+        return false;
+    }
+    st.f_flag & (libc::ST_NOEXEC | libc::ST_NODEV | libc::ST_RDONLY) == 0
+}
+
+/// A new temporary folder for one build: root's, 0700, a name nobody could
+/// have made beforehand (`mkdir` of a random name, failing if it exists — the
+/// parent is world-writable).
+fn make_work_dir(parent: &Path) -> Result<PathBuf> {
+    let dir = tempfile::Builder::new()
+        .prefix(WORK_PREFIX)
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in(parent)
+        .map_err(|e| {
+            OwnBackupError::Config(
+                tr!(
+                    "media_linux.work_failed",
+                    path = parent.display(),
+                    error = e
+                )
+                .into_owned(),
+            )
+        })?;
+    // Never removed by `TempDir`'s drop: `remove_dir_all` would go down into
+    // the builder's bind mounts (/dev, /proc, /sys). The script removes it.
+    Ok(dir.keep())
+}
+
+/// Is `path` a temporary folder of a build: a real directory (not a
+/// symlink) named [`WORK_PREFIX`]…, owned by root — which nobody else can
+/// make in a world-writable folder.
+fn is_work_dir(path: &Path) -> bool {
+    let named = path
+        .file_name()
+        .is_some_and(|n| n.as_bytes().starts_with(WORK_PREFIX.as_bytes()));
+    named && std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir() && m.uid() == 0)
+}
+
+/// The folder of the build this service is running now: not a leftover.
+static RUNNING: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// What builds left behind: temporary folders of builds that did not end
+/// (a killed service) and the cache of older versions.
+fn leftovers(paths: &Paths) -> Vec<PathBuf> {
+    let running = RUNNING.lock().map(|r| r.clone()).unwrap_or(None);
+    let mut out = Vec::new();
+    for parent in paths.work_parents() {
+        let Ok(entries) = std::fs::read_dir(&parent) else {
+            continue;
+        };
+        out.extend(
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| is_work_dir(p) && Some(p) != running.as_ref()),
+        );
+    }
+    if std::fs::symlink_metadata(LEGACY_CACHE_DIR).is_ok_and(|m| m.is_dir()) {
+        out.push(PathBuf::from(LEGACY_CACHE_DIR));
+    }
+    out
+}
+
+/// Remove a build's folder: the script undoes whatever is mounted under it
+/// first (`rm` would go down into the builder's /dev and /proc), then
+/// removes it. Says whether it is gone.
+fn remove_work(paths: &Paths, work: &Path) -> bool {
+    let args = vec![
+        "purge".to_string(),
+        "--work".to_string(),
+        work.display().to_string(),
+    ];
+    let mut log = None;
+    if let Err(e) = run_script(
+        paths,
+        &args,
+        &CancelToken::default(),
+        &mut log,
+        &mut |l| info!(target: "media", "{l}"),
+    ) {
+        warn!(error = %e, path = %work.display(), "could not remove the medium's build folder");
+    }
+    // The old cache's own parent, when nothing else of ours is in it.
+    if work == Path::new(LEGACY_CACHE_DIR) {
+        let _ = std::fs::remove_dir(Path::new(LEGACY_CACHE_DIR).parent().unwrap_or(work));
+    }
+    !work.exists()
 }
 
 fn find_program(name: &str) -> Option<PathBuf> {
@@ -1041,7 +1185,9 @@ fn mirror_host() -> String {
 #[derive(Debug, Clone, Default)]
 pub struct Status {
     pub installed_version: Option<String>,
+    /// Where the build's temporary folder will be made.
     pub cache_dir: PathBuf,
+    /// What earlier builds left behind (removed before the next one).
     pub cache_bytes: u64,
     pub free_bytes: u64,
     pub need_bytes: u64,
@@ -1066,22 +1212,22 @@ pub fn status() -> Status {
             None
         }
     };
-    let cache_bytes = dir_bytes(&paths.cache);
-    // The cache's own file system: the directory, or the nearest parent that
-    // exists before the first build makes it.
-    let free = paths
-        .cache
-        .ancestors()
-        .find(|p| p.exists())
-        .and_then(|p| free_bytes(p).ok())
-        .unwrap_or(0);
-    let need = need_bytes(cache_bytes);
-    if free < need {
-        problems.push(no_space(&paths.cache, need, free));
+    let left = leftovers(&paths);
+    let cache_bytes = left.iter().map(|p| dir_bytes(p)).sum();
+    // What is left in the same folder is removed before the build starts.
+    let reclaimed: u64 = left
+        .iter()
+        .filter(|p| p.parent() == Some(paths.work_parent.as_path()))
+        .map(|p| dir_bytes(p))
+        .sum();
+    let free = free_bytes(&paths.work_parent).unwrap_or(0);
+    let need = need_bytes(0);
+    if free.saturating_add(reclaimed) < need {
+        problems.push(no_space(&paths.work_parent, need, free));
     }
     Status {
         installed_version,
-        cache_dir: paths.cache,
+        cache_dir: paths.work_parent,
         cache_bytes,
         free_bytes: free,
         need_bytes: need,
@@ -1365,20 +1511,6 @@ fn read_until_any(reader: &mut impl BufRead, out: &mut Vec<u8>) -> std::io::Resu
     }
 }
 
-/// The script's `clean`: the build tree goes (after its mounts are undone),
-/// the builder and the package cache stay.
-fn clean_build_tree(paths: &Paths) {
-    let mut log = None;
-    let args = vec![
-        "clean".to_string(),
-        "--work".to_string(),
-        paths.cache.display().to_string(),
-    ];
-    if let Err(e) = run_script(paths, &args, &CancelToken::default(), &mut log, &mut |_| {}) {
-        warn!(error = %e, "could not clean the medium's build tree");
-    }
-}
-
 /// What the build unit [`UNIT`], by its `ActiveState`, needs when the
 /// service starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1403,64 +1535,65 @@ pub fn leftover(active_state: &str) -> Leftover {
 /// At the service's start: a build unit an earlier service left behind (it
 /// was killed, or an upgrade stopped it mid-build — the unit is not in the
 /// service's cgroup and outlives it) is stopped, its trap undoing its
-/// mounts, and the script's `clean` runs once: whatever is still mounted
-/// under the builder is unmounted and the build tree goes; the builder and
-/// the package cache stay. Says whether there was such a unit.
+/// mounts; then every build folder left behind, and the cache of older
+/// versions, is removed. Says whether there was anything to clean.
 pub fn recover_abandoned_build() -> bool {
-    if !have_systemd() {
-        return false;
+    let mut found = false;
+    if have_systemd() {
+        let unit = format!("{UNIT}.service");
+        let state = Command::new("systemctl")
+            .args(["show", "--property=ActiveState", "--value", &unit])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        match leftover(&state) {
+            Leftover::Nothing => {}
+            Leftover::Stop => {
+                found = true;
+                systemctl(&["stop", &unit]);
+                systemctl(&["reset-failed", &unit]);
+            }
+            Leftover::Reset => {
+                found = true;
+                systemctl(&["reset-failed", &unit]);
+            }
+        }
     }
-    let unit = format!("{UNIT}.service");
-    let state = Command::new("systemctl")
-        .args(["show", "--property=ActiveState", "--value", &unit])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default();
-    match leftover(&state) {
-        Leftover::Nothing => return false,
-        Leftover::Stop => systemctl(&["stop", &unit]),
-        Leftover::Reset => {}
-    }
-    systemctl(&["reset-failed", &unit]);
     let paths = Paths::locate();
-    if paths.script.is_file() {
-        clean_build_tree(&paths);
+    let left = leftovers(&paths);
+    if !left.is_empty() && paths.script.is_file() {
+        found = true;
+        for dir in &left {
+            remove_work(&paths, dir);
+        }
     }
-    let _ = remove_tree(&paths.cache.join("input"));
-    true
+    found
 }
 
-/// Remove the builder, the package cache and everything else of the build.
+/// Remove what earlier builds left behind (see [`recover_abandoned_build`]).
 /// Returns the bytes freed.
 pub fn clear_cache() -> Result<u64> {
     let paths = Paths::locate();
     paths.check()?;
-    let before = dir_bytes(&paths.cache);
-    if before == 0 {
-        return Ok(0);
+    let mut freed = 0u64;
+    let mut kept = Vec::new();
+    for dir in leftovers(&paths) {
+        let before = dir_bytes(&dir);
+        if remove_work(&paths, &dir) {
+            freed += before;
+        } else {
+            freed += before.saturating_sub(dir_bytes(&dir));
+            kept.push(dir.display().to_string());
+        }
     }
-    let args = vec![
-        "purge".to_string(),
-        "--work".to_string(),
-        paths.cache.display().to_string(),
-    ];
-    let mut log = None;
-    let ended = run_script(
-        &paths,
-        &args,
-        &CancelToken::default(),
-        &mut log,
-        &mut |l| info!(target: "media", "{l}"),
-    )?;
-    let after = dir_bytes(&paths.cache);
-    if !ended.ok {
+    if !kept.is_empty() {
         return Err(OwnBackupError::Config(
-            tr!("media_linux.clear_failed", path = paths.cache.display()).into_owned(),
+            tr!("media_linux.clear_failed", path = kept.join(", ")).into_owned(),
         ));
     }
-    Ok(before.saturating_sub(after))
+    Ok(freed)
 }
 
 // --- the whole build --------------------------------------------------------------------------
@@ -1491,7 +1624,8 @@ pub struct BuildReport {
 }
 
 /// Build the medium; `progress` gets the stage, its percentage and a word
-/// about it.
+/// about it. Everything is done in a temporary folder that is removed when
+/// the build ends, however it ends.
 pub fn build(
     req: BuildRequest,
     cancel: &CancelToken,
@@ -1508,14 +1642,20 @@ pub fn build(
         )));
     }
 
+    // What earlier builds left (a killed service) goes first: its space is
+    // this build's.
+    for dir in leftovers(&paths) {
+        remove_work(&paths, &dir);
+    }
     // Space first: a build that runs out halfway wastes ten minutes.
-    std::fs::create_dir_all(&paths.cache)?;
-    std::fs::set_permissions(&paths.cache, std::fs::Permissions::from_mode(0o700))?;
-    let cached = dir_bytes(&paths.cache);
-    let need = need_bytes(cached);
-    let free = free_bytes(&paths.cache)?;
+    let need = need_bytes(0);
+    let free = free_bytes(&paths.work_parent)?;
     if free < need {
-        return Err(OwnBackupError::Config(no_space(&paths.cache, need, free)));
+        return Err(OwnBackupError::Config(no_space(
+            &paths.work_parent,
+            need,
+            free,
+        )));
     }
     let dest_free = req.out.free_bytes()?;
     if dest_free < DEST_MIN_BYTES {
@@ -1526,9 +1666,30 @@ pub fn build(
         )));
     }
 
+    let work = make_work_dir(&paths.work_parent)?;
+    info!(path = %work.display(), "the medium is built in a temporary folder");
+    if let Ok(mut r) = RUNNING.lock() {
+        *r = Some(work.clone());
+    }
+    let built = build_in(req, &paths, &work, cancel, progress);
+    if let Ok(mut r) = RUNNING.lock() {
+        *r = None;
+    }
+    if !remove_work(&paths, &work) {
+        warn!(path = %work.display(), "the medium's build folder was not removed completely");
+    }
+    built
+}
+
+fn build_in(
+    req: BuildRequest,
+    paths: &Paths,
+    work: &Path,
+    cancel: &CancelToken,
+    progress: &mut dyn FnMut(LinuxStage, u64, &str),
+) -> Result<BuildReport> {
     progress(LinuxStage::Builder, 0, &tr!("media_linux.detail_repack"));
-    let input = paths.cache.join("input");
-    remove_tree(&input)?;
+    let input = work.join("input");
     std::fs::create_dir_all(&input)?;
     let deb = input.join("own-backup.deb");
     let mut warnings = Vec::new();
@@ -1568,7 +1729,8 @@ pub fn build(
         return Err(OwnBackupError::Cancelled);
     }
 
-    let mut log = File::create(paths.log())
+    let mut log = std::fs::create_dir_all(&paths.log_dir)
+        .and_then(|_| File::create(paths.log()))
         .map_err(|e| warn!(error = %e, "no build log"))
         .ok();
     let args = vec![
@@ -1578,41 +1740,30 @@ pub fn build(
         "--deb".to_string(),
         deb.display().to_string(),
         "--work".to_string(),
-        paths.cache.display().to_string(),
+        work.display().to_string(),
     ];
     let mut tracker = Tracker::new();
-    let ended = run_script(&paths, &args, cancel, &mut log, &mut |line| {
+    let ended = run_script(paths, &args, cancel, &mut log, &mut |line| {
         if let Some(p) = tracker.feed(line) {
             progress(p.stage, p.percent, &p.detail);
         }
     });
     drop(log);
-    let ended = match ended {
-        Ok(e) => e,
-        Err(e) => {
-            clean_build_tree(&paths);
-            return Err(e);
-        }
-    };
+    let ended = ended?;
     if ended.cancelled {
-        // The script removed its tree on the signal; again in case it was
-        // killed before it could.
-        clean_build_tree(&paths);
         return Err(OwnBackupError::Cancelled);
     }
     let (iso_path, iso) = match (ended.ok, tracker.iso.clone()) {
-        (true, Some(reported)) => match open_built_iso(&paths.cache, &reported) {
+        (true, Some(reported)) => match open_built_iso(work, &reported) {
             Ok(file) => (PathBuf::from(reported), file),
             Err(e) => {
                 warn!(error = %e, "the build's ISO was refused");
-                clean_build_tree(&paths);
                 return Err(e);
             }
         },
         _ => {
-            let why = failure_text(&tracker, &paths);
+            let why = failure_text(&tracker, paths);
             warn!(%why, "the medium was not built");
-            clean_build_tree(&paths);
             return Err(OwnBackupError::Config(why));
         }
     };
@@ -1621,10 +1772,6 @@ pub fn build(
         .clone()
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
 
-    let finish = |paths: &Paths| {
-        clean_build_tree(paths);
-        let _ = remove_tree(&input);
-    };
     progress(LinuxStage::Iso, 96, &tr!("media_linux.detail_saving"));
     let saved = req.out.save(&iso, &version, cancel, &mut |pct| {
         progress(
@@ -1633,13 +1780,7 @@ pub fn build(
             &tr!("media_linux.detail_saving"),
         );
     });
-    let saved = match saved {
-        Ok(p) => p,
-        Err(e) => {
-            finish(&paths);
-            return Err(e);
-        }
-    };
+    let saved = saved?;
     let iso_bytes = iso.metadata().map(|m| m.len()).unwrap_or(0);
     info!(path = %saved.display(), mb = iso_bytes >> 20, "medium saved");
     progress(LinuxStage::Iso, 100, "");
@@ -1664,12 +1805,8 @@ pub fn build(
             );
             match written {
                 Ok(r) => Some(r),
-                Err(OwnBackupError::Cancelled) => {
-                    finish(&paths);
-                    return Err(OwnBackupError::Cancelled);
-                }
+                Err(OwnBackupError::Cancelled) => return Err(OwnBackupError::Cancelled),
                 Err(e) => {
-                    finish(&paths);
                     return Err(OwnBackupError::Device(
                         tr!(
                             "media_linux.stick_failed",
@@ -1682,7 +1819,6 @@ pub fn build(
             }
         }
     };
-    finish(&paths);
     Ok(BuildReport {
         iso_path: saved,
         iso_bytes,
@@ -1690,8 +1826,9 @@ pub fn build(
         from_installed,
         warnings,
         stick,
-        cache_bytes: dir_bytes(&paths.cache),
-        cache_dir: paths.cache,
+        // Nothing stays: the folder is removed as this returns.
+        cache_bytes: 0,
+        cache_dir: paths.work_parent.clone(),
     })
 }
 
@@ -1703,9 +1840,11 @@ fn failure_text(tracker: &Tracker, paths: &Paths) -> String {
     }
     match classify_failure(tracker.tail(), &mirror_host()) {
         ToolFailure::Network(host) => refusal("network", &host, &[]),
-        ToolFailure::NoSpace => {
-            tr!("media_linux.no_space_during", path = paths.cache.display()).into_owned()
-        }
+        ToolFailure::NoSpace => tr!(
+            "media_linux.no_space_during",
+            path = paths.work_parent.display()
+        )
+        .into_owned(),
         ToolFailure::Other => {
             let last: Vec<&str> = tracker.tail().collect();
             let last = last[last.len().saturating_sub(3)..].join(" / ");
@@ -2188,6 +2327,33 @@ mod tests {
         std::fs::rename(&build, dir.path().join("old-build")).unwrap();
         std::os::unix::fs::symlink(&elsewhere, &build).unwrap();
         refused(good.to_str().unwrap());
+    }
+
+    #[test]
+    fn every_build_gets_a_new_private_folder_and_only_root_s_count_as_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = make_work_dir(dir.path()).unwrap();
+        let b = make_work_dir(dir.path()).unwrap();
+        assert_ne!(a, b);
+        assert!(a
+            .file_name()
+            .unwrap()
+            .as_bytes()
+            .starts_with(WORK_PREFIX.as_bytes()));
+        let meta = std::fs::metadata(&a).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+        // The folder outlives the call: the script removes it, not a drop.
+        assert!(a.is_dir() && b.is_dir());
+        // A symlink with our name, and a folder with another, are never
+        // taken for a build's; ours counts only when root made it.
+        let link = dir.path().join(format!("{WORK_PREFIX}link"));
+        std::os::unix::fs::symlink("/", &link).unwrap();
+        assert!(!is_work_dir(&link));
+        std::fs::create_dir(dir.path().join("other")).unwrap();
+        assert!(!is_work_dir(&dir.path().join("other")));
+        assert_eq!(is_work_dir(&a), me().0 == 0);
+        let e = make_work_dir(&dir.path().join("none")).unwrap_err();
+        assert!(e.to_string().contains("none"), "{e}");
     }
 
     #[test]

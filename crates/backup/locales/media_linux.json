@@ -141,8 +141,12 @@
     "en": "The medium was not built. Last lines: %{last}. The whole log: %{log}"
   },
   "media_linux.clear_failed": {
-    "ru": "Кэш сборки носителя (%{path}) удалён не полностью.",
-    "en": "The medium's build cache (%{path}) was not removed completely."
+    "ru": "Остатки прошлых сборок носителя (%{path}) удалены не полностью.",
+    "en": "What earlier medium builds left (%{path}) was not removed completely."
+  },
+  "media_linux.work_failed": {
+    "ru": "Не удалось создать временную папку для сборки в %{path}: %{error}",
+    "en": "Could not make a temporary folder for the build in %{path}: %{error}"
   },
   "media_linux.stick_failed": {
     "ru": "ISO сохранён (%{path}), но флешка не записана: %{error}",

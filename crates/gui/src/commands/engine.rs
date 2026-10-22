@@ -852,8 +852,7 @@ pub async fn write_media_stick(
     Ok(report)
 }
 
-/// Linux: can the boot medium be built now (the service's answer, with the
-/// cache an earlier build left).
+/// Linux: can the boot medium be built now (the service's answer).
 #[tauri::command]
 pub async fn linux_media_status(
     state: State<'_, GuiState>,
@@ -880,7 +879,8 @@ pub async fn build_linux_media(
     Ok(report)
 }
 
-/// Linux: remove the medium's builder and package cache.
+/// Linux: remove what medium builds left behind (a build interrupted by a
+/// killed service, the cache of older versions).
 #[tauri::command]
 pub async fn clear_linux_media_cache(
     state: State<'_, GuiState>,

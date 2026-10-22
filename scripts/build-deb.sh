@@ -192,7 +192,7 @@ Version: $deb_version
 Architecture: $arch
 Maintainer: $holder
 Installed-Size: $installed_size
-Depends: $shlibs, libayatana-appindicator3-1, systemd, dbus, polkitd | policykit-1, mount, kmod
+Depends: $shlibs, libayatana-appindicator3-1, systemd, dbus, polkitd | policykit-1, mount, kmod, curl
 Recommends: lvm2, cryptsetup-bin, pkexec, ntfs-3g, libtss2-rc0t64 | libtss2-rc0,
  debootstrap, debian-archive-keyring
 Section: admin

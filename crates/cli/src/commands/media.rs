@@ -40,7 +40,8 @@ pub enum MediaCommand {
     WriteStick(WriteStickArgs),
     /// Linux: собрать носитель из установленной программы (Debian 13) в папку
     BuildLinux(BuildLinuxArgs),
-    /// Linux: кэш сборки носителя (сборщик и пакеты Debian); --clear удаляет его
+    /// Linux: где собирается носитель и что осталось от прерванных сборок
+    /// (и кэш старых версий); --clear удаляет остатки
     LinuxCache(LinuxCacheArgs),
     /// Остановить то, что служба делает сейчас: сборку носителя, запись
     /// флешки (как кнопка «Отмена» в окне)
@@ -72,7 +73,7 @@ pub struct BuildLinuxArgs {
 
 #[derive(Args)]
 pub struct LinuxCacheArgs {
-    /// Удалить кэш (следующая сборка скачает всё заново)
+    /// Удалить остатки прошлых сборок
     #[arg(long)]
     pub clear: bool,
 }
@@ -252,7 +253,7 @@ pub async fn run(args: MediaArgs) -> Result<()> {
                 watch_progress(&args.endpoint, &token).await
             };
             println!(
-                "Собираю носитель Linux в {out} … (первый раз — около 1 ГБ загрузки и 15 минут)"
+                "Собираю носитель Linux в {out} … (около 1 ГБ загрузки и 15 минут; временная папка сборки удаляется после неё)"
             );
             let report = client.build_linux_media(&options).await;
             if let Some(h) = watcher {
@@ -284,11 +285,6 @@ pub async fn run(args: MediaArgs) -> Result<()> {
                     (None, None) => {}
                 }
             }
-            println!(
-                "  кэш сборки: {} ({} МиБ; `media linux-cache --clear` удаляет)",
-                report.cache_dir,
-                report.cache_bytes >> 20
-            );
             for w in &report.warnings {
                 println!("  [!] {w}");
             }
@@ -300,10 +296,11 @@ pub async fn run(args: MediaArgs) -> Result<()> {
         MediaCommand::LinuxCache(c) => {
             if c.clear {
                 let r = client.clear_linux_media_cache().await.map_err(cfg)?;
-                println!("Кэш удалён: {} МиБ", r.freed_bytes >> 20);
+                println!("Остатки удалены: {} МиБ", r.freed_bytes >> 20);
             } else {
                 let s = client.linux_media_status().await.map_err(cfg)?;
-                println!("Кэш сборки: {} ({} МиБ)", s.cache_dir, s.cache_bytes >> 20);
+                println!("Временная папка сборки — в {}", s.cache_dir);
+                println!("Остатки прошлых сборок: {} МиБ", s.cache_bytes >> 20);
                 println!(
                     "Свободно: {} МиБ, для сборки нужно: {} МиБ",
                     s.free_bytes >> 20,

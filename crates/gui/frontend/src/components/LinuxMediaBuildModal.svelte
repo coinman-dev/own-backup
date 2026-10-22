@@ -1,10 +1,13 @@
 <script lang="ts">
-  // Linux: the boot medium built by the service, the way the Windows one is —
-  // the program makes the ISO itself and saves it into a folder the person
-  // chooses; a stick is written only when they tick «Записать на флешку» and
-  // pick one. The medium is Debian 13 with exactly the installed program
-  // (the service packs the installed package; a changed program file stops
-  // it), built with live-build as root in /var/cache/own-backup/media.
+  // Linux: the boot medium. First the person chooses how to get it: the ready
+  // ISO of the installed version from GitHub (downloaded by the window itself
+  // into their folder, checked against the release's SHA256SUMS), or a build
+  // by the service, the way the Windows medium is made — the ISO is saved
+  // into a folder the person chooses; a stick is written only when they tick
+  // «Записать на флешку» and pick one. The medium is Debian 13 with exactly
+  // the installed program (the service packs the installed package; a changed
+  // program file stops it), built with live-build as root in a temporary
+  // folder under /var/tmp that is removed when the build ends.
   //
   // Writing an ISO that already exists stays available as a link: that is
   // MediaStickModal, opened by the card.
@@ -14,6 +17,9 @@
   import { pickPath } from '../lib/pickPath.svelte';
   import { formatBytes } from '../lib/format';
   import type {
+    LinuxMediaDownload,
+    LinuxMediaDownloadProgress,
+    LinuxMediaRelease,
     LinuxMediaReport,
     LinuxMediaStatus,
     MediaProgress,
@@ -30,11 +36,17 @@
   }
   let { onClose, onWriteReady }: Props = $props();
 
+  // How the medium is got: asked first.
+  let way = $state<'ask' | 'download' | 'build'>('ask');
+
   let status = $state<LinuxMediaStatus | null>(null);
   let statusError: string | null = $state(null);
   let checking = $state(false);
-  let clearing = $state(false);
-  let cleared: string | null = $state(null);
+
+  // The ready ISO on GitHub: undefined while looking, null when there is none.
+  let release = $state<LinuxMediaRelease | null | undefined>(undefined);
+  let releaseError: string | null = $state(null);
+  let downloaded = $state<LinuxMediaDownload | null>(null);
 
   let outputDir = $state('');
   let toStick = $state(false);
@@ -51,11 +63,13 @@
   let error: string | null = $state(null);
 
   const chosen = $derived(sticks.find((s) => s.device === device) ?? null);
-  const finished = $derived(!!report);
+  const finished = $derived(!!report || !!downloaded);
   const stickReady = $derived(!toStick || (!!chosen && chosen.mounted.length === 0 && confirmed));
   const canStart = $derived(
-    !building && !report && !!status && status.problems.length === 0 &&
-    outputDir.trim().length > 0 && stickReady,
+    way === 'download'
+      ? !building && !finished && !!release && outputDir.trim().length > 0
+      : way === 'build' && !building && !finished && !!status && status.problems.length === 0 &&
+        outputDir.trim().length > 0 && stickReady,
   );
 
   // The stage clock, as in the Windows dialog: a step measured in minutes
@@ -79,6 +93,7 @@
 
   onMount(() => {
     check();
+    findRelease();
     api
       .defaultMediaFolder()
       .then((d) => {
@@ -86,10 +101,42 @@
       })
       .catch(() => {});
     const un = listen<MediaProgress>('media-progress', (e) => {
-      if (building) progress = e.payload;
+      if (building && way === 'build') progress = e.payload;
     });
-    return () => { un.then((f) => f()); };
+    const unDl = listen<LinuxMediaDownloadProgress>('linux-media-download', (e) => {
+      if (building && way === 'download') progress = downloadProgress(e.payload);
+    });
+    return () => {
+      un.then((f) => f());
+      unDl.then((f) => f());
+    };
   });
+
+  async function findRelease() {
+    release = undefined;
+    releaseError = null;
+    try {
+      release = await api.linuxMediaRelease();
+    } catch (e) {
+      release = null;
+      releaseError = errorText(e);
+    }
+  }
+
+  // The download's two steps in the build's stage list.
+  function downloadProgress(p: LinuxMediaDownloadProgress, finished = false): MediaProgress {
+    const verify = p.stage === 'verify';
+    return {
+      stages: [
+        { id: 'download', title: m.lmb_dl_stage_download() },
+        { id: 'verify', title: m.lmb_dl_stage_verify() },
+      ],
+      stage_index: verify ? 1 : 0,
+      percent: verify ? 0 : p.total > 0 ? Math.floor((p.received * 100) / p.total) : 0,
+      detail: verify ? '' : `${formatBytes(p.received)} / ${formatBytes(p.total)}`,
+      finished,
+    };
+  }
 
   async function check() {
     checking = true;
@@ -100,20 +147,6 @@
       statusError = errorText(e);
     } finally {
       checking = false;
-    }
-  }
-
-  async function clearCache() {
-    clearing = true;
-    cleared = null;
-    try {
-      const r = await api.clearLinuxMediaCache();
-      cleared = m.lmb_cache_cleared({ size: formatBytes(r.freed_bytes) });
-    } catch (e) {
-      cleared = errorText(e);
-    } finally {
-      clearing = false;
-      check();
     }
   }
 
@@ -176,6 +209,7 @@
 
   async function start() {
     if (!canStart) return;
+    if (way === 'download') return download();
     building = true;
     cancelling = false;
     error = null;
@@ -202,10 +236,27 @@
     }
   }
 
+  async function download() {
+    if (!release) return;
+    building = true;
+    cancelling = false;
+    error = null;
+    progress = downloadProgress({ stage: 'download', received: 0, total: release.size });
+    try {
+      downloaded = await api.downloadLinuxMedia(outputDir.trim());
+      progress = downloadProgress({ stage: 'verify', received: release.size, total: release.size }, true);
+    } catch (e) {
+      error = errorText(e);
+    } finally {
+      building = false;
+      cancelling = false;
+    }
+  }
+
   async function cancel() {
     cancelling = true;
     try {
-      await api.cancelEngineOp();
+      await (way === 'download' ? api.cancelLinuxMediaDownload() : api.cancelEngineOp());
     } catch {
       // The build ends on its own; the error, if any, arrives with it.
     }
@@ -233,9 +284,48 @@
           {m.lmb_intro_version({ version: status.installed_version })}
         {/if}
       </div>
-      <div class="needs">{m.lmb_needs()}</div>
+      {#if way === 'ask'}
+        <div class="choose">{m.lmb_choose()}</div>
+        <button class="way" onclick={() => (way = 'download')} disabled={!release}>
+          <span class="way-title">{m.lmb_way_download()}</span>
+          <span class="way-note">
+            {#if release === undefined}
+              {m.lmb_way_download_looking()}
+            {:else if release}
+              {m.lmb_way_download_note({ version: release.version, tag: release.tag, size: formatBytes(release.size) })}
+            {:else if releaseError}
+              {releaseError}
+            {:else}
+              {m.lmb_way_download_none()}
+            {/if}
+          </span>
+        </button>
+        {#if release === null}
+          <button class="lnk again" onclick={findRelease}>{m.lmb_check_again()}</button>
+        {/if}
+        <button class="way" onclick={() => (way = 'build')}>
+          <span class="way-title">{m.lmb_way_build()}</span>
+          <span class="way-note">{m.lmb_way_build_note()}</span>
+        </button>
+      {:else if way === 'download'}
+        {#if release}
+          <div class="needs">
+            {m.lmb_dl_intro({ version: release.version, tag: release.tag, size: formatBytes(release.size) })}
+          </div>
+        {/if}
+      {:else}
+        <div class="needs">{m.lmb_needs({ dir: status?.cache_dir ?? '/var/tmp' })}</div>
+      {/if}
 
-      {#if statusError}
+      {#if way !== 'ask' && !building && !finished}
+        <button class="lnk again" onclick={() => { way = 'ask'; error = null; progress = null; }}>
+          {m.lmb_other_way()}
+        </button>
+      {/if}
+
+      {#if way !== 'build'}
+        <!-- The build's checks and options below are the build's only. -->
+      {:else if statusError}
         <div class="warn-box">{@render warnIcon()}<span>{statusError}</span></div>
       {:else if status && status.problems.length > 0 && !building && !finished}
         {#each status.problems as p}
@@ -246,17 +336,7 @@
         </button>
       {/if}
 
-      {#if status && status.cache_bytes > 0 && !building}
-        <div class="cache">
-          <span>{m.lmb_cache({ size: formatBytes(status.cache_bytes), path: status.cache_dir })}</span>
-          <button class="lnk" onclick={clearCache} disabled={clearing}>
-            {clearing ? m.lmb_cache_clearing() : m.lmb_cache_clear()}
-          </button>
-        </div>
-      {/if}
-      {#if cleared}<div class="muted">{cleared}</div>{/if}
-
-      {#if !building && !finished}
+      {#if way === 'build' && !building && !finished}
         <label class="opt">
           <input type="checkbox" checked={toStick}
                  onchange={(e) => setToStick((e.currentTarget as HTMLInputElement).checked)} />
@@ -366,12 +446,22 @@
               </span>
             </div>
           {/if}
-          <div class="rep-row">
-            <span>{m.lmb_rep_cache()}</span>
-            <span>{formatBytes(report.cache_bytes)} · {report.cache_dir}</span>
-          </div>
           {#each report.warnings as w}<div class="warn">{w}</div>{/each}
           <div class="rep-note">{report.stick ? m.ms_rep_note() : m.lmb_rep_note()}</div>
+        </div>
+      {/if}
+
+      {#if downloaded}
+        <div class="report">
+          <div class="rep-head">{m.mb_rep_ready()}</div>
+          <div class="rep-row"><span>{m.mb_rep_file()}</span><span>{downloaded.iso_path}</span></div>
+          <div class="rep-row"><span>{m.mb_rep_size()}</span><span>{formatBytes(downloaded.iso_bytes)}</span></div>
+          <div class="rep-row">
+            <span>{m.lmb_rep_program()}</span>
+            <span>{downloaded.version} · {m.lmb_rep_downloaded({ tag: downloaded.tag })}</span>
+          </div>
+          <div class="rep-note">{m.lmb_rep_note()}</div>
+          <button class="lnk ready" onclick={onWriteReady}>{m.lmb_write_ready()}</button>
         </div>
       {/if}
     </div>
@@ -390,7 +480,9 @@
           {cancelling ? m.lmb_cancelling() : m.common_cancel()}
         </button>
       {:else}
-        <button class="btn primary" onclick={start} disabled={!canStart}>{m.mb_start()}</button>
+        <button class="btn primary" onclick={start} disabled={!canStart}>
+          {way === 'download' ? m.lmb_dl_start() : m.mb_start()}
+        </button>
       {/if}
     </div>
   </div>
@@ -408,7 +500,12 @@
   .needs { margin-top: 10px; font-size: 12px; color: var(--text-muted); line-height: 1.5; }
   .warn-box { display: flex; align-items: flex-start; gap: 10px; font-size: 12px; margin-top: 10px; line-height: 1.45; padding: 10px 12px; border-radius: 8px; background: var(--warning-soft); border: 1px solid var(--warning-line); color: var(--warning-text); word-break: break-word; }
   .w-icon { flex: none; margin-top: 1px; }
-  .cache { display: flex; gap: 14px; align-items: baseline; margin-top: 10px; font-size: 12px; color: var(--text-muted); }
+  .choose { margin-top: 14px; font-size: 13px; font-weight: 600; color: var(--head); }
+  .way { display: block; width: 100%; text-align: left; margin-top: 10px; padding: 12px 14px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--card-bg); cursor: pointer; font-family: var(--font); transition: background-color .15s ease, border-color .15s ease; }
+  .way:hover:not(:disabled) { background: var(--panel2); border-color: var(--primary); }
+  .way:disabled { cursor: default; opacity: .6; }
+  .way-title { display: block; font-size: 14px; font-weight: 600; color: var(--head); }
+  .way-note { display: block; margin-top: 3px; font-size: 12px; color: var(--text-muted); line-height: 1.45; }
   .opt { display: flex; align-items: flex-start; gap: 9px; font-size: 13px; color: var(--head); margin-top: 16px; cursor: pointer; }
   .opt input { margin-top: 2px; flex-shrink: 0; }
   .opt-note { display: block; font-size: 12px; color: var(--text-muted); line-height: 1.4; margin-top: 2px; }

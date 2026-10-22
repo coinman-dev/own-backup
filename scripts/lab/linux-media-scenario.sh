@@ -260,14 +260,14 @@ stage_build() {
     expect build:stick-written "$RUN/evidence/build-2.txt" '^Записано и проверено' "the stick is written and read back"
     expect build:stick-logs "$RUN/evidence/build-2.txt" "^Раздел для журналов: ${dev}3\$" "the log partition is ${dev}3"
     "${vm[@]}" ssh -- "ls -l $out; sudo own-backup-cli media linux-cache;
-        echo mounts=\$(grep -c ' /var/cache/own-backup' /proc/self/mountinfo);
-        echo chroot=\$(sudo test -d /var/cache/own-backup/media/builder/build/chroot && echo yes || echo no);
+        echo mounts=\$(grep -c -e ' /var/tmp/own-backup-media' -e ' /var/cache/own-backup' /proc/self/mountinfo);
+        echo work=\$(sudo find /var/tmp /var/lib/own-backup -maxdepth 1 -name 'own-backup-media.*' | wc -l);
         echo unit=\$(systemctl is-active own-backup-media-build.service)" \
         | tee "$RUN/evidence/build-after.txt"
-    expect build:no-mounts "$RUN/evidence/build-after.txt" '^mounts=0$' "nothing is left mounted in the cache"
-    expect build:tree-dropped "$RUN/evidence/build-after.txt" '^chroot=no$' "the build tree is removed after a build"
+    expect build:no-mounts "$RUN/evidence/build-after.txt" '^mounts=0$' "nothing is left mounted"
+    expect build:work-removed "$RUN/evidence/build-after.txt" '^work=0$' "the temporary build folder is removed after a build"
     expect build:unit-gone "$RUN/evidence/build-after.txt" '^unit=(inactive|unknown)$' "the transient unit is gone"
-    expect build:cache-kept "$RUN/evidence/build-after.txt" '^Кэш сборки: .* \([1-9][0-9]+ МиБ\)$' "the builder and the package cache stay"
+    expect build:nothing-left "$RUN/evidence/build-after.txt" '^Остатки прошлых сборок: 0 МиБ$' "nothing of the build stays"
 
     echo "=== build 3: cancelled halfway"
     # The client's pid, not pgrep: this very shell's command line names the build too.
@@ -277,9 +277,8 @@ stage_build() {
         sleep 20; sudo own-backup-cli media cancel
         for i in \$(seq 1 150); do [ -d /proc/\$pid ] || break; sleep 2; done
         cat /tmp/build-3.txt; ls -la $out;
-        echo mounts=\$(grep -c ' /var/cache/own-backup' /proc/self/mountinfo);
-        echo chroot=\$(sudo test -d /var/cache/own-backup/media/builder/build/chroot && echo yes || echo no);
-        echo builder=\$(sudo test -x /var/cache/own-backup/media/builder/usr/bin/lb && echo yes || echo no);
+        echo mounts=\$(grep -c -e ' /var/tmp/own-backup-media' -e ' /var/cache/own-backup' /proc/self/mountinfo);
+        echo work=\$(sudo find /var/tmp /var/lib/own-backup -maxdepth 1 -name 'own-backup-media.*' | wc -l);
         echo unit=\$(systemctl is-active own-backup-media-build.service)" \
         | tee "$RUN/evidence/build-3.txt"
     expect build:cancelled "$RUN/evidence/build-3.txt" 'сборка носителя отменена' "the build is cancelled"
@@ -289,8 +288,7 @@ stage_build() {
         check build:cancel-no-iso PASS "no partial ISO in the folder"
     fi
     expect build:cancel-mounts "$RUN/evidence/build-3.txt" '^mounts=0$' "nothing left mounted after the cancel"
-    expect build:cancel-tree "$RUN/evidence/build-3.txt" '^chroot=no$' "the half-built tree is removed"
-    expect build:cancel-builder "$RUN/evidence/build-3.txt" '^builder=yes$' "the builder is kept"
+    expect build:cancel-work "$RUN/evidence/build-3.txt" '^work=0$' "the temporary build folder is removed after the cancel"
     expect build:cancel-unit "$RUN/evidence/build-3.txt" '^unit=(inactive|unknown)$' "the transient unit is gone"
 
     "${vm[@]}" get "$iso" "$RUN/built.iso"

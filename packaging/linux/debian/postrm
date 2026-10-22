@@ -10,6 +10,22 @@ if [ "$1" = "remove" ]; then
     deb-systemd-helper mask own-backup.service >/dev/null || true
 fi
 
+# A medium build the removal stopped (prerm) leaves its temporary folder;
+# nothing of a build is meant to outlive it. Only root's folders of that
+# name (nobody else can make one) and never with something mounted inside.
+if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+    for d in /var/tmp/own-backup-media.*; do
+        if [ ! -d "$d" ] || [ -L "$d" ] || [ "$(stat -c %u "$d")" != 0 ]; then
+            continue
+        fi
+        if grep -q " $d/" /proc/self/mountinfo 2>/dev/null; then
+            echo "own-backup: something is still mounted under $d; kept" >&2
+        else
+            rm -rf --one-file-system "$d"
+        fi
+    done
+fi
+
 if [ "$1" = "purge" ]; then
     deb-systemd-helper purge own-backup.service >/dev/null || true
     deb-systemd-helper unmask own-backup.service >/dev/null || true
@@ -25,7 +41,7 @@ if [ "$1" = "purge" ]; then
         echo "own-backup: an engine still holds its socket; /var/lib/own-backup was kept" >&2
     else
         rm -rf --one-file-system /var/lib/own-backup /var/log/own-backup
-        # The boot medium's builder and package cache (a few GiB), unless a
+        # The cache older versions kept for the boot medium (a few GiB), unless a
         # build stopped by force left something mounted inside it.
         if [ -d /var/cache/own-backup ]; then
             if grep -q ' /var/cache/own-backup/' /proc/self/mountinfo 2>/dev/null; then

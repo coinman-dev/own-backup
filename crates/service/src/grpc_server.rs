@@ -2775,8 +2775,9 @@ impl BackupService for BackupServiceImpl {
         }
     }
 
-    /// Linux: remove the medium's builder and package cache. Not while a
-    /// build (or anything else) holds the slot.
+    /// Linux: remove what medium builds left behind (folders of builds a
+    /// killed service did not finish, the cache of older versions). Not
+    /// while a build (or anything else) holds the slot.
     async fn clear_linux_media_cache(
         &self,
         req: Request<Empty>,
@@ -2788,7 +2789,7 @@ impl BackupService for BackupServiceImpl {
             crate::polkit::authorize(&req, crate::polkit::Action::BuildMedia).await?;
             let slot = self.reserve(
                 &tr!("grpc_server.busy_media_cache"),
-                own_backup_backup::media_linux_build::CACHE_DIR,
+                own_backup_backup::media_linux_build::WORK_PARENTS[0],
             )?;
             let freed = tokio::task::spawn_blocking(move || {
                 let _slot = slot;
@@ -2800,7 +2801,7 @@ impl BackupService for BackupServiceImpl {
                 own_backup_common::OwnBackupError::Config(m) => Status::failed_precondition(m),
                 other => Status::failed_precondition(other.to_string()),
             })?;
-            info!(mb = freed >> 20, "the medium's build cache was removed");
+            info!(mb = freed >> 20, "what medium builds left was removed");
             json_reply(&LinuxMediaCacheClearedDto { freed_bytes: freed })
         }
         #[cfg(not(target_os = "linux"))]

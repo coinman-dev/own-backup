@@ -870,12 +870,13 @@ pub async fn run_main_loop(
         ));
         // A medium build runs as a transient unit outside this cgroup, so
         // an engine killed or upgraded mid-build leaves it running, its
-        // binds under the cache mounted. Stopped and cleaned before any
-        // build may start: the slot is held until then.
+        // binds under its temporary folder mounted. Stopped and the folder
+        // removed (and the cache of older versions) before any build may
+        // start: the slot is held until then.
         let slot = busy
             .reserve(own_backup_core::busy::Doing::new(
                 tr!("main.busy_media_cleanup"),
-                own_backup_backup::media_linux_build::CACHE_DIR,
+                own_backup_backup::media_linux_build::WORK_PARENTS[0],
             ))
             .ok();
         std::thread::spawn(move || {

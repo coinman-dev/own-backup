@@ -1257,6 +1257,28 @@ export interface LinuxMediaStatus {
   /** Empty when the package is not installed. */
   installed_version: string;
   cache_dir: string;
+/** The ready Linux medium of the installed version on GitHub. */
+export interface LinuxMediaRelease {
+  version: string;
+  tag: string;
+  size: number;
+}
+
+/** A ready Linux medium downloaded from GitHub. */
+export interface LinuxMediaDownload {
+  iso_path: string;
+  iso_bytes: number;
+  version: string;
+  tag: string;
+}
+
+/** The `linux-media-download` event. */
+export interface LinuxMediaDownloadProgress {
+  stage: 'download' | 'verify';
+  received: number;
+  total: number;
+}
+
   cache_bytes: number;
   free_bytes: number;
   need_bytes: number;

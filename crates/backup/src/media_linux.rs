@@ -486,9 +486,161 @@ pub fn iso_file_name(version: &str, n: u32) -> String {
     }
 }
 
+// --- the ready ISO on GitHub ---------------------------------------------------------------
+
+/// Where the window looks for a ready medium: this repository's releases.
+pub const GITHUB_REPO: &str = "coinman-dev/own-backup";
+
+/// The releases, newest first, as GitHub's API lists them.
+pub fn github_releases_url() -> String {
+    format!("https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=100")
+}
+
+/// The name a ready medium of `version` has among a release's assets:
+/// `OwnBackup-Linux-0.1.5.beta-4_amd64.iso` for the package `0.1.5~beta-4`.
+/// The whole Debian version, revision included: the medium carries exactly
+/// one build of the program. Characters GitHub does not keep in an asset's
+/// name (`~`, `+`, `:`) are dots, as GitHub itself would make them; the epoch
+/// is dropped.
+pub fn release_asset_name(version: &str) -> String {
+    let v = version.split_once(':').map_or(version, |(_, v)| v);
+    let v: String = v
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '.'
+            }
+        })
+        .collect();
+    format!("OwnBackup-Linux-{v}_amd64.iso")
+}
+
+/// A ready medium found in a release.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseIso {
+    pub tag: String,
+    pub name: String,
+    pub size: u64,
+    pub url: String,
+    /// The release's checksum lists (`SHA256SUMS`, `SHA256SUMS.txt` — the
+    /// Windows installer's list is the latter); one of them must name the ISO.
+    pub sums_urls: Vec<String>,
+}
+
+/// The newest published (not draft) release in GitHub's answer that has
+/// the medium of `version`. `None` when no release has it.
+pub fn find_release_iso(releases: &serde_json::Value, version: &str) -> Option<ReleaseIso> {
+    let want = release_asset_name(version);
+    releases.as_array()?.iter().find_map(|r| {
+        if r.get("draft").and_then(|d| d.as_bool()) == Some(true) {
+            return None;
+        }
+        let assets = r.get("assets")?.as_array()?;
+        fn name_of(a: &serde_json::Value) -> Option<&str> {
+            a.get("name").and_then(|n| n.as_str())
+        }
+        let url_of = |a: &serde_json::Value| {
+            a.get("browser_download_url")
+                .and_then(|u| u.as_str())
+                .filter(|u| u.starts_with("https://"))
+                .map(str::to_string)
+        };
+        let iso = assets.iter().find(|a| name_of(a) == Some(want.as_str()))?;
+        let sums_urls = assets
+            .iter()
+            .filter(|a| matches!(name_of(a), Some("SHA256SUMS" | "SHA256SUMS.txt")))
+            .filter_map(url_of)
+            .collect();
+        Some(ReleaseIso {
+            tag: r.get("tag_name")?.as_str()?.to_string(),
+            name: want.clone(),
+            size: iso.get("size")?.as_u64()?,
+            url: url_of(iso)?,
+            sums_urls,
+        })
+    })
+}
+
+/// The SHA-256 a checksum list (`sha256sum`'s lines, text or binary mode)
+/// gives for `name`, in lower case.
+pub fn sha256_listed(sums: &str, name: &str) -> Option<String> {
+    sums.lines().find_map(|line| {
+        let (hash, file) = line.trim_end().split_once(char::is_whitespace)?;
+        let file = file.trim_start().trim_start_matches('*');
+        (file == name && hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| hash.to_ascii_lowercase())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_ready_medium_is_the_exact_build_in_the_newest_release_that_has_it() {
+        assert_eq!(
+            release_asset_name("0.1.5~beta-4"),
+            "OwnBackup-Linux-0.1.5.beta-4_amd64.iso"
+        );
+        assert_eq!(
+            release_asset_name("1:2.0+git1-1"),
+            "OwnBackup-Linux-2.0.git1-1_amd64.iso"
+        );
+        let asset = |name: &str, size: u64| {
+            serde_json::json!({
+                "name": name,
+                "size": size,
+                "browser_download_url": format!("https://github.com/x/releases/download/t/{name}"),
+            })
+        };
+        let releases = serde_json::json!([
+            { "tag_name": "draft", "draft": true,
+              "assets": [asset("OwnBackup-Linux-0.1.5.beta-4_amd64.iso", 1)] },
+            { "tag_name": "other", "draft": false,
+              "assets": [asset("OwnBackup-Linux-0.1.5.beta-3_amd64.iso", 2)] },
+            { "tag_name": "linux-test-0.1.5-beta.4", "draft": false,
+              "assets": [asset("own-backup_0.1.5.beta-4_amd64.deb", 3),
+                         asset("OwnBackup-Linux-0.1.5.beta-4_amd64.iso", 600),
+                         asset("SHA256SUMS.txt", 90),
+                         asset("SHA256SUMS", 100)] },
+            { "tag_name": "older", "draft": false,
+              "assets": [asset("OwnBackup-Linux-0.1.5.beta-4_amd64.iso", 5)] },
+        ]);
+        let found = find_release_iso(&releases, "0.1.5~beta-4").unwrap();
+        assert_eq!(found.tag, "linux-test-0.1.5-beta.4");
+        assert_eq!(found.size, 600);
+        assert!(found
+            .url
+            .ends_with("/OwnBackup-Linux-0.1.5.beta-4_amd64.iso"));
+        assert_eq!(found.sums_urls.len(), 2);
+        assert!(found.sums_urls.iter().any(|u| u.ends_with("/SHA256SUMS")));
+        assert!(found
+            .sums_urls
+            .iter()
+            .any(|u| u.ends_with("/SHA256SUMS.txt")));
+        assert!(find_release_iso(&releases, "0.1.5~beta-5").is_none());
+        // GitHub's answer for a private repository, or anything else.
+        assert!(
+            find_release_iso(&serde_json::json!({"message": "Not Found"}), "0.1.5~beta-4")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn the_checksum_of_the_named_file_is_read_from_the_list() {
+        let a = "a".repeat(64);
+        let b = "B".repeat(64);
+        let sums = format!("{a}  own-backup.deb\n{b} *OwnBackup-Linux-1_amd64.iso\nshort  x.iso\n");
+        assert_eq!(sha256_listed(&sums, "own-backup.deb"), Some(a));
+        assert_eq!(
+            sha256_listed(&sums, "OwnBackup-Linux-1_amd64.iso"),
+            Some("b".repeat(64))
+        );
+        assert_eq!(sha256_listed(&sums, "x.iso"), None);
+        assert_eq!(sha256_listed(&sums, "missing.iso"), None);
+    }
 
     fn feed_all(t: &mut Tracker, text: &str) -> Vec<Progress> {
         text.lines().filter_map(|l| t.feed(l)).collect()

@@ -41,6 +41,8 @@ import type {
   LinuxMediaBuild,
   LinuxMediaReport,
   LinuxMediaStatus,
+  LinuxMediaRelease,
+  LinuxMediaDownload,
   ServiceStatus,
   MountBackendStatus,
   ArchiveImageInfo,
@@ -82,7 +84,12 @@ export const api = {
   linuxMediaStatus: () => invoke<LinuxMediaStatus>('linux_media_status'),
   buildLinuxMedia: (options: LinuxMediaBuild) =>
     invoke<LinuxMediaReport>('build_linux_media', { options }),
-  clearLinuxMediaCache: () => invoke<{ freed_bytes: number }>('clear_linux_media_cache'),
+  // Linux: the ready medium of the installed version from GitHub, downloaded
+  // by the window itself (no service, no password).
+  linuxMediaRelease: () => invoke<LinuxMediaRelease | null>('linux_media_release'),
+  downloadLinuxMedia: (outputDir: string) =>
+    invoke<LinuxMediaDownload>('download_linux_media', { outputDir }),
+  cancelLinuxMediaDownload: () => invoke<void>('cancel_linux_media_download'),
   defaultMediaFolder: () => invoke<string>('default_media_folder'),
   driveSignature: () => invoke<number>('drive_signature'),
   // EFI, recovery and vendor partitions without a letter (the service decides

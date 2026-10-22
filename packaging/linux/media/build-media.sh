@@ -14,13 +14,15 @@
 #
 #   build-media.sh build --config DIR --deb FILE --work DIR
 #   build-media.sh clean --work DIR   # the build tree goes; builder and package cache stay
-#   build-media.sh purge --work DIR   # everything under DIR goes
+#   build-media.sh purge --work DIR   # DIR and everything under it goes
 #
 # How: the build runs inside a minimal Debian trixie tree made by debootstrap
 # (DIR/builder), with Debian's own live-build. The host's live-build is not
 # used: Ubuntu ships an old fork (3.0~a57) that cannot build a trixie medium
 # with Secure Boot. The tree and live-build's package cache (builder/build/
-# cache) are kept between runs, so a rebuild downloads nothing but updates.
+# cache) stay in DIR until `purge`: the service gives every build a new
+# temporary DIR and purges it afterwards; the repository's script keeps its
+# DIR, so a rebuild there downloads nothing but updates.
 #
 # Needs: root, debootstrap and debian-archive-keyring on the host, network to
 # the Debian mirror (OBK_MEDIA_MIRROR, default http://deb.debian.org/debian/;
@@ -139,6 +141,7 @@ case "$cmd" in
         unmount_under "$work"
         if [[ -d $work ]]; then
             find "$work" -mindepth 1 -maxdepth 1 -exec rm -rf --one-file-system {} +
+            rmdir "$work"
         fi
         exit 0
         ;;
