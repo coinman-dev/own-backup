@@ -24,7 +24,7 @@ use crate::block_reader::{BlockReader, RawVolumeBlockReader};
 use crate::efivars::BootBackup;
 use crate::engine_core::platform::{
     userspace_vhdx, DiskIdentity, DiskPlatform, DiskRef, DiskWindow, EnginePlatform, FinishedImage,
-    NativeUsedMap, SourceSession, VolumeSpan,
+    NativeUsedMap, PhysicalVolume, PvVolume, SourceSession, VolumeSpan,
 };
 use crate::exclusions::{ByteRanges, ExcludedPath, ExclusionScan};
 use crate::linux_device::LinuxRawDevice;
@@ -96,6 +96,12 @@ impl LinuxPlatform {
         };
         let read_path = snapshot.snapshot_device_path.clone();
         let mode = snapshot.metadata.get("mode").map(String::as_str);
+        // A physical volume in use: its logical volumes, each with its own
+        // answer to the key store rule.
+        let pv = match own_backup_snapshot::linux::pv_layout(snapshot)? {
+            Some(layout) => Some(physical_volume_of(&layout)?),
+            None => None,
+        };
         // An idle device holds still only while nobody else can take it:
         // claimed exclusively, it cannot be mounted (or claimed by mkfs,
         // device-mapper, md) until the session lets go (decision R5). Readers
@@ -107,12 +113,44 @@ impl LinuxPlatform {
         Ok(LinuxSession {
             key_store,
             read_path,
-            snapshot: matches!(mode, Some("lvm" | "dm")),
+            snapshot: matches!(mode, Some("lvm" | "dm" | "pv")),
             frozen: own_backup_snapshot::linux::is_frozen(snapshot),
             quiesced: own_backup_snapshot::linux::taken_frozen(snapshot),
             _hold: hold,
+            pv,
         })
     }
+}
+
+/// The engine's view of a physical volume's snapshot: each logical volume
+/// read from its snapshot, which holds still and was taken frozen, and
+/// whether the service's key directory is on it — asked of the volume
+/// itself, whose extents now run through the snapshot's layer.
+fn physical_volume_of(layout: &own_backup_common::lvm_pv::PvSnapshot) -> Result<PhysicalVolume> {
+    let mut volumes = Vec::with_capacity(layout.volumes.len());
+    for v in &layout.volumes {
+        let name = own_backup_snapshot::pv::lv_display(&v.name);
+        let key_store = match crate::seal::local::key_store_rule(&v.origin) {
+            crate::seal::local::KeyStoreRule::Nothing => false,
+            crate::seal::local::KeyStoreRule::ExcludeByName => true,
+            crate::seal::local::KeyStoreRule::Refuse(why) => {
+                return Err(crate::engine_core::volume_exclusions::key_store_refusal(
+                    &format!("{} ({name})", layout.device),
+                    &why,
+                ))
+            }
+        };
+        volumes.push(PvVolume {
+            name,
+            read_path: v.snapshot.clone(),
+            len: v.size,
+            segments: v.segments.clone(),
+            frozen: true,
+            quiesced: true,
+            key_store,
+        });
+    }
+    Ok(PhysicalVolume { volumes })
 }
 
 /// Claim the idle device at `path` for the length of a copy (`O_EXCL` on a
@@ -150,6 +188,8 @@ pub(crate) struct LinuxSession {
     key_store: bool,
     /// The exclusive claim on an idle device, held until the session ends.
     _hold: Option<std::fs::File>,
+    /// An LVM physical volume held through its logical volumes' snapshots.
+    pv: Option<PhysicalVolume>,
 }
 
 impl SourceSession for LinuxSession {
@@ -185,6 +225,10 @@ impl SourceSession for LinuxSession {
 
     fn must_exclude_key_store(&self) -> bool {
         self.key_store
+    }
+
+    fn physical_volume(&self) -> Option<&PhysicalVolume> {
+        self.pv.as_ref()
     }
 }
 

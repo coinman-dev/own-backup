@@ -178,6 +178,8 @@ fn backup_disk_inner<P: DiskPlatform>(
     // The service key directory was on one of the partitions and is not in
     // the copy (decision 6/E4).
     let mut key_store_excluded = false;
+    // Excluded NTFS names on logical volumes no removal pass can reach.
+    let mut pv_names_kept: Vec<String> = Vec::new();
     for p in &req.partitions {
         let entry = layout
             .partitions
@@ -230,6 +232,81 @@ fn backup_disk_inner<P: DiskPlatform>(
         };
         let patterns_windows = with_key_store(&req.exclusion_patterns_windows);
         let patterns_linux = with_key_store(&req.exclusion_patterns_linux);
+
+        // An LVM physical volume in use: its logical volumes are read from
+        // their snapshots, each through its own map and exclusions, and the
+        // rest from the partition itself (`disk_pv`).
+        if let Some(pv) = session.physical_volume().cloned() {
+            let part_len = P::Dev::open_read(&read_path)?.len();
+            let slot_len = (entry.last_lba + 1 - entry.first_lba) * sector;
+            if part_len > slot_len {
+                return Err(OwnBackupError::Config(format!(
+                    "partition {} volume ({part_len} B) exceeds its GPT slot ({slot_len} B)",
+                    p.part_index
+                )));
+            }
+            let mut pvp = super::disk_pv::prepare_pv(
+                platform,
+                &pv,
+                &read_path,
+                part_len,
+                p.part_index,
+                &source,
+                req.block_size,
+                &req.exclusion_patterns_windows,
+                &req.exclusion_patterns_linux,
+                key_store,
+                |done, total| {
+                    progress(&BackupProgress {
+                        backup_id: "prepare".into(),
+                        status: BackupStatus::Running,
+                        blocks_done: done,
+                        blocks_total: total,
+                        bytes_written: 0,
+                        speed_bps: 0,
+                        categories: None,
+                        excluded: None,
+                    })
+                },
+            )?;
+            excluded_files += pvp.excluded_files;
+            excluded_bytes += pvp.excluded_bytes;
+            if let Some(c) = &pvp.categories {
+                categories.get_or_insert_with(Default::default).merge(c);
+            }
+            scan_skips.append(&mut pvp.skips);
+            pv_names_kept.append(&mut pvp.names_kept);
+            key_store_excluded |= pvp.key_store_excluded;
+            let used = std::mem::replace(&mut pvp.used, Box::new(AllUsedMap::new(0)));
+            info!(
+                part = p.part_index,
+                volumes = pv.volumes.len(),
+                used_blocks = used.used_block_count(),
+                offset = part_offset,
+                "whole-disk backup: partition prepared (LVM physical volume)"
+            );
+            prepared.push(PreparedPartition {
+                part_index: p.part_index,
+                device: source,
+                read_path,
+                luks: None,
+                bitlocker: None,
+                locked_window: None,
+                ro_guard: None,
+                volume_len: part_len,
+                part_offset,
+                filesystem: super::disk_pv::PV_FILESYSTEM.into(),
+                luks_header: None,
+                zero_ranges: ByteRanges::new(),
+                patches: Vec::new(),
+                removal_paths: Vec::new(),
+                container: None,
+                pv: Some(pvp),
+                used,
+                session,
+            });
+            continue;
+        }
 
         // What sort of container this partition is, asked of its first sectors
         // and of nobody's memory. Read whether or not a passphrase came with
@@ -507,6 +584,7 @@ fn backup_disk_inner<P: DiskPlatform>(
             patches: pm.patches,
             removal_paths: pm.removal_paths,
             container,
+            pv: None,
             used,
             session,
         });
@@ -812,6 +890,10 @@ fn backup_disk_inner<P: DiskPlatform>(
                 (None, Some((disk, off, len))) => {
                     Box::new(disk_window::<P::Dev>(disk, *off, *len)?)
                 }
+                (None, None) if prep.pv.is_some() => {
+                    let pv = prep.pv.as_ref().expect("checked");
+                    Box::new(pv.open::<P::Dev>(&prep.read_path)?)
+                }
                 (None, None) => {
                     let dev = P::Dev::open_read(&prep.read_path)?;
                     match &prep.luks {
@@ -929,7 +1011,7 @@ fn backup_disk_inner<P: DiskPlatform>(
     //     (valid backup), only a post-merge failure fails the run — cannot break
     //     a working backup. The content is already zeroed either way, so no
     //     excluded data leaks even when this pass is skipped.
-    let removal: Vec<(u64, u64, Vec<crate::exclusions::ExcludedPath>)> = prepared
+    let mut removal: Vec<(u64, u64, Vec<crate::exclusions::ExcludedPath>)> = prepared
         .iter_mut()
         .filter(|p| !p.removal_paths.is_empty())
         .map(|p| {
@@ -940,6 +1022,18 @@ fn backup_disk_inner<P: DiskPlatform>(
             )
         })
         .collect();
+    // Logical volumes in one piece on their physical volume are volumes of
+    // the image like any partition.
+    for p in &mut prepared {
+        let at = p.part_offset;
+        if let Some(pv) = p.pv.as_mut() {
+            removal.extend(
+                std::mem::take(&mut pv.removals)
+                    .into_iter()
+                    .map(|(offset, len, paths)| (at + offset, len, paths)),
+            );
+        }
+    }
     let mut excluded_entries_kept: Option<String> = None;
     if !removal.is_empty() {
         // Каждый проход удаления называет свой итог сам: удаление — пути,
@@ -980,6 +1074,11 @@ fn backup_disk_inner<P: DiskPlatform>(
                 Some(tr!("engine_win.entries_partly_kept", count = failed).into_owned())
             }
         };
+    }
+    if !pv_names_kept.is_empty() {
+        let mut all: Vec<String> = excluded_entries_kept.take().into_iter().collect();
+        all.append(&mut pv_names_kept);
+        excluded_entries_kept = Some(all.join("; "));
     }
 
     // 7. Build the embedded manifest + sidecar and write it into the meta region.

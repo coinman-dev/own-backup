@@ -235,6 +235,14 @@ fn backup_volume_inner<P: EnginePlatform>(
 
     // --- VSS shadow copy (live lettered volumes only) ---
     let mut session = platform.open_volume_session(&source, req.use_vss)?;
+    // A physical volume held through its logical volumes is assembled by the
+    // whole-disk copy only; read here as one device it would not be one
+    // point in time.
+    if session.physical_volume().is_some() {
+        return Err(OwnBackupError::NoSnapshotProvider(
+            tr!("engine.pv_volume_copy", volume = source).into_owned(),
+        ));
+    }
     let read_path = session.read_path().to_string();
     let vss_used = session.snapshot_used();
 

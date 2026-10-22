@@ -16,7 +16,7 @@ use own_backup_common::{OwnBackupError, Result};
 
 use super::platform::{
     userspace_vhdx, DiskIdentity, DiskPlatform, DiskRef, DiskWindow, EnginePlatform, FinishedImage,
-    NativeUsedMap, SourceDevice, SourceSession, VolumeSpan,
+    NativeUsedMap, PhysicalVolume, SourceDevice, SourceSession, VolumeSpan,
 };
 use crate::block_reader::{BlockReader, RawVolumeBlockReader};
 use crate::efivars::BootBackup;
@@ -143,6 +143,9 @@ pub(crate) enum TestSource {
     /// A snapshot registered at `read_path` is read when one is wanted; it is
     /// frozen, the live device under it is not.
     Snapshot { read_path: String },
+    /// An LVM physical volume in use: the partition itself is read where no
+    /// logical volume of `pv` maps, each volume from its own device.
+    PhysicalVolume(PhysicalVolume),
 }
 
 pub(crate) struct TestSession {
@@ -151,6 +154,7 @@ pub(crate) struct TestSession {
     frozen: bool,
     completed: bool,
     key_store: bool,
+    pv: Option<PhysicalVolume>,
     /// Not `Send`, like a VSS session: the engine must not need it to be.
     _not_send: PhantomData<*const ()>,
 }
@@ -184,6 +188,10 @@ impl SourceSession for TestSession {
 
     fn must_exclude_key_store(&self) -> bool {
         self.key_store
+    }
+
+    fn physical_volume(&self) -> Option<&PhysicalVolume> {
+        self.pv.as_ref()
     }
 }
 
@@ -245,8 +253,13 @@ impl EnginePlatform for TestPlatform {
             TestSource::Direct { frozen } => (source.to_string(), false, *frozen),
             TestSource::Snapshot { read_path } if use_snapshot => (read_path.clone(), true, true),
             TestSource::Snapshot { .. } => (source.to_string(), false, false),
+            TestSource::PhysicalVolume(_) => (source.to_string(), true, true),
         };
         Ok(TestSession {
+            pv: match how {
+                TestSource::PhysicalVolume(pv) => Some(pv.clone()),
+                _ => None,
+            },
             key_store: self.key_stores.contains(source),
             read_path,
             snapshot,

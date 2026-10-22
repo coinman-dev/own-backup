@@ -626,5 +626,29 @@
   "engine.key_store_left_behind": {
     "ru": "разбор файлов оставил в копии содержимое: %{path}",
     "en": "the file scan left content in the copy: %{path}"
+  },
+  "engine.key_store_pv_not_found": {
+    "ru": "каталог ключей лежит на этом физическом томе LVM, но ни на одном из его логических томов, удержанных снимками",
+    "en": "the key directory is on this LVM physical volume, but on none of its logical volumes held by snapshots"
+  },
+  "engine.skip_pv_volume_line": {
+    "ru": "раздел %{index}, логический том %{volume} (%{fs}): %{why}",
+    "en": "partition %{index}, logical volume %{volume} (%{fs}): %{why}"
+  },
+  "engine.pv_names_kept": {
+    "ru": "логический том %{volume} лежит на разделе не одним куском — имена его исключённых файлов NTFS (%{count}) остались в копии, их данных в ней нет",
+    "en": "the logical volume %{volume} is not one piece on the partition — the names of its excluded NTFS files (%{count}) stay in the copy, their data is not in it"
+  },
+  "engine.pv_label_gone": {
+    "ru": "На разделе %{volume} больше не читается метка физического тома LVM — он изменился после того, как были сняты снимки его логических томов. Копия не сделана.",
+    "en": "The LVM physical volume label of %{volume} can no longer be read — it changed after its logical volumes were snapshotted. No copy was made."
+  },
+  "engine.pv_volume_copy": {
+    "ru": "%{volume} — физический том LVM в работе: он копируется только вместе с диском целиком.",
+    "en": "%{volume} is an LVM physical volume in use: it is copied only as part of its whole disk."
+  },
+  "engine.pv_layout_bad": {
+    "ru": "Части логических томов на разделе %{volume} пересекаются или выходят за его конец — копия не сделана.",
+    "en": "Parts of the logical volumes on %{volume} overlap or run past its end — no copy was made."
   }
 }

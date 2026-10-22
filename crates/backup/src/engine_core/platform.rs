@@ -107,6 +107,41 @@ pub(crate) trait SourceSession {
     fn must_exclude_key_store(&self) -> bool {
         false
     }
+
+    /// The source is an LVM physical volume whose logical volumes are held
+    /// by snapshots of their own: [`Self::read_path`] is the partition, read
+    /// for everything no logical volume maps, and each volume is read from
+    /// its snapshot. `None` for any other source (and always on Windows).
+    fn physical_volume(&self) -> Option<&PhysicalVolume> {
+        None
+    }
+}
+
+/// A partition that is an LVM physical volume in use, as its session holds
+/// it (`engine_core::disk_pv`).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PhysicalVolume {
+    pub(crate) volumes: Vec<PvVolume>,
+}
+
+/// One logical volume of a [`PhysicalVolume`].
+#[derive(Debug, Clone)]
+pub(crate) struct PvVolume {
+    /// For messages and the log (`vg/lv`).
+    pub(crate) name: String,
+    /// Its snapshot: what the copy reads.
+    pub(crate) read_path: String,
+    /// Bytes.
+    pub(crate) len: u64,
+    /// Its parts on this partition.
+    pub(crate) segments: Vec<own_backup_common::lvm_pv::PvSegment>,
+    /// As [`SourceSession::frozen`] and [`SourceSession::quiesced`] for the
+    /// volume's own filesystem.
+    pub(crate) frozen: bool,
+    pub(crate) quiesced: bool,
+    /// The service's key directory is on this volume
+    /// ([`SourceSession::must_exclude_key_store`]).
+    pub(crate) key_store: bool,
 }
 
 /// A window onto the device that holds an encrypted volume's ciphertext.

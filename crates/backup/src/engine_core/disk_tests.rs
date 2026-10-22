@@ -488,3 +488,397 @@ fn the_key_directory_is_left_out_of_a_whole_disk_too() {
         .expect("refused");
     assert!(e.to_string().contains(&disk.esp), "{e}");
 }
+
+// ---------------------------------------------------------------------------
+// A partition that is an LVM physical volume in use
+// ---------------------------------------------------------------------------
+
+mod physical_volume {
+    use super::*;
+    use crate::engine_core::platform::{PhysicalVolume, PvVolume};
+    use own_backup_common::lvm_pv::fixtures::{label, mda, vg_text};
+    use own_backup_common::lvm_pv::PvSegment;
+
+    const LINUX_LVM: &str = "E6D6D379-F507-44C2-A23C-238F2A3DF928";
+    /// The PV: 24 MiB at 8 MiB on the disk; 4 MiB extents from 1 MiB, five
+    /// of them (1..21 MiB), then a 3 MiB tail.
+    const PV_AT: u64 = 8 * MIB;
+    const PV_LEN: u64 = 24 * MIB;
+    const EXT: u64 = 4 * MIB;
+    const PE_START: u64 = MIB;
+
+    fn extent(n: u64) -> u64 {
+        PE_START + n * EXT
+    }
+
+    /// The disk: an ESP and the PV. Logical volumes: `root` on extents 0-1
+    /// and `data` on extent 3, both active (read from their snapshots);
+    /// `idle` on extent 4, inactive (read from the partition); extent 2 free.
+    struct PvDisk {
+        device: String,
+        esp: String,
+        part: String,
+        /// The partition as it is now, written to while it is copied.
+        live: Vec<u8>,
+        root: (String, Vec<u8>),
+        data: (String, Vec<u8>),
+    }
+
+    impl PvDisk {
+        fn new(root: Vec<u8>, metadata_readable: bool) -> Self {
+            assert_eq!(root.len() as u64, 2 * EXT);
+            let text = vg_text(
+                5,
+                &[
+                    ("root", vec![("striped", vec![("pv0", 0)], 2)]),
+                    ("data", vec![("striped", vec![("pv0", 3)], 1)]),
+                    ("idle", vec![("striped", vec![("pv0", 4)], 1)]),
+                ],
+            );
+            let mut live: Vec<u8> = (0..PV_LEN).map(|i| (i / 512 % 241) as u8 ^ 0x33).collect();
+            let head = label(PV_LEN, PE_START, &[(4096, PE_START - 4096)]);
+            live[..head.len()].copy_from_slice(&head);
+            let mut area = mda(PE_START - 4096, 8192, &text);
+            if !metadata_readable {
+                area[4] ^= 0xFF;
+            }
+            live[4096..PE_START as usize].copy_from_slice(&area);
+            // What the volumes hold on the live partition by now: not what
+            // their snapshots froze.
+            live[extent(0) as usize..extent(2) as usize].fill(0xEE);
+            live[extent(2) as usize..extent(3) as usize].fill(0xFF);
+            live[extent(3) as usize..extent(4) as usize].fill(0xDD);
+            let data: Vec<u8> = (0..EXT).map(|i| (i % 253) as u8 ^ 0x5C).collect();
+
+            let mut esp_data = fat16(&[b'1'; 20_000]);
+            esp_data.resize(6 * MIB as usize, 0);
+            let layout = DiskLayout {
+                disk_guid: "0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0".into(),
+                sector_size: 512,
+                size_bytes: PV_AT + PV_LEN + MIB,
+                partitions: vec![
+                    GptPartitionEntry {
+                        index: 1,
+                        type_guid: ESP.into(),
+                        part_guid: "11111111-0000-0000-0000-000000000001".into(),
+                        first_lba: MIB / 512,
+                        last_lba: 7 * MIB / 512 - 1,
+                        attributes: 0,
+                        name: "EFI system partition".into(),
+                    },
+                    GptPartitionEntry {
+                        index: 2,
+                        type_guid: LINUX_LVM.into(),
+                        part_guid: "11111111-0000-0000-0000-000000000002".into(),
+                        first_lba: PV_AT / 512,
+                        last_lba: (PV_AT + PV_LEN) / 512 - 1,
+                        attributes: 0,
+                        name: "lvm".into(),
+                    },
+                ],
+            };
+            let disk = Self {
+                device: unique_path("disk"),
+                esp: unique_path("esp"),
+                part: unique_path("pv"),
+                live,
+                root: (unique_path("root-snap"), root),
+                data: (unique_path("data-snap"), data),
+            };
+            let mut bytes = vec![0u8; layout.size_bytes as usize];
+            for op in crate::gpt_writer::disk_gpt_write_ops(&layout, layout.size_bytes).unwrap() {
+                let at = op.offset as usize;
+                bytes[at..at + op.bytes.len()].copy_from_slice(&op.bytes);
+            }
+            bytes[MIB as usize..7 * MIB as usize].copy_from_slice(&esp_data);
+            bytes[PV_AT as usize..(PV_AT + PV_LEN) as usize].copy_from_slice(&disk.live);
+            register_device(&disk.device, bytes, 512);
+            register_device(&disk.esp, esp_data, 512);
+            register_device(&disk.part, disk.live.clone(), 512);
+            register_device(&disk.root.0, disk.root.1.clone(), 512);
+            register_device(&disk.data.0, disk.data.1.clone(), 512);
+            disk
+        }
+
+        fn pv(&self, key_store: Option<&str>) -> PhysicalVolume {
+            let volume = |name: &str, read: &str, len: u64, at: u64| PvVolume {
+                name: format!("vg0/{name}"),
+                read_path: read.to_string(),
+                len,
+                segments: vec![PvSegment {
+                    pv_offset: at,
+                    lv_offset: 0,
+                    length: len,
+                }],
+                frozen: true,
+                quiesced: true,
+                key_store: key_store == Some(name),
+            };
+            PhysicalVolume {
+                volumes: vec![
+                    volume("root", &self.root.0, 2 * EXT, extent(0)),
+                    volume("data", &self.data.0, EXT, extent(3)),
+                ],
+            }
+        }
+
+        fn platform(&self, pv: PhysicalVolume) -> TestPlatform {
+            TestPlatform::new()
+                .source(&self.esp, TestSource::Direct { frozen: true })
+                .source(&self.part, TestSource::PhysicalVolume(pv))
+                .slot(&self.esp, DISK, MIB)
+                .slot(&self.part, DISK, PV_AT)
+        }
+
+        fn request(&self, image: &Path) -> DiskBackupRequest {
+            DiskBackupRequest {
+                disk_number: DISK,
+                disk_device: Some(self.device.clone()),
+                disk_model: "Test disk".into(),
+                partitions: vec![
+                    DiskPartitionBackup {
+                        device: self.esp.clone(),
+                        part_index: 1,
+                        passphrase: None,
+                    },
+                    DiskPartitionBackup {
+                        device: self.part.clone(),
+                        part_index: 2,
+                        passphrase: None,
+                    },
+                ],
+                image_path: image.to_path_buf(),
+                full_image_path: None,
+                block_size: BS,
+                image_format: ImageFormat::Qcow2,
+                job_id: Some("disk-pv-tests".into()),
+                encryption: None,
+                exclusion_patterns_windows: Vec::new(),
+                exclusion_patterns_linux: Vec::new(),
+                kind: BackupType::Full,
+                parent_image: None,
+                source_disk: None,
+                bootable: false,
+                zstd_level: 0,
+            }
+        }
+
+        /// The partition's bytes `from..to` in `image`.
+        fn in_image(&self, image: &Path, from: u64, to: u64) -> Vec<u8> {
+            image_bytes(image, PV_AT + from, (to - from) as usize)
+        }
+
+        /// Does the image store any block of the partition's `from..to`?
+        fn stored(&self, image: &Path, from: u64, to: u64) -> bool {
+            let bs = BS as u64;
+            let (first, last) = ((PV_AT + from) / bs, (PV_AT + to - 1) / bs);
+            load_sidecar_of(image)
+                .unwrap()
+                .checksums
+                .iter()
+                .any(|c| (first..=last).contains(&c.block_number))
+        }
+    }
+
+    fn raw_root() -> Vec<u8> {
+        (0..2 * EXT).map(|i| (i % 249) as u8 ^ 0xA7).collect()
+    }
+
+    /// An 8 MiB ext4 holding `keep.txt` and `junk.tmp` (300 000 bytes of
+    /// 0x5A); `None` without mkfs.ext4.
+    fn ext4_root() -> Option<Vec<u8>> {
+        let dir = tempfile::tempdir().unwrap();
+        let content = dir.path().join("content");
+        std::fs::create_dir(&content).unwrap();
+        std::fs::write(content.join("keep.txt"), b"kept\n").unwrap();
+        std::fs::write(content.join("junk.tmp"), vec![0x5A; 300_000]).unwrap();
+        let img = dir.path().join("fs.img");
+        std::fs::File::create(&img)
+            .unwrap()
+            .set_len(2 * EXT)
+            .unwrap();
+        let made = std::process::Command::new("mkfs.ext4")
+            .args(["-q", "-F", "-b", "4096", "-d"])
+            .arg(&content)
+            .arg(&img)
+            .output()
+            .ok()?
+            .status
+            .success();
+        made.then(|| std::fs::read(&img).unwrap())
+    }
+
+    /// The partition comes out as LVM keeps it: its label and metadata as
+    /// they are, each active volume as its snapshot froze it, the inactive
+    /// one and the tail from the partition, and the free extent not at all.
+    #[test]
+    fn a_physical_volume_is_assembled_from_its_volumes_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = PvDisk::new(raw_root(), true);
+        let platform = disk.platform(disk.pv(None));
+        let image = dir.path().join("disk.qcow2");
+        let summary = run(&platform, &disk.request(&image)).unwrap();
+        assert_eq!(summary.partitions, 2);
+
+        assert_same(
+            &disk.in_image(&image, 0, PE_START),
+            &disk.live[..PE_START as usize],
+            "the label and metadata area",
+        );
+        assert_same(
+            &disk.in_image(&image, extent(0), extent(2)),
+            &disk.root.1,
+            "root, as its snapshot holds it",
+        );
+        assert_same(
+            &disk.in_image(&image, extent(3), extent(4)),
+            &disk.data.1,
+            "data, as its snapshot holds it",
+        );
+        assert_same(
+            &disk.in_image(&image, extent(4), PV_LEN),
+            &disk.live[extent(4) as usize..],
+            "the inactive volume and the tail, from the partition",
+        );
+        assert!(
+            !disk.stored(&image, extent(2), extent(3)),
+            "the free extent is not copied"
+        );
+        assert!(disk
+            .in_image(&image, extent(2), extent(3))
+            .iter()
+            .all(|&b| b == 0));
+
+        let sidecar = load_sidecar_of(&image).unwrap();
+        let fs: Vec<_> = sidecar
+            .disk_manifest
+            .unwrap()
+            .images
+            .iter()
+            .map(|i| i.filesystem.clone())
+            .collect();
+        assert_eq!(fs, ["unknown", "LVM2_member"]);
+        // Neither volume's files were walked (nothing parsed them): each is
+        // named in the result.
+        let skipped = summary.file_scan_skipped.unwrap();
+        assert!(
+            skipped.contains("vg0/root") && skipped.contains("vg0/data"),
+            "{skipped}"
+        );
+        assert!(verify_image(&image, |_, _| Ok(())).unwrap().valid());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    /// Without readable metadata nothing counts as free: every byte outside
+    /// the active volumes is copied from the partition.
+    #[test]
+    fn without_its_metadata_nothing_is_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = PvDisk::new(raw_root(), false);
+        let platform = disk.platform(disk.pv(None));
+        let image = dir.path().join("disk.qcow2");
+        run(&platform, &disk.request(&image)).unwrap();
+        assert!(disk.stored(&image, extent(2), extent(3)));
+        assert_same(
+            &disk.in_image(&image, extent(2), extent(3)),
+            &disk.live[extent(2) as usize..extent(3) as usize],
+            "the extent nobody could call free",
+        );
+        assert_same(
+            &disk.in_image(&image, extent(0), extent(2)),
+            &disk.root.1,
+            "root still from its snapshot",
+        );
+    }
+
+    /// A partition that is no PV any more is refused, nothing published; so
+    /// are volumes that overlap.
+    #[test]
+    fn a_partition_whose_label_is_gone_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut disk = PvDisk::new(raw_root(), true);
+        disk.live[..PE_START as usize].fill(0);
+        register_device(&disk.part, disk.live.clone(), 512);
+        let platform = disk.platform(disk.pv(None));
+        let image = dir.path().join("disk.qcow2");
+        let e = run(&platform, &disk.request(&image))
+            .err()
+            .expect("refused");
+        assert!(matches!(e, OwnBackupError::NoSnapshotProvider(_)), "{e}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+
+        let disk = PvDisk::new(raw_root(), true);
+        let mut pv = disk.pv(None);
+        pv.volumes[1].segments[0].pv_offset = extent(1);
+        let e = run(&disk.platform(pv), &disk.request(&image))
+            .err()
+            .expect("refused");
+        assert!(matches!(e, OwnBackupError::Config(_)), "{e}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    /// Inside a logical volume the rules apply as in a volume copy, and the
+    /// service's key directory (decision 6/E4) is left out of the volume
+    /// that holds it — or the disk is not copied.
+    #[test]
+    fn exclusions_and_the_key_directory_apply_inside_the_volumes() {
+        let Some(ext4) = ext4_root() else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let disk = PvDisk::new(ext4, true);
+        let image = dir.path().join("rules.qcow2");
+        let summary = run(
+            &disk.platform(disk.pv(None)),
+            &DiskBackupRequest {
+                exclusion_patterns_linux: vec!["*.tmp".into()],
+                ..disk.request(&image)
+            },
+        )
+        .unwrap();
+        assert_eq!(summary.excluded_files, 1);
+        assert_eq!(summary.excluded_bytes, 300_000);
+        let root = disk.in_image(&image, extent(0), extent(2));
+        assert!(
+            !root.windows(4096).any(|w| w.iter().all(|&b| b == 0x5A)),
+            "the excluded file's data is not in the image"
+        );
+        assert!(verify_image(&image, |_, _| Ok(())).unwrap().valid());
+        // The ext4 volume's free space was not copied either.
+        let blocks = (extent(0)..extent(2))
+            .step_by(BS as usize)
+            .filter(|&at| disk.stored(&image, at, at + BS as u64))
+            .count() as u64;
+        assert!(
+            blocks < 2 * EXT / BS as u64,
+            "{blocks} blocks of root stored"
+        );
+
+        // The key directory on root: left out, though the job has no rules.
+        let platform = disk
+            .platform(disk.pv(Some("root")))
+            .key_store_on(&disk.part);
+        let keyed = dir.path().join("keyed.qcow2");
+        let summary = run(&platform, &disk.request(&keyed)).unwrap();
+        assert!(summary.key_store_excluded);
+
+        // On the raw volume no scanner reads: refused, the volume named.
+        let platform = disk
+            .platform(disk.pv(Some("data")))
+            .key_store_on(&disk.part);
+        let refused = dir.path().join("refused.qcow2");
+        let e = run(&platform, &disk.request(&refused))
+            .err()
+            .expect("refused");
+        assert!(e.to_string().contains("vg0/data"), "{e}");
+        assert!(!refused.exists());
+
+        // On the PV, but on none of its volumes: refused.
+        let platform = disk.platform(disk.pv(None)).key_store_on(&disk.part);
+        let e = run(&platform, &disk.request(&refused))
+            .err()
+            .expect("refused");
+        assert!(e.to_string().contains(&disk.part), "{e}");
+        assert!(!refused.exists());
+    }
+}

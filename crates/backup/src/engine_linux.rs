@@ -1921,6 +1921,192 @@ mod tests {
         assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0);
     }
 
+    /// A PV in use on Linux: the snapshot crate's record (`mode` `pv`) is
+    /// taken apart by the platform — each logical volume read from its
+    /// snapshot, ext4 through its own map and rules, the rest from the
+    /// partition — the record is checked before publication, and a volume
+    /// copy of the same partition is refused.
+    #[test]
+    fn a_physical_volume_is_read_through_its_volumes_snapshots() {
+        use own_backup_common::lvm_pv::fixtures::{label, mda, vg_text};
+        use own_backup_common::lvm_pv::{PvSegment, PvSnapshot, PvSnapshotVolume};
+        let dir = tempfile::tempdir().unwrap();
+        // The root volume's snapshot: a 32 MiB ext4 with a junk file.
+        let content = dir.path().join("root-content");
+        std::fs::create_dir_all(content.join("data")).unwrap();
+        std::fs::write(content.join("data/keep.txt"), b"kept\n").unwrap();
+        std::fs::write(content.join("data/junk.tmp"), vec![0x5A; 400_000]).unwrap();
+        let root = dir.path().join("root.snap");
+        blank(&root, 32 * MIB);
+        let d = content.to_str().unwrap().to_string();
+        if !mkfs("mkfs.ext4", &["-q", "-F", "-b", "4096", "-d", &d], &root) {
+            return;
+        }
+        let root_bytes = std::fs::read(&root).unwrap();
+        // The PV: 48 MiB; root on extents 0-7, extents 8-10 free.
+        const EXT: u64 = 4 * MIB;
+        let pv_len = 48 * MIB;
+        let mut live = vec![0xEEu8; pv_len as usize];
+        let head = label(pv_len, MIB, &[(4096, MIB - 4096)]);
+        live[..head.len()].copy_from_slice(&head);
+        let text = vg_text(11, &[("root", vec![("striped", vec![("pv0", 0)], 8)])]);
+        live[4096..MIB as usize].copy_from_slice(&mda(MIB - 4096, 8192, &text));
+        let part = dir.path().join("p2.pv");
+        std::fs::write(&part, &live).unwrap();
+
+        let disk_path = dir.path().join("disk.img");
+        let part_at = 2 * MIB;
+        let layout = own_backup_common::gpt::DiskLayout {
+            disk_guid: "0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0".into(),
+            sector_size: 512,
+            size_bytes: part_at + pv_len + MIB,
+            partitions: vec![own_backup_common::gpt::GptPartitionEntry {
+                index: 2,
+                type_guid: "E6D6D379-F507-44C2-A23C-238F2A3DF928".into(),
+                part_guid: "11111111-0000-0000-0000-000000000002".into(),
+                first_lba: part_at / 512,
+                last_lba: (part_at + pv_len) / 512 - 1,
+                attributes: 0,
+                name: "lvm".into(),
+            }],
+        };
+        {
+            use std::os::unix::fs::FileExt;
+            let file = std::fs::File::create(&disk_path).unwrap();
+            file.set_len(layout.size_bytes).unwrap();
+            for op in crate::gpt_writer::disk_gpt_write_ops(&layout, layout.size_bytes).unwrap() {
+                file.write_all_at(&op.bytes, op.offset).unwrap();
+            }
+            file.write_all_at(&live, part_at).unwrap();
+        }
+        let record = PvSnapshot {
+            device: part.to_str().unwrap().into(),
+            volumes: vec![PvSnapshotVolume {
+                name: "vg0-root".into(),
+                origin: root.to_str().unwrap().into(),
+                snapshot: root.to_str().unwrap().into(),
+                dm_id: "0".repeat(32),
+                size: 8 * EXT,
+                segments: vec![PvSegment {
+                    pv_offset: MIB,
+                    lv_offset: 0,
+                    length: 8 * EXT,
+                }],
+            }],
+            guard: vec![(0, MIB)],
+            guard_digest: String::new(),
+        };
+        let mut snap = snapshot_of(part.to_str().unwrap(), &part, "pv");
+        snap.metadata.insert(
+            own_backup_snapshot::linux::PV_LAYOUT.into(),
+            record.to_json(),
+        );
+
+        let out = dir.path().join("out");
+        let image = out.join("disk.qcow2");
+        let req = DiskBackupRequest {
+            disk_number: 0,
+            disk_device: Some(disk_path.to_str().unwrap().into()),
+            disk_model: "test disk".into(),
+            partitions: vec![DiskPartitionBackup {
+                device: part.to_str().unwrap().into(),
+                part_index: 2,
+                passphrase: None,
+            }],
+            image_path: image.clone(),
+            full_image_path: None,
+            block_size: DEFAULT_BLOCK_SIZE,
+            image_format: ImageFormat::Qcow2,
+            job_id: Some("linux-pv".into()),
+            encryption: None,
+            exclusion_patterns_windows: Vec::new(),
+            exclusion_patterns_linux: vec!["*.tmp".into()],
+            kind: BackupType::Full,
+            parent_image: None,
+            source_disk: None,
+            bootable: false,
+            zstd_level: crate::qcow2::DEFAULT_ZSTD_LEVEL,
+        };
+        let mut checked = Vec::new();
+        let sum = backup_disk_checked(
+            &req,
+            std::slice::from_ref(&snap),
+            |s| {
+                checked.push(own_backup_snapshot::linux::pv_layout(s).unwrap().unwrap());
+                Ok(())
+            },
+            no_progress,
+        )
+        .unwrap();
+        assert_eq!(
+            checked,
+            vec![record.clone()],
+            "the record is checked at publication"
+        );
+        assert_eq!(sum.excluded_files, 1, "{:?}", sum.file_scan_skipped);
+        assert!(
+            sum.file_scan_skipped.is_none(),
+            "{:?}",
+            sum.file_scan_skipped
+        );
+        // The head from the partition, root's used blocks from its snapshot
+        // and none of the junk, the free extents not at all.
+        assert!(image_at(&image, part_at, MIB as usize) == live[..MIB as usize]);
+        let got = image_at(&image, part_at + MIB, root_bytes.len());
+        assert!(!got.chunks(4096).any(|c| c.iter().all(|&b| b == 0x5A)));
+        assert!(!got.chunks(4096).any(|c| c.iter().all(|&b| b == 0xEE)));
+        // The superblock is root's (its free counts patched by the removal).
+        assert_eq!(&got[1024 + 56..1024 + 58], &[0x53, 0xEF], "ext4 magic");
+        assert_eq!(
+            &got[1024 + 104..1024 + 120],
+            &root_bytes[1024 + 104..1024 + 120],
+            "its UUID"
+        );
+        let free = image_at(&image, part_at + MIB + 8 * EXT, (3 * EXT) as usize);
+        assert!(free.iter().all(|&b| b == 0), "free extents are not copied");
+        let sidecar = read_embedded_sidecar(&image, "qcow2").unwrap();
+        assert_eq!(
+            sidecar.disk_manifest.unwrap().images[0].filesystem,
+            "LVM2_member"
+        );
+        assert!(verify_image(&image, |_, _| Ok(())).unwrap().valid());
+
+        // The record failing its check: nothing published.
+        let failed = out.join("failed.qcow2");
+        let r = backup_disk_checked(
+            &DiskBackupRequest {
+                image_path: failed.clone(),
+                ..req.clone()
+            },
+            std::slice::from_ref(&snap),
+            |_| Err(OwnBackupError::NoSnapshotProvider("changed".into())),
+            no_progress,
+        );
+        assert!(matches!(r, Err(OwnBackupError::NoSnapshotProvider(_))));
+        assert!(!failed.exists());
+
+        // A volume copy of the partition: refused before a byte is read.
+        let vol = backup_volume_checked(
+            &request(&part, &out.join("vol.qcow2"), ImageFormat::Qcow2),
+            &snap,
+            |_| Ok(()),
+            no_progress,
+        );
+        assert!(matches!(vol, Err(OwnBackupError::NoSnapshotProvider(_))));
+        // And a `pv` snapshot without its record is no snapshot at all.
+        let bare = snapshot_of(part.to_str().unwrap(), &part, "pv");
+        assert!(backup_disk_checked(
+            &DiskBackupRequest {
+                image_path: out.join("bare.qcow2"),
+                ..req
+            },
+            &[bare],
+            |_| Ok(()),
+            no_progress,
+        )
+        .is_err());
+    }
+
     /// The real check, for a partition held still whose hold cannot be
     /// confirmed: an error, and no image.
     #[test]
