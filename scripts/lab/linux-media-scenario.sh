@@ -8,6 +8,7 @@
 #   scripts/build-linux-media.sh --deb target/dist/own-backup_*.deb   # the ISO
 #   scripts/lab/linux-media-scenario.sh boot  ISO          # 4 boots of the ISO
 #   scripts/lab/linux-media-scenario.sh stick ISO DEB      # writer + 2 stick boots
+#   scripts/lab/linux-media-scenario.sh build DEB [MEDIA_DEB]  # the service builds it
 #
 # `boot` needs no Ubuntu guest: each boot is a media run of its own
 # (`linux-vm.py media`, cleaned afterwards). `stick` starts the stand's Ubuntu
@@ -16,6 +17,22 @@
 # boots that stick under both firmwares, powers off (the journal goes onto the
 # stick then), and reads the log partition from the host with mtools. The run
 # is left for inspection; `linux-vm.py clean` archives it.
+#
+# `build` is the window's way: the Ubuntu guest (16 GiB root for the build's
+# cache, a 2 GiB stick, network through QEMU's user mode) installs DEB and has
+# the SERVICE build the medium with `own-backup-cli media build-linux` —
+# first refused without debootstrap, then into ~lab/Downloads (the ISO must be
+# lab's, as the folder is), then again with `--stick` (a new name beside the
+# first, the stick written and verified), then a third build cancelled
+# halfway (nothing mounted or half-built left, no partial ISO, the builder
+# kept). The ISO and the stick then boot (UEFI+SB from the ISO, BIOS from the
+# stick). The medium carries the INSTALLED package, which must install on
+# Debian 13: DEB built on the Ubuntu 24.04 baseline. With a DEB built on
+# 26.04 that apt refuses there, give a baseline MEDIA_DEB: the refusal must
+# carry apt's reason, and the builds go on with `--deb MEDIA_DEB` (22.10: the
+# 26.04 package did install on trixie). Needs
+# the internet on the host (deb.debian.org); about 15 minutes for the first
+# build, a few for the next ones.
 #
 # What a boot must show (the medium's self-test, serial port; see
 # packaging/linux/media/.../selftest): own-backup.media on the command line;
@@ -176,7 +193,123 @@ EOF
         "the session's journal was saved at power-off"
 }
 
+stage_build() {
+    local deb=$1 media_deb=${2:-}
+    local out=/home/lab/Downloads
+    "${vm[@]}" up --disks 0 --root-size 16 --stick 2 --mem 4096 --cpus 4 \
+        || { check build:up FAIL "the Ubuntu guest did not come up"; return; }
+    "${vm[@]}" put "$deb" /tmp/own-backup.deb
+    # Without the recommended debootstrap first: the build must say what to install.
+    if "${vm[@]}" ssh -- 'sudo apt-get update -qq >/tmp/install.log 2>&1;
+            sudo apt-get install -y --no-install-recommends /tmp/own-backup.deb >>/tmp/install.log 2>&1'; then
+        check build:install PASS "the package installs"
+    else
+        check build:install FAIL "the package does not install (guest /tmp/install.log)"
+        "${vm[@]}" down
+        return
+    fi
+    "${vm[@]}" ssh -- "mkdir -p $out"
+    "${vm[@]}" ssh -- "sudo own-backup-cli media build-linux --out $out" \
+        >"$RUN/evidence/build-no-tools.txt" 2>&1
+    expect build:refused-tools "$RUN/evidence/build-no-tools.txt" \
+        'sudo apt install debootstrap debian-archive-keyring' "without debootstrap: refused, naming the apt command"
+    "${vm[@]}" ssh -- "sudo own-backup-cli media build-linux --out /nonexistent/dir" \
+        >"$RUN/evidence/build-no-folder.txt" 2>&1
+    expect build:refused-folder "$RUN/evidence/build-no-folder.txt" '/nonexistent/dir' \
+        "a folder that does not exist is refused"
+    "${vm[@]}" ssh -- 'sudo apt-get install -y debootstrap debian-archive-keyring >>/tmp/install.log 2>&1' \
+        || check build:tools FAIL "debootstrap does not install (guest /tmp/install.log)"
+
+    # Build 1 from the installed package. A package built on a system newer
+    # than Debian 13 may not install there: then apt's reason must be in the
+    # refusal, and the builds go on with MEDIA_DEB (`--deb`).
+    local given=()
+    echo "=== build 1: into $out"
+    "${vm[@]}" ssh -- "sudo own-backup-cli media build-linux --out $out" 2>&1 \
+        | tee "$RUN/evidence/build-1.txt"
+    if grep -q '^Готово: ' "$RUN/evidence/build-1.txt"; then
+        expect build:repacked "$RUN/evidence/build-1.txt" '\(установленный пакет\)$' \
+            "the medium carries the installed package"
+    elif [[ -n $media_deb ]] && grep -Eq 'Debian 13.*(Depends|E: )' "$RUN/evidence/build-1.txt"; then
+        check build:installed-refused PASS "the installed package does not install on trixie; apt's reason is shown"
+        "${vm[@]}" put "$media_deb" /home/lab/media.deb
+        given=(--deb /home/lab/media.deb)
+        echo "=== build 1 again, with the given baseline package"
+        "${vm[@]}" ssh -- "sudo own-backup-cli media build-linux --out $out ${given[*]}" 2>&1 \
+            | tee "$RUN/evidence/build-1.txt"
+    else
+        check build:repacked FAIL "the build from the installed package failed (evidence/build-1.txt)"
+    fi
+    expect build:done "$RUN/evidence/build-1.txt" "^Готово: $out/OwnBackup-Linux-[^/]*\\.iso\$" "the ISO is saved in the folder"
+    local stage
+    for stage in 'Подготовка сборщика' 'Загрузка пакетов Debian' 'Сборка системы' 'Создание ISO'; do
+        expect "build:stage:$stage" "$RUN/evidence/build-1.txt" "^  $stage\$" "stage shown: $stage"
+    done
+    local iso
+    iso="$(sed -n 's/^Готово: //p' "$RUN/evidence/build-1.txt" | tail -1)"
+    "${vm[@]}" ssh -- "stat -c '%U %G %s' '$iso'" >"$RUN/evidence/build-owner.txt" 2>&1
+    expect build:owner "$RUN/evidence/build-owner.txt" '^lab lab [0-9]{8,}$' "the ISO is lab's, as the folder is"
+
+    local dev
+    dev="$("${vm[@]}" ssh -- 'readlink -f /dev/disk/by-id/usb-*ob-stick*-0:0 2>/dev/null | head -1')"
+    echo "=== build 2: into $out again, and onto the stick $dev"
+    "${vm[@]}" ssh -- "sudo own-backup-cli media build-linux --out $out --stick $dev ${given[*]}" \
+        | tee "$RUN/evidence/build-2.txt"
+    expect build:second-name "$RUN/evidence/build-2.txt" "^Готово: $out/OwnBackup-Linux-.* \(2\)\.iso\$" \
+        "the second ISO gets a name of its own; the first is not replaced"
+    expect build:stick-written "$RUN/evidence/build-2.txt" '^Записано и проверено' "the stick is written and read back"
+    expect build:stick-logs "$RUN/evidence/build-2.txt" "^Раздел для журналов: ${dev}3\$" "the log partition is ${dev}3"
+    "${vm[@]}" ssh -- "ls -l $out; sudo own-backup-cli media linux-cache;
+        echo mounts=\$(grep -c ' /var/cache/own-backup' /proc/self/mountinfo);
+        echo chroot=\$(sudo test -d /var/cache/own-backup/media/builder/build/chroot && echo yes || echo no);
+        echo unit=\$(systemctl is-active own-backup-media-build.service)" \
+        | tee "$RUN/evidence/build-after.txt"
+    expect build:no-mounts "$RUN/evidence/build-after.txt" '^mounts=0$' "nothing is left mounted in the cache"
+    expect build:tree-dropped "$RUN/evidence/build-after.txt" '^chroot=no$' "the build tree is removed after a build"
+    expect build:unit-gone "$RUN/evidence/build-after.txt" '^unit=(inactive|unknown)$' "the transient unit is gone"
+    expect build:cache-kept "$RUN/evidence/build-after.txt" '^Кэш сборки: .* \([1-9][0-9]+ МиБ\)$' "the builder and the package cache stay"
+
+    echo "=== build 3: cancelled halfway"
+    # The client's pid, not pgrep: this very shell's command line names the build too.
+    "${vm[@]}" ssh -- "nohup sudo own-backup-cli media build-linux --out $out ${given[*]} >/tmp/build-3.txt 2>&1 &
+        pid=\$!
+        for i in \$(seq 1 300); do grep -q '^  Сборка системы' /tmp/build-3.txt && break; sleep 2; done
+        sleep 20; sudo own-backup-cli media cancel
+        for i in \$(seq 1 150); do [ -d /proc/\$pid ] || break; sleep 2; done
+        cat /tmp/build-3.txt; ls -la $out;
+        echo mounts=\$(grep -c ' /var/cache/own-backup' /proc/self/mountinfo);
+        echo chroot=\$(sudo test -d /var/cache/own-backup/media/builder/build/chroot && echo yes || echo no);
+        echo builder=\$(sudo test -x /var/cache/own-backup/media/builder/usr/bin/lb && echo yes || echo no);
+        echo unit=\$(systemctl is-active own-backup-media-build.service)" \
+        | tee "$RUN/evidence/build-3.txt"
+    expect build:cancelled "$RUN/evidence/build-3.txt" 'сборка носителя отменена' "the build is cancelled"
+    if grep -q '\.part' "$RUN/evidence/build-3.txt" || grep -q '(3)\.iso' "$RUN/evidence/build-3.txt"; then
+        check build:cancel-no-iso FAIL "a partial or third ISO is in the folder"
+    else
+        check build:cancel-no-iso PASS "no partial ISO in the folder"
+    fi
+    expect build:cancel-mounts "$RUN/evidence/build-3.txt" '^mounts=0$' "nothing left mounted after the cancel"
+    expect build:cancel-tree "$RUN/evidence/build-3.txt" '^chroot=no$' "the half-built tree is removed"
+    expect build:cancel-builder "$RUN/evidence/build-3.txt" '^builder=yes$' "the builder is kept"
+    expect build:cancel-unit "$RUN/evidence/build-3.txt" '^unit=(inactive|unknown)$' "the transient unit is gone"
+
+    "${vm[@]}" get "$iso" "$RUN/built.iso"
+    "${vm[@]}" down
+    boot_once built-iso-uefi-sb uefi-sb --iso "$RUN/built.iso" --attach cdrom
+    judge built-iso-uefi-sb uefi-sb memory
+    "${vm[@]}" down
+    boot_once built-stick-bios bios --stick
+    judge built-stick-bios bios stick
+    "${vm[@]}" down
+    rm -f "$RUN/built.iso"
+}
+
 case "${1:-}" in
+    build)
+        [[ -f ${2:-} ]] || { echo "usage: $0 build DEB [MEDIA_DEB]" >&2; exit 2; }
+        [[ -z ${3:-} || -f ${3:-} ]] || { echo "no such file: $3" >&2; exit 2; }
+        stage_build "$(realpath "$2")" "${3:+$(realpath "$3")}"
+        ;;
     boot)
         [[ -f ${2:-} ]] || { echo "usage: $0 boot ISO" >&2; exit 2; }
         stage_boot "$(realpath "$2")"
@@ -186,7 +319,7 @@ case "${1:-}" in
         stage_stick "$(realpath "$2")" "$(realpath "$3")"
         ;;
     *)
-        sed -n '2,30p' "$0"
+        sed -n '2,45p' "$0"
         exit 2
         ;;
 esac
