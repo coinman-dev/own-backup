@@ -253,7 +253,8 @@
     align-items: center;
     gap: 12px;
     width: 100%;
-    padding: 11px 20px;
+    /* 17 + the 3px border: the 20px icon centred under the 28px logo. */
+    padding: 11px 16px 11px 17px;
     background: none;
     border: none;
     color: var(--sidebar-text);

@@ -420,8 +420,8 @@
   .restore-root { display: flex; flex-direction: column; height: 100%; }
   .layout { display: flex; flex: 1; min-height: 0; }
   .jobs-col { width: 240px; flex-shrink: 0; background: var(--column-bg); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
-  .col-title { font-size: 24px; font-weight: 300; color: var(--head); padding: 22px 18px 12px; }
-  .this-pc { display: flex; align-items: center; gap: 8px; padding: 6px 18px; font-size: 13px; font-weight: 600; color: var(--text-secondary); }
+  .col-title { font-size: 24px; font-weight: 300; color: var(--head); padding: 22px 8px 12px 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .this-pc { display: flex; align-items: center; gap: 8px; padding: 6px 18px 6px 12px; font-size: 13px; font-weight: 600; color: var(--text-secondary); }
   .jobs-list { flex: 1; overflow: auto; padding: 8px 8px; }
   .empty-list { text-align: center; color: var(--text-muted); font-size: 13px; padding: 30px 10px; line-height: 1.6; }
   .job-item { width: 100%; display: flex; align-items: center; gap: 10px; padding: 10px 8px; border: 1px solid transparent; border-radius: 8px; background: none; cursor: pointer; margin-bottom: 4px; text-align: left; font-family: var(--font); }
