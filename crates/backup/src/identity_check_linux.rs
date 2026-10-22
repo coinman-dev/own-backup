@@ -236,19 +236,7 @@ pub fn clashes_against(
 
 fn to_dto(c: &Clash, part_index: Option<u32>) -> IdentityClashDto {
     IdentityClashDto {
-        kind: match c.identity.kind {
-            IdentityKind::Ext => "ext",
-            IdentityKind::Xfs => "xfs",
-            IdentityKind::Btrfs => "btrfs",
-            IdentityKind::Luks => "luks",
-            IdentityKind::LvmPv => "lvm_pv",
-            IdentityKind::LvmVg => "lvm_vg",
-            IdentityKind::LvmVgName => "lvm_vg_name",
-            IdentityKind::Md => "md",
-            IdentityKind::PartUuid => "partuuid",
-            IdentityKind::Fat => "vfat",
-        }
-        .to_string(),
+        kind: crate::identity_change_linux::kind_slug(c.identity.kind).to_string(),
         value: c.identity.shown.clone(),
         part_index,
         already_on: c.already_on.clone(),
@@ -266,6 +254,10 @@ fn to_dto(c: &Clash, part_index: Option<u32>) -> IdentityClashDto {
             Reidentify::Vgimportclone => "vgimportclone --basevgname <new-name> <device>",
             Reidentify::MdadmUpdateUuid => "mdadm --assemble --update=uuid <array> <device>",
             Reidentify::Fatlabel => "fatlabel -i <device> <new-serial>",
+            Reidentify::LabelTune2fs => "e2fsck -f <device> && tune2fs -L <new-label> <device>",
+            Reidentify::LabelXfsAdmin => "xfs_admin -L <new-label> <device>",
+            Reidentify::LabelBtrfs => "btrfs filesystem label <device> <new-label>",
+            Reidentify::LabelFatlabel => "fatlabel <device> <NEW-LABEL>",
             Reidentify::None => "",
         }
         .to_string(),

@@ -16,6 +16,7 @@
 //! | LUKS      | `cryptsetup luksUUID --uuid <new>`                               |
 //! | LVM       | `vgimportclone --basevgname <vg>_restored` — new PV and VG UUIDs and a new name |
 //! | md        | `mdadm --assemble --update=uuid --uuid=<new>` on the restored members, then stop |
+//! | label     | the old label with `-r` (`-R` on FAT; `-r2`, `-r3`… while taken), shortened to fit: `tune2fs -L` (ext, 16 bytes, after the same `e2fsck`), `xfs_admin -L` (XFS, 12, after the same log replay), `btrfs filesystem label` (btrfs, 255, single-device only), `fatlabel` (FAT, 11, upper case) |
 //!
 //! What lies inside a container is a device too: a LUKS container whose
 //! passphrase came with the restore is opened, a renamed volume group is
@@ -211,6 +212,11 @@ struct Run<'a> {
     dm_prefix: String,
     dm_held: bool,
     seq: u32,
+    /// Nodes whose journal or log this run already replayed.
+    prepared: Vec<String>,
+    /// Labels of the restored filesystems seen so far and the ones given:
+    /// a new label must be none of them either.
+    labels: Vec<String>,
 }
 
 /// Change, on `devices`, every identity `present` (the machine's devices,
@@ -236,6 +242,8 @@ pub fn change_identities(
         dm_prefix: format!("obk-reid-{}-", std::process::id()),
         dm_held: false,
         seq: 0,
+        prepared: Vec::new(),
+        labels: Vec::new(),
     };
     let devs: Vec<Dev> = devices
         .iter()
@@ -273,6 +281,64 @@ fn fat_serial_from(uuid: &str) -> (String, String) {
     (hex, shown)
 }
 
+/// The longest label a filesystem of kind `fs` takes, in bytes, and whether
+/// it is kept in upper case (FAT: DOS labels are, and `fatlabel` warns about
+/// lower case).
+fn label_limit(fs: IdentityKind) -> Option<(usize, bool)> {
+    match fs {
+        IdentityKind::Ext => Some((16, false)),
+        IdentityKind::Xfs => Some((12, false)),
+        IdentityKind::Btrfs => Some((255, false)),
+        IdentityKind::Fat => Some((11, true)),
+        _ => None,
+    }
+}
+
+/// A new label for a filesystem of kind `fs` labelled `old`: still
+/// recognisable — the old one with `-r` (`-R` on FAT), or `-r2`, `-r3`…
+/// while `taken` says the name is in use — shortened at a character
+/// boundary to fit the filesystem's limit. Never starts with `-` (the tools
+/// would read it as an option). On FAT only characters a DOS label takes
+/// are kept (others become `_`). `None` for a filesystem without labels.
+fn fresh_label(fs: IdentityKind, old: &str, taken: impl Fn(&str) -> bool) -> Option<String> {
+    let (limit, upper) = label_limit(fs)?;
+    let base: String = if upper {
+        old.chars()
+            .map(|c| {
+                let c = c.to_ascii_uppercase();
+                if c.is_ascii_alphanumeric() || " !#$%&'()-@^_`{}~".contains(c) {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    } else {
+        old.to_string()
+    };
+    let base = base.trim_start_matches('-');
+    for n in 1u32.. {
+        let mut suffix = if n == 1 {
+            "-r".to_string()
+        } else {
+            format!("-r{n}")
+        };
+        if upper {
+            suffix.make_ascii_uppercase();
+        }
+        let mut cut = limit.saturating_sub(suffix.len()).min(base.len());
+        while !base.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let label = format!("{}{suffix}", base[..cut].trim_end());
+        let label = label.trim_start_matches('-').to_string();
+        if !label.is_empty() && !taken(&label) {
+            return Some(label);
+        }
+    }
+    None
+}
+
 /// mdadm's colon spelling of a UUID.
 fn md_colons(uuid: &str) -> String {
     let hex: String = uuid.chars().filter(|c| c.is_ascii_hexdigit()).collect();
@@ -296,6 +362,7 @@ pub fn kind_slug(kind: IdentityKind) -> &'static str {
         IdentityKind::Md => "md",
         IdentityKind::PartUuid => "partuuid",
         IdentityKind::Fat => "vfat",
+        IdentityKind::Label => "label",
     }
 }
 
@@ -416,6 +483,18 @@ impl Run<'_> {
                     luks_map: dev.luks_map.clone(),
                 });
             }
+            // After the UUID: a btrfs is relabelled by its (now unique)
+            // fsid, and the journal or log is replayed once for both.
+            let labels: Vec<&Identity> = ids
+                .iter()
+                .filter(|i| i.kind == IdentityKind::Label)
+                .collect();
+            self.labels.extend(labels.iter().map(|l| l.shown.clone()));
+            for label in labels {
+                if self.must_change(&dev, label) {
+                    self.change_label(&dev, label)?;
+                }
+            }
         }
         for (_, (md, members)) in arrays {
             let array = self.change_md(&md, &members)?;
@@ -434,21 +513,13 @@ impl Run<'_> {
         let new = match id.kind {
             IdentityKind::Ext => {
                 let new = self.host.new_uuid();
-                // tune2fs changes a UUID only on a freshly checked
-                // filesystem; the check also replays the copy's journal.
-                run_checked(self.tools, "e2fsck", &args(["-f", "-p", node]), None, |c| {
-                    c < 4
-                })?;
+                self.prepare(node, IdentityKind::Ext)?;
                 run_ok(self.tools, "tune2fs", &args(["-U", &new, node]))?;
                 new
             }
             IdentityKind::Xfs => {
                 let new = self.host.new_uuid();
-                // xfs_admin refuses a dirty log, and a copy of a mounted XFS
-                // has one; only the kernel replays it. `nouuid`: the original
-                // may be mounted.
-                let m = self.host.mount(node, "xfs", "rw,nouuid")?;
-                m.unmount()?;
+                self.prepare(node, IdentityKind::Xfs)?;
                 run_ok(self.tools, "xfs_admin", &args(["-U", &new, node]))?;
                 new
             }
@@ -478,6 +549,90 @@ impl Run<'_> {
         };
         self.record(id.kind, &id.shown, &new, dev);
         Ok(Some(new))
+    }
+
+    /// Make the filesystem on `node` fit for its superblock to change, once
+    /// per node. ext: tune2fs changes a UUID only on a freshly checked
+    /// filesystem, and the check replays the copy's journal — a journalled
+    /// superblock replayed later would bring the old UUID or label back.
+    /// XFS: xfs_admin refuses a dirty log, and a copy of a mounted XFS has
+    /// one; only the kernel replays it (`nouuid`: the original may be
+    /// mounted).
+    fn prepare(&mut self, node: &str, kind: IdentityKind) -> Result<()> {
+        if self.prepared.iter().any(|n| n == node) {
+            return Ok(());
+        }
+        match kind {
+            IdentityKind::Ext => {
+                run_checked(self.tools, "e2fsck", &args(["-f", "-p", node]), None, |c| {
+                    c < 4
+                })?;
+            }
+            IdentityKind::Xfs => {
+                let m = self.host.mount(node, "xfs", "rw,nouuid")?;
+                m.unmount()?;
+            }
+            _ => return Ok(()),
+        }
+        self.prepared.push(node.to_string());
+        Ok(())
+    }
+
+    /// Give a filesystem's label a new value of its own (see
+    /// [`fresh_label`]); a multi-device btrfs keeps it, and says so.
+    fn change_label(&mut self, dev: &Dev, id: &Identity) -> Result<()> {
+        let node = dev.node.as_str();
+        let Some(fs) = id.fs else {
+            return Ok(());
+        };
+        if fs == IdentityKind::Btrfs && (id.multi_device || self.host.btrfs_devices(node) > 1) {
+            self.out.notes.push(
+                tr!(
+                    "identity_change_linux.btrfs_multi_device_label",
+                    node = node,
+                    label = id.shown.as_str()
+                )
+                .into_owned(),
+            );
+            return Ok(());
+        }
+        let taken: Vec<String> = self
+            .present
+            .values()
+            .flatten()
+            .filter(|i| i.kind == IdentityKind::Label)
+            .map(|i| i.shown.clone())
+            .chain(self.labels.iter().cloned())
+            .collect();
+        let Some(new) = fresh_label(fs, &id.shown, |l| {
+            taken.iter().any(|t| t.eq_ignore_ascii_case(l))
+        }) else {
+            return Ok(());
+        };
+        match fs {
+            IdentityKind::Ext => {
+                self.prepare(node, fs)?;
+                run_ok(self.tools, "tune2fs", &args(["-L", &new, node]))?;
+            }
+            IdentityKind::Xfs => {
+                self.prepare(node, fs)?;
+                run_ok(self.tools, "xfs_admin", &args(["-L", &new, node]))?;
+            }
+            IdentityKind::Btrfs => {
+                run_ok(
+                    self.tools,
+                    "btrfs",
+                    &args(["filesystem", "label", node, &new]),
+                )?;
+            }
+            IdentityKind::Fat => {
+                run_ok(self.tools, "fatlabel", &args([node, &new]))?;
+            }
+            _ => return Ok(()),
+        }
+        self.labels.push(new.clone());
+        self.record(IdentityKind::Label, &id.shown, &new, dev);
+        Ok(())
     }
 
     /// The new UUID.
@@ -851,6 +1006,7 @@ impl Run<'_> {
                             | IdentityKind::Xfs
                             | IdentityKind::Btrfs
                             | IdentityKind::Fat
+                            | IdentityKind::Label
                     )
             });
             let why = initramfs::reasons(&renamed, recorded_changed, &sys.config);
@@ -1476,6 +1632,295 @@ mod tests {
             ("/dev/sdb2".into(), "xfs".into(), "rw,nouuid".into())
         );
         assert_eq!(tools.calls[3].1[..2], args(["-f", "-U"]));
+    }
+
+    fn label(fs: IdentityKind, l: &str) -> Identity {
+        Identity::label(fs, l)
+    }
+
+    /// The cloud image's three labels and an XFS one, each changed with its
+    /// filesystem's tool after its UUID (when that clashed too), the journal
+    /// or log replayed once per filesystem.
+    #[test]
+    fn clashing_labels_get_new_ones_with_each_filesystems_tool() {
+        let mut host = FakeHost::default();
+        host.ids.insert(
+            "/dev/sdb15".into(),
+            vec![
+                id(IdentityKind::Fat, "1111-2222"),
+                label(IdentityKind::Fat, "UEFI"),
+            ],
+        );
+        host.ids.insert(
+            "/dev/sdb1".into(),
+            vec![
+                id(IdentityKind::Ext, SRC),
+                label(IdentityKind::Ext, "cloudimg-rootfs"),
+            ],
+        );
+        host.ids.insert(
+            "/dev/sdb2".into(),
+            vec![
+                id(IdentityKind::Xfs, "99999999-0000-4000-8000-000000000000"),
+                label(IdentityKind::Xfs, "data"),
+            ],
+        );
+        host.ids.insert(
+            "/dev/sdb16".into(),
+            vec![
+                id(IdentityKind::Btrfs, "88888888-0000-4000-8000-000000000000"),
+                label(IdentityKind::Btrfs, "BOOT"),
+            ],
+        );
+        // Only the root's UUID clashes; every label does (the machine's
+        // side is udev's: labels without a filesystem kind).
+        let present = machine(vec![
+            id(IdentityKind::Ext, SRC),
+            id(IdentityKind::Label, "cloudimg-rootfs"),
+            id(IdentityKind::Label, "UEFI"),
+            id(IdentityKind::Label, "data"),
+            id(IdentityKind::Label, "BOOT"),
+            // Taken already, in another case: the next number.
+            id(IdentityKind::Label, "boot-R"),
+        ]);
+        let mut tools = FakeTools::default();
+        let out = change_identities(
+            &mut tools,
+            &mut host,
+            &present,
+            &[
+                dev("/dev/sdb15", 15),
+                dev("/dev/sdb1", 1),
+                dev("/dev/sdb2", 2),
+                dev("/dev/sdb16", 16),
+            ],
+            false,
+        );
+        assert_eq!(out.failed, None, "{out:?}");
+        let calls: Vec<(String, Vec<String>)> = tools
+            .calls
+            .iter()
+            .map(|(p, a, _)| (p.clone(), a.clone()))
+            .collect();
+        let new_uuid = out.changed[1].new.clone();
+        assert_eq!(
+            calls,
+            vec![
+                ("fatlabel".into(), args(["/dev/sdb15", "UEFI-R"])),
+                ("e2fsck".into(), args(["-f", "-p", "/dev/sdb1"])),
+                ("tune2fs".into(), args(["-U", &new_uuid, "/dev/sdb1"])),
+                (
+                    "tune2fs".into(),
+                    args(["-L", "cloudimg-rootf-r", "/dev/sdb1"])
+                ),
+                ("xfs_admin".into(), args(["-L", "data-r", "/dev/sdb2"])),
+                (
+                    "btrfs".into(),
+                    args(["filesystem", "label", "/dev/sdb16", "BOOT-r2"])
+                ),
+            ]
+        );
+        assert_eq!(
+            host.mounts,
+            vec![("/dev/sdb2".into(), "xfs".into(), "rw,nouuid".into())],
+            "the XFS log is replayed before its label changes"
+        );
+        let labels: Vec<(&str, &str, &str)> = out
+            .changed
+            .iter()
+            .filter(|c| c.kind == IdentityKind::Label)
+            .map(|c| (c.node.as_str(), c.old.as_str(), c.new.as_str()))
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                ("/dev/sdb15", "UEFI", "UEFI-R"),
+                ("/dev/sdb1", "cloudimg-rootfs", "cloudimg-rootf-r"),
+                ("/dev/sdb2", "data", "data-r"),
+                ("/dev/sdb16", "BOOT", "BOOT-r2"),
+            ]
+        );
+        assert_eq!(out.dtos()[0].kind, "label");
+    }
+
+    /// Two restored filesystems with one label get two labels; a label the
+    /// machine does not have stays; a multi-device btrfs keeps its label
+    /// and says so.
+    #[test]
+    fn new_labels_are_unique_and_a_multi_device_btrfs_keeps_its_own() {
+        let mut host = FakeHost::default();
+        for n in ["/dev/sdb1", "/dev/sdb2"] {
+            host.ids.insert(
+                n.into(),
+                vec![
+                    id(IdentityKind::Fat, "1111-2222"),
+                    label(IdentityKind::Fat, "ESP"),
+                ],
+            );
+        }
+        host.ids.insert(
+            "/dev/sdb3".into(),
+            vec![id(IdentityKind::Ext, SRC), label(IdentityKind::Ext, "mine")],
+        );
+        let multi = Identity {
+            multi_device: true,
+            ..label(IdentityKind::Btrfs, "pool")
+        };
+        host.ids.insert(
+            "/dev/sdb4".into(),
+            vec![Identity::btrfs_multi_device(BOOT), multi],
+        );
+        let present = machine(vec![
+            id(IdentityKind::Label, "ESP"),
+            id(IdentityKind::Label, "pool"),
+        ]);
+        let mut tools = FakeTools::default();
+        let out = change_identities(
+            &mut tools,
+            &mut host,
+            &present,
+            &[
+                dev("/dev/sdb1", 1),
+                dev("/dev/sdb2", 2),
+                dev("/dev/sdb3", 3),
+                dev("/dev/sdb4", 4),
+            ],
+            false,
+        );
+        assert_eq!(out.failed, None, "{out:?}");
+        let news: Vec<&str> = out.changed.iter().map(|c| c.new.as_str()).collect();
+        assert_eq!(news, vec!["ESP-R", "ESP-R2"]);
+        assert_eq!(programs(&tools), vec!["fatlabel", "fatlabel"]);
+        assert!(
+            out.notes
+                .iter()
+                .any(|n| n.contains("/dev/sdb4") && n.contains("pool")),
+            "{:?}",
+            out.notes
+        );
+    }
+
+    #[test]
+    fn a_new_label_fits_its_filesystem_and_stays_recognisable() {
+        let free = |_: &str| false;
+        assert_eq!(
+            fresh_label(IdentityKind::Ext, "cloudimg-rootfs", free).as_deref(),
+            Some("cloudimg-rootf-r")
+        );
+        assert_eq!(
+            fresh_label(IdentityKind::Xfs, "abcdefghijkl", free).as_deref(),
+            Some("abcdefghij-r")
+        );
+        assert_eq!(
+            fresh_label(IdentityKind::Fat, "my.disk", free).as_deref(),
+            Some("MY_DISK-R")
+        );
+        assert_eq!(
+            fresh_label(IdentityKind::Fat, "EFI SYSTEM", free).as_deref(),
+            Some("EFI SYSTE-R")
+        );
+        // Cut at a character, never inside one: 14 bytes would split the
+        // seventh letter.
+        let ru = fresh_label(IdentityKind::Ext, "aПриветМир", free).unwrap();
+        assert_eq!(ru, "aПривет-r");
+        assert!(ru.len() <= 16);
+        // A tool would take a leading `-` for an option.
+        assert_eq!(
+            fresh_label(IdentityKind::Btrfs, "--x", free).as_deref(),
+            Some("x-r")
+        );
+        assert_eq!(
+            fresh_label(IdentityKind::Btrfs, "-", free).as_deref(),
+            Some("r")
+        );
+        let long = "x".repeat(255);
+        assert_eq!(
+            fresh_label(IdentityKind::Btrfs, &long, free).unwrap().len(),
+            255
+        );
+        let taken = |l: &str| ["a-r", "a-r2"].contains(&l);
+        assert_eq!(
+            fresh_label(IdentityKind::Ext, "a", taken).as_deref(),
+            Some("a-r3")
+        );
+        assert_eq!(fresh_label(IdentityKind::Luks, "a", free), None);
+    }
+
+    /// The cloud image restored beside its source: root, /boot and ESP
+    /// change labels, the restored fstab and GRUB follow, and the rebuild
+    /// finds /boot by its new label.
+    #[test]
+    fn labels_and_the_references_to_them_change_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let fstab = (
+            "etc/fstab",
+            "LABEL=cloudimg-rootfs / ext4 defaults 0 1\nLABEL=BOOT /boot ext4 defaults 0 2\n"
+                .to_string(),
+        );
+        let resume = (
+            "etc/initramfs-tools/conf.d/resume",
+            "RESUME=none\n".to_string(),
+        );
+        let cmdline = (
+            "etc/kernel/cmdline",
+            "root=LABEL=cloudimg-rootfs ro\n".to_string(),
+        );
+        let mut host = restored_ubuntu(dir.path(), &[fstab, resume, cmdline]);
+        std::fs::write(
+            dir.path().join("boot/grub/grub.cfg"),
+            "search --no-floppy --label --set=root BOOT\n\
+             linux /vmlinuz root=LABEL=cloudimg-rootfs ro\n\
+             chainloader /EFI/BOOT/BOOTX64.EFI\n",
+        )
+        .unwrap();
+        host.ids
+            .get_mut("/dev/sdb1")
+            .unwrap()
+            .push(label(IdentityKind::Ext, "cloudimg-rootfs"));
+        host.ids
+            .get_mut("/dev/sdb16")
+            .unwrap()
+            .push(label(IdentityKind::Ext, "BOOT"));
+        // What blkid reads from /boot once its label changed.
+        host.names.insert(
+            "/dev/sdb16".into(),
+            FsNames {
+                label: Some("BOOT-r".into()),
+                partuuid: None,
+            },
+        );
+        let mut present = the_machine();
+        present.get_mut("sda2").unwrap().extend([
+            id(IdentityKind::Label, "cloudimg-rootfs"),
+            id(IdentityKind::Label, "BOOT"),
+        ]);
+        let out = change_identities(
+            &mut FakeTools::default(),
+            &mut host,
+            &present,
+            &[dev("/dev/sdb1", 1), dev("/dev/sdb16", 16)],
+            true,
+        );
+        assert_eq!(out.failed, None, "{out:?}");
+        let root = dir.path().join("root");
+        assert_eq!(
+            std::fs::read_to_string(root.join("etc/fstab")).unwrap(),
+            "LABEL=cloudimg-rootf-r / ext4 defaults 0 1\nLABEL=BOOT-r /boot ext4 defaults 0 2\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("etc/kernel/cmdline")).unwrap(),
+            "root=LABEL=cloudimg-rootf-r ro\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("boot/grub/grub.cfg")).unwrap(),
+            "search --no-floppy --label --set=root BOOT-r\n\
+             linux /vmlinuz root=LABEL=cloudimg-rootf-r ro\n\
+             chainloader /EFI/BOOT/BOOTX64.EFI\n"
+        );
+        // /etc/kernel/cmdline is copied into the image: rebuilt, with /boot
+        // found by the label it has now.
+        assert_eq!(host.rebuilds.len(), 1, "{:?}", out.notes);
+        assert_eq!(host.rebuilds[0].mounts[0].node, "/dev/sdb16");
     }
 
     #[test]
@@ -2451,6 +2896,103 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&check.stderr)
         );
+    }
+
+    fn blkid_label(path: &str) -> String {
+        let out = std::process::Command::new("blkid")
+            .args(["-p", "-o", "value", "-s", "LABEL", path])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Labels as the Ubuntu cloud image has them, on partition-sized files:
+    /// what this module reads is what blkid reads (XFS too), and e2fsprogs,
+    /// btrfs-progs and dosfstools give each copy the new label the run
+    /// reported, the filesystems still clean. No root, no mount.
+    #[test]
+    fn real_tools_relabel_ext4_btrfs_and_fat_copies() {
+        let tools = [
+            "mkfs.ext4",
+            "mkfs.btrfs",
+            "btrfs",
+            "mkfs.vfat",
+            "fatlabel",
+            "fsck.fat",
+        ];
+        if !tools.iter().all(|t| have(t)) || !have("blkid") {
+            eprintln!("e2fsprogs/btrfs-progs/dosfstools/blkid not installed — skipped");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let ext = image(dir.path(), "ext.img", 32);
+        let btr = image(dir.path(), "btrfs.img", 128);
+        let fat = image(dir.path(), "fat.img", 64);
+        sh(&format!("mkfs.ext4 -q -F -L cloudimg-rootfs {ext}"));
+        sh(&format!("mkfs.btrfs -q -f -L BOOT {btr} >/dev/null"));
+        sh(&format!("mkfs.vfat -F 32 -n UEFI {fat} >/dev/null"));
+        let mut read = vec![ext.clone(), btr.clone(), fat.clone()];
+        if have("mkfs.xfs") {
+            let xfs = image(dir.path(), "xfs.img", 320);
+            sh(&format!("mkfs.xfs -q -f -L twelve-bytes {xfs}"));
+            read.push(xfs);
+        }
+        let label_on = |n: &str| {
+            SystemHost
+                .identities_on(n)
+                .unwrap()
+                .into_iter()
+                .find(|i| i.kind == IdentityKind::Label)
+                .map(|i| i.shown)
+        };
+        for n in &read {
+            assert_eq!(label_on(n), Some(blkid_label(n)), "{n}");
+        }
+        let present = source_of(&[&ext, &btr, &fat]);
+        let devices: Vec<RestoredDevice> = [&ext, &btr, &fat]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| dev(n, i as u32 + 1))
+            .collect();
+        let out = change_identities(
+            &mut crate::linux_tools::SystemTools,
+            &mut SystemHost,
+            &present,
+            &devices,
+            false,
+        );
+        assert_eq!(out.failed, None, "{out:?}");
+        let labels: Vec<(&str, &str)> = out
+            .changed
+            .iter()
+            .filter(|c| c.kind == IdentityKind::Label)
+            .map(|c| (c.old.as_str(), c.new.as_str()))
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                ("cloudimg-rootfs", "cloudimg-rootf-r"),
+                ("BOOT", "BOOT-r"),
+                ("UEFI", "UEFI-R")
+            ]
+        );
+        for c in out.changed.iter().filter(|c| c.kind == IdentityKind::Label) {
+            assert_eq!(blkid_label(&c.node), c.new, "{c:?}");
+            assert_eq!(label_on(&c.node).as_deref(), Some(c.new.as_str()));
+        }
+        for (prog, a) in [
+            ("e2fsck", vec!["-f", "-n", &ext]),
+            ("btrfs", vec!["check", "--readonly", &btr]),
+            ("fsck.fat", vec!["-n", &fat]),
+        ] {
+            let o = std::process::Command::new(prog).args(&a).output().unwrap();
+            assert!(
+                o.status.success(),
+                "{prog}: {}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            );
+        }
     }
 
     /// As root (loop mounts): an XFS copy (its log replayed by a mount first)

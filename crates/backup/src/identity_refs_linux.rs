@@ -6,7 +6,9 @@
 //! `/etc/crypttab`, `root=UUID=` and `search --fs-uuid` in `grub.cfg`, the
 //! `search.fs_uuid` stub GRUB leaves on the ESP, `ARRAY … UUID=` in
 //! `mdadm.conf`, `/dev/mapper/<vg>-<lv>` and `rd.lvm.vg=` for a volume group,
-//! `options root=` in systemd-boot entries. Once the restore has given the
+//! `options root=` in systemd-boot entries; a filesystem label as `LABEL=`,
+//! `/dev/disk/by-label/…`, GRUB's `search --label` and the ESP stub's
+//! `search.fs_label`. Once the restore has given the
 //! copy new identities, every one of those still names the source's — on the
 //! machine the copy came from, that is the source itself.
 //!
@@ -50,6 +52,10 @@ enum Rule {
     /// (device-mapper doubles a `-` inside a name, and an LV name never
     /// starts with one).
     ExactNotDash { old: String, new: String },
+    /// A filesystem label, only where something names a label by it (see
+    /// [`replace_label`]): a label is any text, and `BOOT` is also a part of
+    /// `BOOTX64.EFI`.
+    Label { old: String, new: String },
 }
 
 /// device-mapper doubles a `-` inside a VG or LV name.
@@ -119,6 +125,10 @@ fn rules_for(renamed: &[Renamed]) -> Vec<Rule> {
                 format!("lvmid/{}/", r.old),
                 format!("lvmid/{}/", r.new),
             )),
+            IdentityKind::Label => out.push(Rule::Label {
+                old: r.old.clone(),
+                new: r.new.clone(),
+            }),
             IdentityKind::LvmPv | IdentityKind::PartUuid => {}
         }
     }
@@ -176,6 +186,173 @@ fn replace_not_before_dash(text: &str, old: &str, new: &str, count: &mut usize) 
     out
 }
 
+/// How fstab writes a name: octal escapes for blanks and the backslash.
+fn fstab_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            ' ' => out.push_str(r"\040"),
+            '\t' => out.push_str(r"\011"),
+            '\n' => out.push_str(r"\012"),
+            '\\' => out.push_str(r"\134"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// How udev names a `/dev/disk/by-label` link: every byte outside
+/// `0-9A-Za-z#+-.:=@_` and outside a multibyte UTF-8 character is `\xNN`.
+pub fn udev_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() || "#+-.:=@_".contains(c) || !c.is_ascii() {
+            out.push(c);
+        } else {
+            out.push_str(&format!(r"\x{:02x}", c as u32));
+        }
+    }
+    out
+}
+
+/// Where a name ends in a configuration line: a blank, a quote, a list
+/// separator, the end of the line.
+fn name_ends(rest: &str) -> bool {
+    rest.chars()
+        .next()
+        .is_none_or(|c| c.is_whitespace() || "\"',;".contains(c))
+}
+
+/// Replace `old` right after each `prefix` in `line` with `new`, where it is
+/// the whole name there: quoted (`LABEL="x y"`) up to the closing quote,
+/// otherwise up to [`name_ends`]. With `word`, a `prefix` glued to a word
+/// before it does not count (`PARTLABEL=` is not `LABEL=`).
+fn replace_named(
+    line: &str,
+    prefix: &str,
+    word: bool,
+    old: &str,
+    new: &str,
+    count: &mut usize,
+) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut at = 0;
+    while let Some(pos) = line[at..].find(prefix) {
+        let start = at + pos;
+        let name = start + prefix.len();
+        out.push_str(&line[at..name]);
+        at = name;
+        let glued = word
+            && line[..start]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+        if glued {
+            continue;
+        }
+        let quote = line[name..]
+            .chars()
+            .next()
+            .filter(|c| *c == '"' || *c == '\'');
+        let body = name + quote.map_or(0, char::len_utf8);
+        let Some(rest) = line[body..].strip_prefix(old) else {
+            continue;
+        };
+        let whole = match quote {
+            Some(q) => rest.starts_with(q),
+            None => name_ends(rest),
+        };
+        if whole {
+            out.push_str(&line[name..body]);
+            out.push_str(new);
+            at = body + old.len();
+            *count += 1;
+        }
+    }
+    out.push_str(&line[at..]);
+    out
+}
+
+/// The byte range of the name a GRUB `search --label` / `search -l` /
+/// `search.fs_label` line looks for (inside its quotes, if any): the first
+/// argument that is not an option.
+fn grub_search_label(line: &str) -> Option<(usize, usize)> {
+    let mut words = Vec::new();
+    let mut at = 0;
+    for w in line.split_whitespace() {
+        let start = at + line[at..].find(w)?;
+        words.push((start, w));
+        at = start + w.len();
+    }
+    let (_, command) = *words.first()?;
+    let by_label = match command {
+        "search.fs_label" => true,
+        "search" => words[1..]
+            .iter()
+            .any(|(_, w)| *w == "--label" || *w == "-l"),
+        _ => false,
+    };
+    if !by_label {
+        return None;
+    }
+    let &(start, w) = words[1..].iter().find(|(_, w)| !w.starts_with('-'))?;
+    let quoted = w.len() >= 2
+        && ((w.starts_with('"') && w.ends_with('"')) || (w.starts_with('\'') && w.ends_with('\'')));
+    Some(if quoted {
+        (start + 1, start + w.len() - 1)
+    } else {
+        (start, start + w.len())
+    })
+}
+
+/// Every place `text` names the filesystem label `old`, replaced by `new`:
+/// `LABEL=` (fstab, crypttab, `root=`/`resume=` on a kernel command line —
+/// in fstab's own escaping too), `/dev/disk/by-label/` (in udev's escaping,
+/// or as written), and the name of a GRUB `search` by label. Labels are
+/// case-sensitive, and nothing else that merely contains one is touched.
+fn replace_label(text: &str, old: &str, new: &str, count: &mut usize) -> String {
+    if old.is_empty() {
+        return text.to_string();
+    }
+    let mut spelled = vec![(old.to_string(), new.to_string())];
+    let fstab = (fstab_escape(old), fstab_escape(new));
+    if fstab.0 != old {
+        spelled.push(fstab);
+    }
+    let mut linked = vec![(udev_encode(old), udev_encode(new))];
+    if linked[0].0 != old {
+        linked.push((old.to_string(), new.to_string()));
+    }
+    text.split_inclusive('\n')
+        .map(|line| {
+            let mut line = line.to_string();
+            for (o, n) in &spelled {
+                line = replace_named(&line, "LABEL=", true, o, n, count);
+            }
+            for (o, n) in &linked {
+                line = replace_named(&line, "/dev/disk/by-label/", false, o, n, count);
+            }
+            if !line.trim_start().starts_with('#') {
+                if let Some((a, b)) = grub_search_label(&line) {
+                    if &line[a..b] == old {
+                        line.replace_range(a..b, new);
+                        *count += 1;
+                    }
+                }
+            }
+            line
+        })
+        .collect()
+}
+
+/// Does `text` name the filesystem label `label` where [`rewrite`] would
+/// find it?
+pub fn names_label(text: &str, label: &str) -> bool {
+    let mut count = 0;
+    replace_label(text, label, label, &mut count);
+    count > 0
+}
+
 /// `text` with every renamed identity replaced, and how many replacements
 /// were made.
 pub fn rewrite(text: &str, renamed: &[Renamed]) -> (String, usize) {
@@ -187,6 +364,7 @@ pub fn rewrite(text: &str, renamed: &[Renamed]) -> (String, usize) {
             Rule::ExactNotDash { old, new } => {
                 replace_not_before_dash(&text, &old, &new, &mut count)
             }
+            Rule::Label { old, new } => replace_label(&text, &old, &new, &mut count),
             Rule::Exact { old, new } => {
                 let n = text.matches(&old).count();
                 count += n;
@@ -210,6 +388,7 @@ const FILES: &[&str] = &[
     "etc/mdadm/mdadm.conf",
     "etc/mdadm.conf",
     "etc/default/grub",
+    "etc/default/grub.d/*.cfg",
     "etc/kernel/cmdline",
     "etc/initramfs-tools/conf.d/resume",
     "etc/initramfs-tools/initramfs.conf",
@@ -690,6 +869,96 @@ mod tests {
         assert_eq!(n, 2);
         assert!(out.contains("UUID=11111111:22222222:33333333:44444444"));
         assert!(out.contains("UUID=11111111-2222-2222-3333-333344444444"));
+    }
+
+    /// A label is replaced where something names a label by it, as a whole
+    /// name, in every spelling; nothing that merely contains it moves.
+    #[test]
+    fn a_label_moves_only_where_a_label_is_named() {
+        let r = [renamed(IdentityKind::Label, "BOOT", "BOOT-r")];
+        let text = "LABEL=BOOT /boot ext4 defaults 0 2\n\
+                    LABEL=\"BOOT\" /x ext4 defaults 0 2\n\
+                    PARTLABEL=BOOT /y ext4 defaults 0 2\n\
+                    LABEL=BOOTX /z ext4 defaults 0 2\n\
+                    LABEL=BOOT-r /w ext4 defaults 0 2\n\
+                    /dev/disk/by-label/BOOT /v ext4 defaults 0 2\n\
+                    GRUB_CMDLINE_LINUX=\"root=LABEL=BOOT\"\n\
+                    linux /vmlinuz root=LABEL=BOOT ro quiet\n\
+                    \tsearch --no-floppy --label --set=root --hint-efi=hd0,gpt16 BOOT\n\
+                    search.fs_label BOOT root\n\
+                    search -l 'BOOT'\n\
+                    search --no-floppy --fs-uuid --set=root BOOT\n\
+                    chainloader /EFI/BOOT/BOOTX64.EFI\n\
+                    menuentry 'BOOT' {\n";
+        let (out, n) = rewrite(text, &r);
+        assert_eq!(n, 8, "{out}");
+        let want = "LABEL=BOOT-r /boot ext4 defaults 0 2\n\
+                    LABEL=\"BOOT-r\" /x ext4 defaults 0 2\n\
+                    PARTLABEL=BOOT /y ext4 defaults 0 2\n\
+                    LABEL=BOOTX /z ext4 defaults 0 2\n\
+                    LABEL=BOOT-r /w ext4 defaults 0 2\n\
+                    /dev/disk/by-label/BOOT-r /v ext4 defaults 0 2\n\
+                    GRUB_CMDLINE_LINUX=\"root=LABEL=BOOT-r\"\n\
+                    linux /vmlinuz root=LABEL=BOOT-r ro quiet\n\
+                    \tsearch --no-floppy --label --set=root --hint-efi=hd0,gpt16 BOOT-r\n\
+                    search.fs_label BOOT-r root\n\
+                    search -l 'BOOT-r'\n\
+                    search --no-floppy --fs-uuid --set=root BOOT\n\
+                    chainloader /EFI/BOOT/BOOTX64.EFI\n\
+                    menuentry 'BOOT' {\n";
+        assert_eq!(out, want);
+        assert!(names_label(&out, "BOOT-r") && !names_label(&out, "BOOTX64.EFI"));
+
+        // A label with a blank: fstab's and udev's escapes.
+        let r = [renamed(IdentityKind::Label, "my disk", "my disk-r")];
+        let text = "LABEL=my\\040disk /d ext4 defaults 0 2\n\
+                    /dev/disk/by-label/my\\x20disk /e ext4 defaults 0 2\n\
+                    LABEL=\"my disk\" /f ext4 defaults 0 2\n";
+        let (out, n) = rewrite(text, &r);
+        assert_eq!(n, 3, "{out}");
+        assert!(out.contains("LABEL=my\\040disk-r /d"), "{out}");
+        assert!(out.contains("/dev/disk/by-label/my\\x20disk-r /e"), "{out}");
+        assert!(out.contains("LABEL=\"my disk-r\" /f"), "{out}");
+        assert_eq!(udev_encode("a/b c-é"), "a\\x2fb\\x20c-é");
+    }
+
+    /// The Ubuntu cloud image names its root, /boot and ESP by label, and
+    /// its GRUB settings live in grub.d.
+    #[test]
+    fn a_cloud_image_follows_its_new_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "etc/fstab",
+            "LABEL=cloudimg-rootfs / ext4 discard,errors=remount-ro 0 1\n\
+             LABEL=BOOT /boot ext4 defaults 0 2\n\
+             LABEL=UEFI /boot/efi vfat umask=0077 0 1\n",
+        );
+        write(
+            root,
+            "etc/default/grub.d/50-cloudimg-settings.cfg",
+            "GRUB_CMDLINE_LINUX_DEFAULT=\"console=tty1 root=LABEL=cloudimg-rootfs\"\n",
+        );
+        write(root, "etc/hostname", "cloudimg-rootfs\n");
+        let r = [
+            renamed(IdentityKind::Label, "cloudimg-rootfs", "cloudimg-rootf-r"),
+            renamed(IdentityKind::Label, "BOOT", "BOOT-r"),
+            renamed(IdentityKind::Label, "UEFI", "UEFI-R"),
+        ];
+        let e = fix_tree(root, false, &r).unwrap();
+        assert_eq!(
+            e.files,
+            vec!["etc/fstab", "etc/default/grub.d/50-cloudimg-settings.cfg"]
+        );
+        let fstab = std::fs::read_to_string(root.join("etc/fstab")).unwrap();
+        assert_eq!(
+            fstab,
+            "LABEL=cloudimg-rootf-r / ext4 discard,errors=remount-ro 0 1\n\
+             LABEL=BOOT-r /boot ext4 defaults 0 2\n\
+             LABEL=UEFI-R /boot/efi vfat umask=0077 0 1\n"
+        );
+        assert!(!e.initramfs_config, "fstab alone is not an image's");
     }
 
     fn write(root: &Path, rel: &str, text: &str) {

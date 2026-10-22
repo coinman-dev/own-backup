@@ -44,6 +44,10 @@
     "ru": "btrfs на %{node} занимает несколько устройств — его UUID оставлен прежним (менять можно только всем устройствам сразу: btrfstune -u, когда подключены все).",
     "en": "The btrfs on %{node} spans several devices — its UUID was kept (it can only change on all of them at once: btrfstune -u with every device present)."
   },
+  "identity_change_linux.btrfs_multi_device_label": {
+    "ru": "btrfs на %{node} занимает несколько устройств — его метка «%{label}» оставлена прежней (менять её можно, только когда подключены все устройства: btrfs filesystem label).",
+    "en": "The btrfs on %{node} spans several devices — its label «%{label}» was kept (it can only change with every device present: btrfs filesystem label)."
+  },
   "identity_change_linux.vg_not_activated": {
     "ru": "Группа томов %{vg} получила новое имя, но её новый UUID не прочитан — тома внутри не проверены.",
     "en": "Volume group %{vg} got a new name, but its new UUID could not be read — the volumes inside were not checked."

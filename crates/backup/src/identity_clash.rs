@@ -13,6 +13,7 @@
 //! | md        | incremental assembly can add the clone to the running array        |
 //! | XFS       | the second mount is refused until mounted with `nouuid`            |
 //! | ext2/3/4, FAT, LUKS, PARTUUID | both work, but `UUID=`/`PARTUUID=` in fstab, crypttab and the kernel command line resolve to whichever udev saw last |
+//! | filesystem LABEL | the same for `LABEL=` and `/dev/disk/by-label` — one namespace for every filesystem type (the Ubuntu cloud image mounts `LABEL=cloudimg-rootfs`, `LABEL=BOOT`, `LABEL=UEFI`) |
 //!
 //! This module finds the duplicates — what the restored data carries, read
 //! from its first bytes and its tail, against what the machine already has,
@@ -48,6 +49,11 @@ pub enum IdentityKind {
     PartUuid,
     /// FAT volume serial (`XXXX-XXXX`) — an ESP's `UUID=` in fstab.
     Fat,
+    /// Filesystem label (`LABEL=`, `/dev/disk/by-label`). One namespace for
+    /// every filesystem type, so compared whatever carries it; which
+    /// filesystem does is [`Identity::fs`]. Read from ext2/3/4, XFS, btrfs
+    /// and FAT — the ones a restore can relabel.
+    Label,
 }
 
 /// One identity, normalised for comparison and kept as shown for people.
@@ -64,6 +70,11 @@ pub struct Identity {
     /// filesystems only, so a clone of such a member is always critical.
     /// Read from the data itself; the udev side never sets it.
     pub multi_device: bool,
+    /// Labels only: the filesystem carrying it (`Ext`, `Xfs`, `Btrfs`,
+    /// `Fat`), which decides how it can change and how long it may be. Read
+    /// from the data; the udev side leaves it unset — a label of any
+    /// filesystem takes the same `/dev/disk/by-label` name.
+    pub fs: Option<IdentityKind>,
 }
 
 impl Identity {
@@ -71,7 +82,8 @@ impl Identity {
         let shown = shown.trim().to_string();
         let key = match kind {
             IdentityKind::LvmPv | IdentityKind::LvmVg => shown.replace('-', ""),
-            IdentityKind::LvmVgName => shown.clone(),
+            // Names: case-sensitive, compared as written (by-label links are).
+            IdentityKind::LvmVgName | IdentityKind::Label => shown.clone(),
             _ => shown
                 .chars()
                 .filter(|c| c.is_ascii_hexdigit())
@@ -83,6 +95,15 @@ impl Identity {
             key,
             shown,
             multi_device: false,
+            fs: None,
+        }
+    }
+
+    /// The label of a filesystem of kind `fs`, as read from it.
+    pub fn label(fs: IdentityKind, label: &str) -> Self {
+        Self {
+            fs: Some(fs),
+            ..Self::new(IdentityKind::Label, label)
         }
     }
 
@@ -127,6 +148,14 @@ pub enum Reidentify {
     MdadmUpdateUuid,
     /// `fatlabel -i <dev> <serial>`.
     Fatlabel,
+    /// A label: `tune2fs -L <label> <dev>` (after `e2fsck -f`).
+    LabelTune2fs,
+    /// A label: `xfs_admin -L <label> <dev>`.
+    LabelXfsAdmin,
+    /// A label: `btrfs filesystem label <dev> <label>`; single-device only.
+    LabelBtrfs,
+    /// A label: `fatlabel <dev> <LABEL>`.
+    LabelFatlabel,
     /// Not offered: changing it is the owner's decision (see module docs).
     None,
 }
@@ -188,6 +217,18 @@ fn assess(
         IdentityKind::Md => (Severity::Critical, Reidentify::MdadmUpdateUuid, None),
         IdentityKind::PartUuid => (Severity::Ambiguous, Reidentify::None, None),
         IdentityKind::Fat => (Severity::Ambiguous, Reidentify::Fatlabel, None),
+        IdentityKind::Label => {
+            let how = match id.fs {
+                Some(IdentityKind::Ext) => Reidentify::LabelTune2fs,
+                Some(IdentityKind::Xfs) => Reidentify::LabelXfsAdmin,
+                // Like its fsid, a multi-device btrfs's label is in every
+                // member's superblock.
+                Some(IdentityKind::Btrfs) if !id.multi_device => Reidentify::LabelBtrfs,
+                Some(IdentityKind::Fat) => Reidentify::LabelFatlabel,
+                _ => Reidentify::None,
+            };
+            (Severity::Ambiguous, how, None)
+        }
     }
 }
 
@@ -266,11 +307,18 @@ pub fn identities_of(p: &mut dyn Probe) -> Vec<Identity> {
         if let Some(u) = luks_uuid(&head) {
             out.push(Identity::new(IdentityKind::Luks, &u));
         }
+        let label = |fs: IdentityKind, raw: Option<&[u8]>| {
+            raw.and_then(label_text)
+                .map(|l| Identity::label(fs, &l))
+                .filter(|l| !l.key.is_empty())
+        };
         if let Some(u) = ext_uuid(&head) {
             out.push(Identity::new(IdentityKind::Ext, &u));
+            out.extend(label(IdentityKind::Ext, head.get(1024 + 120..1024 + 136)));
         }
         if let Some(u) = xfs_uuid(&head) {
             out.push(Identity::new(IdentityKind::Xfs, &u));
+            out.extend(label(IdentityKind::Xfs, head.get(108..120)));
         }
         if let Some((u, devices)) = btrfs_fsid(&head) {
             out.push(if devices > 1 {
@@ -278,9 +326,21 @@ pub fn identities_of(p: &mut dyn Probe) -> Vec<Identity> {
             } else {
                 Identity::new(IdentityKind::Btrfs, &u)
             });
+            if let Some(l) = label(
+                IdentityKind::Btrfs,
+                head.get(65536 + 0x12b..65536 + 0x12b + 256),
+            ) {
+                out.push(Identity {
+                    multi_device: devices > 1,
+                    ..l
+                });
+            }
         }
         if let Some(u) = fat_serial(&head) {
             out.push(Identity::new(IdentityKind::Fat, &u));
+            if let Some(l) = fat_label(p, &head) {
+                out.push(Identity::label(IdentityKind::Fat, &l));
+            }
         }
     }
     out.extend(lvm_identities(p));
@@ -357,6 +417,75 @@ fn fat_serial(head: &[u8]) -> Option<String> {
     };
     let s = head.get(at..at + 4)?;
     nonzero(s).then(|| format!("{:02X}{:02X}-{:02X}{:02X}", s[3], s[2], s[1], s[0]))
+}
+
+/// A label field: up to its first NUL; empty is none.
+fn label_text(raw: &[u8]) -> Option<String> {
+    let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+    let s = String::from_utf8_lossy(&raw[..end]).trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+/// A FAT label as blkid reads it: the volume-label entry of the root
+/// directory, else the boot sector's copy (0x47 on FAT32, 0x2B on FAT12/16);
+/// `NO NAME` is none. `fatlabel` writes both.
+fn fat_label(p: &mut dyn Probe, head: &[u8]) -> Option<String> {
+    const NO_NAME: &[u8; 11] = b"NO NAME    ";
+    let fat32 = head.get(0x52..0x57)? == b"FAT32";
+    let in_root = fat_root_label(p, head, fat32);
+    let boot = head.get(if fat32 { 0x47..0x52 } else { 0x2B..0x36 })?;
+    let found = [in_root.as_deref(), Some(boot)]
+        .into_iter()
+        .flatten()
+        .filter(|l| *l != &NO_NAME[..])
+        .find_map(label_text);
+    found
+}
+
+/// The 11 bytes of the root directory's volume-label entry, looked for in
+/// the fixed root directory (FAT12/16) or the root's first cluster (FAT32).
+fn fat_root_label(p: &mut dyn Probe, head: &[u8], fat32: bool) -> Option<Vec<u8>> {
+    let u16_at = |o: usize| {
+        head.get(o..o + 2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]) as u64)
+    };
+    let u32_at = |o: usize| {
+        head.get(o..o + 4)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as u64)
+    };
+    let bps = u16_at(0x0B)?;
+    let spc = *head.get(0x0D)? as u64;
+    let reserved = u16_at(0x0E)?;
+    let fats = *head.get(0x10)? as u64;
+    let root_entries = u16_at(0x11)?;
+    let fat_size = match u16_at(0x16)? {
+        0 => u32_at(0x24)?,
+        n => n,
+    };
+    if ![512, 1024, 2048, 4096].contains(&bps) || spc == 0 || fats == 0 || fat_size == 0 {
+        return None;
+    }
+    let fats_end = (reserved + fats * fat_size) * bps;
+    let (at, len) = if fat32 {
+        let cluster = u32_at(0x2C)?.checked_sub(2)?;
+        (fats_end + cluster * spc * bps, spc * bps)
+    } else {
+        (fats_end, root_entries * 32)
+    };
+    let dir = p.read(at, len.min(64 * 1024) as usize)?;
+    for e in dir.as_chunks::<32>().0 {
+        match e[0] {
+            0x00 => break,
+            0xE5 => continue,
+            _ => {}
+        }
+        let attr = e[11] & 0x3F;
+        let cluster = e[20] as u16 | e[21] as u16 | e[26] as u16 | e[27] as u16;
+        if attr != 0x0F && attr & 0x18 == 0x08 && cluster == 0 {
+            return Some(e[..11].to_vec());
+        }
+    }
+    None
 }
 
 /// LVM2 PV: `LABELONE` in one of the first four sectors, the PV UUID in the
@@ -526,7 +655,7 @@ fn md_colons(b: &[u8]) -> String {
 /// Identities the machine's devices carry, from the udev database
 /// (`<run_udev>/data/b<major>:<minor>`, `E:ID_FS_TYPE=` / `E:ID_FS_UUID=`),
 /// keyed by kernel name via `<sys_dev_block>/<major>:<minor>`. PARTUUIDs come
-/// from `E:ID_PART_ENTRY_UUID=`.
+/// from `E:ID_PART_ENTRY_UUID=`, labels from `E:ID_FS_LABEL_ENC=`.
 ///
 /// udev's blkid prints LVM PV UUIDs dashed and md UUIDs as a plain UUID; both
 /// normalise to the same key as [`identities_of`] produces.
@@ -571,6 +700,16 @@ pub fn host_identities(
                 ids.push(Identity::new(kind, &uuid));
             }
         }
+        // Any filesystem's (or container's) label takes a by-label link.
+        // `_ENC` is the label as written, `\xNN`-escaped; ID_FS_LABEL has
+        // spaces and odd characters replaced.
+        if let Some(label) = prop("ID_FS_LABEL_ENC")
+            .map(|e| udev_unescape(&e))
+            .or_else(|| prop("ID_FS_LABEL"))
+            .filter(|l| !l.trim().is_empty())
+        {
+            ids.push(Identity::new(IdentityKind::Label, &label));
+        }
         if let Some(vg) = prop("DM_VG_NAME") {
             ids.push(Identity::new(IdentityKind::LvmVgName, &vg));
         }
@@ -582,6 +721,28 @@ pub fn host_identities(
         }
     }
     out
+}
+
+/// udev's `\xNN` escapes undone.
+pub fn udev_unescape(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\\' && b.get(i + 1) == Some(&b'x') {
+            if let Some(v) = s
+                .get(i + 2..i + 4)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+            {
+                out.push(v);
+                i += 4;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Lines of an fstab, crypttab or boot loader configuration that name `id`
@@ -881,6 +1042,202 @@ mod tests {
         let id = Identity::new(IdentityKind::Ext, TEXT);
         let got = lines_naming(&fstab, &id);
         assert_eq!(got.iter().map(|(n, _)| *n).collect::<Vec<_>>(), vec![2, 3]);
+    }
+
+    fn label_of(d: &[u8]) -> Option<Identity> {
+        ids(d).into_iter().find(|i| i.kind == IdentityKind::Label)
+    }
+
+    #[test]
+    fn labels_are_read_with_the_filesystem_that_carries_them() {
+        let mut d = disk(1 << 20);
+        d[1024 + 56..1024 + 58].copy_from_slice(&0xEF53u16.to_le_bytes());
+        d[1024 + 104..1024 + 120].copy_from_slice(&RAW);
+        d[1024 + 120..1024 + 135].copy_from_slice(b"cloudimg-rootfs");
+        assert_eq!(
+            ids(&d),
+            vec![
+                Identity::new(IdentityKind::Ext, TEXT),
+                Identity::label(IdentityKind::Ext, "cloudimg-rootfs")
+            ]
+        );
+
+        // XFS: 12 bytes, not NUL-terminated when full.
+        let mut d = disk(1 << 20);
+        d[0..4].copy_from_slice(b"XFSB");
+        d[32..48].copy_from_slice(&RAW);
+        d[108..120].copy_from_slice(b"twelve-bytes");
+        assert_eq!(
+            label_of(&d),
+            Some(Identity::label(IdentityKind::Xfs, "twelve-bytes"))
+        );
+
+        // btrfs: a multi-device filesystem's label says so too.
+        let mut d = disk(1 << 20);
+        d[65536 + 64..65536 + 72].copy_from_slice(b"_BHRfS_M");
+        d[65536 + 32..65536 + 48].copy_from_slice(&RAW);
+        d[65536 + 0x12b..65536 + 0x12b + 4].copy_from_slice(b"data");
+        let l = label_of(&d).unwrap();
+        assert_eq!(
+            (l.fs, l.shown.as_str(), l.multi_device),
+            (Some(IdentityKind::Btrfs), "data", false)
+        );
+        d[65536 + 0x88..65536 + 0x90].copy_from_slice(&2u64.to_le_bytes());
+        assert!(label_of(&d).unwrap().multi_device);
+
+        // No label: none reported.
+        let mut d = disk(1 << 20);
+        d[0..4].copy_from_slice(b"XFSB");
+        d[32..48].copy_from_slice(&RAW);
+        assert_eq!(label_of(&d), None);
+    }
+
+    /// A FAT32 the way mkfs.fat leaves it: 512-byte sectors, 32 reserved,
+    /// two FATs of `fat` sectors, the root in cluster 2.
+    fn fat32(fat: u32, spc: u8) -> Vec<u8> {
+        let mut d = disk(4 << 20);
+        d[0x0B..0x0D].copy_from_slice(&512u16.to_le_bytes());
+        d[0x0D] = spc;
+        d[0x0E..0x10].copy_from_slice(&32u16.to_le_bytes());
+        d[0x10] = 2;
+        d[0x24..0x28].copy_from_slice(&fat.to_le_bytes());
+        d[0x2C..0x30].copy_from_slice(&2u32.to_le_bytes());
+        d[0x43..0x47].copy_from_slice(&[0x34, 0x12, 0xCD, 0xAB]);
+        d[0x47..0x52].copy_from_slice(b"NO NAME    ");
+        d[0x52..0x57].copy_from_slice(b"FAT32");
+        d[510..512].copy_from_slice(&[0x55, 0xAA]);
+        d
+    }
+
+    fn dir_entry(name: &[u8; 11], attr: u8) -> [u8; 32] {
+        let mut e = [0u8; 32];
+        e[..11].copy_from_slice(name);
+        e[11] = attr;
+        e
+    }
+
+    #[test]
+    fn a_fat_label_is_the_root_directorys_then_the_boot_sectors() {
+        let root = ((32 + 2 * 100) * 512) as usize;
+        let mut d = fat32(100, 1);
+        // A long-name entry and a deleted label come first.
+        d[root..root + 32].copy_from_slice(&dir_entry(b"Ae\0f\0i\0\0\0\0\0", 0x0F));
+        let mut gone = dir_entry(b"OLD        ", 0x08);
+        gone[0] = 0xE5;
+        d[root + 32..root + 64].copy_from_slice(&gone);
+        d[root + 64..root + 96].copy_from_slice(&dir_entry(b"EFI        ", 0x10));
+        d[root + 96..root + 128].copy_from_slice(&dir_entry(b"UEFI       ", 0x08));
+        assert_eq!(
+            label_of(&d),
+            Some(Identity::label(IdentityKind::Fat, "UEFI"))
+        );
+
+        // Nothing in the root directory: the boot sector's, unless NO NAME.
+        let mut d = fat32(100, 1);
+        assert_eq!(label_of(&d), None);
+        d[0x47..0x52].copy_from_slice(b"ESP        ");
+        assert_eq!(
+            label_of(&d),
+            Some(Identity::label(IdentityKind::Fat, "ESP"))
+        );
+
+        // FAT16: the fixed root directory after the FATs.
+        let mut d = disk(4 << 20);
+        d[0x0B..0x0D].copy_from_slice(&512u16.to_le_bytes());
+        d[0x0D] = 4;
+        d[0x0E..0x10].copy_from_slice(&4u16.to_le_bytes());
+        d[0x10] = 2;
+        d[0x11..0x13].copy_from_slice(&512u16.to_le_bytes());
+        d[0x16..0x18].copy_from_slice(&20u16.to_le_bytes());
+        d[0x27..0x2B].copy_from_slice(&[1, 2, 3, 4]);
+        d[0x2B..0x36].copy_from_slice(b"NO NAME    ");
+        d[0x36..0x3B].copy_from_slice(b"FAT16");
+        d[510..512].copy_from_slice(&[0x55, 0xAA]);
+        let root = (4 + 2 * 20) * 512;
+        d[root..root + 32].copy_from_slice(&dir_entry(b"BOOT DISK  ", 0x08));
+        assert_eq!(
+            label_of(&d),
+            Some(Identity::label(IdentityKind::Fat, "BOOT DISK"))
+        );
+
+        // A boot sector that makes no sense is no reason to panic.
+        let mut d = fat32(0, 0);
+        d[0x0B..0x0D].copy_from_slice(&0u16.to_le_bytes());
+        assert_eq!(label_of(&d), None);
+    }
+
+    #[test]
+    fn a_label_clashes_with_the_same_label_of_any_filesystem() {
+        let host = present(&[
+            (
+                "sda1",
+                Identity::new(IdentityKind::Label, "cloudimg-rootfs"),
+            ),
+            ("sda15", Identity::new(IdentityKind::Label, "UEFI")),
+        ]);
+        let got = find_clashes(
+            &[
+                Identity::label(IdentityKind::Btrfs, "cloudimg-rootfs"),
+                Identity::label(IdentityKind::Fat, "UEFI"),
+                // Labels are case-sensitive, as their by-label links are.
+                Identity::label(IdentityKind::Ext, "uefi"),
+            ],
+            &host,
+            &[],
+            None,
+        );
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(got.iter().all(|c| c.severity == Severity::Ambiguous));
+        let of = |l: &str| got.iter().find(|c| c.identity.shown == l).unwrap();
+        assert_eq!(of("cloudimg-rootfs").reidentify, Reidentify::LabelBtrfs);
+        assert_eq!(of("cloudimg-rootfs").already_on, vec!["sda1".to_string()]);
+        assert_eq!(of("UEFI").reidentify, Reidentify::LabelFatlabel);
+
+        // How it changes depends on the filesystem; a multi-device btrfs
+        // keeps it.
+        let how = |l: Identity| find_clashes(&[l], &host, &[], None)[0].reidentify;
+        assert_eq!(
+            how(Identity::label(IdentityKind::Ext, "UEFI")),
+            Reidentify::LabelTune2fs
+        );
+        assert_eq!(
+            how(Identity::label(IdentityKind::Xfs, "UEFI")),
+            Reidentify::LabelXfsAdmin
+        );
+        let multi = Identity {
+            multi_device: true,
+            ..Identity::label(IdentityKind::Btrfs, "UEFI")
+        };
+        assert_eq!(how(multi), Reidentify::None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_labels_come_from_the_udev_database_as_written() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let sysdev = root.path().join("dev-block");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&sysdev).unwrap();
+        std::fs::write(
+            data.join("b8:1"),
+            "E:ID_FS_TYPE=ext4\nE:ID_FS_LABEL=my_disk\nE:ID_FS_LABEL_ENC=my\\x20disk\n",
+        )
+        .unwrap();
+        std::fs::write(data.join("b8:2"), "E:ID_FS_TYPE=swap\nE:ID_FS_LABEL=swap\n").unwrap();
+        std::fs::write(data.join("b8:3"), "E:ID_FS_TYPE=ext4\nE:ID_FS_LABEL=\n").unwrap();
+        let host = host_identities(&data, &sysdev);
+        assert_eq!(
+            host["8:1"],
+            vec![Identity::new(IdentityKind::Label, "my disk")]
+        );
+        assert_eq!(
+            host["8:2"],
+            vec![Identity::new(IdentityKind::Label, "swap")],
+            "a by-label link whatever the type"
+        );
+        assert!(!host.contains_key("8:3"));
+        assert_eq!(udev_unescape(r"a\x2fb\x20c\xzz"), r"a/b c\xzz");
     }
     /// The parsers against the real tools, compared with what blkid says.
     /// Needs root (loop devices for LVM and md) and mkfs.ext4, mkfs.xfs,

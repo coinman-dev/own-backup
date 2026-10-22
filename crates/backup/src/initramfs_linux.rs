@@ -392,7 +392,7 @@ pub enum Reason {
     Embedded,
     /// dracut builds host-only images, which record the devices of the root,
     /// /boot and the ESP (the root on the command line they store, the others
-    /// as devices the boot waits for), and one of their UUIDs changed.
+    /// as devices the boot waits for), and one of their UUIDs or labels changed.
     Hostonly,
 }
 
@@ -477,7 +477,7 @@ pub fn dracut_hostonly(text: &str, version: Option<u32>) -> bool {
 
 /// Why the restored system's image must be built again after `changed`
 /// (its references already fixed); empty when it need not be.
-/// `recorded_changed`: the UUID of its root, /boot or ESP changed — what a
+/// `recorded_changed`: the UUID or label of its root, /boot or ESP changed — what a
 /// host-only dracut image records.
 ///
 /// Deliberately on the side of rebuilding: the tool makes the image the
@@ -523,6 +523,15 @@ pub fn reasons(changed: &[Renamed], recorded_changed: bool, sys: &SystemConfig) 
                 | IdentityKind::Md
         );
         if uuid_like && embedded.iter().any(|t| mentions(t, r)) {
+            add(Reason::Embedded);
+        }
+        // `RESUME=LABEL=…`, `root=LABEL=…` in /etc/kernel/cmdline or
+        // dracut's kernel_cmdline: copied into the image as well.
+        if r.kind == IdentityKind::Label
+            && embedded
+                .iter()
+                .any(|t| crate::identity_refs_linux::names_label(t, &r.new))
+        {
             add(Reason::Embedded);
         }
     }
@@ -1458,6 +1467,38 @@ mod tests {
             tool: Some((Tool::UpdateInitramfs, "/usr/sbin/update-initramfs".into())),
             ..Default::default()
         }
+    }
+
+    /// A label is in the image only where the image copies text naming it:
+    /// the resume device, `/etc/kernel/cmdline`, dracut's command line.
+    #[test]
+    fn a_new_label_the_image_copies_needs_a_new_image() {
+        let l = [renamed(
+            IdentityKind::Label,
+            "cloudimg-rootfs",
+            "cloudimg-rootf-r",
+        )];
+        let fstab_only = SystemConfig {
+            fstab: "LABEL=cloudimg-rootf-r / ext4 defaults 0 1\n".into(),
+            ..sys()
+        };
+        assert!(reasons(&l, false, &fstab_only).is_empty());
+        let resume = SystemConfig {
+            resume: "RESUME=LABEL=cloudimg-rootf-r\n".into(),
+            ..sys()
+        };
+        assert_eq!(reasons(&l, false, &resume), vec![Reason::Embedded]);
+        let cmdline = SystemConfig {
+            kernel_cmdline: "root=LABEL=\"cloudimg-rootf-r\" ro\n".into(),
+            ..sys()
+        };
+        assert_eq!(reasons(&l, false, &cmdline), vec![Reason::Embedded]);
+        // Another label that starts the same is not this one.
+        let other = SystemConfig {
+            kernel_cmdline: "root=LABEL=cloudimg-rootf-r2 ro\n".into(),
+            ..sys()
+        };
+        assert!(reasons(&l, false, &other).is_empty());
     }
 
     #[test]

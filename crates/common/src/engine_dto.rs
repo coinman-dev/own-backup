@@ -444,14 +444,16 @@ pub struct LinuxMediaCacheClearedDto {
 
 /// An identity the restored or mounted copy carries that a device of this
 /// machine already has (`backup::identity_clash`): a filesystem, LUKS, LVM or
-/// md UUID, an LVM volume group name, a GPT partition GUID.
+/// md UUID, an LVM volume group name, a GPT partition GUID, a filesystem
+/// label.
 ///
 /// Every field is structured: the window decides from `severity` and `kind`,
 /// never from translated text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdentityClashDto {
     /// `ext`, `xfs`, `btrfs`, `luks`, `lvm_pv`, `lvm_vg`, `lvm_vg_name`, `md`,
-    /// `partuuid`.
+    /// `partuuid`, `vfat` (a FAT serial), `label` (a filesystem label of any
+    /// type: `LABEL=` and `/dev/disk/by-label` resolve across types).
     pub kind: String,
     /// The value as the subsystem's own tools print it.
     pub value: String,
