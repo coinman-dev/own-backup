@@ -1,7 +1,9 @@
 //! What a file on an EFI System Partition is, by its name.
 //!
-//! The pure half of [`crate::esp_scan_win`]. No I/O, so the rules can be tested
-//! against the real partition of a real machine without that machine.
+//! The shared half of [`crate::esp_scan_win`] and `esp_scan_linux`. The rules
+//! do no I/O, so they can be tested against the real partition of a real
+//! machine without that machine; [`collect_loaders`] lists a partition both
+//! systems have already made readable as a directory.
 //!
 //! ## Why not by what is inside the file
 //!
@@ -198,6 +200,130 @@ fn join(vendor: &'static str, file: &str) -> &'static str {
         ("Windows", "securebootrecovery.efi") => static_text(tr!("esp_scan.secure_boot_recovery")),
         (v, _) => v,
     }
+}
+
+// ---- the walk over a readable partition -------------------------------------
+//
+// The one part of this module that touches files: both systems reach the
+// partition as an ordinary directory — Windows through a volume GUID path,
+// Linux through a mount — and list it the same way.
+
+/// One `.efi` found on a partition, before anyone has said which entry names
+/// it.
+#[derive(Debug, Clone)]
+pub struct FoundLoader {
+    /// Inside the partition, the way a boot entry would spell it.
+    pub path: String,
+    pub size: u64,
+    /// What it is, in words — in the window's language.
+    pub kind: &'static str,
+    /// Neither its name nor its contents said what it is — `kind` is the
+    /// generic «загрузчик». The boot page then offers the vendor folder's name
+    /// for a new entry instead of that word; a flag, because the word itself is
+    /// shown in the window's language.
+    pub generic: bool,
+    /// Whether a boot entry would sensibly name it, or another loader launches
+    /// it. See [`role`].
+    pub role: Role,
+    /// The removable-media path every firmware tries by itself.
+    pub fallback: bool,
+}
+
+/// Every `.efi` under `EFI\` of the partition at `root`, two levels deep plus
+/// `<vendor>\Boot`.
+///
+/// Deep enough for every vendor directory that exists in practice, and shallow
+/// enough that a partition holding a whole installer tree does not turn the
+/// list into a file dump. FAT is case-insensitive on both systems, so `EFI`
+/// and `Boot` find `efi` and `BOOT` too.
+pub fn collect_loaders(root: &std::path::Path) -> Vec<FoundLoader> {
+    let efi = root.join("EFI");
+    let mut out = Vec::new();
+    let Ok(vendors) = std::fs::read_dir(&efi) else {
+        // No `EFI\` at all: a formatted but unused ESP.
+        return out;
+    };
+    for vendor in vendors.flatten() {
+        if !vendor.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let vendor_name = vendor.file_name().to_string_lossy().to_string();
+        let mut dirs = vec![(vendor.path(), format!("EFI\\{vendor_name}"))];
+        // Windows keeps its loader one level further down, and it is the one
+        // entry on most machines.
+        let nested = vendor.path().join("Boot");
+        if nested.is_dir() {
+            dirs.push((nested, format!("EFI\\{vendor_name}\\Boot")));
+        }
+        for (dir, prefix) in dirs {
+            let Ok(files) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for f in files.flatten() {
+                let name = f.file_name().to_string_lossy().to_string();
+                if !name.to_lowercase().ends_with(".efi") {
+                    continue;
+                }
+                let path = format!("\\{prefix}\\{name}");
+                let known = kind_by_name(&path).or_else(|| identify(&f.path()));
+                out.push(FoundLoader {
+                    kind: known.unwrap_or_else(|| static_text(tr!("esp_scan_win.generic"))),
+                    generic: known.is_none(),
+                    role: role(&path),
+                    size: f.metadata().map(|m| m.len()).unwrap_or(0),
+                    fallback: crate::efivars::is_fallback_path(&path),
+                    path,
+                });
+            }
+        }
+    }
+    out.sort_by_key(|a| a.path.to_lowercase());
+    out
+}
+
+/// A last resort for a file whose name says nothing.
+///
+/// An EFI binary is a PE file and carries strings in plain UTF-16. Those
+/// strings are a poor witness — see the table at the top of this module for
+/// the three files on this machine they got wrong — so this runs only after the
+/// name and the vendor directory have both come up empty, and its answers stay
+/// vague on purpose.
+fn identify(path: &std::path::Path) -> Option<&'static str> {
+    let bytes = std::fs::read(path).ok()?;
+    let has = |needle: &str| -> bool {
+        let wide: Vec<u8> = needle.bytes().flat_map(|b| [b, 0]).collect();
+        bytes.windows(wide.len()).any(|w| w == wide)
+            || bytes.windows(needle.len()).any(|w| w == needle.as_bytes())
+    };
+    // Only names that cannot be mistaken for a string another loader carries
+    // about its neighbours.
+    if has("Acronis") {
+        Some(static_text(tr!("esp_scan_win.looks_like_acronis")))
+    } else if has("R-Drive") || has("RDrive") {
+        Some(static_text(tr!("esp_scan_win.looks_like_rdrive")))
+    } else if has("systemd-boot") {
+        Some("systemd-boot")
+    } else {
+        None
+    }
+}
+
+/// Which entry, if any, names `path` on the partition `partition_guid`.
+/// `entries` are the firmware's entries as (number, load option).
+pub fn naming_entry<'a>(
+    entries: impl IntoIterator<Item = (u16, &'a crate::efivars::LoadOption)>,
+    partition_guid: &str,
+    path: &str,
+) -> Option<u16> {
+    entries.into_iter().find_map(|(number, option)| {
+        let hd = option.hard_drive()?;
+        let guid = hd.partition_guid()?;
+        let file = option.file_path()?;
+        // The partition is matched by GUID, never by its number: two disks each
+        // have a partition 1 here, and both hold a loader.
+        (guid.eq_ignore_ascii_case(partition_guid) && crate::efivars::same_efi_path(&file, path))
+            .then_some(number)
+    })
 }
 
 #[cfg(test)]

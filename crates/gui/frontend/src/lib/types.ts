@@ -177,7 +177,9 @@ export interface EspLoader {
 }
 
 export interface Esp {
-  disk: number;
+  /** Windows: the disk number (`PhysicalDriveN`). Linux: the kernel device
+   *  (`/dev/nvme0n1`), the inventory's `device_id` for the disk. */
+  disk: number | string;
   partition: number;
   guid: string;
   size_bytes: number;
@@ -194,6 +196,9 @@ export interface BootStatus {
   timeout_secs?: number | null;
   found_by?: string;
   dangling?: string[];
+  /** Where the copy taken before each change goes. Absent from an older
+   *  service. */
+  safety_copy_dir?: string;
   entries?: BootEntry[];
   esps?: Esp[];
 }

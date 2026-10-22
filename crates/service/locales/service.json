@@ -286,6 +286,18 @@
     "ru": "не сказан диск",
     "en": "no disk given"
   },
+  "grpc_server.boot_not_a_disk": {
+    "ru": "%{disk} — не целый диск этой машины",
+    "en": "%{disk} is not a whole disk of this machine"
+  },
+  "grpc_server.boot_no_esp_there": {
+    "ru": "на диске %{disk} нет раздела EFI с номером %{partition}",
+    "en": "disk %{disk} has no EFI System Partition number %{partition}"
+  },
+  "grpc_server.boot_bad_partition_guid": {
+    "ru": "у раздела непонятный GUID: %{guid}",
+    "en": "the partition has an unreadable GUID: %{guid}"
+  },
   "grpc_server.boot_partition_not_given": {
     "ru": "не сказан раздел",
     "en": "no partition given"

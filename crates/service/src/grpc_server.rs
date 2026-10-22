@@ -3713,21 +3713,10 @@ impl BackupService for BackupServiceImpl {
                     "timeout_secs": cfg.timeout,
                     "found_by": cfg.found_by,
                     "dangling": cfg.dangling.iter().map(|n| format!("{n:04X}")).collect::<Vec<_>>(),
-                    "entries": cfg.entries.iter().map(|e| serde_json::json!({
-                        "number": format!("{:04X}", e.number),
-                        "name": e.option.description,
-                        "in_menu": e.order_index.map(|i| i + 1),
-                        "active": e.option.is_active(),
-                        "current": e.is_current,
-                        "next": e.is_next,
-                        "device_entry": e.is_device_entry(),
-                        "file": e.option.file_path(),
-                        "partition_guid": e.option.hard_drive().and_then(|h| h.partition_guid()),
-                        "partition_number": e.option.hard_drive().map(|h| h.partition_number),
-                        // An entry whose device path we did not fully read is
-                        // shown and not offered for editing.
-                        "editable": e.option.fully_understood(),
-                    })).collect::<Vec<_>>(),
+                    "safety_copy_dir": efivars_win::safety_copy_dir().0.display().to_string(),
+                    "entries": cfg.entries.iter().map(|e| boot_entry_json(
+                        e.number, &e.option, e.order_index, e.is_current, e.is_next,
+                    )).collect::<Vec<_>>(),
                     "esps": esps.iter().map(|p| serde_json::json!({
                         "disk": p.disk,
                         "partition": p.partition,
@@ -3752,9 +3741,61 @@ impl BackupService for BackupServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?;
             json_reply(&value)
         }
-        // Not read here yet: answering "not UEFI" on a UEFI machine is a wrong
-        // fact, not a missing feature (`.ai/PLAN.md` §6, stage 3).
-        #[cfg(not(target_os = "windows"))]
+        // The same answer from efivarfs. A disk is its kernel device
+        // (`/dev/nvme0n1`), the inventory's `device_id` for it: Linux has no
+        // disk numbers that last.
+        #[cfg(target_os = "linux")]
+        {
+            use own_backup_backup::efivars_linux::{safety_copy_dir, Efivarfs};
+            use own_backup_backup::esp_scan_linux;
+
+            let copy_dir = safety_copy_dir(&self.state.config.data_dir).0;
+            let value = tokio::task::spawn_blocking(move || -> own_backup_common::Result<_> {
+                let efi = Efivarfs::default();
+                if !efi.is_uefi() {
+                    return Ok(serde_json::json!({
+                        "uefi": false,
+                        "message": tr!("grpc_server.boot_bios_machine").into_owned(),
+                    }));
+                }
+                let cfg = efi.read_config()?;
+                let esps = esp_scan_linux::scan(&cfg.entries)?;
+                Ok(serde_json::json!({
+                    "uefi": true,
+                    "order": cfg.order.iter().map(|n| format!("{n:04X}")).collect::<Vec<_>>(),
+                    "current": cfg.current.map(|n| format!("{n:04X}")),
+                    "next": cfg.next.map(|n| format!("{n:04X}")),
+                    "timeout_secs": cfg.timeout,
+                    "dangling": cfg.dangling.iter().map(|n| format!("{n:04X}")).collect::<Vec<_>>(),
+                    "safety_copy_dir": copy_dir.display().to_string(),
+                    "entries": cfg.entries.iter().map(|e| boot_entry_json(
+                        e.number, &e.option, e.order_index, e.is_current, e.is_next,
+                    )).collect::<Vec<_>>(),
+                    "esps": esps.iter().map(|p| serde_json::json!({
+                        "disk": p.disk,
+                        "partition": p.partition,
+                        "guid": p.partition_guid,
+                        "size_bytes": p.size_bytes,
+                        "unreadable": p.unreadable,
+                        "loaders": p.loaders.iter().map(|l| serde_json::json!({
+                            "path": l.found.path,
+                            "size": l.found.size,
+                            "kind": l.found.kind,
+                            "generic": l.found.generic,
+                            "fallback": l.found.fallback,
+                            "second_stage":
+                                l.found.role == own_backup_backup::esp_scan::Role::SecondStage,
+                            "named_by": l.named_by.map(|n| format!("{n:04X}")),
+                        })).collect::<Vec<_>>(),
+                    })).collect::<Vec<_>>(),
+                }))
+            })
+            .await
+            .map_err(|e| Status::internal(format!("boot status task panicked: {e}")))?
+            .map_err(|e| Status::internal(e.to_string()))?;
+            json_reply(&value)
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
             Err(Status::unimplemented(
                 tr!("grpc_server.boot_read_windows_only").into_owned(),
@@ -3762,127 +3803,328 @@ impl BackupService for BackupServiceImpl {
         }
     }
 
-    /// Change one thing about it.
-    ///
-    /// The safety copy and the guard on the currently-booted entry live in
-    /// `efivars_win::apply_action`, not here: the command line goes through the
-    /// same door, and rules that each caller has to remember are rules that one
-    /// of them eventually will not.
+    /// One change to the boot configuration. The service takes a copy of the
+    /// whole configuration first and refuses to remove or hide the entry this
+    /// machine booted from unless `force` says so (`apply_action` on each
+    /// system). On Linux the change is asked of polkit as well: the socket
+    /// admits any local session, and changing how the machine boots is an
+    /// administrator's decision.
     async fn boot_action(&self, req: Request<JsonRequest>) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
-        #[cfg(target_os = "windows")]
+        #[cfg(target_os = "linux")]
+        crate::polkit::authorize(&req, crate::polkit::Action::BootConfig).await?;
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         {
-            use own_backup_backup::efivars_win::{apply_action, Action};
-
-            #[derive(serde::Deserialize)]
-            struct In {
-                action: String,
-                entry: Option<String>,
-                name: Option<String>,
-                on: Option<bool>,
-                to: Option<usize>,
-                force: Option<bool>,
-                disk: Option<u32>,
-                partition: Option<u32>,
-                file: Option<String>,
-                position: Option<usize>,
-                secs: Option<u16>,
-                clear: Option<bool>,
-            }
-            let p: In = serde_json::from_str(&req.into_inner().json)
+            let p: BootActionIn = serde_json::from_str(&req.into_inner().json)
                 .map_err(|e| Status::invalid_argument(format!("boot_action: {e}")))?;
 
-            let entry = || -> Result<u16, Status> {
-                let s = p.entry.as_deref().unwrap_or_default();
-                u16::from_str_radix(s.trim().trim_start_matches("0x"), 16).map_err(|_| {
-                    Status::invalid_argument(
-                        tr!("grpc_server.boot_not_entry_number", value = s).into_owned(),
-                    )
-                })
-            };
-            let want = |o: Option<String>, what: &str| -> Result<String, Status> {
-                o.ok_or_else(|| {
-                    Status::invalid_argument(
-                        tr!("grpc_server.boot_not_given", what = what).into_owned(),
-                    )
-                })
-            };
-
-            let action = match p.action.as_str() {
-                "rename" => Action::Rename {
-                    entry: entry()?,
-                    name: want(p.name.clone(), &tr!("grpc_server.boot_field_name"))?,
-                },
-                "set_active" => Action::SetActive {
-                    entry: entry()?,
-                    on: p.on.unwrap_or(true),
-                    force: p.force.unwrap_or(false),
-                },
-                "move" => Action::Move {
-                    entry: entry()?,
-                    to: p.to.unwrap_or(0).saturating_sub(1),
-                },
-                "delete" => Action::Delete {
-                    entry: entry()?,
-                    force: p.force.unwrap_or(false),
-                },
-                "create" => Action::Create {
-                    name: want(p.name.clone(), &tr!("grpc_server.boot_field_name"))?,
-                    disk: p.disk.ok_or_else(|| {
-                        Status::invalid_argument(
-                            tr!("grpc_server.boot_disk_not_given").into_owned(),
-                        )
-                    })?,
-                    partition: p.partition.ok_or_else(|| {
-                        Status::invalid_argument(
-                            tr!("grpc_server.boot_partition_not_given").into_owned(),
-                        )
-                    })?,
-                    file: want(p.file.clone(), &tr!("grpc_server.boot_field_loader_path"))?,
-                    position: p.position.map(|x| x.saturating_sub(1)),
-                },
-                "boot_next" => Action::BootNext {
-                    entry: if p.clear.unwrap_or(false) {
-                        None
-                    } else {
-                        Some(entry()?)
+            #[cfg(target_os = "windows")]
+            let done = {
+                use own_backup_backup::efivars_win::{apply_action, Action};
+                let action = match p.common()? {
+                    BootActionKind::Same(a) => match a {
+                        SameAction::Rename { entry, name } => Action::Rename { entry, name },
+                        SameAction::SetActive { entry, on, force } => {
+                            Action::SetActive { entry, on, force }
+                        }
+                        SameAction::Move { entry, to } => Action::Move { entry, to },
+                        SameAction::Delete { entry, force } => Action::Delete { entry, force },
+                        SameAction::BootNext { entry } => Action::BootNext { entry },
+                        SameAction::Timeout { secs } => Action::Timeout { secs },
                     },
-                },
-                "timeout" => Action::Timeout {
-                    secs: p.secs.ok_or_else(|| {
-                        Status::invalid_argument(
-                            tr!("grpc_server.boot_secs_not_given").into_owned(),
-                        )
-                    })?,
-                },
-                other => {
-                    return Err(Status::invalid_argument(
-                        tr!("grpc_server.boot_unknown_action", action = other).into_owned(),
-                    ))
-                }
+                    BootActionKind::Create {
+                        name,
+                        file,
+                        position,
+                    } => Action::Create {
+                        name,
+                        disk: p
+                            .disk
+                            .as_ref()
+                            .and_then(|d| d.as_u64())
+                            .and_then(|d| u32::try_from(d).ok())
+                            .ok_or_else(|| {
+                                Status::invalid_argument(
+                                    tr!("grpc_server.boot_disk_not_given").into_owned(),
+                                )
+                            })?,
+                        partition: p.partition()?,
+                        file,
+                        position,
+                    },
+                };
+                let done = tokio::task::spawn_blocking(move || apply_action(action))
+                    .await
+                    .map_err(|e| Status::internal(format!("boot action task panicked: {e}")))?
+                    .map_err(|e| Status::failed_precondition(e.to_string()))?;
+                (
+                    done.message,
+                    done.safety_copy.path,
+                    done.safety_copy.durable,
+                    done.created,
+                )
             };
 
-            let done = tokio::task::spawn_blocking(move || apply_action(action))
+            #[cfg(target_os = "linux")]
+            let done = {
+                use own_backup_backup::efivars_linux::{safety_copy_dir, Action, Efivarfs};
+                let kind = p.common()?;
+                let disk = p.disk.as_ref().and_then(|d| d.as_str()).map(str::to_string);
+                let partition = p.partition.map(|_| p.partition()).transpose()?;
+                let (copy_dir, durable) = safety_copy_dir(&self.state.config.data_dir);
+                let done = tokio::task::spawn_blocking(
+                    move || -> own_backup_common::Result<own_backup_backup::efivars_linux::Done> {
+                        let action = match kind {
+                            BootActionKind::Same(a) => match a {
+                                SameAction::Rename { entry, name } => {
+                                    Action::Rename { entry, name }
+                                }
+                                SameAction::SetActive { entry, on, force } => {
+                                    Action::SetActive { entry, on, force }
+                                }
+                                SameAction::Move { entry, to } => Action::Move { entry, to },
+                                SameAction::Delete { entry, force } => {
+                                    Action::Delete { entry, force }
+                                }
+                                SameAction::BootNext { entry } => Action::BootNext { entry },
+                                SameAction::Timeout { secs } => Action::Timeout { secs },
+                            },
+                            BootActionKind::Create {
+                                name,
+                                file,
+                                position,
+                            } => Action::Create {
+                                name,
+                                hd: linux_esp_partition(disk.as_deref(), partition)?,
+                                file,
+                                position,
+                            },
+                        };
+                        Efivarfs::default().apply_action(action, &copy_dir, durable)
+                    },
+                )
                 .await
                 .map_err(|e| Status::internal(format!("boot action task panicked: {e}")))?
                 .map_err(|e| Status::failed_precondition(e.to_string()))?;
-            tracing::info!(message = %done.message, "boot configuration changed");
+                (
+                    done.message,
+                    done.safety_copy.path,
+                    done.safety_copy.durable,
+                    done.created,
+                )
+            };
+
+            let (message, safety_copy, durable, created) = done;
+            tracing::info!(message = %message, "boot configuration changed");
             json_reply(&serde_json::json!({
-                "message": done.message,
-                "safety_copy": done.safety_copy.path.display().to_string(),
+                "message": message,
+                "safety_copy": safety_copy.display().to_string(),
                 // На носителе копия может лежать на временном диске: экран
                 // обязан это сказать, а не показать путь и промолчать.
-                "safety_copy_durable": done.safety_copy.durable,
-                "created": done.created.map(|n| format!("{n:04X}")),
+                "safety_copy_durable": durable,
+                "created": created.map(|n| format!("{n:04X}")),
             }))
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
             Err(Status::unimplemented(
                 tr!("grpc_server.boot_change_windows_only").into_owned(),
             ))
         }
     }
+}
+
+/// One boot entry as the boot page reads it — the same on both systems.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn boot_entry_json(
+    number: u16,
+    option: &own_backup_backup::efivars::LoadOption,
+    order_index: Option<usize>,
+    current: bool,
+    next: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "number": format!("{number:04X}"),
+        "name": option.description,
+        "in_menu": order_index.map(|i| i + 1),
+        "active": option.is_active(),
+        "current": current,
+        "next": next,
+        // Names a device, not a file: firmware made it and remakes it.
+        "device_entry": option.file_path().is_none(),
+        "file": option.file_path(),
+        "partition_guid": option.hard_drive().and_then(|h| h.partition_guid()),
+        "partition_number": option.hard_drive().map(|h| h.partition_number),
+        // An entry whose device path we did not fully read is
+        // shown and not offered for editing.
+        "editable": option.fully_understood(),
+    })
+}
+
+/// What the boot page asks to change, as it sends it. `disk` is a number on
+/// Windows (`PhysicalDriveN`) and a device path on Linux.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[derive(serde::Deserialize)]
+struct BootActionIn {
+    action: String,
+    entry: Option<String>,
+    name: Option<String>,
+    on: Option<bool>,
+    to: Option<usize>,
+    force: Option<bool>,
+    disk: Option<serde_json::Value>,
+    partition: Option<u32>,
+    file: Option<String>,
+    position: Option<usize>,
+    secs: Option<u16>,
+    clear: Option<bool>,
+}
+
+/// The actions both systems spell the same way.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+enum SameAction {
+    Rename { entry: u16, name: String },
+    SetActive { entry: u16, on: bool, force: bool },
+    Move { entry: u16, to: usize },
+    Delete { entry: u16, force: bool },
+    BootNext { entry: Option<u16> },
+    Timeout { secs: u16 },
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+enum BootActionKind {
+    Same(SameAction),
+    /// The partition is named differently on each system; the caller reads it.
+    Create {
+        name: String,
+        file: String,
+        position: Option<usize>,
+    },
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+impl BootActionIn {
+    fn entry(&self) -> Result<u16, Status> {
+        let s = self.entry.as_deref().unwrap_or_default();
+        u16::from_str_radix(s.trim().trim_start_matches("0x"), 16).map_err(|_| {
+            Status::invalid_argument(tr!("grpc_server.boot_not_entry_number", value = s).into_owned())
+        })
+    }
+
+    fn want(o: Option<&String>, what: &str) -> Result<String, Status> {
+        o.cloned().ok_or_else(|| {
+            Status::invalid_argument(tr!("grpc_server.boot_not_given", what = what).into_owned())
+        })
+    }
+
+    fn partition(&self) -> Result<u32, Status> {
+        self.partition.ok_or_else(|| {
+            Status::invalid_argument(tr!("grpc_server.boot_partition_not_given").into_owned())
+        })
+    }
+
+    fn common(&self) -> Result<BootActionKind, Status> {
+        let name = || Self::want(self.name.as_ref(), &tr!("grpc_server.boot_field_name"));
+        Ok(BootActionKind::Same(match self.action.as_str() {
+            "rename" => SameAction::Rename {
+                entry: self.entry()?,
+                name: name()?,
+            },
+            "set_active" => SameAction::SetActive {
+                entry: self.entry()?,
+                on: self.on.unwrap_or(true),
+                force: self.force.unwrap_or(false),
+            },
+            "move" => SameAction::Move {
+                entry: self.entry()?,
+                to: self.to.unwrap_or(0).saturating_sub(1),
+            },
+            "delete" => SameAction::Delete {
+                entry: self.entry()?,
+                force: self.force.unwrap_or(false),
+            },
+            "create" => {
+                return Ok(BootActionKind::Create {
+                    name: name()?,
+                    file: Self::want(
+                        self.file.as_ref(),
+                        &tr!("grpc_server.boot_field_loader_path"),
+                    )?,
+                    position: self.position.map(|x| x.saturating_sub(1)),
+                })
+            }
+            "boot_next" => SameAction::BootNext {
+                entry: if self.clear.unwrap_or(false) {
+                    None
+                } else {
+                    Some(self.entry()?)
+                },
+            },
+            "timeout" => SameAction::Timeout {
+                secs: self.secs.ok_or_else(|| {
+                    Status::invalid_argument(tr!("grpc_server.boot_secs_not_given").into_owned())
+                })?,
+            },
+            other => {
+                return Err(Status::invalid_argument(
+                    tr!("grpc_server.boot_unknown_action", action = other).into_owned(),
+                ))
+            }
+        }))
+    }
+}
+
+/// The partition a new Linux boot entry points at: slot `partition` of the
+/// GPT on the whole disk `disk` (`/dev/<kernel name>`), read off the disk now.
+/// Only an EFI System Partition is accepted — a firmware entry naming
+/// anything else would not boot, and the page offers nothing else.
+#[cfg(target_os = "linux")]
+fn linux_esp_partition(
+    disk: Option<&str>,
+    partition: Option<u32>,
+) -> own_backup_common::Result<own_backup_backup::efivars::HardDrive> {
+    use own_backup_common::OwnBackupError;
+    let bad = |m: std::borrow::Cow<'static, str>| OwnBackupError::Device(m.into_owned());
+    let disk = disk.ok_or_else(|| bad(tr!("grpc_server.boot_disk_not_given")))?;
+    let partition = partition.ok_or_else(|| bad(tr!("grpc_server.boot_partition_not_given")))?;
+    // A kernel disk name and nothing else: the path is read as root.
+    let name = disk.strip_prefix("/dev/").unwrap_or_default();
+    let sys = std::path::Path::new("/sys/class/block");
+    if name.is_empty()
+        || name.contains('/')
+        || !sys.join(name).exists()
+        || own_backup_common::linux_block::is_partition(sys, name)
+    {
+        return Err(bad(tr!("grpc_server.boot_not_a_disk", disk = disk)));
+    }
+    let layout = own_backup_backup::esp_scan_linux::read_layout(disk)?;
+    let part = layout
+        .partitions
+        .iter()
+        .find(|p| p.index == partition)
+        .filter(|p| {
+            p.type_guid
+                .eq_ignore_ascii_case(own_backup_common::linux_block::ESP_TYPE_GUID)
+        })
+        .ok_or_else(|| {
+            bad(tr!(
+                "grpc_server.boot_no_esp_there",
+                disk = disk,
+                partition = partition
+            ))
+        })?;
+    own_backup_backup::efivars::HardDrive::from_gpt(
+        part.index,
+        part.first_lba,
+        part.last_lba,
+        &part.part_guid,
+    )
+    .ok_or_else(|| {
+        bad(tr!(
+            "grpc_server.boot_bad_partition_guid",
+            guid = part.part_guid.as_str()
+        ))
+    })
 }
 
 #[cfg(test)]

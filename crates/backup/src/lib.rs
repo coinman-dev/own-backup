@@ -21,6 +21,8 @@ mod engine_core;
 pub mod esp_fallback;
 pub mod esp_fallback_tree;
 pub mod esp_scan;
+#[cfg(target_os = "linux")]
+pub mod esp_scan_linux;
 pub mod exclusions;
 pub mod export;
 pub mod ext_exclusions;

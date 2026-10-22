@@ -11,6 +11,7 @@
 //!     linux_restore_rpc plan-format IMG TARGET_DISK PART FS OUT.json
 //!     linux_restore_rpc dry-run PLAN.json
 //!     linux_restore_rpc apply PLAN.json [--keep | --change [--fix-references]]
+//!     linux_restore_rpc boot-status | boot-action JSON
 //!
 //! A reply is printed as JSON and exits 0. A refusal prints
 //! `{"code", "message", "identity_clashes"}` and exits 3 for
@@ -406,6 +407,18 @@ async fn main() {
                         5
                     });
                 }
+            }
+        }
+        ("boot-status", []) => match client.boot_status_with_status().await {
+            Ok(v) => print(&v),
+            Err(s) => refused(s),
+        },
+        ("boot-action", [json]) => {
+            let action: serde_json::Value = serde_json::from_str(json)
+                .unwrap_or_else(|e| failed(format!("{json}: {e}")));
+            match client.boot_action(&action).await {
+                Ok(v) => print(&v),
+                Err(e) => failed(e.to_string()),
             }
         }
         _ => failed(format!("unknown command or arguments: {args:?}")),

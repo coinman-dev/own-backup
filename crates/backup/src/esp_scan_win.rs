@@ -24,8 +24,6 @@ use std::path::Path;
 use own_backup_common::{tr, Result};
 use tracing::debug;
 
-use crate::efivars;
-use crate::esp_scan::static_text;
 
 /// One `.efi` found on a partition.
 #[derive(Debug, Clone)]
@@ -132,15 +130,11 @@ fn naming_entry(
     partition_guid: &str,
     path: &str,
 ) -> Option<u16> {
-    entries.iter().find_map(|e| {
-        let hd = e.option.hard_drive()?;
-        let guid = hd.partition_guid()?;
-        let file = e.option.file_path()?;
-        // The partition is matched by GUID, never by its number: two disks each
-        // have a partition 1 here, and both hold a loader.
-        (guid.eq_ignore_ascii_case(partition_guid) && efivars::same_efi_path(&file, path))
-            .then_some(e.number)
-    })
+    crate::esp_scan::naming_entry(
+        entries.iter().map(|e| (e.number, &e.option)),
+        partition_guid,
+        path,
+    )
 }
 
 /// One sweep over the volumes of a disk. Deliberately not
@@ -153,88 +147,27 @@ fn quick_volume_root(disk: u32, offset: u64) -> Option<String> {
         .find(|vr| crate::volume_win::volume_start_on_disk(vr) == Some((disk, offset)))
 }
 
-/// Every `.efi` under `EFI\`, two levels deep plus `Microsoft\Boot`.
-///
-/// Deep enough for every vendor directory that exists in practice, and shallow
-/// enough that a partition holding a whole installer tree does not turn the
-/// list into a file dump.
+/// Every `.efi` on the volume, as [`crate::esp_scan::collect_loaders`] finds
+/// them, placed on this disk and partition.
 fn collect_loaders(
     volume_root: &str,
     disk: u32,
     partition: u32,
     partition_guid: &str,
 ) -> Result<Vec<Loader>> {
-    let efi = Path::new(volume_root).join("EFI");
-    let mut out = Vec::new();
-    let Ok(vendors) = std::fs::read_dir(&efi) else {
-        // No `EFI\` at all: a formatted but unused ESP.
-        return Ok(out);
-    };
-    for vendor in vendors.flatten() {
-        if !vendor.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            continue;
-        }
-        let vendor_name = vendor.file_name().to_string_lossy().to_string();
-        let mut dirs = vec![(vendor.path(), format!("EFI\\{vendor_name}"))];
-        // Windows keeps its loader one level further down, and it is the one
-        // entry on most machines.
-        let nested = vendor.path().join("Boot");
-        if nested.is_dir() {
-            dirs.push((nested, format!("EFI\\{vendor_name}\\Boot")));
-        }
-        for (dir, prefix) in dirs {
-            let Ok(files) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            for f in files.flatten() {
-                let name = f.file_name().to_string_lossy().to_string();
-                if !name.to_lowercase().ends_with(".efi") {
-                    continue;
-                }
-                let path = format!("\\{prefix}\\{name}");
-                let known = crate::esp_scan::kind_by_name(&path).or_else(|| identify(&f.path()));
-                out.push(Loader {
-                    disk,
-                    partition,
-                    partition_guid: partition_guid.to_string(),
-                    kind: known.unwrap_or_else(|| static_text(tr!("esp_scan_win.generic"))),
-                    generic: known.is_none(),
-                    role: crate::esp_scan::role(&path),
-                    size: f.metadata().map(|m| m.len()).unwrap_or(0),
-                    fallback: efivars::is_fallback_path(&path),
-                    path,
-                    named_by: None,
-                });
-            }
-        }
-    }
-    out.sort_by(|a, b| a.path.to_lowercase().cmp(&b.path.to_lowercase()));
-    Ok(out)
-}
-
-/// A last resort for a file whose name says nothing.
-///
-/// An EFI binary is a PE file and carries strings in plain UTF-16. Those
-/// strings are a poor witness — see the table in [`crate::esp_scan`] for the
-/// three files on this machine they got wrong — so this runs only after the
-/// name and the vendor directory have both come up empty, and its answers stay
-/// vague on purpose.
-fn identify(path: &Path) -> Option<&'static str> {
-    let bytes = std::fs::read(path).ok()?;
-    let has = |needle: &str| -> bool {
-        let wide: Vec<u8> = needle.bytes().flat_map(|b| [b, 0]).collect();
-        bytes.windows(wide.len()).any(|w| w == wide)
-            || bytes.windows(needle.len()).any(|w| w == needle.as_bytes())
-    };
-    // Only names that cannot be mistaken for a string another loader carries
-    // about its neighbours.
-    if has("Acronis") {
-        Some(static_text(tr!("esp_scan_win.looks_like_acronis")))
-    } else if has("R-Drive") || has("RDrive") {
-        Some(static_text(tr!("esp_scan_win.looks_like_rdrive")))
-    } else if has("systemd-boot") {
-        Some("systemd-boot")
-    } else {
-        None
-    }
+    Ok(crate::esp_scan::collect_loaders(Path::new(volume_root))
+        .into_iter()
+        .map(|f| Loader {
+            disk,
+            partition,
+            partition_guid: partition_guid.to_string(),
+            path: f.path,
+            size: f.size,
+            kind: f.kind,
+            generic: f.generic,
+            role: f.role,
+            fallback: f.fallback,
+            named_by: None,
+        })
+        .collect())
 }

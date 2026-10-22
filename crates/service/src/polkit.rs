@@ -35,9 +35,9 @@ pub(crate) enum Action {
     /// writes the ISO into the caller's folder. Writing it onto a stick as
     /// well erases a disk and asks `Restore` after this.
     BuildMedia,
-    /// The boot configuration has no Linux RPC yet; a plan's boot steps are
-    /// covered by `Restore`.
-    #[allow(dead_code)]
+    /// A change on the boot page (`BootAction`): firmware entries, their
+    /// order, the menu timeout. A restore plan's boot steps are covered by
+    /// `Restore`.
     BootConfig,
 }
 

@@ -779,5 +779,17 @@
   "esp_scan_win.looks_like_rdrive": {
     "ru": "похоже на R-Drive Image",
     "en": "looks like R-Drive Image"
+  },
+  "esp_scan_linux.no_partition_node": {
+    "ru": "у ядра нет устройства для этого раздела — прочитать его нельзя",
+    "en": "the kernel has no device for this partition — it cannot be read"
+  },
+  "esp_scan_linux.not_fat": {
+    "ru": "раздел помечен как EFI, а внутри не FAT — загрузчиков здесь быть не может",
+    "en": "the partition is marked as EFI but holds no FAT — there can be no loaders here"
+  },
+  "esp_scan_linux.unreadable": {
+    "ru": "раздел не прочитать: %{error}",
+    "en": "the partition cannot be read: %{error}"
   }
 }
