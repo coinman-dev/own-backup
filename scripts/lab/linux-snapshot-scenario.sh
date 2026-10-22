@@ -8,8 +8,22 @@
 # the root partition or the ESP the guest booted from, while an idle partition
 # is accepted.
 #
+# Stage `pv` (whole disk with an LVM physical volume in use): data disk 1 gets
+# a GPT with an ESP (vfat, mounted) and a PV whose VG holds `root` (ext4,
+# mounted, written with fsync throughout the copy), `data` (xfs, mounted), an
+# inactive `cold` (ext4) and free extents in the middle and at the end. The
+# disk is copied with `backup-disk` — every LV through its own device-mapper
+# snapshot, all in one suspend, no `lvcreate` (the VG's seqno must not move) —
+# verified, then an increment; the increment is restored onto data disk 3,
+# whose clone of the VG is renamed with vgimportclone, and every filesystem is
+# checked by its checker and its files by sha256. Also: a volume copy of the
+# PV partition is refused, an LV created during the copy makes the copy fail
+# and publish nothing, and a SIGKILL mid-copy is undone by cleanup-snapshots.
+# Stage `pvroot` (opt-in): the guest's own system disk, when its root is on
+# LVM (Ubuntu Server's default layout), copied whole onto data disk 2.
+#
 #   python3 -I scripts/lab/linux-vm.py up --disks 3 [--size 2]
-#   scripts/lab/linux-snapshot-scenario.sh
+#   scripts/lab/linux-snapshot-scenario.sh [lvm|pv|pvroot|all]   (default: all = lvm pv)
 #
 # The host part builds the release CLI, copies it and this file into the guest
 # and runs `this-file guest <cli>` there as root. Only the data disks with the
@@ -23,6 +37,12 @@ set -uo pipefail
 # ---------------------------------------------------------------------------
 
 VG=obklab
+# Stage pv: the VG on data disk 1's PV partition, and its restored clone.
+PVG=obkpvlab
+PV_RST=obkpvrst
+LVM_TYPE=E6D6D379-F507-44C2-A23C-238F2A3DF928
+# Stage pvroot with PVROOT_RESTORE=1 leaves its restored copy on data disk 3.
+KEEP_D3=0
 EV=/var/tmp/obk-evidence
 FAILS=0
 CHECKS=0
@@ -88,10 +108,23 @@ compare() { # mountpoint manifest
 
 guest_cleanup() {
     local m
+    pkill -f 'obk-churn' 2>/dev/null
+    # A run killed here leaves our snapshot layers (and a remounted ESP):
+    # put every volume back before anything is unmounted or removed.
+    if dmsetup ls 2>/dev/null | grep -qE '^obk-(real|snap)-' || [[ -n $(ls /run/own-backup/frozen 2>/dev/null) ]]; then
+        [[ -x ${CLI:-} ]] && "$CLI" cleanup-snapshots >/dev/null 2>&1
+    fi
     for m in /mnt/obk-rst-thin /mnt/obk-rst-classic /mnt/obk-idle /mnt/obk-busy \
-        /mnt/obk-thin /mnt/obk-classic /mnt/obk-images; do
+        /mnt/obk-thin /mnt/obk-classic /mnt/obk-pv-rst /mnt/obk-pv-esp /mnt/obk-pv-root \
+        /mnt/obk-pv-cold /mnt/obk-pv-data /mnt/obk-images; do
         mountpoint -q "$m" && { umount "$m" || umount -l "$m"; }
         [[ -d $m ]] && rmdir "$m"
+    done
+    for g in "$PV_RST" "$PVG"; do
+        if vgs "$g" >/dev/null 2>&1; then
+            vgchange -an "$g" >/dev/null 2>&1
+            vgremove -ff -y "$g" >/dev/null 2>&1
+        fi
     done
     if [[ -n ${ESP_MOUNT:-} ]] && ! mountpoint -q "$ESP_MOUNT"; then
         mount "$ESP_MOUNT" || echo "WARNING: could not remount $ESP_MOUNT"
@@ -102,7 +135,8 @@ guest_cleanup() {
     fi
     for d in "${D1:-}" "${D2:-}" "${D3:-}"; do
         [[ -b $d ]] || continue
-        pvremove -ff -y "$d" >/dev/null 2>&1
+        [[ $KEEP_D3 -eq 1 && $d == "${D3:-}" ]] && continue
+        pvremove -ff -y "$d" "$d"-part* >/dev/null 2>&1
         wipefs -a -q "$d"-part* "$d" 2>/dev/null
     done
     udevadm settle -t 10 2>/dev/null
@@ -189,6 +223,392 @@ refuse_restore() {
     sed 's/^/    /' "$out"
     [[ $rc -ne 0 ]] && grep -Eq "$pattern" "$out" && ! grep -q 'Type YES' "$out"
     check "refuse-$name" "$(verdict $?)" "$target: $(grep -m1 '^Error:' "$out" | cut -c1-160)"
+}
+
+# ---------------------------------------------------------------------------
+# Stage pv: a whole disk whose PV is in use
+# ---------------------------------------------------------------------------
+
+# Our layers, the loop devices of their stores, the stores themselves.
+obk_leftovers() {
+    dmsetup ls 2>/dev/null | grep -E '^obk-(real|snap)-' || true
+    losetup -a 2>/dev/null | grep 'own-backup-cow-' || true
+    find /mnt/obk-images -maxdepth 1 -name '.own-backup-cow-*' 2>/dev/null || true
+}
+
+# The live tables of the active LVs (no keys in an LV's table).
+lv_tables() {
+    local lv
+    for lv in root data; do dmsetup table "$PVG-$lv" 2>&1; done | sha256sum | cut -d' ' -f1
+}
+
+vg_seqno() { vgs --noheadings -o vg_seqno "$PVG" 2>/dev/null | tr -d ' '; }
+
+# Keep writing with fsync; one line per write: index, start, seconds, exit.
+pv_churn() { # dir out-file
+    mkdir -p "$1"
+    exec -a obk-churn bash -c '
+        dir=$1; out=$2; i=0
+        while :; do
+            t0=$(date +%s.%N)
+            dd if=/dev/urandom of="$dir/c$((i % 40))" bs=64K count=4 conv=fsync status=none
+            rc=$?
+            t1=$(date +%s.%N)
+            awk -v i="$i" -v a="$t0" -v b="$t1" -v rc="$rc" \
+                "BEGIN { printf \"%d %s %.3f %d\n\", i, a, b - a, rc }" >>"$out"
+            i=$((i + 1))
+            sleep 0.05
+        done' obk-churn "$1" "$2"
+}
+
+# Wait until both active LVs run on their snapshot-origin table, neither is
+# suspended any more and both snapshots are live: the copy is past its switch.
+pv_wait_switched() { # pid of the copy: no use waiting once it is gone
+    local i lv ok
+    for i in $(seq 1 6000); do
+        kill -0 "$1" 2>/dev/null || return 1
+        ok=1
+        for lv in root data; do
+            dmsetup table "$PVG-$lv" 2>/dev/null | grep -q ' snapshot-origin ' || ok=0
+            dmsetup info -c --noheadings -o attr "$PVG-$lv" 2>/dev/null | grep -qv s || ok=0
+        done
+        [[ $ok -eq 1 && $(dmsetup status 2>/dev/null | grep -cE '^obk-snap-[0-9a-f]+: .* snapshot [0-9]+/') -ge 2 ]] &&
+            return 0
+        sleep 0.01
+    done
+    return 1
+}
+
+pv_make_disks() ( # make the PV disk's table and the images partition
+    set -e
+    local size pv_mib
+    size=$(blockdev --getsize64 "$D1")
+    # Room after the PV: the image adds its metadata partition past the
+    # last partition, and the restore target is no larger than the source.
+    pv_mib=$((size / 1048576 - 1 - 128 - 192))
+    printf 'label: gpt\nsize=128MiB, type=U\nsize=%sMiB, type=%s\n' "$pv_mib" "$LVM_TYPE" | sfdisk -q "$D1"
+    printf 'label: gpt\n,,L\n' | sfdisk -q "$D2"
+    udevadm settle -t 10
+)
+
+pv_make_volumes() ( # esp pv images: the VG, its LVs and filesystems, mounted
+    set -e
+    mkfs.vfat -F 32 -n OBKPVESP "$1"
+    pvcreate -ff -y "$2"
+    vgcreate "$PVG" "$2"
+    lvcreate -y -Wy -Zy -L 600M -n root "$PVG"
+    lvcreate -y -Wy -Zy -L 100M -n cold "$PVG"
+    # A hole of free extents between cold and data.
+    lvcreate -y -Wy -Zy -L 64M -n hole "$PVG"
+    lvcreate -y -Wy -Zy -L 300M -n data "$PVG"
+    lvremove -y "$PVG/hole"
+    mkfs.ext4 -q -L obk-pv-root "/dev/$PVG/root"
+    mkfs.ext4 -q -L obk-pv-cold "/dev/$PVG/cold"
+    mkfs.xfs -q -f -L obk-pv-data "/dev/$PVG/data"
+    mkfs.ext4 -q -L obk-images "$3"
+    mkdir -p /mnt/obk-pv-esp /mnt/obk-pv-root /mnt/obk-pv-cold /mnt/obk-pv-data /mnt/obk-images
+    mount "$1" /mnt/obk-pv-esp
+    mount "/dev/$PVG/root" /mnt/obk-pv-root
+    mount "/dev/$PVG/cold" /mnt/obk-pv-cold
+    mount "/dev/$PVG/data" /mnt/obk-pv-data
+    mount "$3" /mnt/obk-images
+    lvs -a -o lv_name,lv_size,lv_active,seg_pe_ranges "$PVG"
+    pvs -o pv_name,pv_size,pv_free,pe_start "$2"
+)
+
+pv_populate() ( # the known files, hashed; cold unmounted and deactivated
+    set -e
+    populate /mnt/obk-pv-root
+    hashes /mnt/obk-pv-root "$EV/pv-root.sha256"
+    populate /mnt/obk-pv-data
+    hashes /mnt/obk-pv-data "$EV/pv-data.sha256"
+    populate /mnt/obk-pv-cold
+    hashes /mnt/obk-pv-cold "$EV/pv-cold.sha256"
+    mkdir -p /mnt/obk-pv-esp/data/EFI/obk
+    head -c 2M /dev/urandom >/mnt/obk-pv-esp/data/EFI/obk/grubx64.efi
+    printf 'Own Backup PV lab ESP\n' >/mnt/obk-pv-esp/data/hello.txt
+    hashes /mnt/obk-pv-esp "$EV/pv-esp.sha256"
+    sync
+    umount /mnt/obk-pv-cold
+    lvchange -an "$PVG/cold"
+    lvs -a -o lv_name,lv_active "$PVG"
+)
+
+# pv_backup NAME IMAGE [cli args...]: the whole disk, with the root LV written
+# to throughout. Leaves the verdicts that belong to every successful copy.
+pv_backup() {
+    local name=$1 image=$2
+    shift 2
+    local out=$EV/$name.out tables seqno
+    tables=$(lv_tables)
+    seqno=$(vg_seqno)
+    : >"$EV/$name.churn.txt"
+    pv_churn /mnt/obk-pv-root/churn "$EV/$name.churn.txt" &
+    local churn_pid=$!
+    sleep 1
+    local t0=$SECONDS
+    RUST_LOG=info timeout 1200 "$CLI" backup-disk --device "$D1" -o "$image" --format qcow2 --verify "$@" \
+        >"$out" 2>&1
+    local rc=$?
+    sleep 1
+    kill "$churn_pid" 2>/dev/null
+    wait "$churn_pid" 2>/dev/null
+    pkill -f obk-churn 2>/dev/null
+    echo "### exit $rc after $((SECONDS - t0)) s" >>"$out"
+    plain "$out"
+    sed 's/^/    /' "$out"
+
+    check "$name-exit" "$(verdict $rc)" "backup-disk $D1 -> $image $* (exit $rc)"
+    [[ $(grep -c 'device-mapper snapshot created' "$out") -eq 2 ]] &&
+        grep -q 'every logical volume of the physical volume is held by its snapshot' "$out"
+    check "$name-pv-snapshots" "$(verdict $?)" \
+        "root and data held by device-mapper snapshots in one suspend: $(grep -o 'snapshot=obk-snap-[0-9a-f]*' "$out" | tr '\n' ' ')"
+    ! grep -q 'LVM snapshot created' "$out" && [[ $(vg_seqno) == "$seqno" ]]
+    check "$name-no-lvm-metadata-written" "$(verdict $?)" "no lvcreate; VG seqno $seqno before, $(vg_seqno) after"
+    grep -q 'LVM physical volume: free extents are not copied' "$out"
+    check "$name-free-extents-skipped" "$(verdict $?)" \
+        "$(grep -o 'LVM physical volume prepared.*' "$out" | grep -o 'free_bytes=[0-9]*' | head -1)"
+    grep -q "every partition's snapshot held to the end of the copy" "$out"
+    check "$name-checked-before-publish" "$(verdict $?)" "every hold, the PV's included, checked at publication"
+    grep -q '^Verify: OK' "$out" && [[ -s $image ]]
+    check "$name-verified" "$(verdict $?)" "$(grep '^Done:\|^Verify:\|^Excluded\|^Exclusions' "$out" | tr '\n' ' ')"
+    local left
+    left=$(obk_leftovers)
+    [[ $(grep -c 'device-mapper snapshot removed' "$out") -eq 2 && -z $left ]]
+    check "$name-nothing-left" "$(verdict $?)" "both snapshots removed; obk-*, store loops, stores: ${left:-none}"
+    [[ $(lv_tables) == "$tables" ]]
+    check "$name-tables-restored" "$(verdict $?)" "root and data run on exactly their own tables again"
+    findmnt -no OPTIONS /mnt/obk-pv-esp | grep -qw rw
+    check "$name-esp-rw-again" "$(verdict $?)" "the ESP, held read-only for its copy, is read-write again"
+    local writes failed slowest
+    writes=$(wc -l <"$EV/$name.churn.txt")
+    failed=$(awk '$4 != 0' "$EV/$name.churn.txt" | wc -l)
+    slowest=$(sort -k3 -g "$EV/$name.churn.txt" | tail -1 | awk '{print $3}')
+    findmnt -no OPTIONS /mnt/obk-pv-root | grep -qw rw && [[ $writes -gt 0 && $failed -eq 0 ]]
+    check "$name-root-stayed-rw" "$(verdict $?)" \
+        "$writes fsync'd 256 KiB writes to root during the copy, $failed failed, slowest ${slowest:-?} s"
+    return "$rc"
+}
+
+# A copy the PV changed under: an LV is created while the copy is stopped
+# right after its switch. The copy must fail and publish nothing.
+pv_changed_during_copy() {
+    local out=$EV/pv-changed.out image=/mnt/obk-images/changed.qcow2 tables
+    tables=$(lv_tables)
+    RUST_LOG=info "$CLI" backup-disk --device "$D1" -o "$image" --format qcow2 >"$out" 2>&1 &
+    local cli=$! seen=1
+    pv_wait_switched "$cli" && { kill -STOP "$cli"; seen=0; }
+    lvcreate -y -Wy -Zy -L 8M -n intruder "$PVG" >"$EV/pv-changed.lvcreate.out" 2>&1
+    local made=$?
+    kill -CONT "$cli" 2>/dev/null
+    wait "$cli"
+    local rc=$?
+    echo "### exit $rc" >>"$out"
+    plain "$out"
+    sed 's/^/    /' "$out"
+    [[ $seen -eq 0 && $made -eq 0 ]]
+    check pv-changed-setup "$(verdict $?)" "copy stopped after its switch, intruder LV created (exit $made)"
+    [[ $rc -ne 0 ]] && grep -Eq 'изменился во время копирования|changed during the copy' "$out" &&
+        [[ ! -e $image ]] && ! ls -a /mnt/obk-images | grep -q '^\.own-backup-new-'
+    check pv-changed-refused "$(verdict $?)" "exit $rc: $(grep -m1 -Eo '(Error|Ошибка).{0,160}' "$out")"
+    local left
+    left=$(obk_leftovers)
+    [[ -z $left && $(lv_tables) == "$tables" ]]
+    check pv-changed-released "$(verdict $?)" "snapshots released, tables restored: ${left:-nothing left}"
+    lvremove -y "$PVG/intruder" >>"$EV/pv-changed.lvcreate.out" 2>&1
+}
+
+# SIGKILL mid-copy: the volumes stay writable, cleanup-snapshots undoes it all.
+pv_kill() {
+    local tables
+    tables=$(lv_tables)
+    : >"$EV/pv-kill.churn.txt"
+    pv_churn /mnt/obk-pv-root/churn "$EV/pv-kill.churn.txt" &
+    local churn_pid=$!
+    RUST_LOG=info "$CLI" backup-disk --device "$D1" -o /mnt/obk-images/killed.qcow2 --format qcow2 \
+        >"$EV/pv-kill-backup.out" 2>&1 &
+    local cli=$! seen=1
+    pv_wait_switched "$cli" && { kill -STOP "$cli"; seen=0; }
+    {
+        echo "=== CLI stopped after the switch (then SIGKILL)"
+        dmsetup ls | sort
+        dmsetup table | grep -E 'snapshot' | sort
+        losetup -a | grep own-backup-cow-
+        findmnt -no OPTIONS /mnt/obk-pv-esp
+        ls -la /run/own-backup/frozen 2>&1
+    } >"$EV/pv-kill-state.txt" 2>&1
+    kill -9 "$cli" 2>/dev/null
+    wait "$cli" 2>/dev/null
+    plain "$EV/pv-kill-backup.out"
+    [[ $seen -eq 0 && $(grep -cE '^obk-snap-' "$EV/pv-kill-state.txt") -ge 2 ]]
+    check pv-kill-snapshots-in-place "$(verdict $?)" \
+        "killed with $(grep -cE '^obk-(real|snap)-' "$EV/pv-kill-state.txt") obk-* devices in place"
+    timeout 20 bash -c 'dd if=/dev/urandom of=/mnt/obk-pv-root/after-kill.bin bs=1M count=4 conv=fsync status=none &&
+        dd if=/dev/urandom of=/mnt/obk-pv-data/after-kill.bin bs=1M count=4 conv=fsync status=none'
+    check pv-kill-volumes-writable "$(verdict $?)" "root and data take 4 MiB fsync'd writes within 20 s of the SIGKILL"
+    kill "$churn_pid" 2>/dev/null
+    wait "$churn_pid" 2>/dev/null
+    pkill -f obk-churn 2>/dev/null
+    run pv-kill-cleanup env RUST_LOG=info timeout 120 "$CLI" cleanup-snapshots
+    local rc=$? left
+    left=$(obk_leftovers)
+    [[ $rc -eq 0 && -z $left && $(lv_tables) == "$tables" ]]
+    check pv-kill-cleanup "$(verdict $?)" \
+        "exit $rc, $(grep -o 'removed: [0-9]*' "$EV/pv-kill-cleanup.out"); tables restored; left: ${left:-none}"
+    findmnt -no OPTIONS /mnt/obk-pv-esp | grep -qw rw
+    check pv-kill-esp-rw "$(verdict $?)" "the ESP the killed copy held read-only is read-write again"
+    rm -f /mnt/obk-images/.own-backup-new-* /mnt/obk-pv-root/after-kill.bin /mnt/obk-pv-data/after-kill.bin
+}
+
+# Restore the image onto data disk 3, rename the clone's VG, check it all.
+pv_restore() { # image
+    local image=$1
+    run pv-restore timeout 1200 "$CLI" restore "$image" --target "$D3" --yes
+    local rc=$?
+    check pv-restore-exit "$(verdict $rc)" "restore $image -> $D3 (exit $rc)"
+    blockdev --rereadpt "$D3" 2>/dev/null
+    udevadm settle -t 10
+    local R_ESP R_PV
+    R_ESP=$(part_of "$D3" 1) && R_PV=$(part_of "$D3" 2)
+    check pv-restore-partitions "$(verdict $?)" "ESP ${R_ESP:-?}, PV ${R_PV:-?} on the restored disk"
+    [[ -n ${R_PV:-} ]] || return
+    # The clone carries the source's PV and VG UUIDs: renamed, it can be
+    # activated beside the source.
+    local import=(vgimportclone --basevgname "$PV_RST")
+    if [[ $(lvmconfig --typeconfig full devices/use_devicesfile 2>/dev/null) == *1 ]]; then
+        import+=(--importdevices)
+    fi
+    run pv-import "${import[@]}" "$R_PV"
+    run pv-activate vgchange -ay "$PV_RST"
+    rc=$?
+    run pv-restored-lvs lvs -a -o lv_name,lv_size,seg_pe_ranges --units b "$PV_RST"
+    lvs --noheadings -o lv_name,lv_size --units b "$PVG" | sort >"$EV/pv-lvs-source.txt"
+    lvs --noheadings -o lv_name,lv_size --units b "$PV_RST" | sort >"$EV/pv-lvs-restored.txt"
+    [[ $rc -eq 0 ]] && diff -q "$EV/pv-lvs-source.txt" "$EV/pv-lvs-restored.txt" >/dev/null
+    check pv-restore-vg "$(verdict $?)" "the restored VG activates with the source's LVs and sizes"
+
+    run pv-fsck-root e2fsck -fn "/dev/$PV_RST/root"
+    check pv-fsck-root "$(verdict $?)" "ext4 root (copied while written) clean before any mount"
+    run pv-fsck-cold e2fsck -fn "/dev/$PV_RST/cold"
+    check pv-fsck-cold "$(verdict $?)" "ext4 cold (inactive, read from the partition) clean"
+    run pv-fsck-esp fsck.vfat -n "$R_ESP"
+    check pv-fsck-esp "$(verdict $?)" "the ESP (held read-only for its copy) clean"
+    run pv-fsck-data-before xfs_repair -n "/dev/$PV_RST/data"
+    check pv-fsck-data-before INFO "xfs_repair -n before the first mount: exit $?"
+
+    local lv mnt=/mnt/obk-pv-rst opts
+    mkdir -p "$mnt"
+    for lv in root data cold esp; do
+        local dev=/dev/$PV_RST/$lv
+        opts=ro
+        [[ $lv == esp ]] && dev=$R_ESP
+        # The source's XFS is mounted with the same UUID; its log replays on mount.
+        [[ $lv == data ]] && opts=rw,nouuid
+        if mount -o "$opts" "$dev" "$mnt" 2>"$EV/pv-mount-$lv.err"; then
+            compare "$mnt" "$EV/pv-$lv.sha256" >"$EV/pv-compare-$lv.txt" 2>&1
+            check "pv-restored-$lv-files" "$(verdict $?)" \
+                "$(wc -l <"$EV/pv-$lv.sha256") files by sha256 ($(wc -l <"$EV/pv-compare-$lv.txt") mismatch lines)"
+            if [[ $lv == root ]]; then
+                [[ -f $mnt/data/after-full.txt ]]
+                check pv-restored-root-increment "$(verdict $?)" "the file written between the full and the increment is there"
+                check pv-restored-root-churn INFO "$(ls "$mnt/churn" 2>/dev/null | wc -l) churn files in the copy"
+            fi
+            umount "$mnt"
+        else
+            check "pv-restored-$lv-files" FAIL "mount -o $opts $dev: $(cat "$EV/pv-mount-$lv.err")"
+        fi
+    done
+    run pv-fsck-data xfs_repair -n "/dev/$PV_RST/data"
+    check pv-fsck-data "$(verdict $?)" "xfs data clean after mount/umount"
+    vgchange -an "$PV_RST" >/dev/null 2>&1
+    vgremove -ff -y "$PV_RST" >/dev/null 2>&1
+}
+
+pv_steps() {
+    run pv-setup-disks pv_make_disks
+    local rc=$? ESP1 PV1 P2
+    ESP1=$(part_of "$D1" 1) && PV1=$(part_of "$D1" 2) && P2=$(part_of "$D2" 1) || rc=1
+    [[ $rc -eq 0 ]] && { run pv-setup-volumes pv_make_volumes "$ESP1" "$PV1" "$P2" || rc=1; }
+    [[ $rc -eq 0 ]] && { run pv-setup-files pv_populate || rc=1; }
+    check pv-setup "$(verdict $rc)" \
+        "GPT on ob-data-1: ESP $ESP1 (vfat, mounted) + PV $PV1: root ext4 + data xfs mounted, cold inactive, free extents; images on $P2"
+    [[ $rc -eq 0 ]] || return
+    local IMG=/mnt/obk-images
+
+    # A volume copy of the PV partition: refused, its LVs named.
+    run pv-volume-refused timeout 120 "$CLI" backup "$PV1" -o "$IMG/pv-alone.qcow2" --format qcow2
+    rc=$?
+    [[ $rc -ne 0 ]] && grep -Eq 'физический том LVM|LVM physical volume' "$EV/pv-volume-refused.out" &&
+        grep -q "$PVG/root" "$EV/pv-volume-refused.out" && [[ -z $(obk_leftovers) && ! -e $IMG/pv-alone.qcow2 ]]
+    check pv-volume-copy-refused "$(verdict $?)" "$(grep -m1 -Eo '(Error|Ошибка).{0,160}' "$EV/pv-volume-refused.out")"
+
+    pv_backup pv-full "$IMG/pvdisk.qcow2"
+    local full_rc=$?
+    run pv-full-image qemu-img info "$IMG/pvdisk.qcow2"
+
+    # An increment of the disk: one more file on root.
+    printf 'written between the full copy and the increment\n' >/mnt/obk-pv-root/data/after-full.txt
+    sync -f /mnt/obk-pv-root/data/after-full.txt
+    local restore_from=$IMG/pvdisk.qcow2
+    if [[ $full_rc -eq 0 ]]; then
+        pv_backup pv-inc "$IMG/pvdisk-inc.qcow2" --kind incremental --parent "$IMG/pvdisk.qcow2"
+        if [[ $? -eq 0 ]]; then
+            grep -q 'Incremental' "$EV/pv-inc.out"
+            check pv-inc-is-a-child "$(verdict $?)" "$(grep '^Done:' "$EV/pv-inc.out")"
+            restore_from=$IMG/pvdisk-inc.qcow2
+        fi
+    fi
+
+    pv_changed_during_copy
+    pv_kill
+    if [[ $full_rc -eq 0 ]]; then
+        pv_restore "$restore_from"
+    else
+        check pv-restore-exit SKIP "no image to restore"
+    fi
+
+    compare /mnt/obk-pv-root "$EV/pv-root.sha256" >/dev/null 2>&1 &&
+        compare /mnt/obk-pv-data "$EV/pv-data.sha256" >/dev/null 2>&1
+    check pv-sources-intact "$(verdict $?)" "root and data still match their hashes"
+}
+
+# Stage pvroot: the guest's own system disk, when its root is an LV.
+pvroot_steps() {
+    local root_src disk
+    root_src=$(findmnt -no SOURCE /)
+    disk=$(lsblk -nrso NAME,TYPE "$root_src" 2>/dev/null | awk '$2 == "disk" { print $1 }' | head -1)
+    if [[ $(lsblk -no TYPE "$root_src" 2>/dev/null) != lvm || -z $disk ]]; then
+        check pvroot SKIP "the root ($root_src) is not on LVM: nothing to show here"
+        return
+    fi
+    run pvroot-layout lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS "/dev/$disk"
+    run pvroot-images bash -c "set -e
+        printf 'label: gpt\n,,L\n' | sfdisk -q $D2
+        udevadm settle -t 10"
+    local P2
+    P2=$(part_of "$D2" 1) || { check pvroot-setup FAIL "no images partition"; return; }
+    mkfs.ext4 -q -L obk-images "$P2" && mkdir -p /mnt/obk-images && mount "$P2" /mnt/obk-images
+    check pvroot-setup "$(verdict $?)" "images on $P2; system disk /dev/$disk, root $root_src"
+    local tables
+    tables=$(dmsetup table 2>/dev/null | grep -v '^obk-' | sha256sum)
+    run pvroot-backup env RUST_LOG=info timeout 3600 "$CLI" backup-disk --device "/dev/$disk" \
+        -o /mnt/obk-images/system.qcow2 --format qcow2 --bootable --verify
+    local rc=$?
+    check pvroot-backup "$(verdict $rc)" "the running system's disk, root LV suspended for its snapshot (exit $rc)"
+    grep -q '^Verify: OK' "$EV/pvroot-backup.out"
+    check pvroot-verified "$(verdict $?)" "$(grep '^Done:\|^Verify:' "$EV/pvroot-backup.out" | tr '\n' ' ')"
+    [[ -z $(obk_leftovers) && $(dmsetup table 2>/dev/null | grep -v '^obk-' | sha256sum) == "$tables" ]]
+    check pvroot-released "$(verdict $?)" "no obk-* left, every table as before"
+    timeout 10 touch /var/tmp/obk-alive && timeout 10 sync
+    check pvroot-guest-responsive "$(verdict $?)" "root writable within 10 s after the copy"
+    if [[ ${PVROOT_RESTORE:-0} == 1 ]]; then
+        # Leaves a duplicate of the system's VG on data disk 3: shut the stand
+        # down right after, and boot the copy alone
+        # (linux-restore-boot.py boot data-3.qcow2).
+        run pvroot-restore timeout 3600 "$CLI" restore /mnt/obk-images/system.qcow2 --target "$D3" --yes
+        check pvroot-restore "$(verdict $?)" "the copy restored onto $D3 for a boot test"
+        KEEP_D3=1
+    fi
 }
 
 guest_steps() {
@@ -375,6 +795,8 @@ guest_steps() {
 
 guest_main() {
     CLI=$1
+    local stages=${2:-all} stage
+    [[ $stages == all ]] && stages='lvm pv'
     [[ $EUID -eq 0 ]] || { echo 'guest part needs root'; exit 2; }
     D1=/dev/disk/by-id/virtio-ob-data-1
     D2=/dev/disk/by-id/virtio-ob-data-2
@@ -390,14 +812,25 @@ guest_main() {
     trap 'exit 130' INT TERM
     guest_cleanup # leftovers of an interrupted earlier run
 
-    guest_steps
+    for stage in $stages; do
+        echo "== stage $stage" | tee -a "$EV/summary.txt"
+        case $stage in
+            lvm) guest_steps ;;
+            pv) pv_steps ;;
+            pvroot) pvroot_steps ;;
+            *) check "stage-$stage" FAIL "no such stage (lvm, pv, pvroot, all)" ;;
+        esac
+        guest_cleanup
+    done
 
-    guest_cleanup
-    run after-cleanup bash -c "lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS $D1 $D2 $D3; vgs; lvs -a; findmnt /boot/efi"
-    ! vgs "$VG" >/dev/null 2>&1 && ! lsblk -rno NAME "$D1" "$D2" "$D3" | grep -q '[0-9]$' &&
-        ! lvs --noheadings 2>/dev/null | grep -q obk-snap- &&
+    local wiped=("$D1" "$D2") kept=''
+    if [[ $KEEP_D3 -eq 1 ]]; then kept=' (data disk 3 keeps the restored system)'; else wiped+=("$D3"); fi
+    run after-cleanup bash -c "lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS $D1 $D2 $D3; vgs; lvs -a; dmsetup ls; findmnt /boot/efi"
+    ! vgs "$VG" >/dev/null 2>&1 && ! vgs "$PVG" >/dev/null 2>&1 && ! vgs "$PV_RST" >/dev/null 2>&1 &&
+        ! lsblk -rno NAME "${wiped[@]}" | grep -q '[0-9]$' &&
+        ! lvs --noheadings 2>/dev/null | grep -q obk-snap- && [[ -z $(dmsetup ls 2>/dev/null | grep -E '^obk-') ]] &&
         { [[ -z ${ESP_MOUNT:-} ]] || mountpoint -q "$ESP_MOUNT"; }
-    check guest-cleaned-up "$(verdict $?)" "no VG, no partitions on the data disks, ESP mounted as before"
+    check guest-cleaned-up "$(verdict $?)" "no VG, no obk-* device, no partitions on the data disks$kept, ESP mounted as before"
     mkdir -p "$EV/cli-logs"
     cp -a /var/log/own-backup/. "$EV/cli-logs/" 2>/dev/null
     dmesg >"$EV/dmesg.txt" 2>&1
@@ -410,7 +843,7 @@ guest_main() {
 }
 
 if [[ ${1:-} == guest ]]; then
-    guest_main "$2"
+    guest_main "$2" "${3:-all}"
     exit $?
 fi
 
@@ -424,6 +857,11 @@ VM=(python3 -I "$HERE/linux-vm.py")
 RUN_DIR=$HOME/lab/linux/run
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 HOST_EV=$RUN_DIR/evidence/snapshot-$STAMP
+STAGES=${1:-all}
+case $STAGES in
+    lvm | pv | pvroot | all) ;;
+    *) echo "usage: $0 [lvm|pv|pvroot|all]" >&2; exit 2 ;;
+esac
 
 die() {
     echo "[scenario] ERROR: $*" >&2
@@ -467,7 +905,7 @@ git -C "$REPO" log -1 --format='%H %s' >"$HOST_EV/commit.txt"
 "${VM[@]}" put "${BASH_SOURCE[0]}" /tmp/obk-scenario/scenario.sh || die 'copy of the scenario failed'
 
 echo "[scenario] guest part starts; evidence: $HOST_EV"
-"${VM[@]}" ssh -- 'sudo bash /tmp/obk-scenario/scenario.sh guest /tmp/obk-scenario/own-backup-cli' \
+"${VM[@]}" ssh -- "sudo env PVROOT_RESTORE=${PVROOT_RESTORE:-0} bash /tmp/obk-scenario/scenario.sh guest /tmp/obk-scenario/own-backup-cli $STAGES" \
     2>&1 | tee "$HOST_EV/guest-console.log"
 rc=${PIPESTATUS[0]}
 
