@@ -101,7 +101,13 @@ drop_build() {
 }
 
 state=running
+# The clean-up ignores the stop signal, and so do the tools it runs (an
+# ignored signal stays ignored across exec): systemd's stop signals the unit's
+# processes until no new ones appear, and would kill the umount and rm this
+# forks — the stand's first cancel left the half-built tree mounted (22.10).
+# TimeoutStopSec of the transient unit bounds it.
 on_exit() {
+    trap '' TERM INT HUP
     unmount_under "$builder"
     if [[ $state == stopped ]]; then
         drop_build
@@ -109,16 +115,19 @@ on_exit() {
     fi
 }
 trap on_exit EXIT
-trap 'state=stopped; exit 143' TERM INT HUP
+trap "trap '' TERM INT HUP; state=stopped; exit 143" TERM INT HUP
 
 case "$cmd" in
     clean)
         say "removing the build tree (the builder and the package cache stay)"
+        # Mounts first: rm --one-file-system fails on a mount point it skips.
+        unmount_under "$builder"
         drop_build
         exit 0
         ;;
     purge)
         say "removing $work"
+        unmount_under "$work"
         if [[ -d $work ]]; then
             find "$work" -mindepth 1 -maxdepth 1 -exec rm -rf --one-file-system {} +
         fi

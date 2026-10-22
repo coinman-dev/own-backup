@@ -354,8 +354,12 @@ pub fn stage_installed(root: &Path, package: &str, stage: &Path) -> Result<Repac
         ));
     }
 
+    // Explicit modes: the service runs with UMask=0027, and dpkg-deb refuses
+    // a control directory that is not 0755..0775 (stand, 22.10).
     let debian = stage.join("DEBIAN");
     std::fs::create_dir_all(&debian)?;
+    std::fs::set_permissions(&debian, std::fs::Permissions::from_mode(0o755))?;
+    std::fs::set_permissions(stage, std::fs::Permissions::from_mode(0o755))?;
     let write = |name: &str, text: &str, mode: u32| -> std::io::Result<()> {
         let p = debian.join(name);
         std::fs::write(&p, text)?;
@@ -422,11 +426,51 @@ pub fn dpkg_deb_build(stage: &Path, out: &Path) -> Result<()> {
 /// The installed package as a .deb at `out`, staged in `stage` (removed
 /// before and after).
 pub fn repack(root: &Path, package: &str, stage: &Path, out: &Path) -> Result<Repacked> {
+    repack_with(root, package, stage, out, &mut |s, o| dpkg_deb_build(s, o))
+}
+
+/// [`repack`] with the archive made by `pack(stage, out)`.
+pub fn repack_with(
+    root: &Path,
+    package: &str,
+    stage: &Path,
+    out: &Path,
+    pack: &mut dyn FnMut(&Path, &Path) -> Result<()>,
+) -> Result<Repacked> {
     remove_tree(stage)?;
     let staged = stage_installed(root, package, stage);
-    let built = staged.and_then(|r| dpkg_deb_build(stage, out).map(|()| r));
+    let built = staged.and_then(|r| pack(stage, out).map(|()| r));
     let _ = remove_tree(stage);
     built
+}
+
+/// `dpkg-deb --build` as a transient unit: inside the service's sandbox
+/// (`RestrictSUIDSGID=`) its tar fails to read the staged files (stand,
+/// 22.10: "Cannot stat: Function not implemented").
+fn dpkg_deb_unsandboxed(stage: &Path, out: &Path) -> Result<()> {
+    let program = find_program("dpkg-deb").ok_or_else(|| {
+        OwnBackupError::Config(tr!("media_linux.repack_failed", error = "dpkg-deb").into_owned())
+    })?;
+    let args: Vec<String> = ["--root-owner-group", "-Zgzip", "--build"]
+        .iter()
+        .map(|s| s.to_string())
+        .chain([stage.display().to_string(), out.display().to_string()])
+        .collect();
+    let mut lines: Vec<String> = Vec::new();
+    let ended = run_program(
+        &program,
+        &args,
+        &CancelToken::default(),
+        &mut None,
+        &mut |l| lines.push(l.to_string()),
+    )?;
+    if !ended.ok || !out.is_file() {
+        let error = lines[lines.len().saturating_sub(4)..].join(" / ");
+        return Err(OwnBackupError::Config(
+            tr!("media_linux.repack_failed", error = error).into_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn remove_tree(path: &Path) -> std::io::Result<()> {
@@ -572,6 +616,9 @@ impl OutputDir {
             armed: true,
         };
         std::os::unix::fs::fchown(&out, Some(self.uid), Some(self.gid))
+            .map_err(|e| self.save_error(e))?;
+        // An ordinary file of theirs, whatever the service's UMask=0027 made it.
+        out.set_permissions(std::fs::Permissions::from_mode(0o644))
             .map_err(|e| self.save_error(e))?;
         let mut buf = vec![0u8; CHUNK];
         let mut done: u64 = 0;
@@ -934,6 +981,18 @@ fn run_script(
     log: &mut Option<File>,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<Ended> {
+    run_program(&paths.script, args, cancel, log, on_line)
+}
+
+/// Run `program` with `args` outside the service's sandbox (see the module
+/// header), every output line to `on_line` (and to the log).
+fn run_program(
+    program: &Path,
+    args: &[String],
+    cancel: &CancelToken,
+    log: &mut Option<File>,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<Ended> {
     let env = script_env();
     let systemd = have_systemd();
     let mut cmd = if systemd {
@@ -941,12 +1000,12 @@ fn run_script(
         // (its trap cleans up) before a new one may take the name.
         systemctl(&["stop", &format!("{UNIT}.service")]);
         systemctl(&["reset-failed", &format!("{UNIT}.service")]);
-        let argv = systemd_run_argv(&paths.script, args, &env);
+        let argv = systemd_run_argv(program, args, &env);
         let mut c = Command::new(&argv[0]);
         c.args(&argv[1..]);
         c
     } else {
-        let mut c = Command::new(&paths.script);
+        let mut c = Command::new(program);
         c.args(args).env_clear().envs(env.iter().cloned());
         // Its own group: a cancel signals the script and every tool under it.
         std::os::unix::process::CommandExt::process_group(&mut c, 0);
@@ -961,7 +1020,7 @@ fn run_script(
             OwnBackupError::Config(
                 tr!(
                     "media_linux.start_failed",
-                    path = paths.script.display(),
+                    path = program.display(),
                     error = e
                 )
                 .into_owned(),
@@ -1215,7 +1274,13 @@ pub fn build(
             out.sync_all()?;
         }
         None => {
-            let repacked = repack(Path::new("/"), PACKAGE, &input.join("stage"), &deb)?;
+            let repacked = repack_with(
+                Path::new("/"),
+                PACKAGE,
+                &input.join("stage"),
+                &deb,
+                &mut |s, o| dpkg_deb_unsandboxed(s, o),
+            )?;
             info!(version = %repacked.version, "installed package packed for the medium");
             if !repacked.changed_conffiles.is_empty() {
                 warnings.push(
@@ -1517,6 +1582,10 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(stage.join("DEBIAN/conffiles")).unwrap(),
             "/etc/xdg/autostart/own-backup-tray.desktop\n"
+        );
+        assert_eq!(
+            std::fs::metadata(stage.join("DEBIAN")).unwrap().mode() & 0o777,
+            0o755
         );
         let postinst = stage.join("DEBIAN/postinst");
         assert_eq!(std::fs::metadata(&postinst).unwrap().mode() & 0o777, 0o755);
