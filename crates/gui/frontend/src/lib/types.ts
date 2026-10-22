@@ -1252,11 +1252,6 @@ export interface LinuxMediaReport {
   cache_bytes: number;
 }
 
-/** Can the Linux medium be built now (`LinuxMediaStatusDto`). */
-export interface LinuxMediaStatus {
-  /** Empty when the package is not installed. */
-  installed_version: string;
-  cache_dir: string;
 /** The ready Linux medium of the installed version on GitHub. */
 export interface LinuxMediaRelease {
   version: string;
@@ -1279,6 +1274,11 @@ export interface LinuxMediaDownloadProgress {
   total: number;
 }
 
+/** Can the Linux medium be built now (`LinuxMediaStatusDto`). */
+export interface LinuxMediaStatus {
+  /** Empty when the package is not installed. */
+  installed_version: string;
+  cache_dir: string;
   cache_bytes: number;
   free_bytes: number;
   need_bytes: number;
