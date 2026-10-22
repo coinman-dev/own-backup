@@ -379,6 +379,67 @@ pub struct MediaStickReportDto {
     pub log_skipped: Option<String>,
 }
 
+// --- building the Linux medium in the service --------------------------------
+
+/// Build the Linux boot medium: the ISO into the caller's own folder and,
+/// optionally, onto a stick. Progress arrives as `media` engine events
+/// ([`MediaProgressDto`]); CancelEngineOp stops it.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct LinuxMediaBuildDto {
+    /// An existing folder owned by the caller; the ISO gets a name of its
+    /// own there and never replaces a file.
+    pub output_dir: String,
+    /// Also write the medium onto this stick (`/dev/sdb`); empty for none.
+    #[serde(default)]
+    pub stick_device: String,
+    /// The stick as the list showed it; required with `stick_device`.
+    #[serde(default)]
+    pub stick_expect: Option<MediaStickIdentityDto>,
+    /// Development: this .deb (the caller's own file) instead of the
+    /// installed package. Empty — the installed package, as the window sends.
+    #[serde(default)]
+    pub deb_path: String,
+}
+
+/// What the build did.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct LinuxMediaReportDto {
+    pub iso_path: String,
+    pub iso_bytes: u64,
+    /// The package version the medium carries.
+    pub version: String,
+    /// Made from the installed package (not from a given .deb).
+    pub from_installed: bool,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub stick: Option<MediaStickReportDto>,
+    /// The builder and package cache kept for the next build.
+    pub cache_dir: String,
+    pub cache_bytes: u64,
+}
+
+/// What the window shows before a Linux build: whether one can start, and
+/// the cache an earlier build left.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct LinuxMediaStatusDto {
+    /// The installed package's version; empty when it is not installed.
+    pub installed_version: String,
+    pub cache_dir: String,
+    pub cache_bytes: u64,
+    pub free_bytes: u64,
+    pub need_bytes: u64,
+    /// What stops a build now, in the person's words; empty when it can start.
+    #[serde(default)]
+    pub problems: Vec<String>,
+}
+
+/// The cache removed.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct LinuxMediaCacheClearedDto {
+    pub freed_bytes: u64,
+}
+
 // --- duplicate identities (Linux restore and mount) ------------------------
 
 /// An identity the restored or mounted copy carries that a device of this

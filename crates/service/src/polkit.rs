@@ -30,6 +30,11 @@ pub(crate) enum Action {
     Restore,
     DeleteBackups,
     ManageKeys,
+    /// Building the Linux boot medium: a root build (debootstrap, chroot,
+    /// packages from the network) that fills gigabytes of the cache and
+    /// writes the ISO into the caller's folder. Writing it onto a stick as
+    /// well erases a disk and asks `Restore` instead.
+    BuildMedia,
     /// The boot configuration has no Linux RPC yet; a plan's boot steps are
     /// covered by `Restore`.
     #[allow(dead_code)]
@@ -42,6 +47,7 @@ impl Action {
             Action::Restore => "com.ownbackup.restore",
             Action::DeleteBackups => "com.ownbackup.delete-backups",
             Action::ManageKeys => "com.ownbackup.manage-keys",
+            Action::BuildMedia => "com.ownbackup.build-media",
             Action::BootConfig => "com.ownbackup.boot-config",
         }
     }
@@ -195,6 +201,7 @@ mod tests {
             Action::Restore,
             Action::DeleteBackups,
             Action::ManageKeys,
+            Action::BuildMedia,
             Action::BootConfig,
         ] {
             assert!(

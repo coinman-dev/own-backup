@@ -171,6 +171,23 @@ fn read_sessions(dir: &Path) -> std::io::Result<Option<Vec<Session>>> {
     Ok(Some(sessions))
 }
 
+/// Who made the call: the uid and gid of `SO_PEERCRED`, or this process's
+/// own for a call that did not come over the Unix socket (the loopback TCP of
+/// a `--foreground` development run, whose client is the developer running
+/// it). What the engine writes FOR the caller — the boot medium's ISO into
+/// their folder — is theirs by these ids.
+#[allow(clippy::result_large_err)] // tonic::Status, as every RPC handler returns
+pub(crate) fn caller_ids(info: Option<&UdsConnectInfo>) -> Result<(u32, u32), Status> {
+    let Some(info) = info else {
+        // SAFETY: plain getters.
+        return Ok(unsafe { (libc::geteuid(), libc::getegid()) });
+    };
+    let cred = info
+        .peer_cred
+        .ok_or_else(|| Status::permission_denied(tr!("peer_access.unknown_peer").into_owned()))?;
+    Ok((cred.uid(), cred.gid()))
+}
+
 /// Check one call. `None` means it did not arrive over the Unix socket (the
 /// loopback TCP of a `--foreground` development run), which this does not
 /// cover.

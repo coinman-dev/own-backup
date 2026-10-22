@@ -2566,6 +2566,238 @@ impl BackupService for BackupServiceImpl {
         }
     }
 
+    /// Linux: can a medium be built now, and what an earlier build left in
+    /// the cache.
+    async fn linux_media_status(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        media_build_unavailable()?;
+        #[cfg(target_os = "linux")]
+        {
+            use own_backup_common::engine_dto::LinuxMediaStatusDto;
+            let s = tokio::task::spawn_blocking(own_backup_backup::media_linux_build::status)
+                .await
+                .map_err(|e| Status::internal(format!("media status panicked: {e}")))?;
+            json_reply(&LinuxMediaStatusDto {
+                installed_version: s.installed_version.unwrap_or_default(),
+                cache_dir: s.cache_dir.display().to_string(),
+                cache_bytes: s.cache_bytes,
+                free_bytes: s.free_bytes,
+                need_bytes: s.need_bytes,
+                problems: s.problems,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = req;
+            Err(Status::unimplemented(
+                tr!("grpc_server.media_linux_only").into_owned(),
+            ))
+        }
+    }
+
+    /// Linux: build the boot medium from the installed package, save the ISO
+    /// into the caller's folder and, when asked, write it onto a stick. The
+    /// destructive-operation slot is held throughout: the build is long, runs
+    /// as root, and its stick write erases a disk.
+    async fn build_linux_media(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        media_build_unavailable()?;
+        #[cfg(target_os = "linux")]
+        {
+            use own_backup_backup::media_linux::LinuxStage;
+            use own_backup_backup::media_linux_build::{
+                build, open_callers_file, open_output_dir, BuildRequest,
+            };
+            use own_backup_common::engine_dto::{
+                LinuxMediaBuildDto, LinuxMediaReportDto, MediaProgressDto, MediaStageDto,
+                MediaStickReportDto,
+            };
+            use own_backup_common::OwnBackupError;
+
+            // The person's words, without the error kind's English prefix.
+            fn refused(e: OwnBackupError) -> Status {
+                match e {
+                    OwnBackupError::Cancelled => {
+                        Status::cancelled(tr!("grpc_server.media_linux_cancelled").into_owned())
+                    }
+                    OwnBackupError::Config(m)
+                    | OwnBackupError::Device(m)
+                    | OwnBackupError::RestoreIncompatible(m) => Status::failed_precondition(m),
+                    other => Status::failed_precondition(other.to_string()),
+                }
+            }
+
+            let (uid, gid) = crate::peer_access::caller_ids(
+                req.extensions()
+                    .get::<tonic::transport::server::UdsConnectInfo>(),
+            )?;
+            let p: LinuxMediaBuildDto = serde_json::from_str(&req.get_ref().json)
+                .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+            let with_stick = !p.stick_device.trim().is_empty();
+            // Erasing a stick is the restore question; a build alone writes
+            // only into the cache and the caller's own folder.
+            let action = if with_stick {
+                crate::polkit::Action::Restore
+            } else {
+                crate::polkit::Action::BuildMedia
+            };
+            crate::polkit::authorize(&req, action).await?;
+
+            let stick = if with_stick {
+                // Which stick the person chose, as listed (see write_media_stick).
+                let expect = p.stick_expect.clone().ok_or_else(|| {
+                    Status::failed_precondition(
+                        tr!("grpc_server.media_stick_list_again").into_owned(),
+                    )
+                })?;
+                let device = p.stick_device.trim().to_string();
+                let checked = device.clone();
+                tokio::task::spawn_blocking(move || {
+                    own_backup_backup::media_stick_linux::check_stick(&checked)?;
+                    own_backup_restore::guard_target_disk_device(&checked)
+                })
+                .await
+                .map_err(|e| Status::internal(format!("stick check panicked: {e}")))?
+                .map_err(refused)?;
+                Some((device, expect))
+            } else {
+                None
+            };
+            let dir = p.output_dir.clone();
+            let deb_path = p.deb_path.trim().to_string();
+            let (out, deb) = tokio::task::spawn_blocking(move || {
+                let out = open_output_dir(&dir, uid, gid)?;
+                let deb = if deb_path.is_empty() {
+                    None
+                } else {
+                    Some(open_callers_file(&deb_path, uid)?)
+                };
+                Ok::<_, OwnBackupError>((out, deb))
+            })
+            .await
+            .map_err(|e| Status::internal(format!("folder check panicked: {e}")))?
+            .map_err(refused)?;
+
+            let slot = self.reserve(
+                &tr!("grpc_server.busy_media_build"),
+                &out.path.display().to_string(),
+            )?;
+            let cancel = slot.cancel();
+            let events = self.state.events.clone();
+            let plan = LinuxStage::plan(with_stick);
+            let stages: Vec<MediaStageDto> = plan
+                .iter()
+                .map(|s| MediaStageDto {
+                    id: s.id().into(),
+                    title: s.title(),
+                })
+                .collect();
+            info!(
+                folder = %out.path.display(),
+                uid,
+                stick = %p.stick_device,
+                given_deb = !p.deb_path.trim().is_empty(),
+                "building the Linux boot medium"
+            );
+            let report = tokio::task::spawn_blocking(move || {
+                let _slot = slot;
+                let _awake = keep_awake(&tr!("grpc_server.busy_media_build"));
+                let last = *plan.last().unwrap_or(&LinuxStage::Iso);
+                let mut emit = |stage: LinuxStage, percent: u64, detail: &str| {
+                    emit_engine(
+                        &events,
+                        "media",
+                        &MediaProgressDto {
+                            stages: stages.clone(),
+                            stage_index: plan.iter().position(|s| *s == stage).unwrap_or(0),
+                            percent,
+                            detail: detail.to_string(),
+                            finished: stage == last && percent == 100,
+                        },
+                    );
+                };
+                build(BuildRequest { out, deb, stick }, &cancel, &mut emit)
+            })
+            .await
+            .map_err(|e| Status::internal(format!("medium build panicked: {e}")))?
+            .map_err(|e| {
+                tracing::warn!(error = %e, "the Linux boot medium was not built");
+                refused(e)
+            })?;
+            info!(
+                iso = %report.iso_path.display(),
+                mb = report.iso_bytes >> 20,
+                version = %report.version,
+                stick = report.stick.is_some(),
+                "Linux boot medium built"
+            );
+            let device = p.stick_device.trim().to_string();
+            json_reply(&LinuxMediaReportDto {
+                iso_path: report.iso_path.display().to_string(),
+                iso_bytes: report.iso_bytes,
+                version: report.version,
+                from_installed: report.from_installed,
+                warnings: report.warnings,
+                stick: report.stick.map(|s| MediaStickReportDto {
+                    device,
+                    iso_bytes: s.iso_bytes,
+                    volume_id: s.volume_id,
+                    log_partition: s.log_partition,
+                    log_skipped: s.log_skipped,
+                }),
+                cache_dir: report.cache_dir.display().to_string(),
+                cache_bytes: report.cache_bytes,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = req;
+            Err(Status::unimplemented(
+                tr!("grpc_server.media_linux_only").into_owned(),
+            ))
+        }
+    }
+
+    /// Linux: remove the medium's builder and package cache. Not while a
+    /// build (or anything else) holds the slot.
+    async fn clear_linux_media_cache(
+        &self,
+        req: Request<Empty>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[cfg(target_os = "linux")]
+        {
+            use own_backup_common::engine_dto::LinuxMediaCacheClearedDto;
+            crate::polkit::authorize(&req, crate::polkit::Action::BuildMedia).await?;
+            let slot = self.reserve(
+                &tr!("grpc_server.busy_media_cache"),
+                own_backup_backup::media_linux_build::CACHE_DIR,
+            )?;
+            let freed = tokio::task::spawn_blocking(move || {
+                let _slot = slot;
+                own_backup_backup::media_linux_build::clear_cache()
+            })
+            .await
+            .map_err(|e| Status::internal(format!("cache removal panicked: {e}")))?
+            .map_err(|e| match e {
+                own_backup_common::OwnBackupError::Config(m) => Status::failed_precondition(m),
+                other => Status::failed_precondition(other.to_string()),
+            })?;
+            info!(mb = freed >> 20, "the medium's build cache was removed");
+            json_reply(&LinuxMediaCacheClearedDto { freed_bytes: freed })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = req;
+            Err(Status::unimplemented(
+                tr!("grpc_server.media_linux_only").into_owned(),
+            ))
+        }
+    }
+
     async fn unmount_image(&self, req: Request<JsonRequest>) -> Result<Response<Empty>, Status> {
         check_auth(&req, &self.service_token)?;
         #[cfg(target_os = "windows")]

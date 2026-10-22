@@ -724,6 +724,51 @@ impl BackupClient {
         parse(&reply.json)
     }
 
+    /// Linux: can the boot medium be built now, and the cache an earlier
+    /// build left.
+    pub async fn linux_media_status(
+        &mut self,
+    ) -> Result<own_backup_common::engine_dto::LinuxMediaStatusDto> {
+        let reply = self
+            .inner
+            .linux_media_status(self.request(proto::Empty {}))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
+    /// Linux: build the boot medium from the installed package into the
+    /// caller's folder (and onto a stick when one is given). Progress arrives
+    /// on the event stream as kind `media`; this returns when it is done —
+    /// some minutes, more the first time.
+    pub async fn build_linux_media(
+        &mut self,
+        options: &own_backup_common::engine_dto::LinuxMediaBuildDto,
+    ) -> Result<own_backup_common::engine_dto::LinuxMediaReportDto> {
+        let json = serde_json::to_string(options).unwrap_or_default();
+        let reply = self
+            .inner
+            .build_linux_media(self.request(proto::JsonRequest { json }))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
+    /// Linux: remove the medium's builder and package cache.
+    pub async fn clear_linux_media_cache(
+        &mut self,
+    ) -> Result<own_backup_common::engine_dto::LinuxMediaCacheClearedDto> {
+        let reply = self
+            .inner
+            .clear_linux_media_cache(self.request(proto::Empty {}))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
     pub async fn unmount_image(&mut self, image_path: &str) -> Result<()> {
         let json = serde_json::json!({ "image_path": image_path }).to_string();
         self.inner

@@ -66,6 +66,19 @@
     </defaults>
   </action>
 
+  <action id="com.ownbackup.build-media">
+    <description>Build a boot medium</description>
+    <description xml:lang="ru">Собрать загрузочный носитель</description>
+    <message>Authentication is required to build a boot medium (Debian packages are downloaded and assembled as root)</message>
+    <message xml:lang="ru">Чтобы собрать загрузочный носитель (пакеты Debian скачиваются и собираются от имени root), нужна проверка подлинности</message>
+    <icon_name>own-backup</icon_name>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
   <action id="com.ownbackup.boot-config">
     <description>Change the boot configuration</description>
     <description xml:lang="ru">Изменить настройки загрузки</description>

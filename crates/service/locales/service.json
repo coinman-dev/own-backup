@@ -202,6 +202,22 @@
     "ru": "запись носителя на флешку",
     "en": "writing the medium onto a stick"
   },
+  "grpc_server.busy_media_build": {
+    "ru": "сборка загрузочного носителя Linux",
+    "en": "building the Linux boot medium"
+  },
+  "grpc_server.busy_media_cache": {
+    "ru": "удаление кэша сборки носителя",
+    "en": "removing the medium's build cache"
+  },
+  "grpc_server.media_linux_cancelled": {
+    "ru": "сборка носителя отменена; незаконченные файлы удалены",
+    "en": "the medium build was cancelled; the unfinished files were removed"
+  },
+  "grpc_server.media_linux_only": {
+    "ru": "носитель на основе Linux собирается службой только в Linux",
+    "en": "the Linux-based medium is built by the service on Linux only"
+  },
   "grpc_server.busy_which_stick": {
     "ru": "флешка %{device}",
     "en": "stick %{device}"

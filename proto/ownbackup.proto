@@ -164,6 +164,14 @@ service BackupService {
   // `media` events; CancelEngineOp stops it.
   rpc ListMediaSticks(Empty) returns (JsonReply);       // JSON: [MediaStickDto]
   rpc WriteMediaStick(JsonRequest) returns (JsonReply); // in: MediaStickWriteDto -> MediaStickReportDto
+  // Linux: the medium built by the service from the INSTALLED package (Debian
+  // live-build in a debootstrap tree, as root, in a transient unit), the ISO
+  // saved into the caller's own folder and, when asked, written onto a stick.
+  // Progress as `media` events; CancelEngineOp stops it. The builder and the
+  // package cache stay in /var/cache/own-backup/media between builds.
+  rpc LinuxMediaStatus(Empty) returns (JsonReply);       // JSON: LinuxMediaStatusDto
+  rpc BuildLinuxMedia(JsonRequest) returns (JsonReply);  // in: LinuxMediaBuildDto -> LinuxMediaReportDto
+  rpc ClearLinuxMediaCache(Empty) returns (JsonReply);   // JSON: LinuxMediaCacheClearedDto
 
   // --- What mounting a backup image needs on this machine ---
   // No driver of ours is installed on either platform: Windows serves the
