@@ -48,6 +48,18 @@
     "ru": "btrfs на %{node} занимает несколько устройств — его метка «%{label}» оставлена прежней (менять её можно, только когда подключены все устройства: btrfs filesystem label).",
     "en": "The btrfs on %{node} spans several devices — its label «%{label}» was kept (it can only change with every device present: btrfs filesystem label)."
   },
+  "identity_change_linux.label_not_utf8": {
+    "ru": "Метка «%{label}» на %{node} не в UTF-8 (символы прочитаны с заменой) — оставлена прежней: записанная обратно, она отличалась бы от той, которую называет система. Смените её вручную, если она совпадает с меткой этой машины.",
+    "en": "The label «%{label}» on %{node} is not UTF-8 (its characters were read with replacements) — it was kept: written back, it would differ from the one the system names. Change it by hand if it matches a label of this machine."
+  },
+  "identity_change_linux.duplicate_label": {
+    "ru": "Одна и та же метка «%{label}» у нескольких восстановленных файловых систем (%{nodes}): LABEL=%{label} может указать на любую из них.",
+    "en": "Several restored filesystems carry the same label «%{label}» (%{nodes}): LABEL=%{label} may resolve to any of them."
+  },
+  "identity_change_linux.duplicate_label_changed": {
+    "ru": "Одна и та же метка «%{label}» была у нескольких восстановленных файловых систем (%{nodes}); они получили метки %{labels}. Ссылки LABEL=%{label} в восстановленной системе, если их исправляли, ведут теперь на «%{first}» — проверьте, та ли это файловая система.",
+    "en": "Several restored filesystems carried the same label «%{label}» (%{nodes}); they got the labels %{labels}. References to LABEL=%{label} in the restored system, if they were fixed, now name «%{first}» — check that it is the right filesystem."
+  },
   "identity_change_linux.vg_not_activated": {
     "ru": "Группа томов %{vg} получила новое имя, но её новый UUID не прочитан — тома внутри не проверены.",
     "en": "Volume group %{vg} got a new name, but its new UUID could not be read — the volumes inside were not checked."

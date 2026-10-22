@@ -84,6 +84,25 @@ pub(super) fn left_by_change(clashes: &[IdentityClashDto]) -> Vec<IdentityClashD
         .collect()
 }
 
+/// [`identity_gate`] for mounting a copy: a shared filesystem label alone
+/// does not stop it. Systems made from one template share their labels
+/// (`cloudimg-rootfs`, `UEFI`, `BOOT`), and a mounted copy is reached by its
+/// mount point, not by `LABEL=`; the duplicates are logged, and only the
+/// other kinds need a choice.
+pub(super) fn mount_identity_gate(
+    clashes: Vec<IdentityClashDto>,
+    choice: Option<IdentityChoice>,
+) -> Result<Vec<IdentityClashDto>, Status> {
+    let (labels, others): (Vec<_>, Vec<_>) = clashes.into_iter().partition(|c| c.kind == "label");
+    if !labels.is_empty() {
+        warn!(
+            labels = %identity_check_linux::describe(&labels),
+            "the mounted copy shares filesystem labels with this machine: /dev/disk/by-label may name either"
+        );
+    }
+    identity_gate(others, choice)
+}
+
 /// A mounted copy is read, not changed: `Change` is a restore's choice.
 pub(super) fn mount_choice_allowed(choice: Option<IdentityChoice>) -> Result<(), Status> {
     match choice {
@@ -837,6 +856,29 @@ mod tests {
             change_command: "vgimportclone --basevgname <new-name> <device>".into(),
             mount_hint: String::new(),
         }
+    }
+
+    /// Mounting: shared labels alone are logged, not asked about; with
+    /// another duplicate the question still comes, without the labels. A
+    /// restore still asks about a label.
+    #[test]
+    fn a_mount_is_not_stopped_by_shared_labels_alone() {
+        let label = IdentityClashDto {
+            kind: "label".into(),
+            value: "cloudimg-rootfs".into(),
+            severity: "ambiguous".into(),
+            change_command: "e2fsck -f <device> && tune2fs -L <new-label> <device>".into(),
+            ..clash()
+        };
+        assert!(mount_identity_gate(vec![label.clone()], None)
+            .unwrap()
+            .is_empty());
+        let status = mount_identity_gate(vec![label.clone(), clash()], None).unwrap_err();
+        let details: serde_json::Value = serde_json::from_slice(status.details()).unwrap();
+        let list: Vec<IdentityClashDto> =
+            serde_json::from_value(details[IDENTITY_CLASHES_DETAIL].clone()).unwrap();
+        assert_eq!(list, vec![clash()]);
+        assert!(identity_gate(vec![label], None).is_err());
     }
 
     #[test]

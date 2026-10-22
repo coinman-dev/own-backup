@@ -2095,7 +2095,7 @@ impl BackupService for BackupServiceImpl {
                 image_path: String,
                 read_write: Option<bool>,
                 /// What to do about identities the mounted copy shares with
-                /// this machine's own devices (`restore_linux::identity_gate`).
+                /// this machine's own devices (`restore_linux::mount_identity_gate`).
                 #[serde(default)]
                 identity_choice: Option<own_backup_common::engine_dto::IdentityChoice>,
             }
@@ -2111,7 +2111,7 @@ impl BackupService for BackupServiceImpl {
                     .await
                     .map_err(|e| Status::internal(format!("identity check panicked: {e}")))?
                     .map_err(|e| Status::internal(e.to_string()))?;
-            let kept = restore_linux::identity_gate(clashes, p.identity_choice)?;
+            let kept = restore_linux::mount_identity_gate(clashes, p.identity_choice)?;
             // XFS refuses a second filesystem of one UUID unless told.
             let extra = own_backup_backup::identity_check_linux::mount_options_for(&kept);
             let mount_point =

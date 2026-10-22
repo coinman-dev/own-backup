@@ -669,14 +669,17 @@ PY
 }
 label_ref_count() { # disk old-labels new-labels: how many references to the new
     # labels the files of every filesystem on disk hold; exit 1 when one names an old one
-    local n p m=$WORK/m-lr total=0 got rc=0
+    # Read-only for real: no journal or log replayed into the source.
+    local n p m=$WORK/m-lr total=0 got rc=0 opts
     for n in $(part_numbers "$1"); do
         p=$(part "$1" "$n") || continue
         case $(blkid -p -o value -s TYPE "$p") in
-            ext4 | vfat | xfs | btrfs) ;;
+            ext4) opts=ro,noload ;;
+            xfs) opts=ro,norecovery ;;
+            vfat | btrfs) opts=ro ;;
             *) continue ;;
         esac
-        mkdir -p "$m" && mount -o ro "$p" "$m" 2>/dev/null || continue
+        mkdir -p "$m" && mount -o "$opts" "$p" "$m" 2>/dev/null || continue
         got=$(label_refs "$2" "$3" "$m" 2>>"$EV/ch-label-refs.txt") || rc=1
         total=$((total + ${got:-0}))
         umount "$m"

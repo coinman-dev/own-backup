@@ -392,7 +392,7 @@ pub enum Reason {
     Embedded,
     /// dracut builds host-only images, which record the devices of the root,
     /// /boot and the ESP (the root on the command line they store, the others
-    /// as devices the boot waits for), and one of their UUIDs or labels changed.
+    /// as devices the boot waits for), and one of their UUIDs changed.
     Hostonly,
 }
 
@@ -477,7 +477,7 @@ pub fn dracut_hostonly(text: &str, version: Option<u32>) -> bool {
 
 /// Why the restored system's image must be built again after `changed`
 /// (its references already fixed); empty when it need not be.
-/// `recorded_changed`: the UUID or label of its root, /boot or ESP changed — what a
+/// `recorded_changed`: the UUID of its root, /boot or ESP changed — what a
 /// host-only dracut image records.
 ///
 /// Deliberately on the side of rebuilding: the tool makes the image the

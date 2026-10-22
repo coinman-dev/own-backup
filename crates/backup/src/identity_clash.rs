@@ -219,6 +219,9 @@ fn assess(
         IdentityKind::Fat => (Severity::Ambiguous, Reidentify::Fatlabel, None),
         IdentityKind::Label => {
             let how = match id.fs {
+                // Not UTF-8: read with replacements, it cannot be written
+                // back as the system names it.
+                _ if id.shown.contains(char::REPLACEMENT_CHARACTER) => Reidentify::None,
                 Some(IdentityKind::Ext) => Reidentify::LabelTune2fs,
                 Some(IdentityKind::Xfs) => Reidentify::LabelXfsAdmin,
                 // Like its fsid, a multi-device btrfs's label is in every

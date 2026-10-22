@@ -214,9 +214,16 @@ struct Run<'a> {
     seq: u32,
     /// Nodes whose journal or log this run already replayed.
     prepared: Vec<String>,
-    /// Labels of the restored filesystems seen so far and the ones given:
-    /// a new label must be none of them either.
-    labels: Vec<String>,
+    /// Labels of the restored filesystems, with the node carrying each:
+    /// those of every restored device are read before the walk, those of
+    /// the devices it opens as it meets them. A new label must be none of
+    /// them, nor one already given.
+    labels: Vec<(String, String)>,
+    /// New labels given by this run.
+    given: Vec<String>,
+    /// What the restored devices carried when read before the walk; the
+    /// walk takes each from here instead of reading it again.
+    pre_read: BTreeMap<String, Vec<Identity>>,
 }
 
 /// Change, on `devices`, every identity `present` (the machine's devices,
@@ -244,7 +251,18 @@ pub fn change_identities(
         seq: 0,
         prepared: Vec::new(),
         labels: Vec::new(),
+        given: Vec::new(),
+        pre_read: BTreeMap::new(),
     };
+    // Every restored device's labels before anything is relabelled: a new
+    // label must not be one a device further on still carries. One that
+    // cannot be read fails in the walk.
+    for d in devices {
+        if let Ok(ids) = run.host.identities_on(&d.node) {
+            run.saw_labels(&d.node, &ids);
+            run.pre_read.insert(d.node.clone(), ids);
+        }
+    }
     let devs: Vec<Dev> = devices
         .iter()
         .map(|d| Dev {
@@ -259,6 +277,7 @@ pub fn change_identities(
     if result.is_ok() && fix_references && !run.out.changed.is_empty() {
         result = run.fix_references();
     }
+    run.duplicate_label_notes();
     run.close_all();
     if let Err(e) = result {
         warn!(error = %e, "changing the restored copy's identities failed");
@@ -398,7 +417,10 @@ impl Run<'_> {
         let mut arrays: BTreeMap<String, (Identity, Vec<Dev>)> = BTreeMap::new();
         let mut groups: BTreeMap<String, (Vec<Identity>, Vec<Dev>)> = BTreeMap::new();
         for dev in devs {
-            let ids = self.host.identities_on(&dev.node)?;
+            let ids = match self.pre_read.remove(&dev.node) {
+                Some(ids) => ids,
+                None => self.host.identities_on(&dev.node)?,
+            };
             info!(node = %dev.node, identities = ?ids, "restored device read");
             if let Some(md) = ids.iter().find(|i| i.kind == IdentityKind::Md) {
                 // A member's data may begin with a filesystem (v1.0, 0.90):
@@ -489,7 +511,7 @@ impl Run<'_> {
                 .iter()
                 .filter(|i| i.kind == IdentityKind::Label)
                 .collect();
-            self.labels.extend(labels.iter().map(|l| l.shown.clone()));
+            self.saw_labels(&dev.node, &ids);
             for label in labels {
                 if self.must_change(&dev, label) {
                     self.change_label(&dev, label)?;
@@ -578,6 +600,64 @@ impl Run<'_> {
         Ok(())
     }
 
+    /// Record the labels `ids` (read from `node`) carry.
+    fn saw_labels(&mut self, node: &str, ids: &[Identity]) {
+        for l in ids.iter().filter(|i| i.kind == IdentityKind::Label) {
+            let seen = (l.shown.clone(), node.to_string());
+            if !self.labels.contains(&seen) {
+                self.labels.push(seen);
+            }
+        }
+    }
+
+    /// One label on more than one restored filesystem: a `LABEL=` in the
+    /// restored system cannot tell them apart, and its references (when
+    /// fixed) follow the first one's new label — said, not chosen silently.
+    fn duplicate_label_notes(&mut self) {
+        let mut done: Vec<&str> = Vec::new();
+        for (label, _) in &self.labels {
+            if done.contains(&label.as_str()) {
+                continue;
+            }
+            done.push(label);
+            let nodes: Vec<&str> = self
+                .labels
+                .iter()
+                .filter(|(l, _)| l == label)
+                .map(|(_, n)| n.as_str())
+                .collect();
+            if nodes.len() < 2 {
+                continue;
+            }
+            let changed: Vec<&Changed> = self
+                .out
+                .changed
+                .iter()
+                .filter(|c| c.kind == IdentityKind::Label && c.old == *label)
+                .collect();
+            let note = match changed.first() {
+                None => tr!(
+                    "identity_change_linux.duplicate_label",
+                    label = label.as_str(),
+                    nodes = nodes.join(", ")
+                ),
+                Some(first) => tr!(
+                    "identity_change_linux.duplicate_label_changed",
+                    label = label.as_str(),
+                    nodes = nodes.join(", "),
+                    labels = changed
+                        .iter()
+                        .map(|c| format!("{} → {}", c.node, c.new))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    first = first.new.as_str()
+                ),
+            };
+            warn!(%label, ?nodes, "one label on several restored filesystems");
+            self.out.notes.push(note.into_owned());
+        }
+    }
+
     /// Give a filesystem's label a new value of its own (see
     /// [`fresh_label`]); a multi-device btrfs keeps it, and says so.
     fn change_label(&mut self, dev: &Dev, id: &Identity) -> Result<()> {
@@ -596,13 +676,27 @@ impl Run<'_> {
             );
             return Ok(());
         }
+        // Read through a lossy decoding: written back, it would not be the
+        // label the system names.
+        if id.shown.contains(char::REPLACEMENT_CHARACTER) {
+            self.out.notes.push(
+                tr!(
+                    "identity_change_linux.label_not_utf8",
+                    node = node,
+                    label = id.shown.as_str()
+                )
+                .into_owned(),
+            );
+            return Ok(());
+        }
         let taken: Vec<String> = self
             .present
             .values()
             .flatten()
             .filter(|i| i.kind == IdentityKind::Label)
             .map(|i| i.shown.clone())
-            .chain(self.labels.iter().cloned())
+            .chain(self.labels.iter().map(|(l, _)| l.clone()))
+            .chain(self.given.iter().cloned())
             .collect();
         let Some(new) = fresh_label(fs, &id.shown, |l| {
             taken.iter().any(|t| t.eq_ignore_ascii_case(l))
@@ -630,7 +724,7 @@ impl Run<'_> {
             }
             _ => return Ok(()),
         }
-        self.labels.push(new.clone());
+        self.given.push(new.clone());
         self.record(IdentityKind::Label, &id.shown, &new, dev);
         Ok(())
     }
@@ -1006,7 +1100,6 @@ impl Run<'_> {
                             | IdentityKind::Xfs
                             | IdentityKind::Btrfs
                             | IdentityKind::Fat
-                            | IdentityKind::Label
                     )
             });
             let why = initramfs::reasons(&renamed, recorded_changed, &sys.config);
@@ -1791,10 +1884,68 @@ mod tests {
         let news: Vec<&str> = out.changed.iter().map(|c| c.new.as_str()).collect();
         assert_eq!(news, vec!["ESP-R", "ESP-R2"]);
         assert_eq!(programs(&tools), vec!["fatlabel", "fatlabel"]);
+        // Which one the references follow is said, not chosen silently.
+        assert!(
+            out.notes.iter().any(|n| n.contains("/dev/sdb1, /dev/sdb2")
+                && n.contains("/dev/sdb2 → ESP-R2")
+                && n.contains("«ESP-R»")),
+            "{:?}",
+            out.notes
+        );
         assert!(
             out.notes
                 .iter()
                 .any(|n| n.contains("/dev/sdb4") && n.contains("pool")),
+            "{:?}",
+            out.notes
+        );
+    }
+
+    /// A new label is none a restored device further on carries (read
+    /// before the walk); a label read with replacements is kept and said.
+    #[test]
+    fn a_new_label_avoids_later_devices_and_a_non_utf8_one_is_kept() {
+        let mut host = FakeHost::default();
+        host.ids.insert(
+            "/dev/sdb1".into(),
+            vec![id(IdentityKind::Ext, SRC), label(IdentityKind::Ext, "data")],
+        );
+        host.ids.insert(
+            "/dev/sdb2".into(),
+            vec![
+                id(IdentityKind::Ext, BOOT),
+                label(IdentityKind::Ext, "data-r"),
+            ],
+        );
+        host.ids.insert(
+            "/dev/sdb3".into(),
+            vec![
+                id(IdentityKind::Fat, "1111-2222"),
+                label(IdentityKind::Fat, "\u{FFFD}SP"),
+            ],
+        );
+        let present = machine(vec![
+            id(IdentityKind::Label, "data"),
+            id(IdentityKind::Label, "\u{FFFD}SP"),
+        ]);
+        let mut tools = FakeTools::default();
+        let out = change_identities(
+            &mut tools,
+            &mut host,
+            &present,
+            &[
+                dev("/dev/sdb1", 1),
+                dev("/dev/sdb2", 2),
+                dev("/dev/sdb3", 3),
+            ],
+            false,
+        );
+        assert_eq!(out.failed, None, "{out:?}");
+        let news: Vec<&str> = out.changed.iter().map(|c| c.new.as_str()).collect();
+        assert_eq!(news, vec!["data-r2"]);
+        assert_eq!(programs(&tools), vec!["e2fsck", "tune2fs"]);
+        assert!(
+            out.notes.iter().any(|n| n.contains("/dev/sdb3")),
             "{:?}",
             out.notes
         );

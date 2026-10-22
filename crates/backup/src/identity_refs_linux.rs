@@ -53,7 +53,7 @@ enum Rule {
     /// starts with one).
     ExactNotDash { old: String, new: String },
     /// A filesystem label, only where something names a label by it (see
-    /// [`replace_label`]): a label is any text, and `BOOT` is also a part of
+    /// [`replace_labels`]): a label is any text, and `BOOT` is also a part of
     /// `BOOTX64.EFI`.
     Label { old: String, new: String },
 }
@@ -231,8 +231,7 @@ fn replace_named(
     line: &str,
     prefix: &str,
     word: bool,
-    old: &str,
-    new: &str,
+    pairs: &[(String, String)],
     count: &mut usize,
 ) -> String {
     let mut out = String::with_capacity(line.len());
@@ -255,14 +254,18 @@ fn replace_named(
             .next()
             .filter(|c| *c == '"' || *c == '\'');
         let body = name + quote.map_or(0, char::len_utf8);
-        let Some(rest) = line[body..].strip_prefix(old) else {
-            continue;
-        };
-        let whole = match quote {
-            Some(q) => rest.starts_with(q),
-            None => name_ends(rest),
-        };
-        if whole {
+        // At most one old name is the whole name here; with two equal old
+        // names (two filesystems of one label) the first change wins.
+        let found = pairs.iter().find(|(old, _)| {
+            !old.is_empty()
+                && line[body..]
+                    .strip_prefix(old.as_str())
+                    .is_some_and(|rest| match quote {
+                        Some(q) => rest.starts_with(q),
+                        None => name_ends(rest),
+                    })
+        });
+        if let Some((old, new)) = found {
             out.push_str(&line[name..body]);
             out.push_str(new);
             at = body + old.len();
@@ -305,36 +308,41 @@ fn grub_search_label(line: &str) -> Option<(usize, usize)> {
     })
 }
 
-/// Every place `text` names the filesystem label `old`, replaced by `new`:
+/// Every place `text` names a filesystem label `old`, replaced by its `new`:
 /// `LABEL=` (fstab, crypttab, `root=`/`resume=` on a kernel command line —
 /// in fstab's own escaping too), `/dev/disk/by-label/` (in udev's escaping,
 /// or as written), and the name of a GRUB `search` by label. Labels are
 /// case-sensitive, and nothing else that merely contains one is touched.
-fn replace_label(text: &str, old: &str, new: &str, count: &mut usize) -> String {
-    if old.is_empty() {
+///
+/// All the `labels` (old, new) in one pass: each name found is replaced
+/// once, so `data → data-r` beside `data-r → data-r2` never carries a
+/// reference on to the other filesystem.
+fn replace_labels(text: &str, labels: &[(String, String)], count: &mut usize) -> String {
+    let labels: Vec<&(String, String)> = labels.iter().filter(|(o, _)| !o.is_empty()).collect();
+    if labels.is_empty() {
         return text.to_string();
     }
-    let mut spelled = vec![(old.to_string(), new.to_string())];
-    let fstab = (fstab_escape(old), fstab_escape(new));
-    if fstab.0 != old {
-        spelled.push(fstab);
-    }
-    let mut linked = vec![(udev_encode(old), udev_encode(new))];
-    if linked[0].0 != old {
-        linked.push((old.to_string(), new.to_string()));
+    let mut spelled = Vec::new();
+    let mut linked = Vec::new();
+    for (old, new) in &labels {
+        spelled.push((old.clone(), new.clone()));
+        let fstab = (fstab_escape(old), fstab_escape(new));
+        if fstab.0 != *old {
+            spelled.push(fstab);
+        }
+        let udev = (udev_encode(old), udev_encode(new));
+        if udev.0 != *old {
+            linked.push(udev);
+        }
+        linked.push((old.clone(), new.clone()));
     }
     text.split_inclusive('\n')
         .map(|line| {
-            let mut line = line.to_string();
-            for (o, n) in &spelled {
-                line = replace_named(&line, "LABEL=", true, o, n, count);
-            }
-            for (o, n) in &linked {
-                line = replace_named(&line, "/dev/disk/by-label/", false, o, n, count);
-            }
+            let mut line = replace_named(line, "LABEL=", true, &spelled, count);
+            line = replace_named(&line, "/dev/disk/by-label/", false, &linked, count);
             if !line.trim_start().starts_with('#') {
                 if let Some((a, b)) = grub_search_label(&line) {
-                    if &line[a..b] == old {
+                    if let Some((_, new)) = labels.iter().find(|(old, _)| line[a..b] == **old) {
                         line.replace_range(a..b, new);
                         *count += 1;
                     }
@@ -349,7 +357,7 @@ fn replace_label(text: &str, old: &str, new: &str, count: &mut usize) -> String 
 /// find it?
 pub fn names_label(text: &str, label: &str) -> bool {
     let mut count = 0;
-    replace_label(text, label, label, &mut count);
+    replace_labels(text, &[(label.to_string(), label.to_string())], &mut count);
     count > 0
 }
 
@@ -358,13 +366,17 @@ pub fn names_label(text: &str, label: &str) -> bool {
 pub fn rewrite(text: &str, renamed: &[Renamed]) -> (String, usize) {
     let mut count = 0;
     let mut text = text.to_string();
+    let mut labels = Vec::new();
     for rule in rules_for(renamed) {
         text = match rule {
             Rule::AnyCase { old, new } => replace_any_case(&text, &old, &new, &mut count),
             Rule::ExactNotDash { old, new } => {
                 replace_not_before_dash(&text, &old, &new, &mut count)
             }
-            Rule::Label { old, new } => replace_label(&text, &old, &new, &mut count),
+            Rule::Label { old, new } => {
+                labels.push((old, new));
+                text
+            }
             Rule::Exact { old, new } => {
                 let n = text.matches(&old).count();
                 count += n;
@@ -376,6 +388,7 @@ pub fn rewrite(text: &str, renamed: &[Renamed]) -> (String, usize) {
             }
         };
     }
+    let text = replace_labels(&text, &labels, &mut count);
     (text, count)
 }
 
@@ -920,6 +933,29 @@ mod tests {
         assert!(out.contains("/dev/disk/by-label/my\\x20disk-r /e"), "{out}");
         assert!(out.contains("LABEL=\"my disk-r\" /f"), "{out}");
         assert_eq!(udev_encode("a/b c-é"), "a\\x2fb\\x20c-é");
+    }
+
+    /// One filesystem's new label is another's old one: each reference
+    /// moves once, to its own filesystem's new label.
+    #[test]
+    fn chained_labels_move_in_one_pass() {
+        let r = [
+            renamed(IdentityKind::Label, "data", "data-r"),
+            renamed(IdentityKind::Label, "data-r", "data-r2"),
+        ];
+        let text = "LABEL=data /a ext4 defaults 0 2\n\
+                    LABEL=data-r /b ext4 defaults 0 2\n\
+                    search.fs_label data root\n\
+                    /dev/disk/by-label/data-r /c ext4 defaults 0 2\n";
+        let (out, n) = rewrite(text, &r);
+        assert_eq!(n, 4, "{out}");
+        assert_eq!(
+            out,
+            "LABEL=data-r /a ext4 defaults 0 2\n\
+             LABEL=data-r2 /b ext4 defaults 0 2\n\
+             search.fs_label data-r root\n\
+             /dev/disk/by-label/data-r2 /c ext4 defaults 0 2\n"
+        );
     }
 
     /// The Ubuntu cloud image names its root, /boot and ESP by label, and
