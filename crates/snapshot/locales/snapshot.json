@@ -131,5 +131,45 @@
   "linux.readonly_lost": {
     "ru": "Раздел %{volume} (%{mount}) перемонтировали для записи во время копирования — не эта программа. Копия не согласована и не сохранена; повторите.",
     "en": "Partition %{volume} (%{mount}) was remounted read-write during the copy, not by this program. The copy is not consistent and was not kept; try again."
+  },
+  "linux.pv_whole_disk_only": {
+    "ru": "Раздел %{volume} — физический том LVM, на нём работают логические тома (%{lvs}). Такой раздел копируется только вместе с диском целиком (копия диска); отдельно копируйте его логические тома как тома.",
+    "en": "Partition %{volume} is an LVM physical volume with logical volumes in use (%{lvs}). Such a partition is copied only as part of the whole disk (a disk copy); on their own, copy its logical volumes as volumes."
+  },
+  "linux.pv_on_luks": {
+    "ru": "Раздел %{volume} — контейнер LUKS (%{container}), внутри которого физический том LVM с логическими томами в работе. Копия диска с таким разделом пока не делается: снимки его логических томов есть, но восстановить контейнер вокруг них пока нельзя. Скопируйте логические тома по отдельности (как тома) или весь диск с загрузочного носителя.",
+    "en": "Partition %{volume} is a LUKS container (%{container}) holding an LVM physical volume whose logical volumes are in use. A disk copy with such a partition is not made yet: its logical volumes can be snapshotted, but the container around them cannot be restored yet. Copy the logical volumes on their own (as volumes), or the whole disk from the bootable media."
+  },
+  "linux.pv_lv_stacked": {
+    "ru": "На логическом томе %{lv} физического тома %{volume} открыто ещё одно устройство (%{holders}) — например, контейнер LUKS, пул тонких томов или классический снимок LVM. Снимок такого тома не удержит то, что над ним, поэтому копия диска не сделана. Скопируйте открытое устройство как том или весь диск с загрузочного носителя.",
+    "en": "Another device (%{holders}) is opened on the logical volume %{lv} of the physical volume %{volume} — a LUKS container, a thin pool or a classic LVM snapshot, for example. A snapshot of that volume would not hold what sits on it, so no disk copy was made. Copy the opened device as a volume, or the whole disk from the bootable media."
+  },
+  "linux.pv_lv_unsupported": {
+    "ru": "Логический том %{lv} физического тома %{volume} устроен как %{kinds}; на ходу копируются только обычные (линейные) логические тома. Копия диска не сделана — скопируйте его с загрузочного носителя.",
+    "en": "The logical volume %{lv} of the physical volume %{volume} is of kind %{kinds}; only plain (linear) logical volumes are copied while in use. No disk copy was made — copy it from the bootable media."
+  },
+  "linux.pv_foreign": {
+    "ru": "Раздел %{volume} — физический том LVM, но на нём открыто и другое устройство (%{holder}), не логический том. Копия диска не сделана — скопируйте его с загрузочного носителя.",
+    "en": "Partition %{volume} is an LVM physical volume, but another device (%{holder}) that is not a logical volume is opened on it too. No disk copy was made — copy it from the bootable media."
+  },
+  "linux.pv_mismatch": {
+    "ru": "Таблица логического тома %{lv} на физическом томе %{volume} не сходится с самим томом (части не покрывают его или пересекаются с другим томом). Копия диска не сделана.",
+    "en": "The table of the logical volume %{lv} on the physical volume %{volume} does not match the volume itself (its parts do not cover it, or overlap another volume). No disk copy was made."
+  },
+  "linux.pv_changed": {
+    "ru": "Физический том LVM %{volume} изменился во время копирования: %{reason}. Копия не согласована и не сохранена — повторите её, когда группа томов не перестраивается.",
+    "en": "The LVM physical volume %{volume} changed during the copy: %{reason}. The copy is not consistent and was not kept — run it again when the volume group is not being changed."
+  },
+  "linux.pv_changed_metadata": {
+    "ru": "метаданные группы томов переписаны (логический том создан, удалён, переименован или изменён)",
+    "en": "the volume group's metadata was rewritten (a logical volume was created, removed, renamed or changed)"
+  },
+  "linux.pv_changed_volumes": {
+    "ru": "на нём появились другие устройства (%{holders}) — например, активирован или создан логический том",
+    "en": "other devices appeared on it (%{holders}) — a logical volume was activated or created, for example"
+  },
+  "linux.pv_changed_table": {
+    "ru": "таблица логического тома %{lv} заменена (например, lvextend или lvchange --refresh)",
+    "en": "the table of the logical volume %{lv} was replaced (by lvextend or lvchange --refresh, for example)"
   }
 }

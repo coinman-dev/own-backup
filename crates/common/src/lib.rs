@@ -11,6 +11,7 @@ pub mod linux_block;
 pub mod log_files;
 pub mod log_level;
 pub mod log_mirror;
+pub mod lvm_pv;
 pub mod media_mode;
 pub mod media_paths;
 pub mod media_tools;

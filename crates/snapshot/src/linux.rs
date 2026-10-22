@@ -34,6 +34,7 @@ use own_backup_common::linux_block::{self, Usage};
 use own_backup_common::{tr, OwnBackupError, Result};
 
 use crate::dm_snapshot::{self, ContainerKey, Session, SnapState};
+use crate::pv;
 use crate::quiesce;
 use crate::traits::{Snapshot, SnapshotProvider};
 
@@ -65,6 +66,12 @@ pub enum Assessment {
     Hold(quiesce::Plan),
     /// In use, a plain partition that does not qualify for a hold, and why.
     NotShort(Usage, quiesce::NotShort),
+    /// In use, an LVM physical volume whose logical volumes are all plain:
+    /// each of them gets a device-mapper snapshot, all at one point in time
+    /// (`pv.rs`) — for a whole-disk copy only.
+    PhysicalVolume(Vec<pv::LvPlan>),
+    /// In use, an LVM physical volume that cannot be held that way, and why.
+    PvRefused(pv::PvRefusal),
     /// In use, and there is no way to hold a point in time.
     InUse(Usage),
 }
@@ -79,8 +86,10 @@ pub struct DmIdentity {
 
 /// Decide how `volume` can be copied consistently into the folder `dest`
 /// (`None`: unknown — then no partition is held still, since nobody can tell
-/// whether the copy would write onto it).
-pub async fn assess(volume: &str, dest: Option<&Path>) -> Result<Assessment> {
+/// whether the copy would write onto it). `whole_disk`: the copy is of a
+/// whole disk, where a physical volume in use is held through snapshots of
+/// its logical volumes.
+pub async fn assess(volume: &str, dest: Option<&Path>, whole_disk: bool) -> Result<Assessment> {
     let usage = linux_block::device_usage(Path::new(volume))
         .map_err(|e| bad(format!("cannot tell what uses {volume}: {e}")))?;
     let Some(usage) = usage else {
@@ -94,8 +103,26 @@ pub async fn assess(volume: &str, dest: Option<&Path>) -> Result<Assessment> {
             let (volume, dest) = (volume.to_string(), dest.map(Path::to_path_buf));
             // Reads sysfs, mountinfo and the configuration.
             tokio::task::spawn_blocking(move || {
-                let facts = linux_block::kernel_name(Path::new(&volume))
-                    .and_then(|k| quiesce::facts_of(&k).ok().flatten());
+                let kernel = linux_block::kernel_name(Path::new(&volume));
+                if let (Some(k), false) = (&kernel, usage.holders.is_empty()) {
+                    match pv::facts(k).map(|(is_pv, dev, holders)| pv::judge(dev, is_pv, &holders))
+                    {
+                        Ok(pv::PvJudgement::Plan(plan)) => {
+                            return Assessment::PhysicalVolume(plan)
+                        }
+                        // Outside a whole-disk copy the partition under an
+                        // opened container is refused as before: copy the
+                        // opened volume instead.
+                        Ok(pv::PvJudgement::Refuse(pv::PvRefusal::OnLuks { .. }))
+                            if !whole_disk => {}
+                        Ok(pv::PvJudgement::Refuse(why)) => return Assessment::PvRefused(why),
+                        Ok(pv::PvJudgement::NotPv) => {}
+                        Err(e) => {
+                            warn!(volume = %volume, error = %e, "cannot tell whether it is an LVM physical volume")
+                        }
+                    }
+                }
+                let facts = kernel.and_then(|k| quiesce::facts_of(&k).ok().flatten());
                 let protected = dest.as_deref().map(quiesce::protected_paths);
                 judge_partition(usage, facts, protected.as_deref())
             })
@@ -168,7 +195,7 @@ fn dm_of(volume: &str) -> Option<DmIdentity> {
 pub fn taken_frozen(snapshot: &Snapshot) -> bool {
     matches!(
         snapshot.metadata.get("mode").map(String::as_str),
-        Some("lvm" | "dm" | "freeze" | "readonly-remount")
+        Some("lvm" | "dm" | "pv" | "freeze" | "readonly-remount")
     )
 }
 
@@ -216,7 +243,7 @@ pub fn assert_file_frozen(snapshot: &mut Snapshot) {
 /// is behind.
 pub fn is_frozen(snapshot: &Snapshot) -> bool {
     match snapshot.metadata.get("mode").map(String::as_str) {
-        Some("lvm" | "dm" | "freeze" | "readonly-remount" | "idle" | "readonly") => true,
+        Some("lvm" | "dm" | "pv" | "freeze" | "readonly-remount" | "idle" | "readonly") => true,
         Some("file") => snapshot
             .metadata
             .get(FILE_FROZEN)
@@ -232,6 +259,9 @@ pub fn is_frozen(snapshot: &Snapshot) -> bool {
 /// a snapshot whichever provider took it. A state that cannot be read is an
 /// error, never "intact".
 pub fn check_intact_blocking(snapshot: &Snapshot) -> Result<()> {
+    if let Some(layout) = pv_layout(snapshot)? {
+        return pv::check(&layout);
+    }
     if let Some(snap) = snapshot.metadata.get("dm_snapshot") {
         return dm_verdict(snapshot, dm_snapshot::snapshot_state(snap));
     }
@@ -258,6 +288,25 @@ pub fn check_intact_blocking(snapshot: &Snapshot) -> Result<()> {
         snapshot,
         &run_blocking("lvs", &["--noheadings", "-o", "lv_attr", lv])?,
     )
+}
+
+/// Metadata key of a physical volume's snapshot: its record
+/// ([`own_backup_common::lvm_pv::PvSnapshot`], JSON) — names and offsets
+/// only, never a table or a key.
+pub const PV_LAYOUT: &str = "pv_layout";
+
+/// The record of a physical volume's snapshot (`mode` `pv`); `None` for any
+/// other snapshot, an error for a `pv` one without a readable record.
+pub fn pv_layout(snapshot: &Snapshot) -> Result<Option<own_backup_common::lvm_pv::PvSnapshot>> {
+    if snapshot.metadata.get("mode").map(String::as_str) != Some("pv") {
+        return Ok(None);
+    }
+    snapshot
+        .metadata
+        .get(PV_LAYOUT)
+        .and_then(|j| own_backup_common::lvm_pv::PvSnapshot::from_json(j))
+        .map(Some)
+        .ok_or_else(|| bad("a physical volume's snapshot without its record"))
 }
 
 /// Is a device-mapper snapshot in `state` still one point in time?
@@ -341,6 +390,9 @@ pub struct LinuxSnapshotProvider {
     /// Partitions held still by this provider, by id. One dropped here is
     /// released (thawed, remounted read-write) on the way.
     holds: Mutex<HashMap<String, quiesce::Hold>>,
+    /// The copy is of a whole disk: an LVM physical volume in use is held
+    /// through snapshots of its logical volumes ([`Self::whole_disk`]).
+    whole_disk: bool,
 }
 
 impl LinuxSnapshotProvider {
@@ -363,6 +415,16 @@ impl LinuxSnapshotProvider {
         }
     }
 
+    /// For a whole-disk copy: a partition that is an LVM physical volume in
+    /// use is held through device-mapper snapshots of all its logical volumes
+    /// at once (`pv.rs`), and the engine reads it piece by piece. A volume
+    /// copy of such a partition is refused — its logical volumes are volumes
+    /// of their own.
+    pub fn whole_disk(mut self) -> Self {
+        self.whole_disk = true;
+        self
+    }
+
     /// How to recover the volume key of an opened LUKS container when the
     /// kernel keeps it to itself (see [`ContainerKey`]).
     pub fn container_key(
@@ -378,6 +440,11 @@ impl LinuxSnapshotProvider {
     /// kernel, and what was read from it is not one point in time. Ask before
     /// releasing it.
     pub async fn check_intact(&self, snapshot: &Snapshot) -> Result<()> {
+        if let Some(layout) = pv_layout(snapshot)? {
+            return tokio::task::spawn_blocking(move || pv::check(&layout))
+                .await
+                .map_err(|e| bad(format!("check task: {e}")))?;
+        }
         if let (Some(id), Some(method)) = (snapshot.metadata.get("hold_id"), hold_method(snapshot))
         {
             let held = {
@@ -450,6 +517,75 @@ impl LinuxSnapshotProvider {
         Ok(snapshot)
     }
 
+    /// Snapshot every logical volume of the physical volume `volume` at one
+    /// point in time (`pv.rs`). The copy reads the partition itself through
+    /// the snapshot's record, which the engine takes apart.
+    async fn pv_snapshot(&self, volume: &str, plan: Vec<pv::LvPlan>) -> Result<Snapshot> {
+        let Some(dir) = self.cow_dir.clone() else {
+            return Err(OwnBackupError::NoSnapshotProvider(
+                tr!("linux.dm_no_cow_dir", volume = volume).into_owned(),
+            ));
+        };
+        let kernel = linux_block::kernel_name(Path::new(volume))
+            .ok_or_else(|| bad(format!("{volume}: not a block device")))?;
+        let vol = volume.to_string();
+        // Blocking: suspends every logical volume and waits for them to flush.
+        let (sessions, layout) =
+            tokio::task::spawn_blocking(move || pv::create(&vol, &kernel, &plan, &dir))
+                .await
+                .map_err(|e| bad(format!("snapshot task: {e}")))??;
+
+        let mut metadata = HashMap::new();
+        metadata.insert("mode".into(), "pv".into());
+        metadata.insert(PV_LAYOUT.into(), layout.to_json());
+        let dense: u64 = sessions.iter().filter_map(|s| s.dense_store).sum();
+        if dense > 0 {
+            metadata.insert(DENSE_STORE_BYTES.into(), dense.to_string());
+        }
+        let snapshot = Snapshot {
+            provider_name: PROVIDER.into(),
+            source_device: volume.into(),
+            snapshot_device_path: volume.into(),
+            created_at: Utc::now(),
+            metadata,
+        };
+        let mut held = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        for s in sessions {
+            held.insert(s.id.clone(), s);
+        }
+        Ok(snapshot)
+    }
+
+    /// Release every logical volume's snapshot of a physical volume: those
+    /// this provider holds through their sessions, the others from what the
+    /// kernel shows. Every one is tried; the first failure is returned.
+    async fn release_pv(&self, layout: own_backup_common::lvm_pv::PvSnapshot) -> Result<()> {
+        let sessions: Vec<(String, Option<Session>)> = {
+            let mut held = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            layout
+                .volumes
+                .iter()
+                .map(|v| (v.dm_id.clone(), held.remove(&v.dm_id)))
+                .collect()
+        };
+        tokio::task::spawn_blocking(move || {
+            let mut first = None;
+            for (id, session) in sessions {
+                let done = match session {
+                    Some(s) => s.release(),
+                    None => dm_snapshot::release_by_id(&id),
+                };
+                if let Err(e) = done {
+                    warn!(id = %id, error = %e, "a logical volume's snapshot was not released");
+                    first.get_or_insert(e);
+                }
+            }
+            first.map_or(Ok(()), Err)
+        })
+        .await
+        .map_err(|e| bad(format!("release task: {e}")))?
+    }
+
     /// Hold the short partition `volume` still as `plan` says; the copy reads
     /// the device itself, and [`Self::release_snapshot`] lets it go.
     async fn hold(&self, volume: &str, plan: quiesce::Plan) -> Result<Snapshot> {
@@ -491,7 +627,25 @@ impl SnapshotProvider for LinuxSnapshotProvider {
     }
 
     async fn create_snapshot(&self, volume: &str) -> Result<Snapshot> {
-        match assess(volume, self.cow_dir.as_deref()).await? {
+        match assess(volume, self.cow_dir.as_deref(), self.whole_disk).await? {
+            Assessment::PhysicalVolume(plan) if self.whole_disk => {
+                self.pv_snapshot(volume, plan).await
+            }
+            Assessment::PhysicalVolume(plan) => Err(OwnBackupError::NoSnapshotProvider(
+                tr!(
+                    "linux.pv_whole_disk_only",
+                    volume = volume,
+                    lvs = plan
+                        .iter()
+                        .map(|lv| pv::lv_display(&lv.name))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+                .into_owned(),
+            )),
+            Assessment::PvRefused(why) => Err(OwnBackupError::NoSnapshotProvider(pv::describe(
+                volume, &why,
+            ))),
             Assessment::File => Ok(direct(volume, "file")),
             Assessment::Idle => Ok(direct(volume, "idle")),
             Assessment::ReadOnly => Ok(direct(volume, "readonly")),
@@ -519,6 +673,9 @@ impl SnapshotProvider for LinuxSnapshotProvider {
     }
 
     async fn release_snapshot(&self, snapshot: &Snapshot) -> Result<()> {
+        if let Some(layout) = pv_layout(snapshot)? {
+            return self.release_pv(layout).await;
+        }
         if let Some(id) = snapshot.metadata.get("hold_id") {
             let hold = self
                 .holds

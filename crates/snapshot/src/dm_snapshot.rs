@@ -631,6 +631,80 @@ fn switch(ctl: &Control, p: &mut Prepared) -> Switched {
     out
 }
 
+/// What happened while a group of origins was suspended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupSwitched {
+    Done,
+    /// Memory could not be locked; nothing was suspended.
+    NotLocked(i32),
+    /// Origin `index` could not be suspended; every origin runs on its own
+    /// table again.
+    NotSuspended {
+        index: usize,
+        errno: i32,
+    },
+    /// A later step failed at origin `index`; origins before it may already
+    /// run on their snapshot-origin table (the caller puts them back).
+    Failed {
+        index: usize,
+        step: &'static str,
+        errno: i32,
+    },
+}
+
+/// [`switch`] for several origins at once, so that their snapshots are one
+/// point in time: suspend every origin (each freezing its filesystem), then
+/// activate every snapshot, then resume every origin with its new table.
+/// The same rules hold between the first suspend and the last resume: no
+/// allocation, no logging, no file I/O, memory locked.
+fn switch_all(ctl: &Control, ps: &mut [Prepared]) -> GroupSwitched {
+    // SAFETY: plain syscalls without pointers.
+    if unsafe { libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE) } != 0 {
+        return GroupSwitched::NotLocked(io::Error::last_os_error().raw_os_error().unwrap_or(0));
+    }
+    let n = ps.len();
+    let out = 'run: {
+        for i in 0..n {
+            if let Err(errno) = ctl.issue(&mut ps[i].suspend) {
+                for p in ps[..i].iter_mut() {
+                    roll_back(ctl, p);
+                }
+                break 'run GroupSwitched::NotSuspended { index: i, errno };
+            }
+        }
+        for i in 0..n {
+            if let Some(r) = ps[i].resume_snapshot.as_mut() {
+                if let Err(errno) = ctl.issue(r) {
+                    for p in ps.iter_mut() {
+                        roll_back(ctl, p);
+                    }
+                    break 'run GroupSwitched::Failed {
+                        index: i,
+                        step: "resume snapshot",
+                        errno,
+                    };
+                }
+            }
+        }
+        for i in 0..n {
+            if let Err(errno) = ctl.issue(&mut ps[i].resume) {
+                for p in ps[i..].iter_mut() {
+                    roll_back(ctl, p);
+                }
+                break 'run GroupSwitched::Failed {
+                    index: i,
+                    step: "resume origin",
+                    errno,
+                };
+            }
+        }
+        GroupSwitched::Done
+    };
+    // SAFETY: as above.
+    unsafe { libc::munlockall() };
+    out
+}
+
 /// Put a suspended origin back to work on whatever table it has.
 fn roll_back(ctl: &Control, p: &mut Prepared) -> bool {
     let _ = ctl.issue(&mut p.clear);
@@ -708,6 +782,9 @@ pub struct Session {
     /// `/dev/dm-N` of the snapshot: what the copy reads.
     pub snap_path: String,
     pub cow_path: PathBuf,
+    /// `major:minor` of obk-real: what the origin's snapshot-origin table
+    /// names, and what holds the origin's own devices meanwhile.
+    pub real_dev: (u32, u32),
     /// Bytes of a store allocated in full because the destination has no
     /// sparse files ([`dense_store_size`]); `None` for a sparse store. The
     /// run says so in its summary: such a store is capped and can overflow.
@@ -728,6 +805,12 @@ pub struct Session {
 }
 
 impl Session {
+    /// The origin's table as it was when the snapshot was taken — keys
+    /// included, so never to be logged.
+    pub fn original_table(&self) -> &[Target] {
+        &self.original
+    }
+
     /// Undo a creation that did not reach the switch, or whose switch was
     /// rolled back: the origin runs on its own table again.
     fn abandon(&mut self) {
@@ -824,6 +907,74 @@ pub fn create(
     cow_dir: &Path,
     container_key: Option<&ContainerKey>,
 ) -> Result<Session> {
+    let mut made = create_group(
+        &[Origin {
+            volume,
+            kernel,
+            rw_mounts,
+        }],
+        cow_dir,
+        container_key,
+    )?;
+    Ok(made.pop().expect("one origin, one snapshot"))
+}
+
+/// One device to snapshot as part of a group.
+#[derive(Debug, Clone, Copy)]
+pub struct Origin<'a> {
+    /// As the caller names it, for messages.
+    pub volume: &'a str,
+    /// Kernel name (`dm-3`).
+    pub kernel: &'a str,
+    /// Where its filesystem is mounted read-write, to be synced first.
+    pub rw_mounts: &'a [String],
+}
+
+/// Take snapshots of several busy device-mapper devices at one point in
+/// time — the logical volumes of one physical volume: every layer is built
+/// first, then all origins are suspended together and switched together
+/// ([`switch_all`]). Either every snapshot is made, or none is left behind.
+/// Blocking.
+pub fn create_group(
+    origins: &[Origin<'_>],
+    cow_dir: &Path,
+    container_key: Option<&ContainerKey>,
+) -> Result<Vec<Session>> {
+    let mut armed: Vec<Session> = Vec::with_capacity(origins.len());
+    for o in origins {
+        match arm(o.volume, o.kernel, cow_dir, container_key) {
+            Ok(s) => armed.push(s),
+            Err(e) => {
+                for s in &mut armed {
+                    s.abandon();
+                }
+                return Err(e);
+            }
+        }
+    }
+    if armed.is_empty() {
+        return Ok(armed);
+    }
+    match fire(&mut armed, origins) {
+        Ok(()) => Ok(armed),
+        Err(e) => {
+            for s in &mut armed {
+                s.abandon();
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Everything of one snapshot short of the switch: the store, obk-real with
+/// the origin's table, obk-snap held open, and the origin's snapshot-origin
+/// table loaded as its inactive one.
+fn arm(
+    volume: &str,
+    kernel: &str,
+    cow_dir: &Path,
+    container_key: Option<&ContainerKey>,
+) -> Result<Session> {
     let origin = read_sys(kernel, "dm/name").map_err(|e| failed(volume, e))?;
     let size: u64 = read_sys(kernel, "size")
         .ok()
@@ -869,6 +1020,7 @@ pub fn create(
         origin,
         snap_path: String::new(),
         cow_path,
+        real_dev: (0, 0),
         dense_store,
         ctl,
         holder: None,
@@ -880,7 +1032,7 @@ pub fn create(
         snap_made: false,
         origin_loaded: false,
     };
-    match build(&mut s, volume, size, rw_mounts, container_key) {
+    match build(&mut s, volume, size, container_key) {
         Ok(()) => Ok(s),
         Err(e) => {
             s.abandon();
@@ -893,7 +1045,6 @@ fn build(
     s: &mut Session,
     volume: &str,
     size: u64,
-    rw_mounts: &[String],
     container_key: Option<&ContainerKey>,
 ) -> Result<()> {
     let cow = s.cow.as_ref().expect("store is open");
@@ -912,6 +1063,7 @@ fn build(
         .create(&s.real, &format!("{REAL_UUID}{}", s.id))
         .map_err(|e| failed(volume, format!("{}: {e}", s.real)))?;
     s.real_made = true;
+    s.real_dev = real.dev;
     load_real(s, volume, container_key)?;
     s.ctl
         .resume(&s.real, udev::HIDDEN)
@@ -944,40 +1096,56 @@ fn build(
         )
         .map_err(|e| failed(volume, format!("{}: {e}", s.origin)))?;
     s.origin_loaded = true;
+    Ok(())
+}
 
-    sync_mounts(rw_mounts);
-    let mut p = Prepared::new(&s.origin, 0, Some(&s.snap)).map_err(|e| failed(volume, e))?;
-    // ---- from here to `switch` returning: no logging, no file I/O ----
-    let switched = switch(&s.ctl, &mut p);
+/// The switch of every armed snapshot at once ([`switch_all`]).
+fn fire(sessions: &mut [Session], origins: &[Origin<'_>]) -> Result<()> {
+    for o in origins {
+        sync_mounts(o.rw_mounts);
+    }
+    let mut ps = Vec::with_capacity(sessions.len());
+    for (s, o) in sessions.iter().zip(origins) {
+        ps.push(Prepared::new(&s.origin, 0, Some(&s.snap)).map_err(|e| failed(o.volume, e))?);
+    }
+    // ---- from here to `switch_all` returning: no logging, no file I/O ----
+    let switched = switch_all(&sessions[0].ctl, &mut ps);
     match switched {
-        Switched::Done => {
-            s.origin_loaded = false;
-            info!(
-                origin = %s.origin, snapshot = %s.snap, device = %s.snap_path,
-                store = %s.cow_path.display(), "device-mapper snapshot created"
-            );
+        GroupSwitched::Done => {
+            for s in sessions.iter_mut() {
+                s.origin_loaded = false;
+                info!(
+                    origin = %s.origin, snapshot = %s.snap, device = %s.snap_path,
+                    store = %s.cow_path.display(), "device-mapper snapshot created"
+                );
+            }
             Ok(())
         }
-        Switched::NotLocked(e) => Err(failed(volume, format!("mlockall: {}", errno_text(e)))),
-        Switched::NotSuspended(e) => Err(failed(
-            volume,
-            format!("suspend {}: {}", s.origin, errno_text(e)),
+        GroupSwitched::NotLocked(e) => Err(failed(
+            origins[0].volume,
+            format!("mlockall: {}", errno_text(e)),
         )),
-        Switched::Failed {
-            step,
-            errno,
-            running,
-        } => {
-            warn!(origin = %s.origin, step, error = %errno_text(errno), running, "device-mapper snapshot switch failed");
-            // The origin may have taken the new table before failing: then it
+        GroupSwitched::NotSuspended { index, errno } => Err(failed(
+            origins[index].volume,
+            format!("suspend {}: {}", sessions[index].origin, errno_text(errno)),
+        )),
+        GroupSwitched::Failed { index, step, errno } => {
+            warn!(origin = %sessions[index].origin, step, error = %errno_text(errno),
+                  "device-mapper snapshot switch failed");
+            // An origin may have taken its new table before the failure: it
             // goes back the way a release does. If even that fails, obk-real
             // stays (the origin runs through it) and the rest is removed.
-            if running && origin_is_switched(&s.ctl, &s.origin) {
-                if let Err(e) = put_back(s) {
-                    warn!(origin = %s.origin, error = %e, "cannot put the origin back on its own table");
+            for s in sessions.iter_mut() {
+                if origin_is_switched(&s.ctl, &s.origin) {
+                    if let Err(e) = put_back(s) {
+                        warn!(origin = %s.origin, error = %e, "cannot put the origin back on its own table");
+                    }
                 }
             }
-            Err(failed(volume, format!("{step}: {}", errno_text(errno))))
+            Err(failed(
+                origins[index].volume,
+                format!("{step}: {}", errno_text(errno)),
+            ))
         }
     }
 }

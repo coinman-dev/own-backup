@@ -14,6 +14,8 @@ pub mod linux;
 #[cfg(target_os = "linux")]
 mod loop_dev;
 #[cfg(target_os = "linux")]
+pub mod pv;
+#[cfg(target_os = "linux")]
 pub mod quiesce;
 
 #[cfg(target_os = "windows")]
