@@ -852,6 +852,111 @@ pub async fn write_media_stick(
     Ok(report)
 }
 
+/// Linux: can the boot medium be built now (the service's answer, with the
+/// cache an earlier build left).
+#[tauri::command]
+pub async fn linux_media_status(
+    state: State<'_, GuiState>,
+) -> Result<own_backup_common::engine_dto::LinuxMediaStatusDto, String> {
+    state.link.client().await?.linux_media_status().await
+}
+
+/// Linux: build the boot medium from the installed package into the person's
+/// folder (and onto a stick). Minutes of work in the service; progress comes
+/// back on the `media-progress` window event.
+#[tauri::command]
+pub async fn build_linux_media(
+    state: State<'_, GuiState>,
+    options: own_backup_common::engine_dto::LinuxMediaBuildDto,
+) -> Result<own_backup_common::engine_dto::LinuxMediaReportDto, String> {
+    tracing::info!(folder = %options.output_dir, stick = %options.stick_device, "building the Linux boot medium");
+    let report = state
+        .link
+        .client()
+        .await?
+        .build_linux_media(&options)
+        .await?;
+    tracing::info!(iso = %report.iso_path, mb = report.iso_bytes >> 20, "Linux boot medium built");
+    Ok(report)
+}
+
+/// Linux: remove the medium's builder and package cache.
+#[tauri::command]
+pub async fn clear_linux_media_cache(
+    state: State<'_, GuiState>,
+) -> Result<own_backup_common::engine_dto::LinuxMediaCacheClearedDto, String> {
+    state.link.client().await?.clear_linux_media_cache().await
+}
+
+/// Where the Linux medium's ISO goes unless the person picks another folder:
+/// their downloads folder as the desktop names it (`~/Загрузки` on a Russian
+/// desktop), otherwise `~/Downloads`, otherwise home. Asked here, in the
+/// person's own process: the service is root and knows nobody's home.
+#[tauri::command]
+pub fn default_media_folder() -> String {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return String::new();
+    };
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| home.join(".config"));
+    let named = std::fs::read_to_string(config.join("user-dirs.dirs"))
+        .ok()
+        .and_then(|text| xdg_download_dir(&text, &home));
+    [named, Some(home.join("Downloads"))]
+        .into_iter()
+        .flatten()
+        .find(|p| p.is_dir())
+        .unwrap_or(home)
+        .display()
+        .to_string()
+}
+
+/// `XDG_DOWNLOAD_DIR="$HOME/Загрузки"` of a `user-dirs.dirs`, with `$HOME`
+/// expanded. Only `$HOME/…` and absolute paths are allowed there.
+fn xdg_download_dir(text: &str, home: &std::path::Path) -> Option<std::path::PathBuf> {
+    let value = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .find_map(|l| l.strip_prefix("XDG_DOWNLOAD_DIR="))?;
+    let value = value.trim().trim_matches('"');
+    if let Some(rest) = value.strip_prefix("$HOME") {
+        let rest = rest.trim_start_matches('/');
+        // "$HOME/" means the home folder itself: no downloads folder.
+        return (!rest.is_empty()).then(|| home.join(rest));
+    }
+    let p = std::path::PathBuf::from(value);
+    p.is_absolute().then_some(p)
+}
+
+#[cfg(test)]
+mod media_folder_tests {
+    use super::xdg_download_dir;
+    use std::path::Path;
+
+    #[test]
+    fn the_desktop_s_downloads_folder_is_read_with_home_expanded() {
+        let home = Path::new("/home/u");
+        let text = "# comment\nXDG_DESKTOP_DIR=\"$HOME/Рабочий стол\"\nXDG_DOWNLOAD_DIR=\"$HOME/Загрузки\"\n";
+        assert_eq!(
+            xdg_download_dir(text, home).unwrap(),
+            Path::new("/home/u/Загрузки")
+        );
+        assert_eq!(
+            xdg_download_dir("XDG_DOWNLOAD_DIR=\"/data/dl\"", home).unwrap(),
+            Path::new("/data/dl")
+        );
+        assert_eq!(xdg_download_dir("XDG_DOWNLOAD_DIR=\"$HOME/\"", home), None);
+        assert_eq!(xdg_download_dir("XDG_DOWNLOAD_DIR=\"dl\"", home), None);
+        assert_eq!(
+            xdg_download_dir("#XDG_DOWNLOAD_DIR=\"$HOME/x\"", home),
+            None
+        );
+    }
+}
+
 #[tauri::command]
 pub async fn unmount_backup(state: State<'_, GuiState>, image_path: String) -> Result<(), String> {
     state.link.client().await?.unmount_image(&image_path).await

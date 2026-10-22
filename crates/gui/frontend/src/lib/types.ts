@@ -1230,6 +1230,40 @@ export interface MediaStickReport {
   log_skipped: string | null;
 }
 
+/** Build the Linux medium (`LinuxMediaBuildDto`). */
+export interface LinuxMediaBuild {
+  /** An existing folder of the person's own. */
+  output_dir: string;
+  /** Also write it onto this stick; empty for none. */
+  stick_device: string;
+  stick_expect: MediaStickIdentity | null;
+  /** Development only: a .deb instead of the installed package. */
+  deb_path: string;
+}
+
+export interface LinuxMediaReport {
+  iso_path: string;
+  iso_bytes: number;
+  version: string;
+  from_installed: boolean;
+  warnings: string[];
+  stick: MediaStickReport | null;
+  cache_dir: string;
+  cache_bytes: number;
+}
+
+/** Can the Linux medium be built now (`LinuxMediaStatusDto`). */
+export interface LinuxMediaStatus {
+  /** Empty when the package is not installed. */
+  installed_version: string;
+  cache_dir: string;
+  cache_bytes: number;
+  free_bytes: number;
+  need_bytes: number;
+  /** What stops a build now, in the person's words. */
+  problems: string[];
+}
+
 export interface MediaProgress {
   /** The whole queue, sent with every event so the two sides cannot drift. */
   stages: MediaStage[];

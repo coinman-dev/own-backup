@@ -1,8 +1,8 @@
 <script lang="ts">
-  // Linux: the boot medium onto a USB stick. The ISO is built by
-  // scripts/build-linux-media.sh (live-build needs root, a Debian tree and
-  // the network — not a dialog's job); here it is written, read back and given
-  // a partition for the medium's logs, by the service.
+  // Linux: a ready boot medium ISO onto a USB stick — one the program built
+  // earlier (LinuxMediaBuildModal, which can also write the stick right after
+  // the build). Here it is written, read back and given a partition for the
+  // medium's logs, by the service.
   //
   // The stick is erased whole, so the dialog names it the way the person sees
   // it (model and size, not only /dev/sdb), refuses a stick the desktop has
@@ -136,7 +136,7 @@
 
     <div class="body">
       <div class="intro">
-        {m.ms_intro()} <code>scripts/build-linux-media.sh</code>. {m.ms_intro_write()}
+        {m.ms_intro()} {m.ms_intro_write()}
       </div>
 
       <div class="field">
@@ -253,7 +253,6 @@
   .x:hover:not(:disabled) { color: var(--head); background: var(--track); }
   .body { padding: 16px 18px; overflow: auto; flex: 1; min-height: 0; }
   .intro { font-size: 13px; color: var(--text); line-height: 1.6; }
-  .intro code { font-family: var(--font-mono); font-size: 12px; }
   .lbl { font-size: 12px; color: var(--accent-text); }
   .field { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; margin-top: 16px; }
   .field input { min-width: 0; background: var(--input-bg); border: 1px solid var(--border-strong); border-radius: 6px; padding: 7px 10px; font-size: 13px; color: var(--text); font-family: var(--font); }

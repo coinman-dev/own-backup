@@ -10,6 +10,7 @@
   import { formatBytes } from '../lib/format';
   import MediaBuildModal from './MediaBuildModal.svelte';
   import MediaStickModal from './MediaStickModal.svelte';
+  import LinuxMediaBuildModal from './LinuxMediaBuildModal.svelte';
   import { pickPath } from '../lib/pickPath.svelte';
   import type { BaseImage } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
@@ -24,7 +25,8 @@
   /** The Windows medium can be built here at all. */
   const canBuildWindows = $derived(isWindows());
   let open: 'windows' | 'linux' | null = $state(null);
-  /** Linux: the stick writer. The ISO is built by a script, not here. */
+  /** Linux: the build dialog, and the writer of a ready ISO it links to. */
+  let linuxOpen = $state(false);
   let stickOpen = $state(false);
   // A Winre.wim the user pointed at — taken from an installation ISO, say —
   // goes before anything the search found. The service reads it first; a file
@@ -76,7 +78,7 @@
     if (media.active) return;
     if (tab === 'windows' && (!canBuildWindows || !windowsBase)) return; // nothing to build on
     if (tab === 'linux' && !isWindows()) {
-      stickOpen = true;
+      linuxOpen = true;
       return;
     }
     open = tab;
@@ -170,8 +172,8 @@
       {/if}
     {:else if !isWindows()}
       <div class="p-desc">{m.bmc_linux_desc()}</div>
-      <div class="p-meta">{m.bmc_linux_ready()}</div>
-      <div class="p-go">{m.bmc_click_to_write()}</div>
+      <div class="p-meta">{m.bmc_linux_build()}</div>
+      <div class="p-go">{m.bmc_click_to_build_linux()}</div>
     {:else}
       <div class="p-desc">{m.bmc_linux_desc()}</div>
       <div class="p-meta soon">{m.bmc_linux_soon()}</div>
@@ -179,6 +181,13 @@
     {/if}
   </div>
 </div>
+
+{#if linuxOpen}
+  <LinuxMediaBuildModal
+    onClose={() => (linuxOpen = false)}
+    onWriteReady={() => { linuxOpen = false; stickOpen = true; }}
+  />
+{/if}
 
 {#if stickOpen}
   <MediaStickModal onClose={() => (stickOpen = false)} />

@@ -38,6 +38,9 @@ import type {
   MediaStick,
   MediaStickReport,
   MediaStickWrite,
+  LinuxMediaBuild,
+  LinuxMediaReport,
+  LinuxMediaStatus,
   ServiceStatus,
   MountBackendStatus,
   ArchiveImageInfo,
@@ -75,6 +78,12 @@ export const api = {
   listMediaSticks: () => invoke<MediaStick[]>('list_media_sticks'),
   writeMediaStick: (options: MediaStickWrite) =>
     invoke<MediaStickReport>('write_media_stick', { options }),
+  // Linux: the medium built by the service from the installed package.
+  linuxMediaStatus: () => invoke<LinuxMediaStatus>('linux_media_status'),
+  buildLinuxMedia: (options: LinuxMediaBuild) =>
+    invoke<LinuxMediaReport>('build_linux_media', { options }),
+  clearLinuxMediaCache: () => invoke<{ freed_bytes: number }>('clear_linux_media_cache'),
+  defaultMediaFolder: () => invoke<string>('default_media_folder'),
   driveSignature: () => invoke<number>('drive_signature'),
   // EFI, recovery and vendor partitions without a letter (the service decides
   // which), and giving one a letter or taking it away (`letter: null`).
