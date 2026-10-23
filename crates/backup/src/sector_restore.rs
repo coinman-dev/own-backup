@@ -306,6 +306,21 @@ fn wipe_gaps(
     Ok(wiped)
 }
 
+/// How much of a slice of `slice_len` bytes at `payload_off` lies inside a
+/// data area of `payload_len` bytes, in whole encryption sectors; `None` when
+/// nothing does.
+fn payload_slice(
+    payload_off: u64,
+    slice_len: usize,
+    payload_len: u64,
+    params: &crate::luks::LuksParams,
+) -> Option<usize> {
+    let room = payload_len.checked_sub(payload_off)?;
+    let len = (slice_len as u64).min(room);
+    let len = len - len % params.sector_size.max(1) as u64;
+    (len > 0).then_some(len as usize)
+}
+
 /// [`wipe_gaps`] for a container being re-encrypted: the zeros have to be
 /// *encrypted* zeros, or the plaintext there is noise.
 ///
@@ -323,21 +338,6 @@ fn wipe_gaps(
 /// which is how a restored Kubuntu's apt met the .deb files it had excluded.
 /// The plain sector path has wiped its gaps since D16; the encrypted path
 /// simply never did, and only an encrypted target could show it.
-/// How much of a slice of `slice_len` bytes at `payload_off` lies inside a
-/// data area of `payload_len` bytes, in whole encryption sectors; `None` when
-/// nothing does.
-fn payload_slice(
-    payload_off: u64,
-    slice_len: usize,
-    payload_len: u64,
-    params: &crate::luks::LuksParams,
-) -> Option<usize> {
-    let room = payload_len.checked_sub(payload_off)?;
-    let len = (slice_len as u64).min(room);
-    let len = len - len % params.sector_size.max(1) as u64;
-    (len > 0).then_some(len as usize)
-}
-
 fn wipe_gaps_encrypted(
     dev: &mut dyn SectorTarget,
     covered: &mut [(u64, u64)],
@@ -610,6 +610,33 @@ pub fn write_container_blocks(
     cancel: &CancelToken,
     progress: &mut dyn FnMut(&SectorRestoreProgress) -> Result<()>,
 ) -> Result<SectorRestoreSummary> {
+    write_container_blocks_with(
+        image_path, keys, sidecar, src_index, fit, dev, read_back, label, opts, req, None, cancel,
+        progress,
+    )
+}
+
+/// [`write_container_blocks`] with the container's key already recovered
+/// from the saved header (`known`, by [`crate::luks::open_luks_from_header`]
+/// with the same passphrase): the header read back off the target is then
+/// compared with what was written instead of being unlocked again — one key
+/// derivation (seconds of Argon2) fewer, the same proof that it landed.
+#[allow(clippy::too_many_arguments)]
+pub fn write_container_blocks_with(
+    image_path: &Path,
+    keys: Option<&crate::seal::context::ArchiveKeys>,
+    sidecar: &Sidecar,
+    src_index: u32,
+    fit: ContainerFit,
+    dev: &mut dyn SectorTarget,
+    read_back: &mut dyn FnMut() -> Result<Box<dyn RawVolume>>,
+    label: &str,
+    opts: SectorRestoreOptions,
+    req: &ReencryptRequest<'_>,
+    known: Option<&crate::luks::LuksParams>,
+    cancel: &CancelToken,
+    progress: &mut dyn FnMut(&SectorRestoreProgress) -> Result<()>,
+) -> Result<SectorRestoreSummary> {
     let started = Instant::now();
     let block_size = sidecar.manifest.block_size as u64;
     let image_len = sidecar.manifest.source_disk.size_bytes;
@@ -626,7 +653,19 @@ pub fn write_container_blocks(
 
     let params = {
         let mut probe = read_back()?;
-        crate::luks::open_luks(probe.as_mut(), req.passphrase.as_bytes())?
+        match known {
+            None => crate::luks::open_luks(probe.as_mut(), req.passphrase.as_bytes())?,
+            Some(params) => {
+                let mut landed = vec![0u8; header.len()];
+                probe.read_at(0, &mut landed)?;
+                if landed != header {
+                    return Err(OwnBackupError::Device(
+                        tr!("sector_restore.header_not_landed", target = label).into_owned(),
+                    ));
+                }
+                params.clone()
+            }
+        }
     };
     if params.data_offset != req.header.data_offset {
         return Err(OwnBackupError::ImageFormat(

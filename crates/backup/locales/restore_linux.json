@@ -24,9 +24,13 @@
     "ru": "Контейнер LUKS раздела %{index} не восстановить с шифрованием: %{why}. Данные раздела доступны: подключите копию или восстановите этот раздел отдельно.",
     "en": "The LUKS container of partition %{index} cannot be restored with its encryption: %{why}. The partition's data is still available: mount the copy or restore that partition on its own."
   },
+  "restore_disk_linux.luks_sector_misaligned": {
+    "ru": "Контейнер LUKS раздела %{index} шифрует секторами по %{sector} Б, а раздел начинается на %{offset} Б при блоке копии %{block} Б: границы блоков не совпадают с секторами контейнера, вернуть шифрование нельзя. Данные раздела доступны подключением копии.",
+    "en": "The LUKS container of partition %{index} encrypts in %{sector}-byte sectors, but the partition starts at %{offset} B with a copy block of %{block} B: block boundaries do not fall on the container's sectors, so the encryption cannot be put back. The partition's data is reachable by mounting the copy."
+  },
   "restore_disk_linux.luks_passphrases_needed": {
-    "ru": "Чтобы вернуть шифрование LUKS, нужны пароли контейнеров (те, что спрашивает система при загрузке, а не пароль копии): %{list}.",
-    "en": "Putting the LUKS encryption back needs the containers' passphrases (the ones the system asks for at boot, not the copy's password): %{list}."
+    "ru": "Чтобы вернуть шифрование LUKS, нужны пароли контейнеров — те, что действовали на момент копии (их спрашивала система при загрузке), а не пароль копии: %{list}.",
+    "en": "Putting the LUKS encryption back needs the containers' passphrases — the ones valid when the copy was made (the system asked for them at boot), not the copy's password: %{list}."
   },
   "restore_disk_linux.luks_passphrase_missing": {
     "ru": "раздел %{index} — пароль не указан",

@@ -345,8 +345,10 @@ pub fn read_header_area_at(vol: &mut dyn RawVolume, data_offset: u64) -> Result<
     // anything wilder rather than allocating whatever a corrupt header claims.
     const MAX_HEADER: u64 = 64 * 1024 * 1024;
     if data_offset > MAX_HEADER {
-        return Err(bad(format!(
-            "data offset {data_offset} exceeds the largest plausible header area ({MAX_HEADER})"
+        return Err(bad(tr!(
+            "luks.header_too_large",
+            offset = data_offset,
+            max = MAX_HEADER
         )));
     }
     let mut buf = vec![0u8; data_offset as usize];
@@ -409,6 +411,84 @@ pub fn restore_obstacles(header: &[u8]) -> Result<Vec<String>> {
     } else {
         info.methods
     })
+}
+
+/// Offsets in a LUKS2 binary header (`struct luks2_hdr_disk`).
+const LUKS2_BIN_LEN: usize = 4096;
+const LUKS2_SECONDARY_MAGIC: &[u8; 6] = b"SKUL\xba\xbe";
+
+/// Is the header area `area` (read off a live device: everything before the
+/// data) one consistent version of the header? LUKS2 keeps two binary
+/// headers, each with the checksum of itself and its JSON area and a
+/// sequence id that every update raises: both checksums must hold and both
+/// ids agree, or the read caught cryptsetup between its writes. LUKS1 has a
+/// single header with no checksum: there is nothing to check here (a change
+/// shows when the area is read again and compared). `Err` names what is off.
+pub fn check_header_consistent(area: &[u8]) -> std::result::Result<(), String> {
+    if !is_luks(area) || area.len() < LUKS2_BIN_LEN {
+        return Err("no LUKS header".into());
+    }
+    if u16::from_be_bytes([area[6], area[7]]) != 2 {
+        return Ok(());
+    }
+    let be64 = |b: &[u8], o: usize| u64::from_be_bytes(b[o..o + 8].try_into().unwrap());
+    let hdr_size = be64(area, 8) as usize;
+    if !(LUKS2_BIN_LEN..=16 * 1024 * 1024).contains(&hdr_size) || area.len() < 2 * hdr_size {
+        return Err(format!("implausible LUKS2 header size {hdr_size}"));
+    }
+    let primary = &area[..hdr_size];
+    let secondary = &area[hdr_size..2 * hdr_size];
+    if &secondary[..6] != LUKS2_SECONDARY_MAGIC {
+        return Err("the secondary LUKS2 header is missing".into());
+    }
+    for (name, h) in [("primary", primary), ("secondary", secondary)] {
+        let alg = cstr(&h[72..104]);
+        let mut zeroed = h.to_vec();
+        zeroed[448..512].fill(0);
+        let sum: Vec<u8> = match alg.as_str() {
+            "sha256" => Sha256::digest(&zeroed).to_vec(),
+            "sha512" => Sha512::digest(&zeroed).to_vec(),
+            other => return Err(format!("{name} header: checksum {other:?} not supported")),
+        };
+        if h[448..448 + sum.len()] != sum[..] {
+            return Err(format!("{name} header: checksum mismatch"));
+        }
+    }
+    let (s1, s2) = (be64(primary, 16), be64(secondary, 16));
+    if s1 != s2 {
+        return Err(format!("sequence ids differ ({s1} and {s2})"));
+    }
+    Ok(())
+}
+
+/// What of a header decides the data: the cipher, the data area and the
+/// master key's digest — and not the keyslots, tokens, UUID or label, which
+/// `luksAddKey`, `luksKillSlot`, token enrolment and `luksUUID` change. Two
+/// header areas with equal identities encrypt the same data the same way.
+pub fn data_identity(area: &[u8]) -> Result<Value> {
+    if !is_luks(area) || area.len() < 592 {
+        return Err(bad("not a LUKS container"));
+    }
+    match u16::from_be_bytes([area[6], area[7]]) {
+        // cipher, mode, hash, payload offset, key size, mk digest, salt, iterations
+        1 => Ok(Value::String(B64.encode(&area[8..168]))),
+        2 => {
+            let meta = luks2_metadata(&mut HeaderBlob(area), area)?;
+            let mut digests = meta.get("digests").cloned().unwrap_or(Value::Null);
+            if let Some(all) = digests.as_object_mut() {
+                for d in all.values_mut() {
+                    if let Some(d) = d.as_object_mut() {
+                        d.remove("keyslots");
+                    }
+                }
+            }
+            Ok(serde_json::json!({
+                "segments": meta.get("segments").cloned().unwrap_or(Value::Null),
+                "digests": digests,
+            }))
+        }
+        v => Err(bad(format!("unsupported LUKS version {v}"))),
+    }
 }
 
 /// Does `passphrase` open the container whose header the copy kept? `Ok(false)`
@@ -1340,6 +1420,83 @@ mod tests {
         assert_eq!(info.methods.len(), 2, "{:?}", info.methods);
     }
 
+    /// A LUKS2 header area: both binary headers with their checksums over
+    /// `json`, sequence ids `seq1`/`seq2`.
+    fn luks2_area(json: &str, seq1: u64, seq2: u64) -> Vec<u8> {
+        let hdr_size = 16384usize;
+        let mut area = vec![0u8; 4 * hdr_size];
+        for (at, magic, seq) in [
+            (0, LUKS_MAGIC, seq1),
+            (hdr_size, LUKS2_SECONDARY_MAGIC, seq2),
+        ] {
+            let h = &mut area[at..at + hdr_size];
+            h[0..6].copy_from_slice(magic);
+            h[6..8].copy_from_slice(&2u16.to_be_bytes());
+            h[8..16].copy_from_slice(&(hdr_size as u64).to_be_bytes());
+            h[16..24].copy_from_slice(&seq.to_be_bytes());
+            h[72..78].copy_from_slice(b"sha256");
+            h[256..264].copy_from_slice(&(at as u64).to_be_bytes());
+            h[4096..4096 + json.len()].copy_from_slice(json.as_bytes());
+            let sum = Sha256::digest(&*h);
+            h[448..480].copy_from_slice(&sum);
+        }
+        area
+    }
+
+    #[test]
+    fn a_luks2_header_reads_whole_only_with_both_copies_alike() {
+        let json = luks2_json("argon2id", "");
+        assert_eq!(check_header_consistent(&luks2_area(&json, 7, 7)), Ok(()));
+        // Caught between cryptsetup's two writes: the ids differ…
+        let e = check_header_consistent(&luks2_area(&json, 8, 7)).unwrap_err();
+        assert!(e.contains("sequence"), "{e}");
+        // …or one copy is half new.
+        let mut torn = luks2_area(&json, 7, 7);
+        torn[4096 + 3] ^= 1;
+        let e = check_header_consistent(&torn).unwrap_err();
+        assert!(e.contains("primary"), "{e}");
+        let mut lost = luks2_area(&json, 7, 7);
+        lost[16384] = 0;
+        assert!(check_header_consistent(&lost).is_err());
+        // LUKS1 has one header and nothing to compare it with.
+        let c = test_luks1_container(b"pw", &[0u8; 512]);
+        assert_eq!(check_header_consistent(&c[..2 * 1024 * 1024]), Ok(()));
+    }
+
+    /// Key slots come and go without touching the data; the cipher, the data
+    /// area and the master key's digest are the data.
+    #[test]
+    fn the_data_identity_ignores_key_slots_and_tokens() {
+        let json = luks2_json(
+            "argon2id",
+            r#","digests":{"0":{"type":"pbkdf2","keyslots":["0"],"segments":["0"],"hash":"sha256","iterations":1000,"salt":"AA==","digest":"BB=="}}"#,
+        );
+        let base = data_identity(&luks2_area(&json, 1, 1)).unwrap();
+        let more_slots = json
+            .replace(r#""keyslots":["0"]"#, r#""keyslots":["0","1"]"#)
+            .replace(
+                r#""digests""#,
+                r#""tokens":{"0":{"type":"systemd-tpm2","keyslots":["1"]}},"digests""#,
+            );
+        assert_eq!(data_identity(&luks2_area(&more_slots, 2, 2)).unwrap(), base);
+        let new_key = json.replace(r#""digest":"BB==""#, r#""digest":"CC==""#);
+        assert_ne!(data_identity(&luks2_area(&new_key, 2, 2)).unwrap(), base);
+
+        let c = test_luks1_container(b"pw", &[0u8; 512]);
+        let mut slot = c[..2 * 1024 * 1024].to_vec();
+        slot[256 + 4] ^= 1; // keyslot 1's iterations
+        assert_eq!(
+            data_identity(&slot).unwrap(),
+            data_identity(&c[..2 * 1024 * 1024]).unwrap()
+        );
+        let mut mk = c[..2 * 1024 * 1024].to_vec();
+        mk[112] ^= 1; // the master key's digest
+        assert_ne!(
+            data_identity(&mk).unwrap(),
+            data_identity(&c[..2 * 1024 * 1024]).unwrap()
+        );
+    }
+
     #[test]
     fn luks2_with_integrity_is_not_plain_xts() {
         let json = luks2_json("argon2id", "").replace(
@@ -1555,6 +1712,37 @@ mod tests {
             assert!(
                 open_luks(&mut vol, b"wrong pass").is_err(),
                 "{label}: wrong pw must fail"
+            );
+
+            // A header cryptsetup wrote reads whole; a key slot added keeps
+            // the data identity, while the header area changes.
+            let area = |path: &std::path::Path| {
+                let all = std::fs::read(path).unwrap();
+                all[..params.data_offset as usize].to_vec()
+            };
+            let before = area(&path);
+            assert_eq!(check_header_consistent(&before), Ok(()), "{label}");
+            let new_key = dir.path().join(format!("{label}.newkey"));
+            std::fs::write(&new_key, b"another pass").unwrap();
+            let mut add = vec!["luksAddKey", "-q", "--key-file", "-"];
+            if label != "luks1" {
+                add.extend(["--pbkdf", "pbkdf2", "--pbkdf-force-iterations", "1000"]);
+            }
+            add.push(path.to_str().unwrap());
+            add.push(new_key.to_str().unwrap());
+            let out = cryptsetup(&add, pw);
+            assert!(
+                out.status.success(),
+                "{label} luksAddKey: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let after = area(&path);
+            assert_ne!(before, after, "{label}: a slot was added");
+            assert_eq!(check_header_consistent(&after), Ok(()), "{label}");
+            assert_eq!(
+                data_identity(&after).unwrap(),
+                data_identity(&before).unwrap(),
+                "{label}: the data key did not change"
             );
         }
     }

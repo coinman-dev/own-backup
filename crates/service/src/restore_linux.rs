@@ -742,7 +742,11 @@ impl BackupServiceImpl {
         // derivation per container, off the runtime.
         let (keys, passphrases, needs) = {
             let image = image_path.clone();
-            let passphrases = p.passphrases;
+            let passphrases: std::collections::HashMap<u32, zeroize::Zeroizing<String>> = p
+                .passphrases
+                .into_iter()
+                .map(|(k, v)| (k, zeroize::Zeroizing::new(v)))
+                .collect();
             tokio::task::spawn_blocking(move || {
                 let needs =
                     own_backup_backup::sidecar::read_sidecar_with_keys(&image, keys.as_ref())
@@ -855,7 +859,7 @@ impl BackupServiceImpl {
                                 passphrase: summary
                                     .containers
                                     .contains(&i)
-                                    .then(|| request.passphrases.get(&i).cloned())
+                                    .then(|| request.passphrases.get(&i).map(|p| p.to_string()))
                                     .flatten(),
                             }
                         })

@@ -62,7 +62,7 @@ pub(crate) fn capture_opened<D: SourceDevice>(
             .into_owned(),
         ));
     }
-    let area = crate::luks::read_header_area_at(&mut dev, geometry.data_offset)?;
+    let area = read_whole::<D>(c, &mut dev, geometry.data_offset)?;
     let note = match crate::luks::restore_obstacles(&area)? {
         why if why.is_empty() => None,
         why => {
@@ -96,6 +96,105 @@ pub(crate) fn capture_opened<D: SourceDevice>(
         },
         note,
     })
+}
+
+/// Reads of a header being rewritten, tried before the copy gives up.
+const HEADER_READS: usize = 3;
+
+/// The header area `[0, data_offset)` of `c`'s partition as one consistent
+/// version ([`crate::luks::check_header_consistent`]): read past the page
+/// cache, and again — a moment later — when the read caught cryptsetup
+/// between its writes. Refused when it never reads whole.
+fn read_whole<D: SourceDevice>(
+    c: &OpenedContainer,
+    dev: &mut D,
+    data_offset: u64,
+) -> Result<Vec<u8>> {
+    let mut why = String::new();
+    for attempt in 0..HEADER_READS {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        dev.drop_cache()?;
+        let area = crate::luks::read_header_area_at(dev, data_offset)?;
+        match crate::luks::check_header_consistent(&area) {
+            Ok(()) => return Ok(area),
+            Err(e) => {
+                warn!(partition = %c.partition, attempt, error = %e,
+                      "the LUKS header did not read whole");
+                why = e;
+            }
+        }
+    }
+    Err(OwnBackupError::Device(
+        tr!(
+            "engine.luks_header_torn",
+            partition = c.partition.as_str(),
+            why = why
+        )
+        .into_owned(),
+    ))
+}
+
+/// Read the header of the opened container `c` again at the end of the
+/// copy and compare it with the one `captured` at its start. The same: `None`.
+/// Changed in what does not touch the data (a key slot added or removed, a
+/// token, the UUID or label): the header as it is now, which is what the
+/// restored container should carry. Changed in its cipher, data area or
+/// master key: refused — the copy would hold data no saved header opens.
+pub(crate) fn recheck<D: SourceDevice>(
+    c: &OpenedContainer,
+    captured: &LuksHeaderBackup,
+) -> Result<Option<LuksHeaderBackup>> {
+    let mut dev = D::open_read(&c.partition)?;
+    let now = read_whole::<D>(c, &mut dev, captured.data_offset)?;
+    let then = crate::luks::decode_stored_header(captured)?;
+    if now == then {
+        return Ok(None);
+    }
+    let changed = || {
+        OwnBackupError::Device(
+            tr!(
+                "engine.luks_header_changed",
+                partition = c.partition.as_str()
+            )
+            .into_owned(),
+        )
+    };
+    let geometry = crate::luks::header_geometry(&mut HeaderBytes(&now))?;
+    if geometry.data_offset != captured.data_offset
+        || geometry.sector_size != captured.sector_size
+        || crate::luks::data_identity(&now)? != crate::luks::data_identity(&then)?
+    {
+        warn!(partition = %c.partition, "the LUKS header changed its data key or layout during the copy");
+        return Err(changed());
+    }
+    warn!(partition = %c.partition,
+          "the LUKS header changed during the copy (key slots, tokens, UUID): the copy keeps it as it is now");
+    use base64::Engine;
+    Ok(Some(LuksHeaderBackup {
+        header_b64: base64::engine::general_purpose::STANDARD.encode(&now),
+        ..captured.clone()
+    }))
+}
+
+/// A header area in memory, read as a volume.
+struct HeaderBytes<'a>(&'a [u8]);
+
+impl crate::fat_map::RawVolume for HeaderBytes<'_> {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        let o = offset as usize;
+        let end = o
+            .checked_add(buf.len())
+            .filter(|&e| e <= self.0.len())
+            .ok_or_else(|| OwnBackupError::Device("read past the header area".into()))?;
+        buf.copy_from_slice(&self.0[o..end]);
+        Ok(())
+    }
+
+    fn len(&self) -> u64 {
+        self.0.len() as u64
+    }
 }
 
 /// A test disk with an opened LUKS container, for the engine's tests and the
@@ -141,10 +240,17 @@ pub(crate) mod fixture {
 
     impl LuksDisk {
         pub(crate) fn new() -> Self {
+            Self::holding(
+                (0..PAYLOAD)
+                    .map(|i| (i / 512 % 239) as u8 ^ (i % 13) as u8 ^ 0x6B)
+                    .collect(),
+            )
+        }
+
+        /// The container holding `plain` ([`PAYLOAD`] bytes).
+        pub(crate) fn holding(plain: Vec<u8>) -> Self {
+            assert_eq!(plain.len() as u64, PAYLOAD);
             let esp_data: Vec<u8> = (0..3 * MIB).map(|i| (i % 251) as u8 ^ 0x11).collect();
-            let plain: Vec<u8> = (0..PAYLOAD)
-                .map(|i| (i / 512 % 239) as u8 ^ (i % 13) as u8 ^ 0x6B)
-                .collect();
             let container = crate::luks::test_luks1_container(PASS.as_bytes(), &plain);
             assert_eq!(container.len() as u64, HEADER + PAYLOAD);
             let size = PART_AT + HEADER + PAYLOAD + MIB;
@@ -197,6 +303,29 @@ pub(crate) mod fixture {
             register_device(&disk.part, disk.container.clone(), 512);
             register_device(&disk.mapping, disk.plain.clone(), 512);
             disk
+        }
+
+        /// An ext4 of [`PAYLOAD`] bytes made by `mkfs.ext4 -d` (no mount, no
+        /// root) holding `keep.txt`; `None` without the tool.
+        pub(crate) fn ext4() -> Option<Vec<u8>> {
+            let dir = tempfile::tempdir().unwrap();
+            let content = dir.path().join("content");
+            std::fs::create_dir(&content).unwrap();
+            std::fs::write(content.join("keep.txt"), b"kept\n").unwrap();
+            let img = dir.path().join("fs.img");
+            std::fs::File::create(&img)
+                .unwrap()
+                .set_len(PAYLOAD)
+                .unwrap();
+            let made = std::process::Command::new("mkfs.ext4")
+                .args(["-q", "-F", "-b", "4096", "-d"])
+                .arg(&content)
+                .arg(&img)
+                .output()
+                .ok()?
+                .status
+                .success();
+            made.then(|| std::fs::read(&img).unwrap())
         }
 
         /// The platform: the ESP read directly, the container through its
@@ -306,6 +435,80 @@ mod tests {
             .expect("the container is named");
         assert_eq!(enc.kind, VolumeEncryptionKind::Luks1);
         assert_eq!(enc.capture_mode, VolumeCaptureMode::Plaintext);
+    }
+
+    /// The service's key directory inside an opened container (decision
+    /// 6/E4): the filesystem read through the mapping is walked and the
+    /// directory left out; a container whose contents nothing walks is
+    /// refused rather than copied with the keys.
+    #[test]
+    fn the_key_directory_inside_an_opened_container_is_left_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(ext4) = LuksDisk::ext4() else {
+            return;
+        };
+        let disk = LuksDisk::holding(ext4);
+        let platform = disk.platform(HEADER).key_store_on(&disk.part);
+        let image = dir.path().join("keys.qcow2");
+        let summary =
+            crate::engine_core::disk::backup_disk(&platform, &disk.request(&image), |_| Ok(()))
+                .unwrap();
+        assert!(summary.key_store_excluded);
+        let sidecar = load_sidecar_of(&image).unwrap();
+        assert_eq!(sidecar.info.luks_headers.len(), 1, "the header still kept");
+
+        let raw = LuksDisk::new();
+        let platform = raw.platform(HEADER).key_store_on(&raw.part);
+        let refused = dir.path().join("refused.qcow2");
+        let e =
+            crate::engine_core::disk::backup_disk(&platform, &raw.request(&refused), |_| Ok(()))
+                .err()
+                .expect("refused");
+        assert!(e.to_string().contains(&raw.part), "{e}");
+        assert!(!refused.exists());
+    }
+
+    /// Run the copy with the partition's bytes replaced by `changed` once
+    /// blocks are being copied — after the header was captured.
+    fn backup_changing(
+        disk: &LuksDisk,
+        image: &std::path::Path,
+        changed: Vec<u8>,
+    ) -> own_backup_common::Result<()> {
+        let mut changed = Some(changed);
+        crate::engine_core::disk::backup_disk(&disk.platform(HEADER), &disk.request(image), |p| {
+            if p.backup_id != "prepare" {
+                if let Some(bytes) = changed.take() {
+                    register_device(&disk.part, bytes, 512);
+                }
+            }
+            Ok(())
+        })
+        .map(|_| ())
+    }
+
+    /// A key slot changed while the disk was copied: the copy keeps the
+    /// header as it is at the end. The master key changed: no copy — the
+    /// data would be under a key no kept header opens.
+    #[test]
+    fn a_header_changed_during_the_copy_is_kept_as_it_is_now_or_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = LuksDisk::new();
+        let mut slot = disk.container.clone();
+        slot[256 + 4] ^= 1; // keyslot 1's iterations: no data touched
+        let image = dir.path().join("slot.qcow2");
+        backup_changing(&disk, &image, slot.clone()).unwrap();
+        let sidecar = load_sidecar_of(&image).unwrap();
+        let saved = crate::luks::decode_stored_header(&sidecar.info.luks_headers[0]).unwrap();
+        assert!(saved == slot[..HEADER as usize], "the header as it is now");
+
+        let disk = LuksDisk::new();
+        let mut key = disk.container.clone();
+        key[112] ^= 1; // the master key's digest
+        let image = dir.path().join("key.qcow2");
+        let e = backup_changing(&disk, &image, key).expect_err("refused");
+        assert!(e.to_string().contains(&disk.part), "{e}");
+        assert!(!image.exists());
     }
 
     /// A mapping that does not start where the header says, and a partition

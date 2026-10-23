@@ -1281,6 +1281,19 @@ fn backup_disk_inner<P: DiskPlatform>(
     // One captured container header per encrypted partition (D19): with them a
     // restore rebuilds the container byte-for-byte, so the restored system's
     // crypttab and initramfs keep working untouched.
+    //
+    // A header taken off a container the system has open can have been
+    // changed meanwhile (a key slot added, a token enrolled): read again
+    // now, at the end of the copy, and the copy keeps the header as it is
+    // now — or is refused when the change touched the data key or layout.
+    for p in prepared.iter_mut() {
+        let (Some(c), Some(h)) = (p.session.opened_container().cloned(), &p.luks_header) else {
+            continue;
+        };
+        if let Some(now) = super::disk_luks::recheck::<P::Dev>(&c, h)? {
+            p.luks_header = Some(now);
+        }
+    }
     info.luks_headers = prepared
         .iter()
         .filter_map(|p| p.luks_header.clone())

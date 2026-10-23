@@ -532,6 +532,24 @@ fn restore_disk_from_image(
             "image has no embedded whole-disk manifest — not a bootable disk image".into(),
         )
     })?;
+    // A Linux copy whose LUKS containers were captured in the clear: their
+    // data written as it is would put plaintext where the restored system
+    // waits for a container. Putting the container back is the Linux
+    // restore's (D19); here it is not implemented, so nothing is written.
+    let luks = crate::luks_rebuild::luks_in_clear(&sidecar);
+    if !luks.is_empty() {
+        return Err(OwnBackupError::RestoreIncompatible(
+            tr!(
+                "restore_win.luks_rebuild_not_implemented",
+                parts = luks
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+            .into_owned(),
+        ));
+    }
     let layout = &dm.layout; // real GUIDs
     let bs = sidecar.manifest.block_size as u64;
     let image_size = sidecar.manifest.source_disk.size_bytes;

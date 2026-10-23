@@ -33,10 +33,11 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use tracing::info;
+use zeroize::Zeroizing;
 
 use own_backup_common::engine_dto::LuksPassphraseNeedDto;
 use own_backup_common::gpt::DiskLayout;
-use own_backup_common::image::{LuksHeaderBackup, VolumeCaptureMode, VolumeEncryptionKind};
+use own_backup_common::image::{VolumeCaptureMode, VolumeEncryptionKind};
 use own_backup_common::restore_plan::{
     PartitionKind, PartitionScheme, PartitionSpec, PartitionTableSpec,
 };
@@ -212,132 +213,12 @@ pub struct LinuxDiskRestoreRequest {
     /// container's saved header, whose master key re-encrypts the data. The
     /// containers' own secrets, typed for this restore and never stored — a
     /// different thing from the archive password of an encrypted copy.
-    pub passphrases: HashMap<u32, String>,
+    pub passphrases: HashMap<u32, Zeroizing<String>>,
 }
 
-/// A LUKS container the copy holds decrypted, which the restore puts back.
-#[derive(Debug, Clone)]
-pub struct Container {
-    /// Its partition: the index in the copy's table, which the restore
-    /// writes as it is — on the source and on the target alike.
-    pub part_index: u32,
-    /// Its slot on the disk, in bytes.
-    pub offset: u64,
-    pub size: u64,
-    /// The header area the copy kept.
-    pub header: LuksHeaderBackup,
-}
-
-/// The LUKS containers a whole-disk restore of `sidecar`'s copy has to put
-/// back: every partition whose header the copy kept. Refused — before
-/// anything is written — when a partition was captured decrypted from a
-/// LUKS container whose header the copy does not have (plaintext would land
-/// where the restored system waits for a container), or when the container is
-/// one this program cannot rebuild (a cipher it does not implement,
-/// authenticated encryption, a reencryption under way, no passphrase slot).
-pub fn containers_to_rebuild(sidecar: &Sidecar) -> Result<Vec<Container>> {
-    let Some(dm) = sidecar.disk_manifest.as_ref() else {
-        return Ok(Vec::new());
-    };
-    let sector = dm.layout.sector_size.max(1) as u64;
-    let mut out = Vec::new();
-    for p in &dm.layout.partitions {
-        let header = sidecar
-            .info
-            .luks_headers
-            .iter()
-            .find(|h| h.part_index == p.index);
-        let decrypted_luks = dm
-            .images
-            .iter()
-            .find(|i| i.part_index == p.index)
-            .and_then(|i| i.encryption.as_ref())
-            .is_some_and(|e| {
-                matches!(
-                    e.kind,
-                    VolumeEncryptionKind::Luks1 | VolumeEncryptionKind::Luks2
-                ) && e.capture_mode == VolumeCaptureMode::Plaintext
-            });
-        match header {
-            Some(h) => {
-                let bytes = crate::luks::decode_stored_header(h)?;
-                let why = crate::luks::restore_obstacles(&bytes)?;
-                if !why.is_empty() {
-                    return Err(OwnBackupError::RestoreIncompatible(
-                        tr!(
-                            "restore_disk_linux.luks_cannot_rebuild",
-                            index = p.index,
-                            why = why.join("; ")
-                        )
-                        .into_owned(),
-                    ));
-                }
-                out.push(Container {
-                    part_index: p.index,
-                    offset: p.first_lba * sector,
-                    size: (p.last_lba + 1 - p.first_lba) * sector,
-                    header: h.clone(),
-                });
-            }
-            None if decrypted_luks => {
-                return Err(OwnBackupError::RestoreIncompatible(
-                    tr!("restore_disk_linux.luks_no_header", index = p.index).into_owned(),
-                ))
-            }
-            None => {}
-        }
-    }
-    Ok(out)
-}
-
-/// The containers whose passphrase is missing from `passphrases` or wrong.
-/// A passphrase is wrong only when no keyslot accepted it (the digest check
-/// failed); any other failure is the error it is.
-pub fn passphrase_needs(
-    containers: &[Container],
-    passphrases: &HashMap<u32, String>,
-) -> Result<Vec<LuksPassphraseNeedDto>> {
-    let mut out = Vec::new();
-    for c in containers {
-        let wrong = match passphrases.get(&c.part_index) {
-            None => false,
-            Some(p) if crate::luks::check_stored_passphrase(&c.header, p)? => continue,
-            Some(_) => true,
-        };
-        out.push(LuksPassphraseNeedDto {
-            part_index: c.part_index,
-            kind: c.header.kind.clone(),
-            wrong,
-        });
-    }
-    Ok(out)
-}
-
-/// What `needs` asks for, in words.
-pub fn describe_needs(needs: &[LuksPassphraseNeedDto]) -> String {
-    let list: Vec<String> = needs
-        .iter()
-        .map(|n| {
-            if n.wrong {
-                tr!(
-                    "restore_disk_linux.luks_passphrase_wrong",
-                    index = n.part_index
-                )
-            } else {
-                tr!(
-                    "restore_disk_linux.luks_passphrase_missing",
-                    index = n.part_index
-                )
-            }
-            .into_owned()
-        })
-        .collect();
-    tr!(
-        "restore_disk_linux.luks_passphrases_needed",
-        list = list.join(", ")
-    )
-    .into_owned()
-}
+pub use crate::luks_rebuild::{
+    check_passphrases, containers_to_rebuild, describe_needs, passphrase_needs, Container,
+};
 
 /// The parts of the stretch `[start, start + len)` outside every range
 /// `[a, b)` of `skip`, as `(offset, len)` in order.
@@ -424,9 +305,11 @@ pub fn restore_disk(
     // touched: a wrong one found at the container's turn would leave the
     // disk half written.
     let containers = containers_to_rebuild(&sidecar)?;
-    let needs = passphrase_needs(&containers, &req.passphrases)?;
-    if !needs.is_empty() {
-        return Err(OwnBackupError::RestoreIncompatible(describe_needs(&needs)));
+    let checked = check_passphrases(&containers, &req.passphrases)?;
+    if !checked.needs.is_empty() {
+        return Err(OwnBackupError::RestoreIncompatible(describe_needs(
+            &checked.needs,
+        )));
     }
 
     let mut session = open_disk(&req.target_device)?;
@@ -460,6 +343,7 @@ pub fn restore_disk(
         &sidecar,
         chain_key.as_ref(),
         &containers,
+        &checked.keys,
         session.device_mut(),
         &mut |offset, size| {
             ReadWindow::open(&target, offset, size).map(|w| Box::new(w) as Box<dyn RawVolume>)
@@ -530,12 +414,13 @@ fn write_disk_data<D: DiskIo>(
     sidecar: &Sidecar,
     chain_key: Option<&crate::seal::ChainKey>,
     containers: &[Container],
+    keys: &HashMap<u32, crate::luks::LuksParams>,
     io: &mut D,
     read_back: &mut dyn FnMut(u64, u64) -> Result<Box<dyn RawVolume>>,
     progress: &mut dyn FnMut(&DiskRestoreProgress) -> Result<()>,
 ) -> Result<u64> {
     use crate::sector_restore::{
-        container_fitting, write_container_blocks, ReencryptRequest, SectorRestoreOptions,
+        container_fitting, write_container_blocks_with, ReencryptRequest, SectorRestoreOptions,
     };
 
     let bs = sidecar.manifest.block_size as u64;
@@ -545,19 +430,53 @@ fn write_disk_data<D: DiskIo>(
         .disk_manifest
         .as_ref()
         .map_or(0, |dm| dm.layout.partitions.len());
-    let total = sidecar.checksums.len() as u64;
     let skip: Vec<(u64, u64)> = containers
         .iter()
         .map(|c| (c.offset, c.offset + c.size))
         .collect();
+    // One count for the whole run: the blocks written as they are, then each
+    // container's (a block across a slot's edge counts in both).
+    let block_of = |entry: &crate::sidecar::BlockChecksum| {
+        let offset = entry.block_number * bs;
+        (offset, bs.min(image_size.saturating_sub(offset)))
+    };
+    let plain_blocks = sidecar
+        .checksums
+        .iter()
+        .filter(|e| {
+            let (offset, len) = block_of(e);
+            !outside(offset, len, &skip).is_empty()
+        })
+        .count() as u64;
+    let container_blocks: u64 = containers
+        .iter()
+        .map(|c| {
+            sidecar
+                .checksums
+                .iter()
+                .filter(|e| {
+                    let (offset, len) = block_of(e);
+                    offset < c.offset + c.size && offset + len > c.offset
+                })
+                .count() as u64
+        })
+        .sum();
+    let total = plain_blocks + container_blocks;
 
     let mut image =
         ImageReadSource::open_with(&req.image_path, &sidecar.info.container, chain_key)?;
     let mut bytes = 0u64;
+    let mut done = 0u64;
     let mut buf = vec![0u8; bs as usize];
-    for (n, entry) in sidecar.checksums.iter().enumerate() {
-        let offset = entry.block_number * bs;
-        let len = bs.min(image_size - offset) as usize;
+    for entry in &sidecar.checksums {
+        let (offset, len) = block_of(entry);
+        // A block wholly inside a container is the container pass's alone:
+        // not read, decompressed and checked twice.
+        let pieces = outside(offset, len, &skip);
+        if pieces.is_empty() {
+            continue;
+        }
+        let len = len as usize;
         if offset + len as u64 > target_size {
             return Err(OwnBackupError::RestoreIncompatible(
                 tr!(
@@ -581,17 +500,18 @@ fn write_disk_data<D: DiskIo>(
             }
         }
         // The decrypted data of a container never lands in the clear.
-        for (at, piece) in outside(offset, len as u64, &skip) {
+        for (at, piece) in pieces {
             let from = (at - offset) as usize;
             io.write_at(at, &data[from..from + piece as usize])?;
             bytes += piece;
         }
+        done += 1;
         progress(&DiskRestoreProgress {
             phase: "partition".into(),
             partition_index: 0,
             partition_count: count,
             part_label: tr!("engine_win.label_partition_data").into_owned(),
-            blocks_done: n as u64 + 1,
+            blocks_done: done,
             blocks_total: total,
             bytes_written: bytes,
         })?;
@@ -611,16 +531,16 @@ fn write_disk_data<D: DiskIo>(
         })?;
         let creq = ReencryptRequest {
             header: &c.header,
-            passphrase,
+            passphrase: passphrase.as_str(),
         };
         let fit = container_fitting(sidecar, c.part_index, c.size, &creq)?;
         let label = format!("{}:{}:{}", req.target_device, c.offset, c.size);
         let part_label =
             tr!("restore_disk_linux.label_container", index = c.part_index).into_owned();
         let (offset, size) = (c.offset, c.size);
-        let base = bytes;
+        let (base, base_done) = (bytes, done);
         let mut window = DiskWindow::new(io, offset, size);
-        let summary = write_container_blocks(
+        let summary = write_container_blocks_with(
             &req.image_path,
             req.encryption.as_ref(),
             sidecar,
@@ -635,6 +555,8 @@ fn write_disk_data<D: DiskIo>(
                 disk_already_offline: true,
             },
             &creq,
+            // Unlocked already when the passphrase was checked.
+            keys.get(&c.part_index),
             &cancel,
             &mut |pr| {
                 progress(&DiskRestoreProgress {
@@ -642,13 +564,14 @@ fn write_disk_data<D: DiskIo>(
                     partition_index: n,
                     partition_count: count,
                     part_label: part_label.clone(),
-                    blocks_done: pr.blocks_done,
-                    blocks_total: pr.blocks_total,
+                    blocks_done: (base_done + pr.blocks_done).min(total),
+                    blocks_total: total,
                     bytes_written: base + pr.bytes_written,
                 })
             },
         )?;
         bytes += summary.bytes_restored;
+        done += summary.blocks_restored;
         info!(
             part = c.part_index,
             bytes = summary.bytes_restored,
@@ -838,22 +761,36 @@ mod tests {
             target_device: "/dev/mem".into(),
             verify_checksums: true,
             encryption: None,
-            passphrases: pass.map(|p| (2u32, p.to_string())).into_iter().collect(),
+            passphrases: pass
+                .map(|p| (2u32, Zeroizing::new(p.to_string())))
+                .into_iter()
+                .collect(),
         }
     }
 
-    /// Restore `image` onto a zeroed disk of `size` bytes.
-    fn restore_onto(image: &std::path::Path, size: u64, pass: &str) -> Vec<u8> {
+    /// Restore `image` onto a zeroed disk of `size` bytes; with `known`, the
+    /// keys the passphrase check recovered are handed on (no second unlock).
+    fn restore_onto(image: &std::path::Path, size: u64, pass: &str, known: bool) -> Vec<u8> {
         let sidecar = crate::engine_core::read::load_sidecar_of(image).unwrap();
         let containers = containers_to_rebuild(&sidecar).unwrap();
+        let req = request(image, Some(pass));
+        let keys = if known {
+            check_passphrases(&containers, &req.passphrases)
+                .unwrap()
+                .keys
+        } else {
+            HashMap::new()
+        };
         let disk = std::rc::Rc::new(std::cell::RefCell::new(vec![0u8; size as usize]));
         let mut io = Shared(disk.clone());
         let reader = disk.clone();
+        let mut seen: Vec<(u64, u64)> = Vec::new();
         write_disk_data(
-            &request(image, Some(pass)),
+            &req,
             &sidecar,
             None,
             &containers,
+            &keys,
             &mut io,
             &mut |offset, size| {
                 let b = reader.borrow();
@@ -861,9 +798,18 @@ mod tests {
                     b[offset as usize..(offset + size) as usize].to_vec(),
                 )))
             },
-            &mut |_| Ok(()),
+            &mut |p| {
+                seen.push((p.blocks_done, p.blocks_total));
+                Ok(())
+            },
         )
         .unwrap();
+        // One count across the plain blocks and the containers'.
+        assert!(seen
+            .windows(2)
+            .all(|w| w[0].0 <= w[1].0 && w[0].1 == w[1].1));
+        let (done, total) = *seen.last().unwrap();
+        assert!(done <= total && done + 1 >= total, "{done} of {total}");
         let out = disk.borrow().clone();
         out
     }
@@ -909,7 +855,10 @@ mod tests {
                 .is_empty()
         );
 
-        let out = restore_onto(&image, disk.layout.size_bytes, PASS);
+        // Unlocked again on the target, or with the key the check recovered:
+        // the same disk either way.
+        let out = restore_onto(&image, disk.layout.size_bytes, PASS, true);
+        assert!(out == restore_onto(&image, disk.layout.size_bytes, PASS, false));
         let part = &out[PART_AT as usize..PART_AT as usize + disk.container.len()];
         assert!(
             part == disk.container.as_slice(),
@@ -966,6 +915,18 @@ mod tests {
         h.header_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
         let e = containers_to_rebuild(&serpent).unwrap_err();
         assert!(e.to_string().contains("serpent"), "{e}");
+
+        // 4096-byte encryption sectors on a partition that starts between
+        // them: refused before anything is written.
+        let mut odd = load();
+        odd.info.luks_headers[0].sector_size = 4096;
+        assert!(containers_to_rebuild(&odd).is_ok());
+        odd.disk_manifest.as_mut().unwrap().layout.partitions[1].first_lba += 1;
+        let e = containers_to_rebuild(&odd).unwrap_err();
+        assert!(e.to_string().contains("4096"), "{e}");
+        // And the Windows question: which partitions are LUKS in the clear.
+        assert_eq!(crate::luks_rebuild::luks_in_clear(&load()), vec![2]);
+        assert_eq!(crate::luks_rebuild::luks_in_clear(&headless), vec![2]);
     }
 
     #[test]

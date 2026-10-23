@@ -255,7 +255,7 @@ pub async fn run(args: RestoreDiskArgs) -> own_backup_common::Result<()> {
                 println!("  Пароль раздела {} не подходит.", n.part_index);
             }
             let typed = crate::secret_prompt::ask_secret(&format!(
-                "  Пароль контейнера LUKS раздела {} (его спрашивает система при загрузке; не отображается): ",
+                "  Пароль контейнера LUKS раздела {} — тот, что был у него на момент копии (его спрашивала система при загрузке); не отображается: ",
                 n.part_index
             ))
             .map_err(|e| OwnBackupError::Config(e.to_string()))?;

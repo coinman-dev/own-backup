@@ -451,6 +451,26 @@
     "ru": "раздел-приёмник %{target} Б мал для контейнера: заголовок %{header} Б + данные %{payload} Б",
     "en": "the target partition (%{target} B) is too small for the container: header %{header} B + data %{payload} B"
   },
+  "restore_win.luks_rebuild_not_implemented": {
+    "ru": "В копии расшифрованы контейнеры LUKS (разделы %{parts}). Вернуть им шифрование при восстановлении диска умеет только Own Backup в Linux; в Windows это пока не сделано, а писать открытые данные туда, где система ждёт контейнер, восстановление не станет. Восстановите диск из Linux (загрузочный носитель Linux или установленная программа) или подключите копию, чтобы достать файлы.",
+    "en": "The copy holds LUKS containers decrypted (partitions %{parts}). Only Own Backup on Linux can put their encryption back when restoring the disk; on Windows this is not implemented yet, and the restore will not write plaintext where the system expects a container. Restore the disk from Linux (the Linux boot media or the installed program), or mount the copy to get the files."
+  },
+  "luks.header_too_large": {
+    "ru": "заголовок LUKS заявляет начало данных на %{offset} Б — больше любого правдоподобного заголовка (%{max} Б)",
+    "en": "the LUKS header puts the data at %{offset} B — beyond any plausible header (%{max} B)"
+  },
+  "engine.luks_header_torn": {
+    "ru": "Заголовок LUKS на разделе %{partition} не прочитался целым (%{why}) — вероятно, его как раз меняли (luksAddKey, luksChangeKey, токены). Повторите копию.",
+    "en": "The LUKS header on partition %{partition} did not read back whole (%{why}) — probably it was being changed just then (luksAddKey, luksChangeKey, tokens). Run the copy again."
+  },
+  "engine.luks_header_changed": {
+    "ru": "Заголовок LUKS на разделе %{partition} изменился во время копирования так, что сменился ключ данных или их расположение: копия не сохраняется. Повторите копию.",
+    "en": "The LUKS header on partition %{partition} changed during the copy in a way that changed the data key or its layout: the copy is not kept. Run the copy again."
+  },
+  "sector_restore.header_not_landed": {
+    "ru": "Заголовок LUKS, записанный на %{target}, читается обратно не таким, каким был записан: диск не сохранил запись.",
+    "en": "The LUKS header written to %{target} reads back differently from what was written: the disk did not keep the write."
+  },
   "restore_win.header_offset_mismatch": {
     "ru": "восстановленный заголовок сообщает смещение данных %{actual}, ожидалось %{expected}",
     "en": "the restored header reports data offset %{actual}, expected %{expected}"

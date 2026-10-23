@@ -660,11 +660,12 @@ pvluks_make_volumes() ( # esp luks-fs luks-pv images
     set -e
     mkfs.vfat -F 32 -n OBKLKESP "$1"
     local p
-    for p in "$2" "$3"; do
-        # LUKS2, argon2id with a stand-sized memory cost.
-        printf '%s' "$LUKS_PASS" | cryptsetup luksFormat -q --type luks2 --pbkdf argon2id \
-            --pbkdf-memory 65536 --iter-time 200 --key-file - "$p"
-    done
+    # LUKS2, argon2id with a stand-sized memory cost; the filesystem's
+    # container encrypts in 4096-byte sectors, the PV's in 512-byte ones.
+    printf '%s' "$LUKS_PASS" | cryptsetup luksFormat -q --type luks2 --pbkdf argon2id \
+        --pbkdf-memory 65536 --iter-time 200 --sector-size 4096 --key-file - "$2"
+    printf '%s' "$LUKS_PASS" | cryptsetup luksFormat -q --type luks2 --pbkdf argon2id \
+        --pbkdf-memory 65536 --iter-time 200 --sector-size 512 --key-file - "$3"
     printf '%s' "$LUKS_PASS" | cryptsetup open --key-file - "$2" "$LFS"
     printf '%s' "$LUKS_PASS" | cryptsetup open --key-file - "$3" "$LPV"
     mkfs.ext4 -q -L obk-lk-fs "/dev/mapper/$LFS"
@@ -885,6 +886,9 @@ pvluks_steps() {
     check lk-setup "$(verdict $rc)" \
         "GPT on ob-data-1: ESP $ESP1 (vfat, mounted) + LUKS2 $LK1 (ext4, mounted) + LUKS2 $LK2 (PV, VG $LVG: root ext4 + data xfs, mounted); images on $P2"
     [[ $rc -eq 0 ]] || return
+    cryptsetup luksDump "$LK1" | grep -Eq 'sector: *4096' &&
+        cryptsetup luksDump "$LK2" | grep -Eq 'sector: *512'
+    check lk-setup-sectors "$(verdict $?)" "the ext4 container encrypts in 4096-byte sectors, the PV's in 512-byte ones"
 
     pvluks_backup /mnt/obk-images/luksdisk.qcow2
     if [[ $? -eq 0 ]]; then

@@ -35,6 +35,7 @@ pub mod gpt_writer;
 pub mod identity_clash;
 pub mod iscsi;
 pub mod luks;
+pub mod luks_rebuild;
 pub mod mbr_writer;
 pub mod ntfs_map;
 pub mod ntfs_scan;
