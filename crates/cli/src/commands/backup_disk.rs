@@ -343,6 +343,9 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
     if let Some(kept) = &summary.excluded_entries_kept {
         println!("  Исключённые остались в каталоге копии: {kept}");
     }
+    if summary.resident_in_journal {
+        println!("  Журнал NTFS копии ($LogFile) не очищен: резидентное содержимое исключённых файлов может остаться в нём.");
+    }
     println!("  Заняло:      {:.1} с", summary.duration.as_secs_f64());
     if args.verify {
         println!();
@@ -588,6 +591,11 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
     }
     for note in &summary.notes {
         println!("Note: {note}");
+    }
+    if summary.resident_in_journal {
+        println!(
+            "Note: the copy's NTFS journal ($LogFile) is not cleared — resident content of excluded files may remain in it."
+        );
     }
     if summary.backup_kind != kind {
         println!(

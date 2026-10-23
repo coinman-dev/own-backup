@@ -94,6 +94,8 @@ pub struct DiskBackupSummary {
     /// a volume group with physical volumes outside it, for one. Shown in
     /// the run's summary.
     pub notes: Vec<String>,
+    /// As `VolumeBackupSummary::resident_in_journal`, for any partition.
+    pub resident_in_journal: bool,
 }
 
 /// Create a differencing CHILD target over `parent_path` for an incremental /

@@ -1104,6 +1104,7 @@ fn backup_disk_inner<P: DiskPlatform>(
         }
     }
     let mut excluded_entries_kept: Option<String> = None;
+    let mut resident_in_journal = false;
     if !removal.is_empty() {
         // Каждый проход удаления называет свой итог сам: удаление — пути,
         // зануление — куски, пере-хеширование — блоки. Ноль значит «итог
@@ -1134,6 +1135,11 @@ fn backup_disk_inner<P: DiskPlatform>(
             &mut checksums,
             &mut tick,
         )?;
+        if removed.is_some() {
+            resident_in_journal = removal.iter().any(|(_, _, paths)| {
+                super::platform::resident_content_may_remain_in_journal(platform, paths)
+            });
+        }
         // The pass logged why in detail; until this line that log was the
         // only place it was said, and the run showed a plain success.
         excluded_entries_kept = match removed {
@@ -1329,6 +1335,7 @@ fn backup_disk_inner<P: DiskPlatform>(
         excluded_entries_kept,
         key_store_excluded,
         notes,
+        resident_in_journal,
     })
 }
 

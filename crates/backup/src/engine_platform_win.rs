@@ -282,6 +282,12 @@ impl EnginePlatform for WinPlatform {
     fn entries_kept_reason(&self) -> String {
         entries_kept_reason()
     }
+
+    /// The driver replays and keeps its journal; see
+    /// `true_removal_win::clear_resident`.
+    fn journal_keeps_cleared_content(&self) -> bool {
+        true
+    }
 }
 
 impl DiskPlatform for WinPlatform {

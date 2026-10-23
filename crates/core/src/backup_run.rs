@@ -309,6 +309,9 @@ impl VolumeTotals {
         if summary.key_store_excluded {
             note_key_store_excluded(run);
         }
+        if summary.resident_in_journal {
+            note_resident_in_journal(run);
+        }
         // One line per volume that went unwalked; a run over three
         // volumes must not report the reason of whichever came last.
         if let Some(why) = summary.file_scan_skipped {
@@ -425,6 +428,15 @@ fn note_key_store_excluded(run: &mut JobRun) {
     }
 }
 
+/// Resident content of excluded files may remain in the copy's NTFS journal
+/// — erased incompletely, and said so (CLAUDE.md). Once per run.
+fn note_resident_in_journal(run: &mut JobRun) {
+    let note = own_backup_common::tr!("lib.resident_in_journal").into_owned();
+    if !run.notes.contains(&note) {
+        run.notes.push(note);
+    }
+}
+
 /// Record a finished whole-disk copy in its run; returns the image the
 /// engine published. `disk_token` is the disk's file-name token
 /// ([`crate::DiskSourceSpec::file_tag`]).
@@ -457,6 +469,9 @@ pub(crate) fn record_disk(
         note_key_store_excluded(run);
     }
     run.notes.extend(summary.notes);
+    if summary.resident_in_journal {
+        note_resident_in_journal(run);
+    }
     run.duration_secs = summary.duration.as_secs_f64();
     // Record what was ACTUALLY produced (the engine may have fallen back
     // to a full when the parent chain was unusable) so the next run plans

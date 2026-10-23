@@ -152,6 +152,10 @@ pub struct VolumeBackupSummary {
     /// (decision 6/E4) — said in the summary, since it is not one of the
     /// job's own rules.
     pub key_store_excluded: bool,
+    /// The removal pass cleared resident content of excluded files through a
+    /// driver that keeps its journal: the old bytes may remain in the image's
+    /// `$LogFile` (see `EnginePlatform::journal_keeps_cleared_content`).
+    pub resident_in_journal: bool,
 }
 
 /// Back up a volume into a fresh image, on `platform`.
@@ -533,12 +537,15 @@ fn backup_volume_inner<P: EnginePlatform>(
     }
 
     let mut excluded_entries_kept: Option<String> = entries_kept;
+    let mut resident_in_journal = false;
     if !removal_paths.is_empty() {
         let tick = &mut |n, total| phase_tick("exclusions", n, total);
         let removed =
             platform.remove_from_image(&image, span, &removal_paths, &mut checksums, tick)?;
         if let Some(failed) = removed {
             used_blocks = checksums.len() as u64;
+            resident_in_journal =
+                super::platform::resident_content_may_remain_in_journal(platform, &removal_paths);
             if failed > 0 {
                 excluded_entries_kept =
                     Some(tr!("engine_win.entries_partly_kept", count = failed).into_owned());
@@ -739,6 +746,7 @@ fn backup_volume_inner<P: EnginePlatform>(
         file_scan_skipped,
         excluded_entries_kept,
         key_store_excluded,
+        resident_in_journal,
     })
 }
 

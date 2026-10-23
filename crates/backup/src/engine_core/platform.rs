@@ -284,6 +284,25 @@ pub(crate) trait EnginePlatform {
     /// The result screen's sentence for catalog entries the removal pass did
     /// not delete.
     fn entries_kept_reason(&self) -> String;
+
+    /// Whether the removal pass leaves the image's NTFS journal (`$LogFile`)
+    /// as the driver kept it — with the old bytes of the records the pass
+    /// cleared (`ExcludedPath::whole_records`). The Windows driver does;
+    /// ntfs-3g empties the journal when it mounts the volume.
+    fn journal_keeps_cleared_content(&self) -> bool {
+        false
+    }
+}
+
+/// Whether a removal pass that ran over `paths` on `platform` leaves resident
+/// content of excluded files in the image's journal: it cleared records
+/// (`whole_records`) through a driver that keeps its journal. Said on the
+/// result screen — incomplete erasure is reported, never implied complete.
+pub(crate) fn resident_content_may_remain_in_journal<P: EnginePlatform>(
+    platform: &P,
+    paths: &[ExcludedPath],
+) -> bool {
+    platform.journal_keeps_cleared_content() && paths.iter().any(|p| !p.whole_records.is_empty())
 }
 
 /// A whole disk, as a job names it: Windows by number, Linux by its stable

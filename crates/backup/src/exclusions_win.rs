@@ -21,9 +21,11 @@ use windows::Win32::Foundation::{
     CloseHandle, ERROR_HANDLE_EOF, ERROR_MORE_DATA, ERROR_NO_MORE_FILES, HANDLE,
 };
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FileFullDirectoryInfo, FileStreamInfo, GetFileInformationByHandleEx,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileW, FileFullDirectoryInfo, FileIdBothDirectoryInfo, FileStreamInfo, FindClose,
+    FindFirstFileNameW, FindNextFileNameW, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::Ioctl::{FSCTL_GET_RETRIEVAL_POINTERS, STARTING_VCN_INPUT_BUFFER};
 use windows::Win32::System::IO::DeviceIoControl;
@@ -39,12 +41,7 @@ const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 /// Right needed to enumerate a directory's contents.
 const FILE_LIST_DIRECTORY: u32 = 0x0001;
 
-/// One directory entry from [`list_dir_backup`].
-pub struct DirEntryInfo {
-    pub name: String,
-    pub size: u64,
-    pub attributes: u32,
-}
+pub use crate::exclusions::DirEntryInfo;
 
 /// List a directory using `FILE_FLAG_BACKUP_SEMANTICS` + a directory handle, so
 /// ACL-restricted folders (System Volume Information, protected app data) can be
@@ -52,6 +49,16 @@ pub struct DirEntryInfo {
 /// which opens without backup semantics and is denied. Sizes/attributes come
 /// straight from the enumeration, so no per-file open is needed here.
 pub fn list_dir_backup(dir: &std::path::Path) -> Result<Vec<DirEntryInfo>> {
+    list_dir(dir, false)
+}
+
+/// [`list_dir_backup`] with each entry's file id (`FileIdBothDirectoryInfo`):
+/// on NTFS the MFT record number of the entry, known without opening it.
+pub fn list_dir_backup_ids(dir: &std::path::Path) -> Result<Vec<DirEntryInfo>> {
+    list_dir(dir, true)
+}
+
+fn list_dir(dir: &std::path::Path, with_ids: bool) -> Result<Vec<DirEntryInfo>> {
     let wide = to_wide(&dir.to_string_lossy());
     // SAFETY: `wide` outlives the call.
     let handle = unsafe {
@@ -67,6 +74,11 @@ pub fn list_dir_backup(dir: &std::path::Path) -> Result<Vec<DirEntryInfo>> {
     }
     .map_err(|e| own_backup_common::OwnBackupError::Device(format!("open dir: {e}")))?;
     let handle = FileHandle(handle);
+    let class = if with_ids {
+        FileIdBothDirectoryInfo
+    } else {
+        FileFullDirectoryInfo
+    };
 
     let mut out = Vec::new();
     let mut buf = vec![0u8; 64 * 1024];
@@ -75,7 +87,7 @@ pub fn list_dir_backup(dir: &std::path::Path) -> Result<Vec<DirEntryInfo>> {
         let call = unsafe {
             GetFileInformationByHandleEx(
                 handle.0,
-                FileFullDirectoryInfo,
+                class,
                 buf.as_mut_ptr() as *mut _,
                 buf.len() as u32,
             )
@@ -89,41 +101,7 @@ pub fn list_dir_backup(dir: &std::path::Path) -> Result<Vec<DirEntryInfo>> {
                 )))
             }
         }
-        // Parse the FILE_FULL_DIR_INFO chain in `buf`. Field offsets (x64):
-        //   NextEntryOffset@0, EndOfFile@40, FileAttributes@56,
-        //   FileNameLength(bytes)@60, FileName@68.
-        let mut off = 0usize;
-        loop {
-            let rec = &buf[off..];
-            if rec.len() < 68 {
-                break;
-            }
-            let next = u32::from_le_bytes(rec[0..4].try_into().unwrap()) as usize;
-            let size = i64::from_le_bytes(rec[40..48].try_into().unwrap()).max(0) as u64;
-            let attrs = u32::from_le_bytes(rec[56..60].try_into().unwrap());
-            let name_len = u32::from_le_bytes(rec[60..64].try_into().unwrap()) as usize;
-            if 68 + name_len <= rec.len() {
-                let name: Vec<u16> = rec[68..68 + name_len]
-                    .chunks_exact(2)
-                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                    .collect();
-                let name = String::from_utf16_lossy(&name);
-                if name != "." && name != ".." {
-                    out.push(DirEntryInfo {
-                        name,
-                        size,
-                        attributes: attrs,
-                    });
-                }
-            }
-            if next == 0 {
-                break;
-            }
-            off += next;
-            if off >= buf.len() {
-                break;
-            }
-        }
+        out.extend(crate::exclusions::parse_dir_info(&buf, with_ids));
     }
     Ok(out)
 }
@@ -228,8 +206,31 @@ fn collect_excluded_ranges_inner(
                     stack.push((child, rel_child, matched));
                 }
             } else if matched && !is_reparse {
-                match file_extent_ranges(&child, cluster_size, &mut scan.ranges) {
+                // A hard link with a name outside the rules: the data is that
+                // name's too, and stays (the entry itself still goes).
+                match name_outside_rules(&child, &parsed) {
+                    Ok(false) => {}
+                    Ok(true) => {
+                        trace!(file = %child.display(),
+                               "Exclusion scan: a hard link of it stays — its data stays in the backup");
+                        scan.categories.add(&rel_child, info.size);
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!(file = %child.display(), error = %e,
+                              "Exclusion scan: cannot list the names of a hard-linked file — its data stays in the backup");
+                        scan.categories.add(&rel_child, info.size);
+                        continue;
+                    }
+                }
+                // Collected apart and merged only when complete: half a
+                // file's extents would cut it, not exclude it.
+                let mut own = ByteRanges::new();
+                match file_extent_ranges(&child, cluster_size, &mut own) {
                     Ok(bytes) => {
+                        for (s, e) in own.iter() {
+                            scan.ranges.add(s, e);
+                        }
                         // Its named streams (Zone.Identifier, any ADS) are its
                         // content too, in clusters of their own.
                         let bytes =
@@ -271,6 +272,75 @@ fn collect_excluded_ranges_inner(
         "Exclusion scan complete"
     );
     Ok(scan)
+}
+
+/// Whether the file at `path` has a hard link outside the rules: more than
+/// one link, and not every name Windows lists for it (`FindFirstFileNameW`)
+/// excluded. An 8.3 short name is no link of its own and is not counted.
+fn name_outside_rules(path: &Path, parsed: &[crate::exclusions::ExclusionPattern]) -> Result<bool> {
+    let wide = to_wide(&path.to_string_lossy());
+    // SAFETY: `wide` outlives the call.
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            FILE_READ_ATTRIBUTES.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+    }
+    .map_err(|e| own_backup_common::OwnBackupError::Device(format!("CreateFileW failed: {e}")))?;
+    let handle = FileHandle(handle);
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `info` is a live, writable struct of the expected type.
+    unsafe { GetFileInformationByHandle(handle.0, &mut info) }.map_err(|e| {
+        own_backup_common::OwnBackupError::Device(format!("GetFileInformationByHandle: {e}"))
+    })?;
+    if info.nNumberOfLinks <= 1 {
+        return Ok(false);
+    }
+    drop(handle);
+    let names = hard_link_names(path)?;
+    Ok(!crate::exclusions::every_name_excluded(&names, parsed))
+}
+
+/// Every name of the file at `path`, volume-relative (`\dir\file`).
+fn hard_link_names(path: &Path) -> Result<Vec<String>> {
+    use windows::core::PWSTR;
+    let wide = to_wide(&path.to_string_lossy());
+    let mut buf = vec![0u16; 32_768];
+    let mut names = Vec::new();
+    let mut len = buf.len() as u32;
+    // SAFETY: `wide` outlives the call; `buf` holds `len` characters.
+    let find =
+        unsafe { FindFirstFileNameW(PCWSTR(wide.as_ptr()), 0, &mut len, PWSTR(buf.as_mut_ptr())) }
+            .map_err(|e| {
+                own_backup_common::OwnBackupError::Device(format!("FindFirstFileNameW: {e}"))
+            })?;
+    let take = |buf: &[u16], len: u32| {
+        let n = (len as usize).min(buf.len());
+        let end = buf[..n].iter().position(|&c| c == 0).unwrap_or(n);
+        String::from_utf16_lossy(&buf[..end])
+    };
+    names.push(take(&buf, len));
+    let result = loop {
+        len = buf.len() as u32;
+        // SAFETY: as above; `find` is the open enumeration.
+        match unsafe { FindNextFileNameW(find, &mut len, PWSTR(buf.as_mut_ptr())) } {
+            Ok(()) => names.push(take(&buf, len)),
+            Err(e) if e.code() == ERROR_HANDLE_EOF.to_hresult() => break Ok(names),
+            Err(e) => {
+                break Err(own_backup_common::OwnBackupError::Device(format!(
+                    "FindNextFileNameW: {e}"
+                )))
+            }
+        }
+    };
+    // SAFETY: the enumeration handle is ours, closed once.
+    let _ = unsafe { FindClose(find) };
+    result
 }
 
 /// The named data streams of the open file `handle`: their path suffixes

@@ -1292,6 +1292,159 @@ mod tests {
         user_unmount(&mut m);
     }
 
+    /// A hard link that stays, whose name lives in an extension record: a
+    /// file with many names spills them out of its base record, and the kept
+    /// one was the last. The scan reads every name through the attribute
+    /// list, sees the kept one and leaves the data alone; the deletion takes
+    /// the excluded names only. (A reader that stayed in the base record saw
+    /// two excluded names, called the file whole and cut the kept file's data
+    /// out of the copy.)
+    #[test]
+    fn a_kept_hard_link_in_an_extension_record_keeps_the_data() {
+        use std::os::unix::fs::FileExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let vol = tmp.path().join("v.ntfs");
+        let mnt = tmp.path().join("m");
+        let Some(mut m) = user_ntfs_volume(&vol, &mnt, 32 << 20) else {
+            return;
+        };
+        std::fs::create_dir(mnt.join("cache")).unwrap();
+        std::fs::create_dir(mnt.join("keep")).unwrap();
+        let content = vec![0x3C; 20_000];
+        std::fs::write(mnt.join("cache/h.bin"), &content).unwrap();
+        for i in 0..12 {
+            let long = format!("L{i:02}{}", "x".repeat(200));
+            std::fs::hard_link(mnt.join("cache/h.bin"), mnt.join("cache").join(long)).unwrap();
+        }
+        std::fs::hard_link(mnt.join("cache/h.bin"), mnt.join("keep/kept.bin")).unwrap();
+        user_unmount(&mut m);
+        // The kept name really is outside the base record.
+        if let Ok(out) = Command::new("ntfsinfo")
+            .args(["-F", "/keep/kept.bin"])
+            .arg(&vol)
+            .output()
+        {
+            let dump = String::from_utf8_lossy(&out.stdout);
+            let at = dump.find("'kept.bin'").expect("kept.bin in the dump");
+            let header = dump[..at]
+                .rfind("Dumping attribute $FILE_NAME")
+                .map(|h| &dump[h..at])
+                .unwrap();
+            let base = dump
+                .find("Dumping attribute $STANDARD_INFORMATION")
+                .map(|h| &dump[h..])
+                .and_then(|d| d.lines().next())
+                .unwrap();
+            let record = |line: &str| line.rsplit("from mft record ").next().map(str::to_owned);
+            assert_ne!(
+                record(header.lines().next().unwrap()),
+                record(base),
+                "the kept name is not in an extension record:\n{dump}"
+            );
+        }
+
+        let scan = crate::ntfs_scan::scan_mft(
+            &mut std::fs::File::open(&vol).unwrap(),
+            &["cache".to_string()],
+        )
+        .unwrap();
+        assert!(
+            scan.kept
+                .iter()
+                .any(|(_, r)| *r == crate::ntfs_scan::KeptReason::OtherNameKept),
+            "{:?}",
+            scan.kept
+        );
+        // What the copy does with the ranges, then the deletion.
+        {
+            let f = std::fs::OpenOptions::new().write(true).open(&vol).unwrap();
+            for (s, e) in scan.ranges.iter() {
+                f.write_all_at(&vec![0u8; (e - s) as usize], s).unwrap();
+            }
+        }
+        let paths: Vec<ExcludedPath> = scan
+            .paths
+            .iter()
+            .map(|p| ExcludedPath {
+                rel: p.rel.clone(),
+                is_dir: p.is_dir,
+                is_reparse: p.is_reparse,
+                whole_records: p.whole_records.clone(),
+            })
+            .collect();
+        let mut m = Ntfs3gMount::mount(&ntfs3g().unwrap(), vol.to_str().unwrap(), &mnt).unwrap();
+        let (_, failed) = delete_paths(&mnt, &paths, &mut |_| {});
+        assert_eq!(failed, 0);
+        user_unmount(&mut m);
+        check_volume(vol.to_str().unwrap()).unwrap();
+        let mut m = Ntfs3gMount::mount(&ntfs3g().unwrap(), vol.to_str().unwrap(), &mnt).unwrap();
+        assert!(!mnt.join("cache").exists());
+        assert!(
+            std::fs::read(mnt.join("keep/kept.bin")).unwrap() == content,
+            "the kept name lost its data"
+        );
+        user_unmount(&mut m);
+    }
+
+    /// ntfs-3g empties `$LogFile` when it mounts a volume read-write, so the
+    /// journal of an image the Linux pass went through holds none of what
+    /// was there before — the old values of the records it cleared included.
+    /// (Windows replays and keeps its journal; see `true_removal_win`.)
+    #[test]
+    fn ntfs3g_empties_the_journal_on_a_read_write_mount() {
+        use std::os::unix::fs::FileExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let vol = tmp.path().join("v.ntfs");
+        let mnt = tmp.path().join("m");
+        let Some(mut m) = user_ntfs_volume(&vol, &mnt, 16 << 20) else {
+            return;
+        };
+        user_unmount(&mut m);
+        // Where $LogFile (record 2) lives.
+        let (at, len) = {
+            let mut f = std::fs::File::open(&vol).unwrap();
+            let ntfs = ntfs::Ntfs::new(&mut f).unwrap();
+            let log = ntfs.file(&mut f, 2).unwrap();
+            let mut found = None;
+            for attr in log.attributes_raw() {
+                let attr = attr.unwrap();
+                if attr.ty().ok() == Some(ntfs::NtfsAttributeType::Data) {
+                    if let Ok(ntfs::attribute_value::NtfsAttributeValue::NonResident(v)) =
+                        attr.value(&mut f)
+                    {
+                        let run = v.data_runs().next().unwrap().unwrap();
+                        found = Some((
+                            run.data_position().value().unwrap().get(),
+                            run.allocated_size(),
+                        ));
+                    }
+                }
+            }
+            found.expect("$LogFile's data")
+        };
+        // Old journal content past the restart pages.
+        let secret = b"JOURNAL-SECRET-0123456789".repeat(1000);
+        assert!(len > 65_536 + secret.len() as u64);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&vol)
+            .unwrap()
+            .write_all_at(&secret, at + 65_536)
+            .unwrap();
+        let mut m = Ntfs3gMount::mount(&ntfs3g().unwrap(), vol.to_str().unwrap(), &mnt).unwrap();
+        std::fs::write(mnt.join("x.txt"), b"x").unwrap();
+        user_unmount(&mut m);
+        let mut log = vec![0u8; len as usize];
+        std::fs::File::open(&vol)
+            .unwrap()
+            .read_exact_at(&mut log, at)
+            .unwrap();
+        assert!(
+            !log.windows(14).any(|w| w == b"JOURNAL-SECRET"),
+            "the journal kept its old content"
+        );
+    }
+
     /// Not NTFS: ntfs-3g refuses, nothing is written, and the error says so.
     #[test]
     fn a_volume_ntfs3g_refuses_is_an_error_and_unchanged() {

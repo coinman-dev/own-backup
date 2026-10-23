@@ -327,6 +327,81 @@ pub fn recreated_by_windows(rel: &str) -> bool {
 /// left out of the copy.
 pub const NTFS_RESIDENT_MAX: u64 = 4096;
 
+/// One directory entry, as a Windows directory listing gives it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirEntryInfo {
+    pub name: String,
+    pub size: u64,
+    pub attributes: u32,
+    /// The file reference (on NTFS: MFT record number in the low 48 bits,
+    /// sequence number above) — only from a listing that asks for it.
+    pub file_id: Option<u64>,
+}
+
+/// The entries of a `FILE_FULL_DIR_INFO` chain (`with_ids == false`) or a
+/// `FILE_ID_BOTH_DIR_INFO` chain (`with_ids`) — what
+/// `GetFileInformationByHandleEx` fills in for `FileFullDirectoryInfo` and
+/// `FileIdBothDirectoryInfo`, without `.` and `..`. A truncated entry ends
+/// the list.
+///
+/// Layouts (x64): `NextEntryOffset`@0, `EndOfFile`@40, `FileAttributes`@56,
+/// `FileNameLength`@60 (bytes); the name at 68 — or, with ids, the short name
+/// in between, `FileId`@96 and the name at 104.
+pub fn parse_dir_info(buf: &[u8], with_ids: bool) -> Vec<DirEntryInfo> {
+    let name_at = if with_ids { 104 } else { 68 };
+    let mut out = Vec::new();
+    let mut off = 0usize;
+    while let Some(rec) = buf.get(off..).filter(|r| r.len() >= name_at) {
+        let next = u32::from_le_bytes(rec[0..4].try_into().unwrap()) as usize;
+        let size = i64::from_le_bytes(rec[40..48].try_into().unwrap()).max(0) as u64;
+        let attributes = u32::from_le_bytes(rec[56..60].try_into().unwrap());
+        let name_len = u32::from_le_bytes(rec[60..64].try_into().unwrap()) as usize;
+        let file_id = with_ids.then(|| u64::from_le_bytes(rec[96..104].try_into().unwrap()));
+        let Some(raw) = rec.get(name_at..name_at + name_len) else {
+            break;
+        };
+        let units: Vec<u16> = raw
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
+            .collect();
+        let name = String::from_utf16_lossy(&units);
+        if name != "." && name != ".." {
+            out.push(DirEntryInfo {
+                name,
+                size,
+                attributes,
+                file_id,
+            });
+        }
+        if next == 0 {
+            break;
+        }
+        off += next;
+    }
+    out
+}
+
+/// Whether every one of a file's `names` — volume-relative, `\`-separated,
+/// as `FindFirstFileNameW` lists the hard links of a file — falls under the
+/// rules: by its own path, or by a directory above it. A file with a name
+/// outside them is data a kept name still needs.
+pub fn every_name_excluded(names: &[String], parsed: &[ExclusionPattern]) -> bool {
+    !names.is_empty()
+        && names.iter().all(|name| {
+            let comps: Vec<String> = name
+                .split(['\\', '/'])
+                .filter(|c| !c.is_empty())
+                .map(str::to_lowercase)
+                .collect();
+            (1..=comps.len()).any(|k| {
+                let prefix = &comps[..k];
+                parsed.iter().any(|p| p.matches(&prefix[k - 1], prefix))
+            })
+        })
+}
+
 /// The named data streams in a `FILE_STREAM_INFO` chain (what
 /// `GetFileInformationByHandleEx(FileStreamInfo)` fills in): their full names
 /// as a path suffix (`:Zone.Identifier:$DATA`) and sizes. The unnamed stream
@@ -767,6 +842,82 @@ mod tests {
             buf.resize(buf.len().div_ceil(8) * 8, 0);
         }
         buf
+    }
+
+    fn dir_info(entries: &[(&str, i64, u32, u64)], with_ids: bool) -> Vec<u8> {
+        let name_at = if with_ids { 104 } else { 68 };
+        let mut buf = Vec::new();
+        for (i, (name, size, attrs, id)) in entries.iter().enumerate() {
+            let name: Vec<u8> = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
+            let len = (name_at + name.len()).div_ceil(8) * 8;
+            let mut rec = vec![0u8; len];
+            let next = if i + 1 == entries.len() {
+                0
+            } else {
+                len as u32
+            };
+            rec[0..4].copy_from_slice(&next.to_le_bytes());
+            rec[40..48].copy_from_slice(&size.to_le_bytes());
+            rec[56..60].copy_from_slice(&attrs.to_le_bytes());
+            rec[60..64].copy_from_slice(&(name.len() as u32).to_le_bytes());
+            if with_ids {
+                // A short name in between, which must not be read as the name.
+                rec[68] = 24;
+                rec[70..94].copy_from_slice(&[0x41; 24]);
+                rec[96..104].copy_from_slice(&id.to_le_bytes());
+            }
+            rec[name_at..name_at + name.len()].copy_from_slice(&name);
+            buf.extend_from_slice(&rec);
+        }
+        buf
+    }
+
+    /// Both listing layouts: the plain one the walks use, and the one with
+    /// file ids the deletion pass reads record numbers from.
+    #[test]
+    fn directory_listings_are_parsed_with_and_without_ids() {
+        let entries = [
+            (".", 0, 0x10, 5),
+            ("Длинное имя.tmp", 300, 0x20, (7u64 << 48) | 42),
+            ("sub", 0, 0x10, 77),
+        ];
+        for with_ids in [false, true] {
+            let got = parse_dir_info(&dir_info(&entries, with_ids), with_ids);
+            let want: Vec<DirEntryInfo> = entries[1..]
+                .iter()
+                .map(|(n, s, a, id)| DirEntryInfo {
+                    name: n.to_string(),
+                    size: *s as u64,
+                    attributes: *a,
+                    file_id: with_ids.then_some(*id),
+                })
+                .collect();
+            assert_eq!(got, want, "with ids: {with_ids}");
+        }
+        let buf = dir_info(&entries, true);
+        assert_eq!(parse_dir_info(&buf[..buf.len() - 4], true).len(), 1);
+    }
+
+    /// A hard link keeps the data when one of its names stays: the walk sees
+    /// the names Windows lists for the file, each judged by its own path or a
+    /// directory above it.
+    #[test]
+    fn every_name_of_a_hard_link_must_be_excluded() {
+        let parsed = parse_patterns(&["Temp".to_string(), "*.tmp".to_string()]);
+        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(every_name_excluded(
+            &names(&["\\Temp\\a.bin", "\\Users\\u\\b.tmp"]),
+            &parsed
+        ));
+        assert!(!every_name_excluded(
+            &names(&["\\Temp\\a.tmp", "\\Users\\u\\keep.bin"]),
+            &parsed
+        ));
+        assert!(every_name_excluded(
+            &names(&["\\x\\Temp\\deep\\c.bin"]),
+            &parsed
+        ));
+        assert!(!every_name_excluded(&[], &parsed), "no names known");
     }
 
     /// What `FileStreamInfo` reports, named data streams only: the unnamed

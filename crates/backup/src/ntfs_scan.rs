@@ -67,6 +67,10 @@ const ROOT_RECORD: u64 = 5;
 /// исключать нельзя ни при каком совпадении маски: без них тома не будет.
 const FIRST_USER_RECORD: u64 = 16;
 
+/// `$Extend` — the directory of the volume's later metadata files, whose
+/// children have ordinary record numbers.
+const EXTEND_RECORD: u64 = 11;
+
 /// Сколько файлов «данные остаются в копии» перечислять в debug поимённо.
 /// Остальные попадают только в сводку по причинам. 2026-10-07: 16 400 строк
 /// из 16 890 в логе службы были именно такими (распакованные PyInstaller
@@ -84,6 +88,9 @@ pub struct MftScan {
     pub bytes_excluded: u64,
     /// Записей MFT прочитано (живых и мёртвых).
     pub records_scanned: u64,
+    /// Записей MFT, до которых не дотянуться: `$MFT` со списком атрибутов
+    /// (см. [`mft_reachable_records`]). Их файлы правилами не проверены.
+    pub records_unreachable: u64,
     /// Совпавшие — для прохода удаления записей из каталога образа. Как и у
     /// обхода, записываются в ВЕРХНЕЙ точке совпадения: совпавший каталог —
     /// одна запись, всё внутри едет вместе с ним. Иначе список раздувается
@@ -172,7 +179,7 @@ struct Entry {
     /// содержимое файла, как безымянный, и уходят вместе с ним — до
     /// 2026-10-23 скан их пропускал, и кластеры потоков исключённого файла
     /// ехали в копию.
-    named: Vec<(String, Stream)>,
+    named: Vec<(Vec<u8>, Stream)>,
     /// Разбор атрибутов упёрся в ошибку — доверять экстентам нельзя.
     broken: bool,
     /// Every `$FILE_NAME` of the record was read: those of its base record
@@ -213,12 +220,12 @@ impl Stream {
     }
 }
 
-/// Поток `name` записи (пустое имя — безымянный), созданный при первой
-/// встрече.
+/// Поток `name` записи (сырые байты UTF-16LE имени; пустое — безымянный),
+/// созданный при первой встрече.
 fn stream_mut<'a>(
     data: &'a mut Stream,
-    named: &'a mut Vec<(String, Stream)>,
-    name: &str,
+    named: &'a mut Vec<(Vec<u8>, Stream)>,
+    name: &[u8],
 ) -> &'a mut Stream {
     if name.is_empty() {
         return data;
@@ -226,7 +233,7 @@ fn stream_mut<'a>(
     let i = match named.iter().position(|(n, _)| n == name) {
         Some(i) => i,
         None => {
-            named.push((name.to_string(), Stream::default()));
+            named.push((name.to_vec(), Stream::default()));
             named.len() - 1
         }
     };
@@ -282,22 +289,29 @@ where
     }
 }
 
-/// Имя атрибута `$DATA` (пустое у безымянного потока).
-fn attr_name(attr: &ntfs::NtfsAttribute<'_, '_>) -> Option<String> {
+/// Имя атрибута `$DATA` (пустое у безымянного потока) — сырые байты
+/// UTF-16LE: два имени, которые `to_string_lossy` свёл бы в одно (непарные
+/// суррогаты), остаются двумя потоками.
+fn attr_name(attr: &ntfs::NtfsAttribute<'_, '_>) -> Option<Vec<u8>> {
     if attr.name_length() == 0 {
-        return Some(String::new());
+        return Some(Vec::new());
     }
-    attr.name().ok().map(|n| n.to_string_lossy())
+    attr.name().ok().map(|n| n.0.to_vec())
 }
 
 /// Offset of the base file reference in an MFT record header: zero in a base
 /// record, the record it belongs to in an extension record.
 const BASE_REFERENCE_OFFSET: u64 = 0x20;
 
-/// The record number of the base record `file` extends, or 0 when `file` is a
-/// base record itself. Read from the record header directly: the `ntfs` crate
-/// keeps the field private. `None` when it cannot be read.
-fn base_record_of<T>(fs: &mut T, file: &ntfs::NtfsFile<'_>) -> Option<u64>
+/// The low 48 bits of a file reference are the record number, the high 16
+/// its sequence number.
+const RECORD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+
+/// The file reference (record number and sequence number) of the base record
+/// `file` extends, or 0 when `file` is a base record itself. Read from the
+/// record header directly: the `ntfs` crate keeps the field private. `None`
+/// when it cannot be read.
+fn base_reference_of<T>(fs: &mut T, file: &ntfs::NtfsFile<'_>) -> Option<u64>
 where
     T: Read + Seek,
 {
@@ -305,8 +319,7 @@ where
     let mut raw = [0u8; 8];
     fs.seek(SeekFrom::Start(at + BASE_REFERENCE_OFFSET)).ok()?;
     fs.read_exact(&mut raw).ok()?;
-    // The low 48 bits are the record number, the high 16 its sequence number.
-    Some(u64::from_le_bytes(raw) & 0x0000_FFFF_FFFF_FFFF)
+    Some(u64::from_le_bytes(raw))
 }
 
 /// Пройти MFT тома `fs` и собрать всё, что подпадает под `patterns`.
@@ -385,14 +398,31 @@ where
     let mft_len = data_len(&mft, fs).ok_or_else(|| bad(tr!("ntfs_scan.mft_no_data")))?;
     let total = mft_len / record_size;
     debug!(total, record_size, cluster_size, "MFT scan: начинаю");
+    // A `$MFT` so fragmented that its own run list spilled into extension
+    // records: the `ntfs` crate finds a record only through the first `$DATA`
+    // of record 0, and the records past it cannot be read. Their files are
+    // not seen by the rules at all — counted and said, not skipped in silence.
+    let reachable = match mft_reachable_records(&mft, fs, record_size) {
+        Some(limit) if limit < total => {
+            scan.records_unreachable = total - limit;
+            warn!(
+                reachable = limit,
+                unreachable = total - limit,
+                "MFT scan: $MFT has an attribute list — the records past its first run \
+                 list cannot be read, and their files are NOT checked by the rules"
+            );
+            limit
+        }
+        _ => total,
+    };
 
     // --- проход 1: разобрать записи -----------------------------------------
     let mut entries: HashMap<u64, Entry> = HashMap::with_capacity(total as usize / 2);
-    for n in 0..total {
+    for n in 0..reachable {
         scan.records_scanned += 1;
         // Раз в 4096 записей: на миллионе это 260 сообщений, а не миллион.
         if scan.records_scanned % 4096 == 0 {
-            tick(scan.records_scanned, total)?;
+            tick(scan.records_scanned, reachable)?;
         }
         let file = match ntfs.file(fs, n) {
             Ok(f) => f,
@@ -405,8 +435,8 @@ where
         // Extension-запись — продолжение чужой базовой: её атрибуты (имена,
         // части потоков) читаются через ATTRIBUTE_LIST базовой записи ниже.
         // Сама по себе она не файл: имя в ней — имя базовой записи.
-        match base_record_of(fs, &file) {
-            Some(0) => {}
+        match base_reference_of(fs, &file) {
+            Some(r) if r & RECORD_MASK == 0 => {}
             Some(_) => continue,
             None => {
                 warn!(record = n, "MFT scan: заголовок записи не прочитан");
@@ -492,7 +522,7 @@ fn decide(
     // Каталоги, попавшие под правила: всё под ними исключается вместе с ними.
     let mut excluded_dirs: std::collections::HashSet<u64> = std::collections::HashSet::new();
     for (&n, e) in entries {
-        if !e.is_dir || n < FIRST_USER_RECORD {
+        if !e.is_dir || is_system(n, entries) {
             continue;
         }
         if let Some(p) = path_of(n, &entries, &mut path_cache, 0) {
@@ -508,7 +538,7 @@ fn decide(
     let mut path_index: HashMap<u64, usize> = HashMap::new();
     let mut whole: Vec<(u64, u64)> = Vec::new();
     for (&n, e) in entries {
-        if n < FIRST_USER_RECORD {
+        if is_system(n, entries) {
             continue; // служебные файлы тома неприкосновенны
         }
         let Some(p) = path_of(n, &entries, &mut path_cache, 0) else {
@@ -669,6 +699,38 @@ fn decide(
     }
 }
 
+/// A file of the volume itself: one of the first records ($MFT, $LogFile,
+/// $Bitmap…), or anything in the `$Extend` tree — `$UsnJrnl` and its `$J`
+/// stream, `$Quota`, `$ObjId`, `$Reparse`, `$RmMetadata` with `$Repair` and
+/// `$TxfLog`. Those have record numbers like any user file, and a rule that
+/// matched one (`$Extend\$UsnJrnl`, `**\$J`…) would cut the volume's own
+/// metadata out of the copy. Decided by the parent chain of every name, not by
+/// the path text.
+fn is_system(n: u64, entries: &HashMap<u64, Entry>) -> bool {
+    if n < FIRST_USER_RECORD {
+        return true;
+    }
+    let Some(e) = entries.get(&n) else {
+        return false;
+    };
+    e.names.iter().any(|name| {
+        let mut parent = name.parent;
+        for _ in 0..128 {
+            if parent == EXTEND_RECORD {
+                return true;
+            }
+            if parent == ROOT_RECORD {
+                return false;
+            }
+            match entries.get(&parent).and_then(|p| p.names.first()) {
+                Some(up) if up.parent != parent => parent = up.parent,
+                _ => return false,
+            }
+        }
+        false
+    })
+}
+
 fn under_excluded(
     n: u64,
     entries: &HashMap<u64, Entry>,
@@ -772,6 +834,38 @@ fn subtract_named(e: &Entry, ranges: &mut ByteRanges) -> u64 {
     bytes
 }
 
+/// How many records of the MFT the `ntfs` crate can reach, when `$MFT`
+/// itself has an attribute list: `Ntfs::file` seeks through the first `$DATA`
+/// of record 0 only, so the records past that attribute's run list cannot be
+/// read. `None` when there is no attribute list (every record is reachable).
+fn mft_reachable_records<T>(mft: &ntfs::NtfsFile<'_>, fs: &mut T, record_size: u64) -> Option<u64>
+where
+    T: Read + Seek,
+{
+    let mut has_list = false;
+    let mut first_data = None;
+    for attr in mft.attributes_raw() {
+        let attr = attr.ok()?;
+        match attr.ty() {
+            Ok(NtfsAttributeType::AttributeList) => has_list = true,
+            Ok(NtfsAttributeType::Data) if attr.name_length() == 0 && first_data.is_none() => {
+                first_data = Some(attr)
+            }
+            _ => {}
+        }
+    }
+    if !has_list {
+        return None;
+    }
+    let mut covered = 0u64;
+    if let Some(Ok(NtfsAttributeValue::NonResident(v))) = first_data.map(|a| a.value(fs)) {
+        for run in v.data_runs().flatten() {
+            covered += run.allocated_size();
+        }
+    }
+    Some(covered / record_size.max(1))
+}
+
 fn round_up(v: u64, to: u64) -> u64 {
     if to == 0 {
         return v;
@@ -829,7 +923,7 @@ where
 {
     let mut names = Vec::new();
     let mut data = Stream::default();
-    let mut named: Vec<(String, Stream)> = Vec::new();
+    let mut named: Vec<(Vec<u8>, Stream)> = Vec::new();
     let mut broken = false;
     let mut is_reparse = false;
 
@@ -916,7 +1010,7 @@ fn push_name(names: &mut Vec<Name>, fname: &NtfsFileName) {
 struct ListParts<'a> {
     names: &'a mut Vec<Name>,
     data: &'a mut Stream,
-    named: &'a mut Vec<(String, Stream)>,
+    named: &'a mut Vec<(Vec<u8>, Stream)>,
     is_reparse: &'a mut bool,
 }
 
@@ -973,8 +1067,16 @@ where
             .to_file(ntfs, fs)
             .map_err(|e| bad(tr!("ntfs_scan.extension_record", error = e)))?;
         // Чужая запись под видом нашей extension-записи — цепочка битая, и
-        // экстентам из неё верить нельзя.
-        if base_record_of(fs, &part_file) != Some(base) {
+        // экстентам из неё верить нельзя. Своя — это живая запись того
+        // поколения, на которое ссылается список, и ссылается она на это
+        // поколение базовой (номер И sequence), а не на прежнего владельца
+        // того же номера.
+        let wanted = base | (file.sequence_number() as u64) << 48;
+        let entry_ref = entry.base_file_reference();
+        if base_reference_of(fs, &part_file) != Some(wanted)
+            || !part_file.flags().contains(ntfs::NtfsFileFlags::IN_USE)
+            || entry_ref.sequence_number() != part_file.sequence_number()
+        {
             return Err(bad(tr!(
                 "ntfs_scan.extension_foreign",
                 record = part_file.file_record_number(),
@@ -991,7 +1093,7 @@ where
             push_name(parts.names, &fname);
             continue;
         }
-        let name = entry.name().to_string_lossy();
+        let name = entry.name().0.to_vec();
         let s = stream_mut(parts.data, parts.named, &name);
         if !take_data_part(&part_attr, fs, s, part_file.file_record_number()) {
             return Err(bad(tr!("ntfs_scan.extension_runs_unparsed")));
@@ -1523,6 +1625,47 @@ mod rules_tests {
         assert!(scan.kept.is_empty());
     }
 
+    /// The `$Extend` tree is the volume's own, whatever its record numbers
+    /// and whatever a rule says: `$UsnJrnl` with its `$J` stream, and
+    /// `$RmMetadata\$Repair` deeper down. Cutting `$J` out of the copy would
+    /// leave the image a journal of zeros.
+    #[test]
+    fn the_extend_tree_is_never_excluded() {
+        let mut usn = file(EXTEND_RECORD, "$UsnJrnl", 0, 0);
+        usn.data = Stream::default();
+        usn.named.push(("$J".into(), stream(100, 8)));
+        usn.named.push(("$Max".into(), resident(32)));
+        let mut repair = file(40, "$Repair", 200, 2);
+        repair.named.push(("$Config".into(), resident(8)));
+        let scan = run(
+            &[
+                (EXTEND_RECORD, dir(ROOT_RECORD, "$Extend")),
+                (40, dir(EXTEND_RECORD, "$RmMetadata")),
+                (41, dir(40, "$TxfLog")),
+                (42, file(41, "$TxfLog.blf", 300, 1)),
+                (38, usn),
+                (39, repair),
+                (50, file(ROOT_RECORD, "user.tmp", 400, 1)),
+            ],
+            &[
+                "$Extend",
+                "$UsnJrnl",
+                "$RmMetadata",
+                "**\\$TxfLog\\**",
+                "*.tmp",
+                "$*",
+            ],
+        );
+        let rels: Vec<&str> = scan.paths.iter().map(|p| p.rel.as_str()).collect();
+        assert_eq!(rels, vec!["user.tmp"], "only the user's file");
+        assert_eq!(scan.files_excluded, 1);
+        assert!(covered(&scan, 400, 1));
+        for (lcn, n) in [(100, 8), (200, 2), (300, 1)] {
+            assert!(!covered(&scan, lcn, n), "metadata at {lcn} subtracted");
+        }
+        assert_eq!(scan.bytes_excluded, 4096);
+    }
+
     /// Кириллица и пробелы в пути: матчер работает по компонентам, регистр не
     /// важен. На живом томе такие пути были у каждого второго файла.
     #[test]
@@ -1966,67 +2109,74 @@ mod volume_tests {
     }
 
     /// An attribute list that points into a record which does not extend
-    /// this file is a broken chain: nothing of the file is subtracted.
+    /// this file — another record's extension, or an extension of an older
+    /// generation of this record number (its sequence number differs) — is
+    /// a broken chain: nothing of the file is subtracted.
     #[test]
     fn a_foreign_extension_record_voids_the_file() {
-        let Some(v) = populated() else {
-            return;
-        };
-        // The record holding `bigx`, from ntfsinfo's dump of the file.
-        let info = v.info("many.tmp");
-        let lines: Vec<&str> = info.lines().collect();
-        let i = lines
-            .iter()
-            .position(|l| l.contains("'bigx'"))
-            .expect("bigx in the dump");
-        let header = lines[..i]
-            .iter()
-            .rev()
-            .find(|l| l.starts_with("Dumping attribute $DATA"))
-            .unwrap();
-        let record: u64 = header
-            .rsplit("from mft record ")
-            .next()
-            .and_then(|t| t.split_whitespace().next())
-            .and_then(|n| n.parse().ok())
-            .expect("record number");
-        // Point that record's base reference at the root directory.
-        let at = {
-            let mut f = std::fs::File::open(&v.image).unwrap();
-            let ntfs = Ntfs::new(&mut f).unwrap();
-            let file = ntfs.file(&mut f, record).unwrap();
-            assert_ne!(
-                base_record_of(&mut f, &file),
-                Some(0),
-                "an extension record"
-            );
-            file.position().value().unwrap().get()
-        };
-        {
-            use std::os::unix::fs::FileExt;
-            let f = std::fs::OpenOptions::new()
-                .write(true)
-                .open(&v.image)
+        for stale_generation in [false, true] {
+            let Some(v) = populated() else {
+                return;
+            };
+            // The record holding `bigx`, from ntfsinfo's dump of the file.
+            let info = v.info("many.tmp");
+            let lines: Vec<&str> = info.lines().collect();
+            let i = lines
+                .iter()
+                .position(|l| l.contains("'bigx'"))
+                .expect("bigx in the dump");
+            let header = lines[..i]
+                .iter()
+                .rev()
+                .find(|l| l.starts_with("Dumping attribute $DATA"))
                 .unwrap();
-            f.write_all_at(&ROOT_RECORD.to_le_bytes(), at + BASE_REFERENCE_OFFSET)
-                .unwrap();
-        }
-        let scan = v.scan();
-        assert!(
-            scan.kept
-                .contains(&("many.tmp".to_string(), KeptReason::Unreadable)),
-            "{:?}",
-            scan.kept
-        );
-        for (b, at) in v.fills() {
-            if b == 0xC1 || b == 0xC2 {
-                assert!(
-                    !subtracted(&scan, at),
-                    "{b:#x} of a broken record subtracted"
-                );
+            let record: u64 = header
+                .rsplit("from mft record ")
+                .next()
+                .and_then(|t| t.split_whitespace().next())
+                .and_then(|n| n.parse().ok())
+                .expect("record number");
+            let (at, reference) = {
+                let mut f = std::fs::File::open(&v.image).unwrap();
+                let ntfs = Ntfs::new(&mut f).unwrap();
+                let file = ntfs.file(&mut f, record).unwrap();
+                let reference = base_reference_of(&mut f, &file).unwrap();
+                assert_ne!(reference & RECORD_MASK, 0, "an extension record");
+                (file.position().value().unwrap().get(), reference)
+            };
+            // Point that record's base reference at the root directory, or at
+            // the same base record one generation earlier.
+            let forged = if stale_generation {
+                reference.wrapping_sub(1 << 48)
+            } else {
+                ROOT_RECORD
+            };
+            {
+                use std::os::unix::fs::FileExt;
+                let f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&v.image)
+                    .unwrap();
+                f.write_all_at(&forged.to_le_bytes(), at + BASE_REFERENCE_OFFSET)
+                    .unwrap();
             }
+            let scan = v.scan();
+            assert!(
+                scan.kept
+                    .contains(&("many.tmp".to_string(), KeptReason::Unreadable)),
+                "stale generation {stale_generation}: {:?}",
+                scan.kept
+            );
+            for (b, at) in v.fills() {
+                if b == 0xC1 || b == 0xC2 {
+                    assert!(
+                        !subtracted(&scan, at),
+                        "{b:#x} of a broken record subtracted"
+                    );
+                }
+            }
+            let many = scan.paths.iter().find(|p| p.rel == "many.tmp").unwrap();
+            assert!(many.whole_records.is_empty(), "its names may be incomplete");
         }
-        let many = scan.paths.iter().find(|p| p.rel == "many.tmp").unwrap();
-        assert!(many.whole_records.is_empty(), "its names may be incomplete");
     }
 }
