@@ -105,6 +105,72 @@ fn parse_fs(fstype: Option<&str>) -> (FileSystem, bool) {
     }
 }
 
+/// True if `token` is a BitLocker encryption date (`DD.MM.YYYY`, `M/D/YYYY`,
+/// `YYYY-MM-DD`).
+fn is_bitlocker_date(token: &str) -> bool {
+    let Some(sep) = ['.', '/', '-'].into_iter().find(|&c| token.contains(c)) else {
+        return false;
+    };
+    let parts: Vec<&str> = token.split(sep).collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| (1..=4).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_digit()))
+        && parts.iter().any(|p| p.len() == 4)
+}
+
+/// Extract the volume label from a BitLocker FVE description string.
+///
+/// The real NTFS label inside a locked BitLocker volume is encrypted, so
+/// `libblkid` reports the unencrypted FVE description datum as `LABEL`. Windows
+/// formats that description as `<ComputerName> [Drive:] <VolumeLabel> <Date>`
+/// (e.g. `MODULATOR WorkDisk-2 30.06.2025`); only `<VolumeLabel>` is the
+/// volume's name.
+fn clean_bitlocker_label(raw: &str) -> String {
+    let s = raw.trim();
+    let Some((_, rest)) = s.split_once(char::is_whitespace) else {
+        return s.to_string();
+    };
+    let mut rest = rest.trim();
+    if is_bitlocker_date(rest) {
+        return String::new();
+    }
+    if let Some((before_date, last)) = rest.rsplit_once(char::is_whitespace) {
+        if is_bitlocker_date(last.trim()) {
+            rest = before_date.trim();
+        }
+    }
+    let is_drive_letter =
+        |t: &str| t.len() == 2 && t.as_bytes()[0].is_ascii_alphabetic() && t.as_bytes()[1] == b':';
+    if is_drive_letter(rest) {
+        return String::new();
+    }
+    if let Some((first, after_letter)) = rest.split_once(char::is_whitespace) {
+        if is_drive_letter(first) {
+            rest = after_letter.trim();
+        }
+    }
+    rest.to_string()
+}
+
+/// Volume label of an `lsblk` partition node. For BitLocker containers, prefer
+/// the inner label of an already-opened child mapping if present, otherwise
+/// strip the machine name and encryption date from the FVE description.
+fn partition_label(v: &Value, fstype: Option<&str>) -> String {
+    let raw = jstr(v, "label").unwrap_or_default();
+    if fstype.is_some_and(|f| f.eq_ignore_ascii_case("bitlocker")) {
+        if let Some(inner) = v
+            .get("children")
+            .and_then(Value::as_array)
+            .and_then(|kids| kids.iter().find_map(|c| jstr(c, "label")))
+        {
+            return inner;
+        }
+        return clean_bitlocker_label(&raw);
+    }
+    raw
+}
+
 const GPT_TYPE_EFI_SYSTEM: &str = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B";
 
 /// Build a `PartitionInfo` from an `lsblk` node (a `part`, a whole-disk
@@ -113,7 +179,8 @@ const GPT_TYPE_EFI_SYSTEM: &str = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B";
 /// replaces it.
 fn build_partition(v: &Value, index: u32) -> PartitionInfo {
     let path = kernel_path(v);
-    let (filesystem, is_encrypted) = parse_fs(jstr(v, "fstype").as_deref());
+    let fstype = jstr(v, "fstype");
+    let (filesystem, is_encrypted) = parse_fs(fstype.as_deref());
     let gpt_type_guid = jstr(v, "parttype").unwrap_or_default().to_uppercase();
     let mounts = mount_points(v);
     let mounted_at = |m: &str| mounts.iter().any(|x| x == m);
@@ -121,6 +188,7 @@ fn build_partition(v: &Value, index: u32) -> PartitionInfo {
         || mounted_at("/boot")
         || mounted_at("/boot/efi");
     let is_system = mounted_at("/");
+    let volume_label = partition_label(v, fstype.as_deref());
 
     PartitionInfo {
         index: ju64(v, "partn").map(|n| n as u32).unwrap_or(index),
@@ -132,7 +200,7 @@ fn build_partition(v: &Value, index: u32) -> PartitionInfo {
         filesystem,
         volume_letter: None,
         volume_device: path.clone(),
-        volume_label: jstr(v, "label").unwrap_or_default(),
+        volume_label,
         fs_uuid: jstr(v, "uuid").unwrap_or_default(),
         is_system,
         is_boot,
@@ -753,7 +821,35 @@ mod tests {
         assert!(luks.is_system && luks.is_encrypted);
         let bitlocker = nvme.partitions.iter().find(|p| p.index == 4).unwrap();
         assert!(!bitlocker.is_system);
+        assert_eq!(bitlocker.volume_label, "WorkDisk-2");
         assert!(nvme.partitions.iter().filter(|p| p.is_system).count() == 1);
+    }
+
+    #[test]
+    fn bitlocker_description_is_stripped_to_volume_label() {
+        assert_eq!(
+            clean_bitlocker_label("MODULATOR WorkDisk-2 30.06.2025"),
+            "WorkDisk-2"
+        );
+        assert_eq!(
+            clean_bitlocker_label("MODULATOR SSD-1Tb 29.06.2025"),
+            "SSD-1Tb"
+        );
+        assert_eq!(
+            clean_bitlocker_label("MODULATOR WorkDisk-1 29.06.2025"),
+            "WorkDisk-1"
+        );
+        assert_eq!(
+            clean_bitlocker_label("DESKTOP-849SVK9 Windows 16.09.2026"),
+            "Windows"
+        );
+        assert_eq!(clean_bitlocker_label("MODULATOR WorkDisk-2"), "WorkDisk-2");
+        assert_eq!(
+            clean_bitlocker_label("MODULATOR D: WorkDisk-2 30.06.2025"),
+            "WorkDisk-2"
+        );
+        assert_eq!(clean_bitlocker_label("MODULATOR 30.06.2025"), "");
+        assert_eq!(clean_bitlocker_label("MODULATOR D: 30.06.2025"), "");
     }
 
     #[test]
