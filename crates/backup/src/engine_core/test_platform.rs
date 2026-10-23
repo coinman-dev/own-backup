@@ -422,26 +422,25 @@ mod tests {
 
     const MIB: u64 = 1024 * 1024;
 
-    /// An `$MFT` scan that could not reach every record, on a platform with
-    /// no directory walk: the partial scan stands and the result screen is
-    /// told; a complete scan says nothing.
+    /// An `$MFT` scan that could not reach every record is not traded for a
+    /// directory walk on any platform — the walk would lose what only the
+    /// scan knows (kept content, records to clear, the key-directory proof),
+    /// and an encrypted volume has none: the partial scan is used as it is,
+    /// and the result screen is told how many records it could not read. A
+    /// complete scan says nothing.
     #[test]
-    fn an_mft_scan_short_of_records_is_said() {
-        let p = TestPlatform::new();
+    fn an_mft_scan_short_of_records_is_said_not_replaced() {
         let partial = crate::ntfs_scan::MftScan {
             records_unreachable: 7,
             files_excluded: 3,
             ..Default::default()
         };
-        let (scan, note) = crate::engine_core::platform::settle_unreachable(&p, Ok(partial));
-        assert_eq!(scan.unwrap().files_excluded, 3, "the partial scan stands");
-        let note = note.expect("a note");
+        let note = crate::engine_core::platform::unreachable_note(&partial).expect("a note");
         assert!(note.contains('7'), "{note}");
-        let (scan, note) = crate::engine_core::platform::settle_unreachable(
-            &p,
-            Ok(crate::ntfs_scan::MftScan::default()),
+        assert_eq!(
+            crate::engine_core::platform::unreachable_note(&crate::ntfs_scan::MftScan::default()),
+            None
         );
-        assert!(scan.is_ok() && note.is_none());
     }
 
     fn pattern(len: usize) -> Vec<u8> {

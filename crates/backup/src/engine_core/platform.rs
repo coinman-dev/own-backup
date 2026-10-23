@@ -292,43 +292,18 @@ pub(crate) trait EnginePlatform {
     fn journal_keeps_cleared_content(&self) -> bool {
         false
     }
-
-    /// Whether [`EnginePlatform::walk_exclusions`] can walk a volume's
-    /// directories — the fallback for an `$MFT` scan that cannot see every
-    /// file.
-    fn has_directory_walk(&self) -> bool {
-        false
-    }
 }
 
-/// An `$MFT` scan that could not reach every record
-/// (`MftScan::records_unreachable`): where the platform can walk the
-/// directories instead, an error, and the caller falls back to the walk;
-/// elsewhere the partial scan stands, with the note for the result screen
-/// that some files were not checked by the rules.
-pub(crate) fn settle_unreachable<P: EnginePlatform>(
-    platform: &P,
-    scan: Result<crate::ntfs_scan::MftScan>,
-) -> (Result<crate::ntfs_scan::MftScan>, Option<String>) {
-    match scan {
-        Ok(m) if m.records_unreachable > 0 => {
-            let count = m.records_unreachable;
-            if platform.has_directory_walk() {
-                (
-                    Err(own_backup_common::OwnBackupError::Device(
-                        tr!("ntfs_scan.mft_unreachable", count = count).into_owned(),
-                    )),
-                    None,
-                )
-            } else {
-                (
-                    Ok(m),
-                    Some(tr!("engine.mft_records_unreachable", count = count).into_owned()),
-                )
-            }
-        }
-        other => (other, None),
-    }
+/// The note for the result screen when an `$MFT` scan could not reach every
+/// record (`MftScan::records_unreachable`): files the rules never saw. The
+/// partial scan stands on every platform — falling back to a directory walk
+/// would lose what only the scan knows (the content it leaves behind, the
+/// records whose resident content is cleared, the key-directory proof), and
+/// an encrypted volume has no walk to fall back to at all.
+pub(crate) fn unreachable_note(scan: &crate::ntfs_scan::MftScan) -> Option<String> {
+    let count = scan.records_unreachable;
+
+    (count > 0).then(|| tr!("engine.mft_records_unreachable", count = count).into_owned())
 }
 
 /// Whether a removal pass that ran over `paths` on `platform` leaves resident

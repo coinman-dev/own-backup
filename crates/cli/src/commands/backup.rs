@@ -385,6 +385,9 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
     if let Some(why) = &summary.excluded_entries_kept {
         println!("Excluded names kept: {why}");
     }
+    for note in &summary.notes {
+        println!("Note: {note}");
+    }
     if summary.resident_in_journal {
         println!(
             "Note: the copy's NTFS journal ($LogFile) is not cleared — resident content of excluded files may remain in it."

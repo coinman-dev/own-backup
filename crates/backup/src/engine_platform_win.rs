@@ -288,10 +288,6 @@ impl EnginePlatform for WinPlatform {
     fn journal_keeps_cleared_content(&self) -> bool {
         true
     }
-
-    fn has_directory_walk(&self) -> bool {
-        true
-    }
 }
 
 impl DiskPlatform for WinPlatform {

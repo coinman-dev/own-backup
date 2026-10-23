@@ -323,8 +323,8 @@ impl VolumeTotals {
             }
         }
         // One line per volume that went unwalked; a run over three
-
         // volumes must not report the reason of whichever came last.
+
         if let Some(why) = summary.file_scan_skipped {
             let line = if self.volume_count > 1 {
                 format!("{device}: {why}")

@@ -151,10 +151,11 @@ pub(crate) fn prepare_partition_map<P: EnginePlatform>(
                         tr!("engine_win.source_not_frozen").into_owned(),
                     ))
                 };
-                // Records out of reach: the walk sees every file, where there
-                // is one; elsewhere the partial scan stands, said so.
-                let (fast, unreachable) = super::platform::settle_unreachable(platform, fast);
-                out.notes.extend(unreachable);
+                // Records out of reach: the partial scan stands, said so
+                // (`platform::unreachable_note`).
+                if let Ok(mft) = &fast {
+                    out.notes.extend(super::platform::unreachable_note(mft));
+                }
                 match fast {
                     Ok(mft) => {
                         out.excluded_files = mft.files_excluded;

@@ -318,10 +318,6 @@
     "ru": "запись 0 MFT: %{error}",
     "en": "MFT record 0: %{error}"
   },
-  "ntfs_scan.mft_unreachable": {
-    "ru": "%{count} записей $MFT за её списком атрибутов не прочитать",
-    "en": "%{count} $MFT records past its attribute list cannot be read"
-  },
   "ntfs_scan.mft_no_data": {
     "ru": "у $MFT нет потока данных",
     "en": "$MFT has no data stream"

@@ -115,17 +115,8 @@ pub(crate) fn prepare_encrypted_partition_map(
         out.excluded_bytes = scan.bytes_excluded;
         out.categories = Some(scan.categories);
         out.left = super::volume_exclusions::ntfs_left(&scan.kept);
-        // No walk of a partition Windows does not mount: what the scan could
-        // not reach is said.
-        if scan.records_unreachable > 0 {
-            out.notes.push(
-                tr!(
-                    "engine.mft_records_unreachable",
-                    count = scan.records_unreachable
-                )
-                .into_owned(),
-            );
-        }
+        // What the scan could not reach is said (`platform::unreachable_note`).
+        out.notes.extend(super::platform::unreachable_note(&scan));
 
         out.removal_paths = scan
             .paths

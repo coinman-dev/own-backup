@@ -607,10 +607,10 @@ fn backup_disk_inner<P: DiskPlatform>(
         });
     }
 
+    // What the partitions' exclusions had to say comes first.
+    let mut notes: Vec<String> = std::mem::take(&mut prepare_notes);
     // A volume group with physical volumes this copy does not hold: restored
     // alone, it is incomplete. Said in the run's summary, not just the log.
-    let mut notes: Vec<String> = std::mem::take(&mut prepare_notes);
-
     {
         // Every PV in the copy, those copied as plain partitions included (a
         // PV no active volume uses is idle and read as it is).

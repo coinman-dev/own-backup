@@ -176,10 +176,11 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
                     tr!("engine_win.source_not_frozen").into_owned(),
                 ))
             };
-            // Records out of reach: the walk sees every file, where there
-            // is one; elsewhere the partial scan stands, said so.
-            let (fast, unreachable) = super::platform::settle_unreachable(platform, fast);
-            notes.extend(unreachable);
+            // Records out of reach: the partial scan stands, said so
+            // (`platform::unreachable_note`).
+            if let Ok(mft) = &fast {
+                notes.extend(super::platform::unreachable_note(mft));
+            }
             match fast {
                 Ok(mft) => {
                     excluded_files = mft.files_excluded;
@@ -294,10 +295,9 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
                 };
                 crate::ntfs_scan::scan_mft_with(&mut buffered, &patterns, &mut report)
             };
-            // Out of reach on Windows: the pass inside the image walks it.
-            let (scan_result, unreachable) =
-                super::platform::settle_unreachable(platform, scan_result);
-            notes.extend(unreachable);
+            if let Ok(scan) = &scan_result {
+                notes.extend(super::platform::unreachable_note(scan));
+            }
             match scan_result {
                 Ok(scan) => {
                     excluded_files = scan.files_excluded;

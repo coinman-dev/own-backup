@@ -483,32 +483,8 @@ fn decide(
     let mut path_cache: HashMap<u64, Option<Vec<String>>> = HashMap::new();
     path_cache.insert(ROOT_RECORD, Some(Vec::new()));
 
-    // Путь записи: имена родителей до корня. `None` — цепочка оборвалась.
-    fn path_of(
-        n: u64,
-        entries: &HashMap<u64, Entry>,
-        cache: &mut HashMap<u64, Option<Vec<String>>>,
-        depth: u32,
-    ) -> Option<Vec<String>> {
-        if let Some(hit) = cache.get(&n) {
-            return hit.clone();
-        }
-        if depth > 128 {
-            return None;
-        }
-        let entry = entries.get(&n)?;
-        let name = entry.names.first()?;
-        if name.parent == n {
-            return None;
-        }
-        let up = path_of(name.parent, entries, cache, depth + 1);
-        let out = up.map(|mut v| {
-            v.push(name.name.clone());
-            v
-        });
-        cache.insert(n, out.clone());
-        out
-    }
+    // Пути записей — `path_from_root`: обрыв и цикл запоминаются, слишком
+    // глубокая цепочка — нет.
 
     let matches = |comps: &[String]| -> bool {
         let Some(last) = comps.last() else {
@@ -525,7 +501,7 @@ fn decide(
         if !e.is_dir || is_system(n, entries) {
             continue;
         }
-        if let Some(p) = path_of(n, &entries, &mut path_cache, 0) {
+        if let Some(p) = path_from_root(n, entries, &mut path_cache) {
             if !p.is_empty() && matches(&p) {
                 excluded_dirs.insert(n);
             }
@@ -541,7 +517,7 @@ fn decide(
         if is_system(n, entries) {
             continue; // служебные файлы тома неприкосновенны
         }
-        let Some(p) = path_of(n, &entries, &mut path_cache, 0) else {
+        let Some(p) = path_from_root(n, entries, &mut path_cache) else {
             unresolved += 1;
             continue;
         };
@@ -549,7 +525,7 @@ fn decide(
             continue;
         }
         // Совпало само имя — или что-то выше по дереву.
-        let inherited = under_excluded(n, &entries, &excluded_dirs);
+        let inherited = under_excluded(n, entries, &excluded_dirs);
         let hit = matches(&p) || inherited;
         if !hit {
             if !e.is_dir {
@@ -787,7 +763,7 @@ fn all_names_excluded(
     excluded: &std::collections::HashSet<u64>,
 ) -> bool {
     for name in &e.names {
-        let Some(mut path) = path_of_pub(name.parent, entries, cache, 0) else {
+        let Some(mut path) = path_from_root(name.parent, entries, cache) else {
             return false;
         };
         path.push(name.name.clone());
@@ -803,35 +779,71 @@ fn all_names_excluded(
     true
 }
 
-/// The path of record `n` from the root, along its first name; `None` when
-/// the chain breaks, loops or runs deeper than any real tree (128) — a
-/// corrupt volume must not overflow the service's stack.
-fn path_of_pub(
+/// The path of record `n` from the root, along its first name. `None` when
+/// the chain breaks or loops — remembered in `cache` — or runs deeper than
+/// any real tree (128 levels), which is not remembered: a record met halfway
+/// down such a chain still gets its own path. A corrupt volume must not
+/// overflow the service's stack, nor cut off the records near its root.
+fn path_from_root(
     n: u64,
     entries: &HashMap<u64, Entry>,
     cache: &mut HashMap<u64, Option<Vec<String>>>,
-    depth: u32,
 ) -> Option<Vec<String>> {
+    let mut visiting = std::collections::HashSet::new();
+    match walk_path(n, entries, cache, &mut visiting, 0) {
+        Walk::Path(p) => Some(p),
+        Walk::Broken | Walk::TooDeep => None,
+    }
+}
+
+/// What following the parents of a record came to.
+enum Walk {
+    Path(Vec<String>),
+    /// The chain breaks (an orphan, a nameless record) or loops.
+    Broken,
+    /// Deeper than [`walk_path`] goes — says nothing about the record.
+    TooDeep,
+}
+
+fn walk_path(
+    n: u64,
+    entries: &HashMap<u64, Entry>,
+    cache: &mut HashMap<u64, Option<Vec<String>>>,
+    visiting: &mut std::collections::HashSet<u64>,
+    depth: u32,
+) -> Walk {
     if n == ROOT_RECORD {
-        return Some(Vec::new());
+        return Walk::Path(Vec::new());
     }
     if let Some(hit) = cache.get(&n) {
-        return hit.clone();
+        return hit.clone().map_or(Walk::Broken, Walk::Path);
     }
     if depth > 128 {
-        return None;
+        return Walk::TooDeep;
     }
-    let entry = entries.get(&n)?;
-    let name = entry.names.first()?;
-    if name.parent == n {
-        return None;
+    if !visiting.insert(n) {
+        return Walk::Broken; // a loop of parents
     }
-    let up = path_of_pub(name.parent, entries, cache, depth + 1);
-    let out = up.map(|mut v| {
-        v.push(name.name.clone());
-        v
-    });
-    cache.insert(n, out.clone());
+    let Some(name) = entries.get(&n).and_then(|e| e.names.first()) else {
+        cache.insert(n, None);
+        return Walk::Broken;
+    };
+    let out = match walk_path(name.parent, entries, cache, visiting, depth + 1) {
+        Walk::Path(mut v) => {
+            v.push(name.name.clone());
+            Walk::Path(v)
+        }
+        other => other,
+    };
+    match &out {
+        Walk::Path(p) => {
+            cache.insert(n, Some(p.clone()));
+        }
+        Walk::Broken => {
+            cache.insert(n, None);
+        }
+        Walk::TooDeep => {}
+    }
     out
 }
 
@@ -1706,6 +1718,29 @@ mod rules_tests {
         let scan = run(&map.into_iter().collect::<Vec<_>>(), &["*.tmp"]);
         let rels: Vec<&str> = scan.paths.iter().map(|p| p.rel.as_str()).collect();
         assert_eq!(rels, vec!["plain.tmp"]);
+    }
+
+    /// A chain of parents deeper than any real tree gives no path for the
+    /// record at its bottom — and that is not remembered for the records on
+    /// the way, which are near enough to the root to have one. A loop is
+    /// remembered as a loop.
+    #[test]
+    fn a_too_deep_chain_does_not_cut_off_the_records_above() {
+        let mut map: HashMap<u64, Entry> = HashMap::new();
+        let mut parent = ROOT_RECORD;
+        for i in 0..200u64 {
+            map.insert(1000 + i, dir(parent, &format!("d{i:03}")));
+            parent = 1000 + i;
+        }
+        map.insert(60, dir(61, "x"));
+        map.insert(61, dir(60, "y"));
+        let mut cache = HashMap::new();
+        assert_eq!(path_from_root(1199, &map, &mut cache), None, "too deep");
+        let near = path_from_root(1010, &map, &mut cache).expect("near the root");
+        assert_eq!(near.len(), 11);
+        assert_eq!(near.last().map(String::as_str), Some("d010"));
+        assert_eq!(path_from_root(60, &map, &mut cache), None, "a loop");
+        assert_eq!(cache.get(&61), Some(&None), "remembered as broken");
     }
 
     /// A hard link is judged by every directory above each of its names, not
