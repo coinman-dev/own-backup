@@ -11,7 +11,10 @@
 # Stage `pv` (whole disk with an LVM physical volume in use): data disk 1 gets
 # a GPT with an ESP (vfat, mounted) and a PV whose VG holds `root` (ext4,
 # mounted, written with fsync throughout the copy), `data` (xfs, mounted), an
-# inactive `cold` (ext4) and free extents in the middle and at the end. The
+# inactive `cold` (ext4) and free extents in the middle and at the end; the
+# VG also lies on a second PV partition of the same disk, with `data` grown
+# onto it and `tail` (ext4, active, unmounted) only there — the two PVs are
+# held at one point in time, the second through the first one's snapshots. The
 # disk is copied with `backup-disk` — every LV through its own device-mapper
 # snapshot, all in one suspend, no `lvcreate` (the VG's seqno must not move) —
 # verified, then an increment; the increment is restored onto data disk 3,
@@ -116,7 +119,7 @@ guest_cleanup() {
     fi
     for m in /mnt/obk-rst-thin /mnt/obk-rst-classic /mnt/obk-idle /mnt/obk-busy \
         /mnt/obk-thin /mnt/obk-classic /mnt/obk-pv-rst /mnt/obk-pv-esp /mnt/obk-pv-root \
-        /mnt/obk-pv-cold /mnt/obk-pv-data /mnt/obk-images; do
+        /mnt/obk-pv-cold /mnt/obk-pv-data /mnt/obk-pv-tail /mnt/obk-images; do
         mountpoint -q "$m" && { umount "$m" || umount -l "$m"; }
         [[ -d $m ]] && rmdir "$m"
     done
@@ -239,7 +242,7 @@ obk_leftovers() {
 # The live tables of the active LVs (no keys in an LV's table).
 lv_tables() {
     local lv
-    for lv in root data; do dmsetup table "$PVG-$lv" 2>&1; done | sha256sum | cut -d' ' -f1
+    for lv in root data tail; do dmsetup table "$PVG-$lv" 2>&1; done | sha256sum | cut -d' ' -f1
 }
 
 vg_seqno() { vgs --noheadings -o vg_seqno "$PVG" 2>/dev/null | tr -d ' '; }
@@ -285,16 +288,17 @@ pv_make_disks() ( # make the PV disk's table and the images partition
     size=$(blockdev --getsize64 "$D1")
     # Room after the PV: the image adds its metadata partition past the
     # last partition, and the restore target is no larger than the source.
-    pv_mib=$((size / 1048576 - 1 - 128 - 192))
-    printf 'label: gpt\nsize=128MiB, type=U\nsize=%sMiB, type=%s\n' "$pv_mib" "$LVM_TYPE" | sfdisk -q "$D1"
+    pv_mib=$((size / 1048576 - 1 - 128 - 160 - 192))
+    printf 'label: gpt\nsize=128MiB, type=U\nsize=%sMiB, type=%s\nsize=160MiB, type=%s\n' \
+        "$pv_mib" "$LVM_TYPE" "$LVM_TYPE" | sfdisk -q "$D1"
     printf 'label: gpt\n,,L\n' | sfdisk -q "$D2"
     udevadm settle -t 10
 )
 
-pv_make_volumes() ( # esp pv images: the VG, its LVs and filesystems, mounted
+pv_make_volumes() ( # esp pv images pv2: the VG, its LVs and filesystems, mounted
     set -e
     mkfs.vfat -F 32 -n OBKPVESP "$1"
-    pvcreate -ff -y "$2"
+    pvcreate -ff -y "$2" "$4"
     vgcreate "$PVG" "$2"
     lvcreate -y -Wy -Zy -L 600M -n root "$PVG"
     lvcreate -y -Wy -Zy -L 100M -n cold "$PVG"
@@ -302,6 +306,11 @@ pv_make_volumes() ( # esp pv images: the VG, its LVs and filesystems, mounted
     lvcreate -y -Wy -Zy -L 64M -n hole "$PVG"
     lvcreate -y -Wy -Zy -L 300M -n data "$PVG"
     lvremove -y "$PVG/hole"
+    # The second PV: data grows onto it, tail lives only there.
+    vgextend "$PVG" "$4"
+    lvextend -y -L +64M "$PVG/data" "$4"
+    lvcreate -y -Wy -Zy -L 48M -n tail "$PVG" "$4"
+    mkfs.ext4 -q -L obk-pv-tail "/dev/$PVG/tail"
     mkfs.ext4 -q -L obk-pv-root "/dev/$PVG/root"
     mkfs.ext4 -q -L obk-pv-cold "/dev/$PVG/cold"
     mkfs.xfs -q -f -L obk-pv-data "/dev/$PVG/data"
@@ -312,8 +321,9 @@ pv_make_volumes() ( # esp pv images: the VG, its LVs and filesystems, mounted
     mount "/dev/$PVG/cold" /mnt/obk-pv-cold
     mount "/dev/$PVG/data" /mnt/obk-pv-data
     mount "$3" /mnt/obk-images
+    xfs_growfs /mnt/obk-pv-data
     lvs -a -o lv_name,lv_size,lv_active,seg_pe_ranges "$PVG"
-    pvs -o pv_name,pv_size,pv_free,pe_start "$2"
+    pvs -o pv_name,pv_size,pv_free,pe_start "$2" "$4"
 )
 
 pv_populate() ( # the known files, hashed; cold unmounted and deactivated
@@ -331,6 +341,12 @@ pv_populate() ( # the known files, hashed; cold unmounted and deactivated
     sync
     umount /mnt/obk-pv-cold
     lvchange -an "$PVG/cold"
+    mkdir -p /mnt/obk-pv-tail
+    mount "/dev/$PVG/tail" /mnt/obk-pv-tail
+    populate /mnt/obk-pv-tail
+    hashes /mnt/obk-pv-tail "$EV/pv-tail.sha256"
+    umount /mnt/obk-pv-tail
+    rmdir /mnt/obk-pv-tail
     lvs -a -o lv_name,lv_active "$PVG"
 )
 
@@ -359,10 +375,10 @@ pv_backup() {
     sed 's/^/    /' "$out"
 
     check "$name-exit" "$(verdict $rc)" "backup-disk $D1 -> $image $* (exit $rc)"
-    [[ $(grep -c 'device-mapper snapshot created' "$out") -eq 2 ]] &&
+    [[ $(grep -c 'device-mapper snapshot created' "$out") -eq 3 ]] &&
         grep -q 'every logical volume of the physical volume is held by its snapshot' "$out"
     check "$name-pv-snapshots" "$(verdict $?)" \
-        "root and data held by device-mapper snapshots in one suspend: $(grep -o 'snapshot=obk-snap-[0-9a-f]*' "$out" | tr '\n' ' ')"
+        "root, data and tail (both PVs) held by device-mapper snapshots in one suspend: $(grep -o 'snapshot=obk-snap-[0-9a-f]*' "$out" | tr '\n' ' ')"
     ! grep -q 'LVM snapshot created' "$out" && [[ $(vg_seqno) == "$seqno" ]]
     check "$name-no-lvm-metadata-written" "$(verdict $?)" "no lvcreate; VG seqno $seqno before, $(vg_seqno) after"
     grep -q 'LVM physical volume: free extents are not copied' "$out"
@@ -374,10 +390,12 @@ pv_backup() {
     check "$name-verified" "$(verdict $?)" "$(grep '^Done:\|^Verify:\|^Excluded\|^Exclusions' "$out" | tr '\n' ' ')"
     local left
     left=$(obk_leftovers)
-    [[ $(grep -c 'device-mapper snapshot removed' "$out") -eq 2 && -z $left ]]
-    check "$name-nothing-left" "$(verdict $?)" "both snapshots removed; obk-*, store loops, stores: ${left:-none}"
+    [[ $(grep -c 'device-mapper snapshot removed' "$out") -eq 3 && -z $left ]]
+    check "$name-nothing-left" "$(verdict $?)" "all three snapshots removed; obk-*, store loops, stores: ${left:-none}"
     [[ $(lv_tables) == "$tables" ]]
-    check "$name-tables-restored" "$(verdict $?)" "root and data run on exactly their own tables again"
+    check "$name-tables-restored" "$(verdict $?)" "root, data and tail run on exactly their own tables again"
+    ! grep -q 'snapshot of an interrupted backup\|снимок прерванного копирования' "$out"
+    check "$name-second-pv-not-a-leftover" "$(verdict $?)" "the second PV, held by the first one's layers, is not refused"
     findmnt -no OPTIONS /mnt/obk-pv-esp | grep -qw rw
     check "$name-esp-rw-again" "$(verdict $?)" "the ESP, held read-only for its copy, is read-write again"
     local writes failed slowest
@@ -440,7 +458,7 @@ pv_kill() {
     kill -9 "$cli" 2>/dev/null
     wait "$cli" 2>/dev/null
     plain "$EV/pv-kill-backup.out"
-    [[ $seen -eq 0 && $(grep -cE '^obk-snap-' "$EV/pv-kill-state.txt") -ge 2 ]]
+    [[ $seen -eq 0 && $(grep -cE '^obk-snap-' "$EV/pv-kill-state.txt") -ge 3 ]]
     check pv-kill-snapshots-in-place "$(verdict $?)" \
         "killed with $(grep -cE '^obk-(real|snap)-' "$EV/pv-kill-state.txt") obk-* devices in place"
     timeout 20 bash -c 'dd if=/dev/urandom of=/mnt/obk-pv-root/after-kill.bin bs=1M count=4 conv=fsync status=none &&
@@ -468,17 +486,17 @@ pv_restore() { # image
     check pv-restore-exit "$(verdict $rc)" "restore $image -> $D3 (exit $rc)"
     blockdev --rereadpt "$D3" 2>/dev/null
     udevadm settle -t 10
-    local R_ESP R_PV
-    R_ESP=$(part_of "$D3" 1) && R_PV=$(part_of "$D3" 2)
-    check pv-restore-partitions "$(verdict $?)" "ESP ${R_ESP:-?}, PV ${R_PV:-?} on the restored disk"
-    [[ -n ${R_PV:-} ]] || return
+    local R_ESP R_PV R_PV2
+    R_ESP=$(part_of "$D3" 1) && R_PV=$(part_of "$D3" 2) && R_PV2=$(part_of "$D3" 3)
+    check pv-restore-partitions "$(verdict $?)" "ESP ${R_ESP:-?}, PVs ${R_PV:-?} ${R_PV2:-?} on the restored disk"
+    [[ -n ${R_PV2:-} ]] || return
     # The clone carries the source's PV and VG UUIDs: renamed, it can be
     # activated beside the source.
     local import=(vgimportclone --basevgname "$PV_RST")
     if [[ $(lvmconfig --typeconfig full devices/use_devicesfile 2>/dev/null) == *1 ]]; then
         import+=(--importdevices)
     fi
-    run pv-import "${import[@]}" "$R_PV"
+    run pv-import "${import[@]}" "$R_PV" "$R_PV2"
     run pv-activate vgchange -ay "$PV_RST"
     rc=$?
     run pv-restored-lvs lvs -a -o lv_name,lv_size,seg_pe_ranges --units b "$PV_RST"
@@ -491,6 +509,8 @@ pv_restore() { # image
     check pv-fsck-root "$(verdict $?)" "ext4 root (copied while written) clean before any mount"
     run pv-fsck-cold e2fsck -fn "/dev/$PV_RST/cold"
     check pv-fsck-cold "$(verdict $?)" "ext4 cold (inactive, read from the partition) clean"
+    run pv-fsck-tail e2fsck -fn "/dev/$PV_RST/tail"
+    check pv-fsck-tail "$(verdict $?)" "ext4 tail (only on the second PV) clean"
     run pv-fsck-esp fsck.vfat -n "$R_ESP"
     check pv-fsck-esp "$(verdict $?)" "the ESP (held read-only for its copy) clean"
     run pv-fsck-data-before xfs_repair -n "/dev/$PV_RST/data"
@@ -498,7 +518,7 @@ pv_restore() { # image
 
     local lv mnt=/mnt/obk-pv-rst opts
     mkdir -p "$mnt"
-    for lv in root data cold esp; do
+    for lv in root data cold tail esp; do
         local dev=/dev/$PV_RST/$lv
         opts=ro
         [[ $lv == esp ]] && dev=$R_ESP
@@ -526,12 +546,13 @@ pv_restore() { # image
 
 pv_steps() {
     run pv-setup-disks pv_make_disks
-    local rc=$? ESP1 PV1 P2
-    ESP1=$(part_of "$D1" 1) && PV1=$(part_of "$D1" 2) && P2=$(part_of "$D2" 1) || rc=1
-    [[ $rc -eq 0 ]] && { run pv-setup-volumes pv_make_volumes "$ESP1" "$PV1" "$P2" || rc=1; }
+    local rc=$? ESP1 PV1 PV2 P2
+    ESP1=$(part_of "$D1" 1) && PV1=$(part_of "$D1" 2) && PV2=$(part_of "$D1" 3) &&
+        P2=$(part_of "$D2" 1) || rc=1
+    [[ $rc -eq 0 ]] && { run pv-setup-volumes pv_make_volumes "$ESP1" "$PV1" "$P2" "$PV2" || rc=1; }
     [[ $rc -eq 0 ]] && { run pv-setup-files pv_populate || rc=1; }
     check pv-setup "$(verdict $rc)" \
-        "GPT on ob-data-1: ESP $ESP1 (vfat, mounted) + PV $PV1: root ext4 + data xfs mounted, cold inactive, free extents; images on $P2"
+        "GPT on ob-data-1: ESP $ESP1 (vfat, mounted) + PVs $PV1 $PV2: root ext4 + data xfs (on both) mounted, cold inactive, tail on the second, free extents; images on $P2"
     [[ $rc -eq 0 ]] || return
     local IMG=/mnt/obk-images
 
