@@ -504,6 +504,14 @@ pub struct RunImage {
     pub kind: String,
 }
 
+/// What [`JobStore::mark_running`] keeps about a run in progress.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct KilledRunNote {
+    job_id: String,
+    job_name: String,
+    started_at: String,
+}
+
 /// A single completed (or failed) run — feeds the dashboard and Activity.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -833,6 +841,10 @@ impl Job {
 pub struct JobStore {
     jobs_path: PathBuf,
     activity_path: PathBuf,
+    /// One file per backup run in progress ([`JobStore::mark_running`]). A
+    /// file still here when the service starts is a run whose process died
+    /// before it could record anything — killed, or the power went.
+    running_dir: PathBuf,
     jobs: Mutex<Vec<Job>>,
     activity: Mutex<Vec<JobRun>>,
     /// Runs held in memory whose write to the history files failed, by run
@@ -935,6 +947,7 @@ impl JobStore {
         Ok(Arc::new(Self {
             jobs_path,
             activity_path,
+            running_dir: data_dir.join("running"),
             jobs: Mutex::new(jobs),
             activity: Mutex::new(activity),
             unrecorded: Mutex::new(std::collections::HashMap::new()),
@@ -1217,6 +1230,85 @@ impl JobStore {
                 Err(e)
             }
         }
+    }
+
+    /// Note that a backup run of `job` has started. A finished run is
+    /// recorded and the note removed ([`Self::clear_running`]); a process
+    /// that dies first leaves it for [`Self::record_killed_runs`]. Without it
+    /// a copy cut off by `kill -9` or a power cut left no trace in the history
+    /// at all (stand, 2026-10-23) — only its unfinished image, which the next
+    /// start deletes.
+    pub fn mark_running(&self, job: &Job) {
+        let note = KilledRunNote {
+            job_id: job.id.clone(),
+            job_name: job.name.clone(),
+            started_at: chrono::Utc::now().to_rfc3339(),
+        };
+        if let Err(e) = write_json(&self.running_note(&job.id), &note) {
+            warn!(error = %e, job = %job.name, "the run-in-progress note could not be written");
+        }
+    }
+
+    /// The run of `job` ended and is recorded.
+    pub fn clear_running(&self, job_id: &str) {
+        match std::fs::remove_file(self.running_note(job_id)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => warn!(error = %e, job_id, "the run-in-progress note could not be removed"),
+        }
+    }
+
+    fn running_note(&self, job_id: &str) -> PathBuf {
+        // A job id is a UUID; anything else is kept out of the path.
+        let safe: String = job_id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect();
+        self.running_dir.join(format!("{safe}.json"))
+    }
+
+    /// At start: every run a dead process left in progress goes into the
+    /// history as interrupted. `interrupted` keeps it from counting as the
+    /// schedule's run, as a run cut by a normal stop. Returns how many.
+    pub fn record_killed_runs(&self) -> usize {
+        let Ok(dir) = std::fs::read_dir(&self.running_dir) else {
+            return 0;
+        };
+        let mut n = 0;
+        for entry in dir.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let note: Option<KilledRunNote> = match read_json(&path) {
+                Ok(note) => note,
+                Err(e) => {
+                    warn!(error = %e, path = %path.display(), "unreadable run-in-progress note");
+                    None
+                }
+            };
+            if let Some(note) = note {
+                let run = JobRun {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    job_id: note.job_id,
+                    job_name: note.job_name,
+                    started_at: note.started_at,
+                    finished_at: chrono::Utc::now().to_rfc3339(),
+                    status: "cancelled".into(),
+                    interrupted: true,
+                    error: tr!("lib.interrupted_by_kill").into_owned(),
+                    ..Default::default()
+                };
+                info!(job = %run.job_name, started = %run.started_at, "a run cut off by a dead service is recorded as interrupted");
+                if let Err(e) = self.record_run(run) {
+                    warn!(error = %e, "the interrupted run could not be recorded");
+                    continue;
+                }
+                n += 1;
+            }
+            let _ = std::fs::remove_file(&path);
+        }
+        n
     }
 
     pub fn activity(&self) -> Vec<JobRun> {
@@ -2137,6 +2229,7 @@ pub async fn run_queue_worker(
             job = job.name
         ));
         let last_success = store.last_success(&job.id);
+        store.mark_running(&job);
         // The keys of an encrypted job are opened here, once, before anything
         // runs — and if they cannot be opened the run fails saying so, rather
         // than waiting for a password nobody will type at night or writing the
@@ -2192,6 +2285,7 @@ pub async fn run_queue_worker(
             error!(error = %e, job = %job.name, "the finished run could not be written down");
             run.record_error = tr!("lib.run_not_recorded", error = e).into_owned();
         }
+        store.clear_running(&job.id);
 
         queue.finish();
         sink.queue_changed(queue.snapshot());
@@ -4698,6 +4792,47 @@ mod tests {
             store.list().is_empty(),
             "nothing was added in memory either"
         );
+    }
+
+    /// A run whose process died before recording it is recorded at the next
+    /// start as interrupted; a run that ended normally leaves nothing to find.
+    #[test]
+    fn a_run_cut_off_by_a_dead_service_is_recorded_at_the_next_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::load(dir.path());
+        let job = store
+            .upsert(Job {
+                name: "nightly".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let done = store
+            .upsert(Job {
+                name: "finished".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        store.mark_running(&job);
+        store.mark_running(&done);
+        store.clear_running(&done.id);
+        drop(store);
+
+        // The next process.
+        let store = JobStore::load(dir.path());
+        assert_eq!(store.record_killed_runs(), 1);
+        let activity = store.activity();
+        assert_eq!(activity.len(), 1);
+        let run = &activity[0];
+        assert_eq!(run.job_id, job.id);
+        assert_eq!(run.status, "cancelled");
+        assert!(run.interrupted);
+        assert!(!run.started_at.is_empty() && !run.finished_at.is_empty());
+        assert_eq!(store.get(&job.id).unwrap().last_run.unwrap().id, run.id);
+        // Interrupted: not the schedule's run, and the chain is untouched.
+        assert!(store.last_scheduled_start(&job.id).is_none());
+        assert!(store.last_success(&job.id).is_none());
+        // Recorded once.
+        assert_eq!(JobStore::load(dir.path()).record_killed_runs(), 0);
     }
 
     /// A job remembers every folder it wrote into, whatever a client sends:

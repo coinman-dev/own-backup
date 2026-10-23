@@ -744,6 +744,12 @@ pub async fn run_main_loop(
     // an event fan-out for progress streams, and the background worker that
     // actually drives backups.
     let store = own_backup_core::JobStore::try_load(&config.data_dir)?;
+    // A copy the previous process was making when it died (killed, power
+    // cut) has no record of its own; it gets one now, as interrupted.
+    match store.record_killed_runs() {
+        0 => {}
+        n => info!(runs = n, "runs cut off by a dead service recorded as interrupted"),
+    }
     // A local authorization whose job is gone opens an archive on this machine
     // with no password and is accounted for by nothing. Deleting a job retires
     // its own; this catches what older builds and interrupted transactions

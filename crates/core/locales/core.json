@@ -139,6 +139,10 @@
     "ru": "Отменено пользователем",
     "en": "Cancelled by the user"
   },
+  "lib.interrupted_by_kill": {
+    "ru": "Прервано: служба завершилась аварийно (была убита или пропало питание) посреди копии. Недописанный образ удалён при следующем запуске службы; если в задании включён запуск пропущенных копий, копия будет сделана заново",
+    "en": "Interrupted: the service ended abnormally (it was killed or the power went) in the middle of the copy. The unfinished image was deleted at the next start of the service; if the job runs missed backups, the copy is made again"
+  },
   "lib.interrupted_by_stop": {
     "ru": "Прервано: служба остановилась — компьютер выключался или перезагружался, либо обновлялась программа. Если в задании включён запуск пропущенных копий, копия будет сделана после следующего запуска",
     "en": "Interrupted: the service stopped — the computer was shutting down or restarting, or the program was being updated. If the job runs missed backups, the copy is made after the next start"
