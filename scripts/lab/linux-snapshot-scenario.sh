@@ -22,11 +22,24 @@
 # checked by its checker and its files by sha256. Also: a volume copy of the
 # PV partition is refused, an LV created during the copy makes the copy fail
 # and publish nothing, and a SIGKILL mid-copy is undone by cleanup-snapshots.
+# Stage `pvluks` (whole disk with opened LUKS containers — the "encrypt the
+# disk" layout): data disk 1 gets an ESP (vfat, mounted), a LUKS2 partition
+# with ext4 inside (mounted, written throughout the copy) and a LUKS2
+# partition holding an LVM PV (VG with `root` ext4, written, and `data` xfs,
+# both mounted). `backup-disk --password` copies the first through a
+# device-mapper snapshot of its mapping, the second as a PV through its LVs'
+# snapshots, and keeps both containers' headers. `restore-disk` through the
+# service refuses without the containers' passphrase and with a wrong one
+# (data disk 3 untouched), then — passphrases typed on stdin — puts both
+# containers back byte for byte but for the new LUKS UUID the identity change
+# gives them; they open with the passphrase, the PV inside forms a renamed VG,
+# every filesystem is checked and its files compared by sha256. The restore
+# checks need the service of THIS build installed in the guest.
 # Stage `pvroot` (opt-in): the guest's own system disk, when its root is on
 # LVM (Ubuntu Server's default layout), copied whole onto data disk 2.
 #
 #   python3 -I scripts/lab/linux-vm.py up --disks 3 [--size 2]
-#   scripts/lab/linux-snapshot-scenario.sh [lvm|pv|pvroot|all]   (default: all = lvm pv)
+#   scripts/lab/linux-snapshot-scenario.sh [lvm|pv|pvluks|pvroot|all]   (default: all = lvm pv pvluks)
 #
 # The host part builds the release CLI, copies it and this file into the guest
 # and runs `this-file guest <cli>` there as root. Only the data disks with the
@@ -44,6 +57,13 @@ VG=obklab
 PVG=obkpvlab
 PV_RST=obkpvrst
 LVM_TYPE=E6D6D379-F507-44C2-A23C-238F2A3DF928
+# Stage pvluks: the containers' passphrase, their mappings, the VG inside the
+# LUKS → LVM one, and (set by the restore) the restored clone's VG.
+LUKS_PASS='obk lab luks words'
+LFS=obkluksfs
+LPV=obklukspv
+LVG=obkluksvg
+LK_RST=
 # Stage pvroot with PVROOT_RESTORE=1 leaves its restored copy on data disk 3.
 KEEP_D3=0
 EV=/var/tmp/obk-evidence
@@ -119,15 +139,20 @@ guest_cleanup() {
     fi
     for m in /mnt/obk-rst-thin /mnt/obk-rst-classic /mnt/obk-idle /mnt/obk-busy \
         /mnt/obk-thin /mnt/obk-classic /mnt/obk-pv-rst /mnt/obk-pv-esp /mnt/obk-pv-root \
-        /mnt/obk-pv-cold /mnt/obk-pv-data /mnt/obk-pv-tail /mnt/obk-images; do
+        /mnt/obk-pv-cold /mnt/obk-pv-data /mnt/obk-pv-tail /mnt/obk-lk-esp /mnt/obk-lk-fs \
+        /mnt/obk-lk-root /mnt/obk-lk-data /mnt/obk-lk-rst /mnt/obk-images; do
         mountpoint -q "$m" && { umount "$m" || umount -l "$m"; }
         [[ -d $m ]] && rmdir "$m"
     done
-    for g in "$PV_RST" "$PVG"; do
+    for g in "$PV_RST" "$PVG" ${LK_RST:+"$LK_RST"} "$LVG"; do
         if vgs "$g" >/dev/null 2>&1; then
             vgchange -an "$g" >/dev/null 2>&1
             vgremove -ff -y "$g" >/dev/null 2>&1
         fi
+    done
+    # Stage pvluks: the containers, once nothing stands on them.
+    for m in obkrst-fs obkrst-pv "$LFS" "$LPV"; do
+        [[ -e /dev/mapper/$m ]] && cryptsetup close "$m" 2>/dev/null
     done
     if [[ -n ${ESP_MOUNT:-} ]] && ! mountpoint -q "$ESP_MOUNT"; then
         mount "$ESP_MOUNT" || echo "WARNING: could not remount $ESP_MOUNT"
@@ -606,6 +631,259 @@ pv_steps() {
     check pv-sources-intact "$(verdict $?)" "root and data still match their hashes"
 }
 
+# ---------------------------------------------------------------------------
+# Stage pvluks: a whole disk with opened LUKS containers — one holding a
+# filesystem, one holding an LVM PV (the "encrypt the disk" layout)
+# ---------------------------------------------------------------------------
+
+# The dm tables of the mappings and LVs the copy touches (keys masked).
+luks_tables() {
+    local d
+    for d in "$LFS" "$LPV" "$LVG-root" "$LVG-data"; do dmsetup table "$d" 2>&1; done |
+        sha256sum | cut -d' ' -f1
+}
+
+pvluks_make_disks() ( # ESP, LUKS → ext4, LUKS → LVM on data disk 1; images on 2
+    set -e
+    local size rest
+    size=$(blockdev --getsize64 "$D1")
+    # Room after the last partition for the image's metadata partition, as
+    # in stage pv; the restore target is no larger than the source.
+    rest=$((size / 1048576 - 1 - 128 - 320 - 192))
+    printf 'label: gpt\nsize=128MiB, type=U\nsize=320MiB, type=L\nsize=%sMiB, type=L\n' \
+        "$rest" | sfdisk -q "$D1"
+    printf 'label: gpt\n,,L\n' | sfdisk -q "$D2"
+    udevadm settle -t 10
+)
+
+pvluks_make_volumes() ( # esp luks-fs luks-pv images
+    set -e
+    mkfs.vfat -F 32 -n OBKLKESP "$1"
+    local p
+    for p in "$2" "$3"; do
+        # LUKS2, argon2id with a stand-sized memory cost.
+        printf '%s' "$LUKS_PASS" | cryptsetup luksFormat -q --type luks2 --pbkdf argon2id \
+            --pbkdf-memory 65536 --iter-time 200 --key-file - "$p"
+    done
+    printf '%s' "$LUKS_PASS" | cryptsetup open --key-file - "$2" "$LFS"
+    printf '%s' "$LUKS_PASS" | cryptsetup open --key-file - "$3" "$LPV"
+    mkfs.ext4 -q -L obk-lk-fs "/dev/mapper/$LFS"
+    pvcreate -ff -y "/dev/mapper/$LPV"
+    vgcreate "$LVG" "/dev/mapper/$LPV"
+    lvcreate -y -Wy -Zy -L 256M -n root "$LVG"
+    lvcreate -y -Wy -Zy -L 128M -n data "$LVG"
+    mkfs.ext4 -q -L obk-lk-root "/dev/$LVG/root"
+    mkfs.xfs -q -f -L obk-lk-data "/dev/$LVG/data"
+    mkfs.ext4 -q -L obk-images "$4"
+    mkdir -p /mnt/obk-lk-esp /mnt/obk-lk-fs /mnt/obk-lk-root /mnt/obk-lk-data /mnt/obk-images
+    mount "$1" /mnt/obk-lk-esp
+    mount "/dev/mapper/$LFS" /mnt/obk-lk-fs
+    mount "/dev/$LVG/root" /mnt/obk-lk-root
+    mount "/dev/$LVG/data" /mnt/obk-lk-data
+    mount "$4" /mnt/obk-images
+    cryptsetup luksDump "$2" | grep -E '^(Version|Data segments)|offset:|cipher:|sector:|PBKDF:' || true
+    lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS "$D1"
+)
+
+pvluks_populate() ( # the known files, hashed
+    set -e
+    local m
+    for m in fs root data; do
+        populate "/mnt/obk-lk-$m"
+        hashes "/mnt/obk-lk-$m" "$EV/lk-$m.sha256"
+    done
+    printf 'Own Backup LUKS lab ESP\n' >/mnt/obk-lk-esp/hello.txt
+    mkdir -p /mnt/obk-lk-esp/data && cp /mnt/obk-lk-esp/hello.txt /mnt/obk-lk-esp/data/
+    hashes /mnt/obk-lk-esp "$EV/lk-esp.sha256"
+    sync
+)
+
+# The disk copied while the LUKS → ext4 filesystem and the root LV inside the
+# LUKS → LVM container are written with fsync.
+pvluks_backup() { # image
+    local image=$1 out=$EV/lk-backup.out tables
+    tables=$(luks_tables)
+    : >"$EV/lk-churn-root.txt"
+    : >"$EV/lk-churn-fs.txt"
+    pv_churn /mnt/obk-lk-root/churn "$EV/lk-churn-root.txt" &
+    local churn_root=$!
+    pv_churn /mnt/obk-lk-fs/churn "$EV/lk-churn-fs.txt" &
+    local churn_fs=$!
+    sleep 1
+    local t0=$SECONDS
+    # The password recovers the LUKS2 key the kernel keeps in its keyring,
+    # for the second crypt mapping under the filesystem's snapshot.
+    RUST_LOG=info timeout 1200 "$CLI" backup-disk --device "$D1" -o "$image" --format qcow2 \
+        --verify --password "$LUKS_PASS" >"$out" 2>&1
+    local rc=$?
+    sleep 1
+    kill "$churn_root" "$churn_fs" 2>/dev/null
+    wait "$churn_root" "$churn_fs" 2>/dev/null
+    pkill -f obk-churn 2>/dev/null
+    echo "### exit $rc after $((SECONDS - t0)) s" >>"$out"
+    plain "$out"
+    sed 's/^/    /' "$out"
+
+    check lk-backup-exit "$(verdict $rc)" "backup-disk $D1 -> $image (exit $rc)"
+    [[ $(grep -c 'partition with an opened LUKS container held through its mapping' "$out") -eq 2 ]]
+    check lk-backup-through-mappings "$(verdict $?)" \
+        "both LUKS partitions read through their mappings: $(grep -o 'mode=Some("[a-z]*")' "$out" | tr '\n' ' ')"
+    grep -q 'every logical volume of the physical volume is held by its snapshot' "$out"
+    check lk-backup-pv-snapshots "$(verdict $?)" "the LVs inside the container held by device-mapper snapshots"
+    [[ $(grep -c 'header of the opened LUKS container captured' "$out") -eq 2 ]]
+    check lk-backup-headers "$(verdict $?)" "both containers' headers kept in the copy"
+    grep -q '^Verify: OK' "$out" && [[ -s $image ]]
+    check lk-backup-verified "$(verdict $?)" "$(grep '^Done:\|^Verify:' "$out" | tr '\n' ' ')"
+    local left
+    left=$(obk_leftovers)
+    [[ -z $left && $(luks_tables) == "$tables" ]]
+    check lk-backup-released "$(verdict $?)" "no obk-* left, mappings and LVs on their own tables: ${left:-none}"
+    local m failed writes
+    for m in root fs; do
+        writes=$(wc -l <"$EV/lk-churn-$m.txt")
+        failed=$(awk '$4 != 0' "$EV/lk-churn-$m.txt" | wc -l)
+        findmnt -no OPTIONS "/mnt/obk-lk-$m" | grep -qw rw && [[ $writes -gt 0 && $failed -eq 0 ]]
+        check "lk-backup-$m-stayed-rw" "$(verdict $?)" "$writes fsync'd writes to $m during the copy, $failed failed"
+    done
+    return "$rc"
+}
+
+# The first MiB of data disk 3: a refused restore must not have touched it.
+d3_head_intact() { cmp -s -n 1048576 "$D3" "$EV/lk-d3-head.bin"; }
+
+pvluks_restore() { # image
+    local image=$1 rc
+    if ! systemctl is-active -q own-backup; then
+        check lk-restore-exit SKIP "the service is not running (restore-disk goes through it)"
+        return
+    fi
+    wipefs -a -q "$D3" 2>/dev/null
+    head -c 1M /dev/urandom >"$EV/lk-d3-head.bin"
+    dd if="$EV/lk-d3-head.bin" of="$D3" bs=1M count=1 conv=fsync status=none
+
+    # Without the containers' passphrase: refused before a byte is written —
+    # plaintext never goes where a container was.
+    run lk-restore-nopass bash -c "timeout 300 '$CLI' restore-disk '$image' --target-disk '$D3' \
+        --yes --identities change </dev/null"
+    rc=$?
+    [[ $rc -ne 0 ]] && grep -q 'Пароль контейнера LUKS раздела 2' "$EV/lk-restore-nopass.out" &&
+        d3_head_intact
+    check lk-restore-needs-passphrase "$(verdict $?)" \
+        "exit $rc: the containers' passphrases asked for, none given, target untouched"
+    # A wrong one, three rounds: refused as wrong, still nothing written.
+    run lk-restore-wrong bash -c "printf 'wrong\n%.0s' 1 2 3 4 5 6 7 8 | timeout 600 '$CLI' \
+        restore-disk '$image' --target-disk '$D3' --yes --identities change"
+    rc=$?
+    [[ $rc -ne 0 ]] && grep -Eq 'не подходит|does not match' "$EV/lk-restore-wrong.out" && d3_head_intact
+    check lk-restore-wrong-passphrase "$(verdict $?)" "exit $rc; a wrong passphrase is named as such; target untouched"
+
+    # The right one for both containers (typed on stdin, as at a prompt).
+    run lk-restore bash -c "printf '%s\n%s\n' '$LUKS_PASS' '$LUKS_PASS' | timeout 1200 '$CLI' \
+        restore-disk '$image' --target-disk '$D3' --yes --identities change"
+    rc=$?
+    check lk-restore-exit "$(verdict $rc)" "restore-disk $image -> $D3 --identities change (exit $rc)"
+    grep -q 'Раздел 2: контейнер LUKS возвращён' "$EV/lk-restore.out" &&
+        grep -q 'Раздел 3: контейнер LUKS возвращён' "$EV/lk-restore.out"
+    check lk-restore-containers "$(verdict $?)" "partitions 2 and 3 put back as LUKS containers"
+    blockdev --rereadpt "$D3" 2>/dev/null
+    udevadm settle -t 10
+    local R_ESP R_FS R_PV S_FS S_PV
+    R_ESP=$(part_of "$D3" 1) && R_FS=$(part_of "$D3" 2) && R_PV=$(part_of "$D3" 3) &&
+        S_FS=$(part_of "$D1" 2) && S_PV=$(part_of "$D1" 3)
+    check lk-restore-partitions "$(verdict $?)" "ESP ${R_ESP:-?}, containers ${R_FS:-?} ${R_PV:-?}"
+    [[ -n ${R_PV:-} ]] || return
+
+    # The header as the source's — keyslots, cipher, segment — but for the
+    # UUID the identity change gave it (the source's container is open here).
+    local p dump_src dump_rst
+    for p in fs pv; do
+        local src rst
+        [[ $p == fs ]] && { src=$S_FS; rst=$R_FS; } || { src=$S_PV; rst=$R_PV; }
+        dump_src=$(cryptsetup luksDump "$src" | grep -Ev '^(UUID|Epoch):')
+        dump_rst=$(cryptsetup luksDump "$rst" | grep -Ev '^(UUID|Epoch):')
+        cryptsetup luksDump "$rst" >"$EV/lk-dump-$p.txt" 2>&1
+        cryptsetup isLuks "$rst" && [[ $dump_src == "$dump_rst" ]] &&
+            [[ $(cryptsetup luksUUID "$src") != $(cryptsetup luksUUID "$rst") ]]
+        check "lk-restore-$p-header" "$(verdict $?)" \
+            "$rst is the source's container but for a new UUID ($(cryptsetup luksUUID "$rst" 2>/dev/null))"
+    done
+
+    # LUKS → ext4: opens with the passphrase, clean, the same files.
+    printf '%s' "$LUKS_PASS" | cryptsetup open --key-file - "$R_FS" obkrst-fs
+    check lk-restored-fs-opens "$(verdict $?)" "the restored container opens with its passphrase"
+    run lk-fsck-fs e2fsck -fn /dev/mapper/obkrst-fs
+    check lk-fsck-fs "$(verdict $?)" "ext4 inside the container clean"
+    local mnt=/mnt/obk-lk-rst
+    mkdir -p "$mnt"
+    if mount -o ro /dev/mapper/obkrst-fs "$mnt" 2>"$EV/lk-mount-fs.err"; then
+        compare "$mnt" "$EV/lk-fs.sha256" >"$EV/lk-compare-fs.txt" 2>&1
+        check lk-restored-fs-files "$(verdict $?)" "$(wc -l <"$EV/lk-fs.sha256") files by sha256"
+        umount "$mnt"
+    else
+        check lk-restored-fs-files FAIL "mount: $(cat "$EV/lk-mount-fs.err")"
+    fi
+    cryptsetup close obkrst-fs
+
+    # LUKS → LVM: the container opens, the PV inside forms the clone's own VG
+    # (renamed by the change), its LVs are clean and hold the same files.
+    printf '%s' "$LUKS_PASS" | cryptsetup open --key-file - "$R_PV" obkrst-pv
+    check lk-restored-pv-opens "$(verdict $?)" "the restored LUKS → LVM container opens with its passphrase"
+    pvscan --cache >/dev/null 2>&1
+    LK_RST=$(pvs --noheadings -o vg_name /dev/mapper/obkrst-pv 2>/dev/null | tr -d ' ')
+    [[ -n $LK_RST && $LK_RST != "$LVG" ]]
+    check lk-restored-vg-renamed "$(verdict $?)" "the PV inside forms its own VG '${LK_RST:-?}' beside the source's '$LVG'"
+    if [[ -n $LK_RST ]] && run lk-activate vgchange -ay "$LK_RST"; then
+        run lk-fsck-root e2fsck -fn "/dev/$LK_RST/root"
+        check lk-fsck-root "$(verdict $?)" "ext4 root LV (copied while written) clean"
+        local lv opts
+        for lv in root data; do
+            opts=ro
+            [[ $lv == data ]] && opts=rw # its log replays on mount
+            if mount -o "$opts" "/dev/$LK_RST/$lv" "$mnt" 2>"$EV/lk-mount-$lv.err"; then
+                compare "$mnt" "$EV/lk-$lv.sha256" >"$EV/lk-compare-$lv.txt" 2>&1
+                check "lk-restored-$lv-files" "$(verdict $?)" "$(wc -l <"$EV/lk-$lv.sha256") files by sha256"
+                umount "$mnt"
+            else
+                check "lk-restored-$lv-files" FAIL "mount: $(cat "$EV/lk-mount-$lv.err")"
+            fi
+        done
+        run lk-fsck-data xfs_repair -n "/dev/$LK_RST/data"
+        check lk-fsck-data "$(verdict $?)" "xfs data LV clean after mount/umount"
+        vgchange -an "$LK_RST" >/dev/null 2>&1
+    else
+        check lk-restored-vg FAIL "the restored VG does not activate"
+    fi
+    cryptsetup close obkrst-pv
+    if mount -o ro "$R_ESP" "$mnt" 2>/dev/null; then
+        compare "$mnt" "$EV/lk-esp.sha256" >/dev/null 2>&1
+        check lk-restored-esp-files "$(verdict $?)" "the ESP's files by sha256"
+        umount "$mnt"
+    fi
+}
+
+pvluks_steps() {
+    command -v cryptsetup >/dev/null || { check lk-setup SKIP "no cryptsetup in the guest"; return; }
+    run lk-setup-disks pvluks_make_disks
+    local rc=$? ESP1 LK1 LK2 P2
+    ESP1=$(part_of "$D1" 1) && LK1=$(part_of "$D1" 2) && LK2=$(part_of "$D1" 3) &&
+        P2=$(part_of "$D2" 1) || rc=1
+    [[ $rc -eq 0 ]] && { run lk-setup-volumes pvluks_make_volumes "$ESP1" "$LK1" "$LK2" "$P2" || rc=1; }
+    [[ $rc -eq 0 ]] && { run lk-setup-files pvluks_populate || rc=1; }
+    check lk-setup "$(verdict $rc)" \
+        "GPT on ob-data-1: ESP $ESP1 (vfat, mounted) + LUKS2 $LK1 (ext4, mounted) + LUKS2 $LK2 (PV, VG $LVG: root ext4 + data xfs, mounted); images on $P2"
+    [[ $rc -eq 0 ]] || return
+
+    pvluks_backup /mnt/obk-images/luksdisk.qcow2
+    if [[ $? -eq 0 ]]; then
+        pvluks_restore /mnt/obk-images/luksdisk.qcow2
+    else
+        check lk-restore-exit SKIP "no image to restore"
+    fi
+    compare /mnt/obk-lk-fs "$EV/lk-fs.sha256" >/dev/null 2>&1 &&
+        compare /mnt/obk-lk-root "$EV/lk-root.sha256" >/dev/null 2>&1
+    check lk-sources-intact "$(verdict $?)" "the source filesystems still match their hashes"
+}
+
 # Stage pvroot: the guest's own system disk, when its root is an LV.
 pvroot_steps() {
     local root_src disk
@@ -830,7 +1108,7 @@ guest_steps() {
 guest_main() {
     CLI=$1
     local stages=${2:-all} stage
-    [[ $stages == all ]] && stages='lvm pv'
+    [[ $stages == all ]] && stages='lvm pv pvluks'
     [[ $EUID -eq 0 ]] || { echo 'guest part needs root'; exit 2; }
     D1=/dev/disk/by-id/virtio-ob-data-1
     D2=/dev/disk/by-id/virtio-ob-data-2
@@ -851,8 +1129,9 @@ guest_main() {
         case $stage in
             lvm) guest_steps ;;
             pv) pv_steps ;;
+            pvluks) pvluks_steps ;;
             pvroot) pvroot_steps ;;
-            *) check "stage-$stage" FAIL "no such stage (lvm, pv, pvroot, all)" ;;
+            *) check "stage-$stage" FAIL "no such stage (lvm, pv, pvluks, pvroot, all)" ;;
         esac
         guest_cleanup
     done
@@ -861,6 +1140,7 @@ guest_main() {
     if [[ $KEEP_D3 -eq 1 ]]; then kept=' (data disk 3 keeps the restored system)'; else wiped+=("$D3"); fi
     run after-cleanup bash -c "lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS $D1 $D2 $D3; vgs; lvs -a; dmsetup ls; findmnt /boot/efi"
     ! vgs "$VG" >/dev/null 2>&1 && ! vgs "$PVG" >/dev/null 2>&1 && ! vgs "$PV_RST" >/dev/null 2>&1 &&
+        ! vgs "$LVG" >/dev/null 2>&1 && ! dmsetup ls 2>/dev/null | grep -qE '^(obkluks|obkrst-)' &&
         ! lsblk -rno NAME "${wiped[@]}" | grep -q '[0-9]$' &&
         ! lvs --noheadings 2>/dev/null | grep -q obk-snap- && [[ -z $(dmsetup ls 2>/dev/null | grep -E '^obk-') ]] &&
         { [[ -z ${ESP_MOUNT:-} ]] || mountpoint -q "$ESP_MOUNT"; }
@@ -893,8 +1173,8 @@ STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 HOST_EV=$RUN_DIR/evidence/snapshot-$STAMP
 STAGES=${1:-all}
 case $STAGES in
-    lvm | pv | pvroot | all) ;;
-    *) echo "usage: $0 [lvm|pv|pvroot|all]" >&2; exit 2 ;;
+    lvm | pv | pvluks | pvroot | all) ;;
+    *) echo "usage: $0 [lvm|pv|pvluks|pvroot|all]" >&2; exit 2 ;;
 esac
 
 die() {
