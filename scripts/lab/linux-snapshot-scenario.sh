@@ -671,7 +671,8 @@ pvluks_make_volumes() ( # esp luks-fs luks-pv images
     pvcreate -ff -y "/dev/mapper/$LPV"
     vgcreate "$LVG" "/dev/mapper/$LPV"
     lvcreate -y -Wy -Zy -L 256M -n root "$LVG"
-    lvcreate -y -Wy -Zy -L 128M -n data "$LVG"
+    # mkfs.xfs refuses anything under 300 MB.
+    lvcreate -y -Wy -Zy -L 320M -n data "$LVG"
     mkfs.ext4 -q -L obk-lk-root "/dev/$LVG/root"
     mkfs.xfs -q -f -L obk-lk-data "/dev/$LVG/data"
     mkfs.ext4 -q -L obk-images "$4"
@@ -683,19 +684,24 @@ pvluks_make_volumes() ( # esp luks-fs luks-pv images
     mount "$4" /mnt/obk-images
     cryptsetup luksDump "$2" | grep -E '^(Version|Data segments)|offset:|cipher:|sector:|PBKDF:' || true
     lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS "$D1"
+    # `set -e` does nothing here: `run … || rc=1` calls this in a list, where
+    # bash ignores it. The status is this last test — every filesystem made
+    # and mounted (a failed mkfs.xfs once went unnoticed).
+    findmnt -no FSTYPE /mnt/obk-lk-data | grep -qx xfs &&
+        findmnt -no FSTYPE /mnt/obk-lk-root | grep -qx ext4 &&
+        findmnt -no FSTYPE /mnt/obk-lk-fs | grep -qx ext4 &&
+        mountpoint -q /mnt/obk-lk-esp && mountpoint -q /mnt/obk-images
 )
 
-pvluks_populate() ( # the known files, hashed
-    set -e
+pvluks_populate() ( # the known files, hashed (explicit checks: see above)
     local m
     for m in fs root data; do
-        populate "/mnt/obk-lk-$m"
-        hashes "/mnt/obk-lk-$m" "$EV/lk-$m.sha256"
+        mountpoint -q "/mnt/obk-lk-$m" && populate "/mnt/obk-lk-$m" &&
+            hashes "/mnt/obk-lk-$m" "$EV/lk-$m.sha256" || exit 1
     done
-    printf 'Own Backup LUKS lab ESP\n' >/mnt/obk-lk-esp/hello.txt
-    mkdir -p /mnt/obk-lk-esp/data && cp /mnt/obk-lk-esp/hello.txt /mnt/obk-lk-esp/data/
-    hashes /mnt/obk-lk-esp "$EV/lk-esp.sha256"
-    sync
+    printf 'Own Backup LUKS lab ESP\n' >/mnt/obk-lk-esp/hello.txt &&
+        mkdir -p /mnt/obk-lk-esp/data && cp /mnt/obk-lk-esp/hello.txt /mnt/obk-lk-esp/data/ &&
+        hashes /mnt/obk-lk-esp "$EV/lk-esp.sha256" && sync
 )
 
 # The disk copied while the LUKS → ext4 filesystem and the root LV inside the
@@ -732,6 +738,13 @@ pvluks_backup() { # image
     check lk-backup-pv-snapshots "$(verdict $?)" "the LVs inside the container held by device-mapper snapshots"
     [[ $(grep -c 'header of the opened LUKS container captured' "$out") -eq 2 ]]
     check lk-backup-headers "$(verdict $?)" "both containers' headers kept in the copy"
+    # Each filesystem recognised through its mapping or snapshot — "unknown"
+    # means the copy read something else (or the setup made nothing there).
+    grep -q 'partition prepared part=2 fs=ext4' "$out" &&
+        grep -q 'volume=obkluksvg/root fs=ext4' "$out" &&
+        grep -q 'volume=obkluksvg/data fs=xfs' "$out"
+    check lk-backup-filesystems "$(verdict $?)" \
+        "$(grep -o 'part=2 fs=[a-z0-9]*\|volume=obkluksvg/[a-z]* fs=[a-z0-9]*' "$out" | tr '\n' ' ')"
     grep -q '^Verify: OK' "$out" && [[ -s $image ]]
     check lk-backup-verified "$(verdict $?)" "$(grep '^Done:\|^Verify:' "$out" | tr '\n' ' ')"
     local left
