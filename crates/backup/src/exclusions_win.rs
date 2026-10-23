@@ -206,9 +206,19 @@ fn collect_excluded_ranges_inner(
                     stack.push((child, rel_child, matched));
                 }
             } else if matched && !is_reparse {
+                // One open for the links, the extents and the streams.
+                let handle = match open_attributes(&child) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        warn!(file = %child.display(), error = %e,
+                              "Exclusion scan: cannot open — file stays in the backup");
+                        scan.categories.add(&rel_child, info.size);
+                        continue;
+                    }
+                };
                 // A hard link with a name outside the rules: the data is that
                 // name's too, and stays (the entry itself still goes).
-                match name_outside_rules(&child, &parsed) {
+                match name_outside_rules(&handle, &child, &parsed) {
                     Ok(false) => {}
                     Ok(true) => {
                         trace!(file = %child.display(),
@@ -226,15 +236,16 @@ fn collect_excluded_ranges_inner(
                 // Collected apart and merged only when complete: half a
                 // file's extents would cut it, not exclude it.
                 let mut own = ByteRanges::new();
-                match file_extent_ranges(&child, cluster_size, &mut own) {
+                match handle_extent_ranges(&handle, &child, cluster_size, &mut own) {
                     Ok(bytes) => {
                         for (s, e) in own.iter() {
                             scan.ranges.add(s, e);
                         }
                         // Its named streams (Zone.Identifier, any ADS) are its
                         // content too, in clusters of their own.
-                        let bytes =
-                            bytes + stream_extent_ranges(&child, cluster_size, &mut scan.ranges);
+                        let bytes = bytes
+                            + stream_extent_ranges(&handle, &child, cluster_size, &mut scan.ranges);
+
                         scan.files_excluded += 1;
                         scan.bytes_excluded += bytes;
                         if collect_file_bytes {
@@ -274,10 +285,11 @@ fn collect_excluded_ranges_inner(
     Ok(scan)
 }
 
-/// Whether the file at `path` has a hard link outside the rules: more than
-/// one link, and not every name Windows lists for it (`FindFirstFileNameW`)
-/// excluded. An 8.3 short name is no link of its own and is not counted.
-fn name_outside_rules(path: &Path, parsed: &[crate::exclusions::ExclusionPattern]) -> Result<bool> {
+/// Open `path` for its attributes only — enough for its links, streams and
+/// extents. FILE_READ_ATTRIBUTES opens even exclusively-locked files
+/// (pagefile.sys); BACKUP_SEMANTICS is required for directories and system
+/// files; OPEN_REPARSE_POINT: the link itself, never its target.
+fn open_attributes(path: &Path) -> Result<FileHandle> {
     let wide = to_wide(&path.to_string_lossy());
     // SAFETY: `wide` outlives the call.
     let handle = unsafe {
@@ -292,7 +304,18 @@ fn name_outside_rules(path: &Path, parsed: &[crate::exclusions::ExclusionPattern
         )
     }
     .map_err(|e| own_backup_common::OwnBackupError::Device(format!("CreateFileW failed: {e}")))?;
-    let handle = FileHandle(handle);
+    Ok(FileHandle(handle))
+}
+
+/// Whether the file open as `handle` (at `path`) has a hard link outside the
+/// rules: more than one link, and not every name Windows lists for it
+/// (`FindFirstFileNameW`) excluded. An 8.3 short name is no link of its own
+/// and is not counted.
+fn name_outside_rules(
+    handle: &FileHandle,
+    path: &Path,
+    parsed: &[crate::exclusions::ExclusionPattern],
+) -> Result<bool> {
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
     // SAFETY: `info` is a live, writable struct of the expected type.
     unsafe { GetFileInformationByHandle(handle.0, &mut info) }.map_err(|e| {
@@ -301,7 +324,6 @@ fn name_outside_rules(path: &Path, parsed: &[crate::exclusions::ExclusionPattern
     if info.nNumberOfLinks <= 1 {
         return Ok(false);
     }
-    drop(handle);
     let names = hard_link_names(path)?;
     Ok(!crate::exclusions::every_name_excluded(&names, parsed))
 }
@@ -375,33 +397,17 @@ pub(crate) fn named_streams(handle: HANDLE) -> Result<Vec<(String, u64)>> {
     }
 }
 
-/// Append the cluster extents of every named stream of `path` to `ranges`
-/// and return their bytes. A stream that cannot be resolved stays in the
-/// backup, said in the log — as a file that cannot be resolved does.
-fn stream_extent_ranges(path: &Path, cluster_size: u32, ranges: &mut ByteRanges) -> u64 {
-    let wide = to_wide(&path.to_string_lossy());
-    // SAFETY: `wide` outlives the call.
-    let opened = unsafe {
-        CreateFileW(
-            PCWSTR(wide.as_ptr()),
-            FILE_READ_ATTRIBUTES.0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            None,
-            OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-            None,
-        )
-    };
-    let streams = match opened {
-        Ok(h) => {
-            let handle = FileHandle(h);
-            named_streams(handle.0)
-        }
-        Err(e) => Err(own_backup_common::OwnBackupError::Device(format!(
-            "CreateFileW failed: {e}"
-        ))),
-    };
-    let streams = match streams {
+/// Append the cluster extents of every named stream of the file open as
+/// `handle` (at `path`) to `ranges` and return their bytes. A stream that
+/// cannot be resolved stays in the backup, said in the log — as a file that
+/// cannot be resolved does.
+fn stream_extent_ranges(
+    handle: &FileHandle,
+    path: &Path,
+    cluster_size: u32,
+    ranges: &mut ByteRanges,
+) -> u64 {
+    let streams = match named_streams(handle.0) {
         Ok(s) => s,
         Err(e) => {
             warn!(file = %path.display(), error = %e,
@@ -442,24 +448,16 @@ impl Drop for FileHandle {
 /// Returns the number of excluded bytes. Resident files (data inside the MFT
 /// record) have no extents and contribute nothing.
 fn file_extent_ranges(path: &Path, cluster_size: u32, ranges: &mut ByteRanges) -> Result<u64> {
-    let wide = to_wide(&path.to_string_lossy());
-    // FILE_READ_ATTRIBUTES opens even exclusively-locked files (pagefile.sys);
-    // BACKUP_SEMANTICS is required for directories and system files.
-    // SAFETY: `wide` outlives the call.
-    let handle = unsafe {
-        CreateFileW(
-            PCWSTR(wide.as_ptr()),
-            FILE_READ_ATTRIBUTES.0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            None,
-            OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-            None,
-        )
-    }
-    .map_err(|e| own_backup_common::OwnBackupError::Device(format!("CreateFileW failed: {e}")))?;
-    let handle = FileHandle(handle);
+    handle_extent_ranges(&open_attributes(path)?, path, cluster_size, ranges)
+}
 
+/// [`file_extent_ranges`] of a file already open as `handle` (at `path`).
+fn handle_extent_ranges(
+    handle: &FileHandle,
+    path: &Path,
+    cluster_size: u32,
+    ranges: &mut ByteRanges,
+) -> Result<u64> {
     let cs = cluster_size as u64;
     let mut bytes_excluded = 0u64;
     let mut starting_vcn: i64 = 0;

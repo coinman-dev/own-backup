@@ -175,6 +175,9 @@ fn backup_disk_inner<P: DiskPlatform>(
     // Partitions whose files nobody walked, each with its reason (see
     // `PreparedMap::skipped`).
     let mut scan_skips: Vec<String> = Vec::new();
+    // What the partitions' exclusions have to say besides that (see
+    // `PreparedMap::notes`), one line per partition.
+    let mut prepare_notes: Vec<String> = Vec::new();
     // The service key directory was on one of the partitions and is not in
     // the copy (decision 6/E4).
     let mut key_store_excluded = false;
@@ -502,6 +505,7 @@ fn backup_disk_inner<P: DiskPlatform>(
                 categories: None,
                 skipped: Some(tr!("engine_win.skip_bitlocker_no_password").into_owned()),
                 left: Vec::new(),
+                notes: Vec::new(),
             }),
             None => prepare_partition_map(
                 platform,
@@ -553,6 +557,15 @@ fn backup_disk_inner<P: DiskPlatform>(
         if let Some(c) = &pm.categories {
             categories.get_or_insert_with(Default::default).merge(c);
         }
+        prepare_notes.extend(pm.notes.iter().map(|n| {
+            tr!(
+                "engine_win.skip_partition_line",
+                index = p.part_index,
+                fs = pm.filesystem,
+                why = n
+            )
+            .into_owned()
+        }));
         if let Some(why) = &pm.skipped {
             scan_skips.push(
                 tr!(
@@ -596,7 +609,8 @@ fn backup_disk_inner<P: DiskPlatform>(
 
     // A volume group with physical volumes this copy does not hold: restored
     // alone, it is incomplete. Said in the run's summary, not just the log.
-    let mut notes: Vec<String> = Vec::new();
+    let mut notes: Vec<String> = std::mem::take(&mut prepare_notes);
+
     {
         // Every PV in the copy, those copied as plain partitions included (a
         // PV no active volume uses is idle and read as it is).

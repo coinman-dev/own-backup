@@ -422,6 +422,28 @@ mod tests {
 
     const MIB: u64 = 1024 * 1024;
 
+    /// An `$MFT` scan that could not reach every record, on a platform with
+    /// no directory walk: the partial scan stands and the result screen is
+    /// told; a complete scan says nothing.
+    #[test]
+    fn an_mft_scan_short_of_records_is_said() {
+        let p = TestPlatform::new();
+        let partial = crate::ntfs_scan::MftScan {
+            records_unreachable: 7,
+            files_excluded: 3,
+            ..Default::default()
+        };
+        let (scan, note) = crate::engine_core::platform::settle_unreachable(&p, Ok(partial));
+        assert_eq!(scan.unwrap().files_excluded, 3, "the partial scan stands");
+        let note = note.expect("a note");
+        assert!(note.contains('7'), "{note}");
+        let (scan, note) = crate::engine_core::platform::settle_unreachable(
+            &p,
+            Ok(crate::ntfs_scan::MftScan::default()),
+        );
+        assert!(scan.is_ok() && note.is_none());
+    }
+
     fn pattern(len: usize) -> Vec<u8> {
         (0..len).map(|i| (i % 251) as u8).collect()
     }

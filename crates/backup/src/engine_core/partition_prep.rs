@@ -38,6 +38,9 @@ pub(crate) struct PreparedMap {
     /// Matched content the walk left in the copy, and directories it could
     /// not walk (`exclusions::key_store_left_behind`).
     pub(crate) left: Vec<crate::exclusions::LeftInCopy>,
+    /// What the result screen says about this partition's exclusions besides
+    /// the figures — files its `$MFT` scan could not reach, for one.
+    pub(crate) notes: Vec<String>,
 }
 
 /// Карта и исключения для раздела, который Windows не монтирует: NTFS внутри
@@ -64,6 +67,7 @@ pub(crate) fn prepare_encrypted_partition_map(
         categories: None,
         skipped: None,
         left: Vec::new(),
+        notes: Vec::new(),
     };
 
     let scan = if patterns.is_empty() {
@@ -111,6 +115,18 @@ pub(crate) fn prepare_encrypted_partition_map(
         out.excluded_bytes = scan.bytes_excluded;
         out.categories = Some(scan.categories);
         out.left = super::volume_exclusions::ntfs_left(&scan.kept);
+        // No walk of a partition Windows does not mount: what the scan could
+        // not reach is said.
+        if scan.records_unreachable > 0 {
+            out.notes.push(
+                tr!(
+                    "engine.mft_records_unreachable",
+                    count = scan.records_unreachable
+                )
+                .into_owned(),
+            );
+        }
+
         out.removal_paths = scan
             .paths
             .iter()
@@ -159,6 +175,7 @@ pub(crate) fn linux_fs_exclusions(
         categories: None,
         skipped: None,
         left: Vec::new(),
+        notes: Vec::new(),
     };
     if let Ok(mut m) = crate::ext_map::build_ext_used_map(src.as_mut(), block_size) {
         // ext2/3/4: full file-level exclusions (Stage 1 drop+zero, Stage 2

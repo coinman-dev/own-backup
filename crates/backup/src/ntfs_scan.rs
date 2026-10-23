@@ -787,21 +787,30 @@ fn all_names_excluded(
     excluded: &std::collections::HashSet<u64>,
 ) -> bool {
     for name in &e.names {
-        let Some(mut parent_path) = path_of_pub(name.parent, entries, cache) else {
+        let Some(mut path) = path_of_pub(name.parent, entries, cache, 0) else {
             return false;
         };
-        parent_path.push(name.name.clone());
-        if !(matches(&parent_path) || excluded.contains(&name.parent)) {
+        path.push(name.name.clone());
+        // The name itself, or any directory above it, under the rules — as
+        // `under_excluded` sees a file, and the Windows walk a hard link
+        // (`exclusions::every_name_excluded`); not only the parent.
+        let under_rules =
+            excluded.contains(&name.parent) || (1..=path.len()).any(|k| matches(&path[..k]));
+        if !under_rules {
             return false;
         }
     }
     true
 }
 
+/// The path of record `n` from the root, along its first name; `None` when
+/// the chain breaks, loops or runs deeper than any real tree (128) — a
+/// corrupt volume must not overflow the service's stack.
 fn path_of_pub(
     n: u64,
     entries: &HashMap<u64, Entry>,
     cache: &mut HashMap<u64, Option<Vec<String>>>,
+    depth: u32,
 ) -> Option<Vec<String>> {
     if n == ROOT_RECORD {
         return Some(Vec::new());
@@ -809,16 +818,21 @@ fn path_of_pub(
     if let Some(hit) = cache.get(&n) {
         return hit.clone();
     }
+    if depth > 128 {
+        return None;
+    }
     let entry = entries.get(&n)?;
     let name = entry.names.first()?;
     if name.parent == n {
         return None;
     }
-    let up = path_of_pub(name.parent, entries, cache)?;
-    let mut out = up;
-    out.push(name.name.clone());
-    cache.insert(n, Some(out.clone()));
-    Some(out)
+    let up = path_of_pub(name.parent, entries, cache, depth + 1);
+    let out = up.map(|mut v| {
+        v.push(name.name.clone());
+        v
+    });
+    cache.insert(n, out.clone());
+    out
 }
 
 /// Leave the clusters of every named stream of `e` out of the copy. Returns
@@ -1666,6 +1680,70 @@ mod rules_tests {
         assert_eq!(scan.bytes_excluded, 4096);
     }
 
+    /// `is_system` on a corrupt tree: a loop of parents ends, an orphan is no
+    /// system file, and a child of `$Extend` deep down still is.
+    #[test]
+    fn is_system_survives_loops_and_orphans() {
+        let map: HashMap<u64, Entry> = [
+            (EXTEND_RECORD, dir(ROOT_RECORD, "$Extend")),
+            (40, dir(EXTEND_RECORD, "$RmMetadata")),
+            (41, dir(40, "$Txf")),
+            (42, file(41, "deep", 1, 1)),
+            (60, dir(61, "a")),
+            (61, dir(60, "b")),
+            (62, file(60, "in-loop.tmp", 2, 1)),
+            (63, file(999, "orphan.tmp", 3, 1)),
+            (64, file(ROOT_RECORD, "plain.tmp", 4, 1)),
+        ]
+        .into_iter()
+        .collect();
+        assert!(is_system(3, &map), "a record below 16");
+        assert!(is_system(42, &map), "deep in $Extend");
+        assert!(!is_system(62, &map), "a loop of parents ends");
+        assert!(!is_system(63, &map), "an orphan");
+        assert!(!is_system(64, &map));
+        // The rules over the same tree: the loop and the orphan are left alone.
+        let scan = run(&map.into_iter().collect::<Vec<_>>(), &["*.tmp"]);
+        let rels: Vec<&str> = scan.paths.iter().map(|p| p.rel.as_str()).collect();
+        assert_eq!(rels, vec!["plain.tmp"]);
+    }
+
+    /// A hard link is judged by every directory above each of its names, not
+    /// only its parent: `Temp\deep\a.bin` is under the rule `Temp` though
+    /// `deep` itself matches nothing. And a name whose parents loop is no
+    /// excluded name — and no stack overflow.
+    #[test]
+    fn every_name_is_judged_by_its_whole_path() {
+        let mut linked = file(21, "a.bin", 100, 1);
+        linked.names.push(Name {
+            parent: 20,
+            name: "b.bin".into(),
+        });
+        let mut looped = file(20, "c.bin", 200, 1);
+        looped.names.push(Name {
+            parent: 60,
+            name: "d.bin".into(),
+        });
+        let scan = run(
+            &[
+                (20, dir(ROOT_RECORD, "Temp")),
+                (21, dir(20, "deep")),
+                (30, linked),
+                (31, looped),
+                (60, dir(61, "x")),
+                (61, dir(60, "y")),
+            ],
+            &["Temp"],
+        );
+        assert!(covered(&scan, 100, 1), "both names are under Temp");
+        assert!(!covered(&scan, 200, 1), "a name outside any known path");
+        assert_eq!(scan.files_excluded, 1);
+        assert!(scan
+            .kept
+            .iter()
+            .any(|(p, r)| p.ends_with("c.bin") && *r == KeptReason::OtherNameKept));
+    }
+
     /// Кириллица и пробелы в пути: матчер работает по компонентам, регистр не
     /// важен. На живом томе такие пути были у каждого второго файла.
     #[test]
@@ -2108,13 +2186,18 @@ mod volume_tests {
         );
     }
 
-    /// An attribute list that points into a record which does not extend
-    /// this file — another record's extension, or an extension of an older
-    /// generation of this record number (its sequence number differs) — is
-    /// a broken chain: nothing of the file is subtracted.
+    /// An attribute list that points into a record which is not a live
+    /// extension of this generation of this file is a broken chain, and
+    /// nothing of the file is subtracted: a record extending another file, an
+    /// extension of an older generation of this record number, one no longer
+    /// in use, one reused since the list was written (its own sequence number
+    /// is not the one the list names).
     #[test]
     fn a_foreign_extension_record_voids_the_file() {
-        for stale_generation in [false, true] {
+        /// Header offsets of an MFT record: sequence number, flags.
+        const SEQUENCE: u64 = 0x10;
+        const FLAGS: u64 = 0x16;
+        for forgery in ["foreign", "stale generation", "not in use", "reused"] {
             let Some(v) = populated() else {
                 return;
             };
@@ -2136,20 +2219,31 @@ mod volume_tests {
                 .and_then(|t| t.split_whitespace().next())
                 .and_then(|n| n.parse().ok())
                 .expect("record number");
-            let (at, reference) = {
+            let (at, reference, sequence) = {
                 let mut f = std::fs::File::open(&v.image).unwrap();
                 let ntfs = Ntfs::new(&mut f).unwrap();
                 let file = ntfs.file(&mut f, record).unwrap();
                 let reference = base_reference_of(&mut f, &file).unwrap();
                 assert_ne!(reference & RECORD_MASK, 0, "an extension record");
-                (file.position().value().unwrap().get(), reference)
+                assert!(file.flags().contains(ntfs::NtfsFileFlags::IN_USE));
+                (
+                    file.position().value().unwrap().get(),
+                    reference,
+                    file.sequence_number(),
+                )
             };
-            // Point that record's base reference at the root directory, or at
-            // the same base record one generation earlier.
-            let forged = if stale_generation {
-                reference.wrapping_sub(1 << 48)
-            } else {
-                ROOT_RECORD
+            let (offset, bytes): (u64, Vec<u8>) = match forgery {
+                // Its base reference at the root directory…
+                "foreign" => (BASE_REFERENCE_OFFSET, ROOT_RECORD.to_le_bytes().to_vec()),
+                // …at the same base record one generation earlier…
+                "stale generation" => (
+                    BASE_REFERENCE_OFFSET,
+                    reference.wrapping_sub(1 << 48).to_le_bytes().to_vec(),
+                ),
+                // …the record freed…
+                "not in use" => (FLAGS, 0u16.to_le_bytes().to_vec()),
+                // …or given out again under a new sequence number.
+                _ => (SEQUENCE, sequence.wrapping_add(1).to_le_bytes().to_vec()),
             };
             {
                 use std::os::unix::fs::FileExt;
@@ -2157,26 +2251,28 @@ mod volume_tests {
                     .write(true)
                     .open(&v.image)
                     .unwrap();
-                f.write_all_at(&forged.to_le_bytes(), at + BASE_REFERENCE_OFFSET)
-                    .unwrap();
+                f.write_all_at(&bytes, at + offset).unwrap();
             }
             let scan = v.scan();
             assert!(
                 scan.kept
                     .contains(&("many.tmp".to_string(), KeptReason::Unreadable)),
-                "stale generation {stale_generation}: {:?}",
+                "{forgery}: {:?}",
                 scan.kept
             );
             for (b, at) in v.fills() {
                 if b == 0xC1 || b == 0xC2 {
                     assert!(
                         !subtracted(&scan, at),
-                        "{b:#x} of a broken record subtracted"
+                        "{forgery}: {b:#x} of a broken record subtracted"
                     );
                 }
             }
             let many = scan.paths.iter().find(|p| p.rel == "many.tmp").unwrap();
-            assert!(many.whole_records.is_empty(), "its names may be incomplete");
+            assert!(
+                many.whole_records.is_empty(),
+                "{forgery}: its names may be incomplete"
+            );
         }
     }
 }

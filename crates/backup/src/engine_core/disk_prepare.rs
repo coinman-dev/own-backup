@@ -100,6 +100,7 @@ pub(crate) fn prepare_partition_map<P: EnginePlatform>(
         categories: None,
         skipped: None,
         left: Vec::new(),
+        notes: Vec::new(),
     };
     // The same, with the reason nobody walked this partition's files.
     let none_because = |fs: &str, map: Option<Box<dyn UsedSectorMap>>, why: &str| PreparedMap {
@@ -150,6 +151,10 @@ pub(crate) fn prepare_partition_map<P: EnginePlatform>(
                         tr!("engine_win.source_not_frozen").into_owned(),
                     ))
                 };
+                // Records out of reach: the walk sees every file, where there
+                // is one; elsewhere the partial scan stands, said so.
+                let (fast, unreachable) = super::platform::settle_unreachable(platform, fast);
+                out.notes.extend(unreachable);
                 match fast {
                     Ok(mft) => {
                         out.excluded_files = mft.files_excluded;

@@ -312,7 +312,18 @@ impl VolumeTotals {
         if summary.resident_in_journal {
             note_resident_in_journal(run);
         }
+        for note in summary.notes {
+            let line = if self.volume_count > 1 {
+                format!("{device}: {note}")
+            } else {
+                note
+            };
+            if !run.notes.contains(&line) {
+                run.notes.push(line);
+            }
+        }
         // One line per volume that went unwalked; a run over three
+
         // volumes must not report the reason of whichever came last.
         if let Some(why) = summary.file_scan_skipped {
             let line = if self.volume_count > 1 {

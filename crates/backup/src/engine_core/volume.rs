@@ -156,6 +156,10 @@ pub struct VolumeBackupSummary {
     /// driver that keeps its journal: the old bytes may remain in the image's
     /// `$LogFile` (see `EnginePlatform::journal_keeps_cleared_content`).
     pub resident_in_journal: bool,
+    /// What the person should know about this copy besides its figures —
+    /// files an `$MFT` scan could not reach, for one. Shown in the run's
+    /// summary.
+    pub notes: Vec<String>,
 }
 
 /// Back up a volume into a fresh image, on `platform`.
@@ -357,6 +361,7 @@ fn backup_volume_inner<P: EnginePlatform>(
         in_image_exclusions,
         entries_kept,
         key_store_excluded,
+        notes,
     } = resolve_exclusions(
         platform,
         &session,
@@ -747,6 +752,7 @@ fn backup_volume_inner<P: EnginePlatform>(
         excluded_entries_kept,
         key_store_excluded,
         resident_in_journal,
+        notes,
     })
 }
 

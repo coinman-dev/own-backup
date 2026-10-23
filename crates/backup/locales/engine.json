@@ -84,6 +84,10 @@
     "ru": "удалить их из файловой системы образа не удалось (для этого нужны ntfs-3g и модуль ядра nbd; подробности — в журнале службы) — содержимого этих файлов в копии нет, остались только записи в каталоге",
     "en": "they could not be deleted from the image's file system (this needs ntfs-3g and the nbd kernel module; details are in the service log) — the files' contents are not in the backup, only their catalog entries remain"
   },
+  "engine.mft_records_unreachable": {
+    "ru": "исключения применены не ко всем файлам: $MFT тома настолько фрагментирована, что %{count} её записей прочитать не удалось — исключённые файлы среди них могли остаться в копии",
+    "en": "exclusions were not applied to every file: the volume's $MFT is so fragmented that %{count} of its records could not be read — excluded files among them may have stayed in the backup"
+  },
   "engine.skip_no_walk": {
     "ru": "файлы не перечислены: MFT не прочитана (%{error}), а обойти каталоги тома здесь нечем — правила исключений не применялись",
     "en": "files were not listed: the MFT could not be read (%{error}), and there is no way to walk the volume's directories here — exclusion rules were not applied"

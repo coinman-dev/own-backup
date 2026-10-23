@@ -45,6 +45,9 @@ pub(crate) struct VolumeExclusions {
     /// The service's key directory was on this source and is left out of
     /// the copy (decision 6/E4).
     pub(crate) key_store_excluded: bool,
+    /// Other things the result screen says about this copy's exclusions —
+    /// files the `$MFT` scan could not reach, for one.
+    pub(crate) notes: Vec<String>,
 }
 
 /// Apply `req`'s exclusion rules to the source before the copy: the matched
@@ -144,6 +147,7 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
     // исключённых данных в образе нет, осталось убрать записи из каталога.
     let mut pre_copy_exclusions = false;
     let mut entries_kept: Option<String> = None;
+    let mut notes: Vec<String> = Vec::new();
     // Matched content the scan left in the copy, and directories it could not
     // walk — what the key-directory proof below is checked against.
     let mut left: Vec<crate::exclusions::LeftInCopy> = Vec::new();
@@ -172,6 +176,10 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
                     tr!("engine_win.source_not_frozen").into_owned(),
                 ))
             };
+            // Records out of reach: the walk sees every file, where there
+            // is one; elsewhere the partial scan stands, said so.
+            let (fast, unreachable) = super::platform::settle_unreachable(platform, fast);
+            notes.extend(unreachable);
             match fast {
                 Ok(mft) => {
                     excluded_files = mft.files_excluded;
@@ -286,6 +294,10 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
                 };
                 crate::ntfs_scan::scan_mft_with(&mut buffered, &patterns, &mut report)
             };
+            // Out of reach on Windows: the pass inside the image walks it.
+            let (scan_result, unreachable) =
+                super::platform::settle_unreachable(platform, scan_result);
+            notes.extend(unreachable);
             match scan_result {
                 Ok(scan) => {
                     excluded_files = scan.files_excluded;
@@ -588,6 +600,7 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
         removal_paths,
         in_image_exclusions,
         entries_kept,
+        notes,
     })
 }
 
