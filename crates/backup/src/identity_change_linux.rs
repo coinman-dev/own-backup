@@ -71,7 +71,7 @@ pub struct RestoredDevice {
     /// The partition number on the target, when it is one.
     pub part_index: Option<u32>,
     /// The LUKS passphrase the restore re-encrypted it with, if it did.
-    pub passphrase: Option<String>,
+    pub passphrase: Option<zeroize::Zeroizing<String>>,
 }
 
 /// One identity changed.
@@ -161,7 +161,7 @@ struct OpenedDev {
 struct Dev {
     node: String,
     part_index: Option<u32>,
-    passphrase: Option<String>,
+    passphrase: Option<zeroize::Zeroizing<String>>,
     /// Inside a restored container whose own identity clashed: what it
     /// holds is the machine's too (see the module documentation).
     in_clashing_container: bool,
@@ -2093,7 +2093,7 @@ mod tests {
         ]);
         let mut tools = FakeTools::default();
         let devices = [RestoredDevice {
-            passphrase: Some("secret".into()),
+            passphrase: Some(zeroize::Zeroizing::new("secret".into())),
             ..dev("/dev/sdb3", 3)
         }];
         let out = change_identities(&mut tools, &mut host, &present, &devices, false);
@@ -2409,7 +2409,7 @@ mod tests {
             &mut host,
             &present,
             &[RestoredDevice {
-                passphrase: Some("pw".into()),
+                passphrase: Some(zeroize::Zeroizing::new("pw".into())),
                 ..dev("/dev/sdb3", 3)
             }],
             true,
@@ -2845,7 +2845,7 @@ mod tests {
             .insert(mapper.clone(), vec![id(IdentityKind::Ext, inner)]);
         host.mount_dirs.insert(mapper.clone(), root.clone());
         let devices = [RestoredDevice {
-            passphrase: Some("pw".into()),
+            passphrase: Some(zeroize::Zeroizing::new("pw".into())),
             ..dev("/dev/sdb3", 3)
         }];
         let present = machine(vec![id(IdentityKind::Luks, SRC)]);

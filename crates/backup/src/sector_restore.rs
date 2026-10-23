@@ -646,6 +646,15 @@ pub fn write_container_blocks_with(
         payload_len,
         header,
     } = fit;
+    // A key handed in must be this header's — its digest, data offset and
+    // sector size — or the data would go under a key no keyslot here opens.
+    if let Some(params) = known {
+        if !crate::luks::key_belongs_to(&header, params)? {
+            return Err(OwnBackupError::Device(
+                tr!("sector_restore.key_not_this_header", target = label).into_owned(),
+            ));
+        }
+    }
 
     dev.write_at(0, &header)?;
     dev.flush()?;

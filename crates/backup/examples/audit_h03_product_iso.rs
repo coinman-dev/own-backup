@@ -246,6 +246,7 @@ mod probe {
                 target_disk: 0,
                 verify_checksums: true,
                 encryption: Some(keys),
+                passphrases: Default::default(),
             },
             |_| Ok(()),
         )?;

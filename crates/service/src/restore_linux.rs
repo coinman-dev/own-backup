@@ -31,7 +31,8 @@ use tracing::{info, warn};
 
 use super::proto::{JsonReply, JsonRequest};
 use super::{
-    emit_engine, json_reply, keep_awake, manual_keys_off_thread, BackupServiceImpl, ManualSecret,
+    emit_engine, json_reply, keep_awake, luks_gate, luks_needs, manual_keys_off_thread,
+    BackupServiceImpl, ManualSecret,
 };
 use own_backup_backup::identity_check_linux;
 use own_backup_backup::seal::context::ArchiveKeys;
@@ -70,28 +71,6 @@ pub(super) fn identity_gate(
             Ok(clashes)
         }
     }
-}
-
-/// Ask for the passphrases of the LUKS containers a whole-disk restore puts
-/// back, or let it through when nothing is missing or wrong. Asking is a
-/// `FAILED_PRECONDITION` whose details carry the list as JSON
-/// ([`own_backup_common::engine_dto::LUKS_PASSPHRASES_DETAIL`]), so a client
-/// asks for exactly those partitions and decides from structured fields.
-pub(super) fn luks_gate(
-    needs: Vec<own_backup_common::engine_dto::LuksPassphraseNeedDto>,
-) -> Result<(), Status> {
-    if needs.is_empty() {
-        return Ok(());
-    }
-    let text = own_backup_backup::restore_disk_linux::describe_needs(&needs);
-    warn!(needs = %text, "LUKS containers to put back: asking for their passphrases");
-    let details =
-        serde_json::json!({ own_backup_common::engine_dto::LUKS_PASSPHRASES_DETAIL: needs });
-    Err(Status::with_details(
-        tonic::Code::FailedPrecondition,
-        text,
-        serde_json::to_vec(&details).unwrap_or_default().into(),
-    ))
 }
 
 /// The duplicates a change leaves as they are — those without a command to
@@ -740,31 +719,7 @@ impl BackupServiceImpl {
         // missing or wrong one is asked for (structured details) before
         // anything else, and before the slot is taken. Seconds of key
         // derivation per container, off the runtime.
-        let (keys, passphrases, needs) = {
-            let image = image_path.clone();
-            let passphrases: std::collections::HashMap<u32, zeroize::Zeroizing<String>> = p
-                .passphrases
-                .into_iter()
-                .map(|(k, v)| (k, zeroize::Zeroizing::new(v)))
-                .collect();
-            tokio::task::spawn_blocking(move || {
-                let needs =
-                    own_backup_backup::sidecar::read_sidecar_with_keys(&image, keys.as_ref())
-                        .and_then(|sidecar| {
-                            own_backup_backup::restore_disk_linux::containers_to_rebuild(&sidecar)
-                        })
-                        .and_then(|containers| {
-                            own_backup_backup::restore_disk_linux::passphrase_needs(
-                                &containers,
-                                &passphrases,
-                            )
-                        });
-                (keys, passphrases, needs)
-            })
-            .await
-            .map_err(|e| Status::internal(format!("container check panicked: {e}")))?
-        };
-        luks_gate(needs.map_err(|e| Status::failed_precondition(e.to_string()))?)?;
+        let (keys, passphrases) = luks_needs(image_path.clone(), keys, p.passphrases).await?;
 
         let (keys, clashes) = {
             let image = image_path.clone();
@@ -859,7 +814,7 @@ impl BackupServiceImpl {
                                 passphrase: summary
                                     .containers
                                     .contains(&i)
-                                    .then(|| request.passphrases.get(&i).map(|p| p.to_string()))
+                                    .then(|| request.passphrases.get(&i).cloned())
                                     .flatten(),
                             }
                         })

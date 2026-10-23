@@ -451,9 +451,45 @@
     "ru": "раздел-приёмник %{target} Б мал для контейнера: заголовок %{header} Б + данные %{payload} Б",
     "en": "the target partition (%{target} B) is too small for the container: header %{header} B + data %{payload} B"
   },
-  "restore_win.luks_rebuild_not_implemented": {
-    "ru": "В копии расшифрованы контейнеры LUKS (разделы %{parts}). Вернуть им шифрование при восстановлении диска умеет только Own Backup в Linux; в Windows это пока не сделано, а писать открытые данные туда, где система ждёт контейнер, восстановление не станет. Восстановите диск из Linux (загрузочный носитель Linux или установленная программа) или подключите копию, чтобы достать файлы.",
-    "en": "The copy holds LUKS containers decrypted (partitions %{parts}). Only Own Backup on Linux can put their encryption back when restoring the disk; on Windows this is not implemented yet, and the restore will not write plaintext where the system expects a container. Restore the disk from Linux (the Linux boot media or the installed program), or mount the copy to get the files."
+  "luks.torn_no_header": {
+    "ru": "в начале раздела нет заголовка LUKS",
+    "en": "there is no LUKS header at the start of the partition"
+  },
+  "luks.torn_size": {
+    "ru": "размер заголовка LUKS2 неправдоподобен (%{size} Б)",
+    "en": "the LUKS2 header size is implausible (%{size} B)"
+  },
+  "luks.torn_secondary_missing": {
+    "ru": "нет запасного заголовка LUKS2",
+    "en": "the secondary LUKS2 header is missing"
+  },
+  "luks.header_primary": {
+    "ru": "основной",
+    "en": "primary"
+  },
+  "luks.header_secondary": {
+    "ru": "запасной",
+    "en": "secondary"
+  },
+  "luks.torn_checksum_alg": {
+    "ru": "%{header} заголовок LUKS2: контрольная сумма %{alg} не поддерживается",
+    "en": "%{header} LUKS2 header: checksum %{alg} is not supported"
+  },
+  "luks.torn_checksum": {
+    "ru": "%{header} заголовок LUKS2 не сходится со своей контрольной суммой",
+    "en": "the %{header} LUKS2 header does not match its checksum"
+  },
+  "luks.torn_seqid": {
+    "ru": "номера версий двух заголовков LUKS2 разные (%{first} и %{second})",
+    "en": "the two LUKS2 headers carry different sequence ids (%{first} and %{second})"
+  },
+  "luks.torn_reads_differ": {
+    "ru": "два чтения заголовка подряд дали разное",
+    "en": "two reads of the header in a row differ"
+  },
+  "engine.luks_reencrypting": {
+    "ru": "Контейнер LUKS на разделе %{partition} перешифровывается (cryptsetup reencrypt): его данные сейчас частью под старым ключом, частью под новым. Копия не сохраняется; повторите её, когда перешифрование закончится.",
+    "en": "The LUKS container on partition %{partition} is being reencrypted (cryptsetup reencrypt): its data is partly under the old key and partly under the new one. The copy is not kept; run it again once the reencryption has finished."
   },
   "luks.header_too_large": {
     "ru": "заголовок LUKS заявляет начало данных на %{offset} Б — больше любого правдоподобного заголовка (%{max} Б)",
@@ -466,6 +502,10 @@
   "engine.luks_header_changed": {
     "ru": "Заголовок LUKS на разделе %{partition} изменился во время копирования так, что сменился ключ данных или их расположение: копия не сохраняется. Повторите копию.",
     "en": "The LUKS header on partition %{partition} changed during the copy in a way that changed the data key or its layout: the copy is not kept. Run the copy again."
+  },
+  "sector_restore.key_not_this_header": {
+    "ru": "Ключ, полученный при проверке пароля, не подходит к заголовку контейнера для %{target}: восстановление остановлено до записи.",
+    "en": "The key recovered when the passphrase was checked does not belong to the container header for %{target}: the restore stopped before writing."
   },
   "sector_restore.header_not_landed": {
     "ru": "Заголовок LUKS, записанный на %{target}, читается обратно не таким, каким был записан: диск не сохранил запись.",

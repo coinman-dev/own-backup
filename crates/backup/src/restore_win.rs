@@ -173,6 +173,23 @@ impl TargetWriter {
     }
 }
 
+/// A whole disk the caller took offline and holds open for writing: the
+/// whole-disk restore writes through it, a container's slot included
+/// (`luks_rebuild::write_disk_data`).
+impl SectorTarget for WinRawDevice {
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
+        WinRawDevice::write_at(self, offset, data)
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        WinRawDevice::flush(self)
+    }
+
+    fn sector_size(&self) -> u32 {
+        WinRawDevice::sector_size(self)
+    }
+}
+
 impl SectorTarget for TargetWriter {
     fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
         TargetWriter::write_at(self, offset, data)

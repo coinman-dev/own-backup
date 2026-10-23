@@ -871,7 +871,10 @@ fn change_identities(
                 dst,
                 reencrypt: true,
                 ..
-            } if dst.index == part.index => passphrases.get(src_index).cloned(),
+            } if dst.index == part.index => passphrases
+                .get(src_index)
+                .cloned()
+                .map(zeroize::Zeroizing::new),
             _ => None,
         });
         devices.push(change::RestoredDevice {

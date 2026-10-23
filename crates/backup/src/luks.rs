@@ -426,7 +426,7 @@ const LUKS2_SECONDARY_MAGIC: &[u8; 6] = b"SKUL\xba\xbe";
 /// shows when the area is read again and compared). `Err` names what is off.
 pub fn check_header_consistent(area: &[u8]) -> std::result::Result<(), String> {
     if !is_luks(area) || area.len() < LUKS2_BIN_LEN {
-        return Err("no LUKS header".into());
+        return Err(tr!("luks.torn_no_header").into_owned());
     }
     if u16::from_be_bytes([area[6], area[7]]) != 2 {
         return Ok(());
@@ -434,29 +434,34 @@ pub fn check_header_consistent(area: &[u8]) -> std::result::Result<(), String> {
     let be64 = |b: &[u8], o: usize| u64::from_be_bytes(b[o..o + 8].try_into().unwrap());
     let hdr_size = be64(area, 8) as usize;
     if !(LUKS2_BIN_LEN..=16 * 1024 * 1024).contains(&hdr_size) || area.len() < 2 * hdr_size {
-        return Err(format!("implausible LUKS2 header size {hdr_size}"));
+        return Err(tr!("luks.torn_size", size = hdr_size).into_owned());
     }
     let primary = &area[..hdr_size];
     let secondary = &area[hdr_size..2 * hdr_size];
     if &secondary[..6] != LUKS2_SECONDARY_MAGIC {
-        return Err("the secondary LUKS2 header is missing".into());
+        return Err(tr!("luks.torn_secondary_missing").into_owned());
     }
-    for (name, h) in [("primary", primary), ("secondary", secondary)] {
+    for (name, h) in [
+        (tr!("luks.header_primary"), primary),
+        (tr!("luks.header_secondary"), secondary),
+    ] {
         let alg = cstr(&h[72..104]);
         let mut zeroed = h.to_vec();
         zeroed[448..512].fill(0);
         let sum: Vec<u8> = match alg.as_str() {
             "sha256" => Sha256::digest(&zeroed).to_vec(),
             "sha512" => Sha512::digest(&zeroed).to_vec(),
-            other => return Err(format!("{name} header: checksum {other:?} not supported")),
+            other => {
+                return Err(tr!("luks.torn_checksum_alg", header = name, alg = other).into_owned())
+            }
         };
         if h[448..448 + sum.len()] != sum[..] {
-            return Err(format!("{name} header: checksum mismatch"));
+            return Err(tr!("luks.torn_checksum", header = name).into_owned());
         }
     }
     let (s1, s2) = (be64(primary, 16), be64(secondary, 16));
     if s1 != s2 {
-        return Err(format!("sequence ids differ ({s1} and {s2})"));
+        return Err(tr!("luks.torn_seqid", first = s1, second = s2).into_owned());
     }
     Ok(())
 }
@@ -474,18 +479,107 @@ pub fn data_identity(area: &[u8]) -> Result<Value> {
         1 => Ok(Value::String(B64.encode(&area[8..168]))),
         2 => {
             let meta = luks2_metadata(&mut HeaderBlob(area), area)?;
-            let mut digests = meta.get("digests").cloned().unwrap_or(Value::Null);
-            if let Some(all) = digests.as_object_mut() {
-                for d in all.values_mut() {
-                    if let Some(d) = d.as_object_mut() {
-                        d.remove("keyslots");
-                    }
-                }
-            }
+            // Only the digests that pin a data segment's key: one of an
+            // unbound key (`luksAddKey --unbound`) belongs to no segment.
+            let digests: serde_json::Map<String, Value> = meta
+                .get("digests")
+                .and_then(Value::as_object)
+                .map(|all| {
+                    all.iter()
+                        .filter(|(_, d)| {
+                            d.get("segments")
+                                .and_then(Value::as_array)
+                                .is_some_and(|s| !s.is_empty())
+                        })
+                        .map(|(id, d)| {
+                            let mut d = d.clone();
+                            if let Some(o) = d.as_object_mut() {
+                                o.remove("keyslots");
+                            }
+                            (id.clone(), d)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             Ok(serde_json::json!({
                 "segments": meta.get("segments").cloned().unwrap_or(Value::Null),
                 "digests": digests,
             }))
+        }
+        v => Err(bad(format!("unsupported LUKS version {v}"))),
+    }
+}
+
+/// Is the container whose header area is `area` being reencrypted
+/// (`cryptsetup reencrypt`): a mandatory `online-reencrypt` requirement, or
+/// more than one data segment? Its data is then partly under each key until
+/// the reencryption ends.
+pub fn reencryption_in_progress(area: &[u8]) -> bool {
+    if !is_luks(area) || area.len() < 8 || u16::from_be_bytes([area[6], area[7]]) != 2 {
+        return false;
+    }
+    let Ok(meta) = luks2_metadata(&mut HeaderBlob(area), area) else {
+        return false;
+    };
+    let reencrypt = meta
+        .get("config")
+        .and_then(|c| c.get("requirements"))
+        .and_then(|r| r.get("mandatory").unwrap_or(r).as_array())
+        .is_some_and(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .any(|r| r.starts_with("online-reencrypt"))
+        });
+    let segments = meta
+        .get("segments")
+        .and_then(Value::as_object)
+        .map_or(0, |s| {
+            s.values()
+                .filter(|s| jstr(s, "type") == Some("crypt"))
+                .count()
+        });
+    reencrypt || segments > 1
+}
+
+/// Does `params`' master key belong to the container whose header area is
+/// `area` — the key its own digest was made of (PBKDF2, a fraction of a
+/// second), its data offset and sector size? A key recovered from one header
+/// and put under another would encrypt data no keyslot of that one opens.
+pub fn key_belongs_to(area: &[u8], params: &LuksParams) -> Result<bool> {
+    if !is_luks(area) || area.len() < 592 {
+        return Err(bad("not a LUKS container"));
+    }
+    let geometry = header_geometry(&mut HeaderBlob(area))?;
+    if geometry.data_offset != params.data_offset || geometry.sector_size != params.sector_size {
+        return Ok(false);
+    }
+    let mk = &params.master_key[..];
+    match u16::from_be_bytes([area[6], area[7]]) {
+        1 => {
+            let be32 = |o: usize| u32::from_be_bytes(area[o..o + 4].try_into().unwrap());
+            let hash = Hash::parse(&cstr(&area[72..104]))?;
+            Ok(pbkdf2(hash, mk, &area[132..164], be32(164), 20) == area[112..132])
+        }
+        2 => {
+            let meta = luks2_metadata(&mut HeaderBlob(area), area)?;
+            for d in meta
+                .get("digests")
+                .and_then(Value::as_object)
+                .into_iter()
+                .flat_map(|m| m.values())
+                .filter(|d| jstr(d, "type") == Some("pbkdf2"))
+            {
+                let h = Hash::parse(jstr(d, "hash").unwrap_or("sha256"))?;
+                let iters = d
+                    .get("iterations")
+                    .and_then(jnum)
+                    .ok_or_else(|| bad("digest iterations"))? as u32;
+                let want = b64(d, "digest")?;
+                if pbkdf2(h, mk, &b64(d, "salt")?, iters, want.len()) == want {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
         }
         v => Err(bad(format!("unsupported LUKS version {v}"))),
     }
@@ -1449,12 +1543,12 @@ mod tests {
         assert_eq!(check_header_consistent(&luks2_area(&json, 7, 7)), Ok(()));
         // Caught between cryptsetup's two writes: the ids differ…
         let e = check_header_consistent(&luks2_area(&json, 8, 7)).unwrap_err();
-        assert!(e.contains("sequence"), "{e}");
+        assert!(e.contains('8') && e.contains('7'), "{e}");
         // …or one copy is half new.
         let mut torn = luks2_area(&json, 7, 7);
         torn[4096 + 3] ^= 1;
         let e = check_header_consistent(&torn).unwrap_err();
-        assert!(e.contains("primary"), "{e}");
+        assert!(e.contains(&*tr!("luks.header_primary")), "{e}");
         let mut lost = luks2_area(&json, 7, 7);
         lost[16384] = 0;
         assert!(check_header_consistent(&lost).is_err());
@@ -1481,6 +1575,20 @@ mod tests {
         assert_eq!(data_identity(&luks2_area(&more_slots, 2, 2)).unwrap(), base);
         let new_key = json.replace(r#""digest":"BB==""#, r#""digest":"CC==""#);
         assert_ne!(data_identity(&luks2_area(&new_key, 2, 2)).unwrap(), base);
+        // An unbound key (`luksAddKey --unbound`) has a digest of its own
+        // that pins no segment: it does not touch the data.
+        let unbound = json.replace(
+            r#""digests":{"0":"#,
+            r#""digests":{"1":{"type":"pbkdf2","keyslots":["1"],"segments":[],"hash":"sha256","iterations":1000,"salt":"DD==","digest":"EE=="},"0":"#,
+        );
+        assert_eq!(data_identity(&luks2_area(&unbound, 3, 3)).unwrap(), base);
+        // A reencryption under way is told by name.
+        assert!(!reencryption_in_progress(&luks2_area(&json, 1, 1)));
+        let reenc = luks2_json(
+            "argon2id",
+            r#","config":{"requirements":{"mandatory":["online-reencrypt-v2"]}}"#,
+        );
+        assert!(reencryption_in_progress(&luks2_area(&reenc, 1, 1)));
 
         let c = test_luks1_container(b"pw", &[0u8; 512]);
         let mut slot = c[..2 * 1024 * 1024].to_vec();
@@ -1495,6 +1603,20 @@ mod tests {
             data_identity(&mk).unwrap(),
             data_identity(&c[..2 * 1024 * 1024]).unwrap()
         );
+    }
+
+    #[test]
+    fn a_key_is_checked_against_the_header_it_goes_under() {
+        let c = test_luks1_container(b"pw", &[0u8; 512]);
+        let header = &c[..2 * 1024 * 1024];
+        let params = open_luks_from_header(header, b"pw").unwrap();
+        assert!(key_belongs_to(header, &params).unwrap());
+        let mut other = params.clone();
+        other.master_key[0] ^= 1;
+        assert!(!key_belongs_to(header, &other).unwrap());
+        let mut moved = params.clone();
+        moved.data_offset += 512;
+        assert!(!key_belongs_to(header, &moved).unwrap());
     }
 
     #[test]
@@ -1744,6 +1866,7 @@ mod tests {
                 data_identity(&before).unwrap(),
                 "{label}: the data key did not change"
             );
+            assert!(key_belongs_to(&after, &params).unwrap(), "{label}");
         }
     }
 }

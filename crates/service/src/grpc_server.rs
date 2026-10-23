@@ -771,6 +771,65 @@ fn refused_secret(e: own_backup_common::OwnBackupError) -> Status {
     }
 }
 
+/// Ask for the passphrases of the LUKS containers a whole-disk restore puts
+/// back, or let it through when nothing is missing or wrong. Asking is a
+/// `FAILED_PRECONDITION` whose details carry the list as JSON
+/// ([`own_backup_common::engine_dto::LUKS_PASSPHRASES_DETAIL`]), so a client
+/// asks for exactly those partitions and decides from structured fields.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[allow(clippy::result_large_err)]
+fn luks_gate(
+    needs: Vec<own_backup_common::engine_dto::LuksPassphraseNeedDto>,
+) -> Result<(), Status> {
+    if needs.is_empty() {
+        return Ok(());
+    }
+    let text = own_backup_backup::luks_rebuild::describe_needs(&needs);
+    tracing::warn!(needs = %text, "LUKS containers to put back: asking for their passphrases");
+    let details =
+        serde_json::json!({ own_backup_common::engine_dto::LUKS_PASSPHRASES_DETAIL: needs });
+    Err(Status::with_details(
+        tonic::Code::FailedPrecondition,
+        text,
+        serde_json::to_vec(&details).unwrap_or_default().into(),
+    ))
+}
+
+/// The LUKS containers a whole-disk restore of `image` puts back, with the
+/// `passphrases` the client sent (by source partition): settled on a blocking
+/// thread — seconds of key derivation per container — before the operation
+/// reserves the machine, and asked for through [`luks_gate`] when one is
+/// missing or wrong. Gives back the keys and the passphrases, zeroized on drop.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[allow(clippy::type_complexity, clippy::result_large_err)]
+async fn luks_needs(
+    image: std::path::PathBuf,
+    keys: Option<own_backup_backup::seal::context::ArchiveKeys>,
+    passphrases: std::collections::HashMap<u32, String>,
+) -> Result<
+    (
+        Option<own_backup_backup::seal::context::ArchiveKeys>,
+        std::collections::HashMap<u32, zeroize::Zeroizing<String>>,
+    ),
+    Status,
+> {
+    let passphrases: std::collections::HashMap<u32, zeroize::Zeroizing<String>> = passphrases
+        .into_iter()
+        .map(|(k, v)| (k, zeroize::Zeroizing::new(v)))
+        .collect();
+    let (keys, passphrases, needs) = tokio::task::spawn_blocking(move || {
+        use own_backup_backup::luks_rebuild::{containers_to_rebuild, passphrase_needs};
+        let needs = own_backup_backup::sidecar::read_sidecar_with_keys(&image, keys.as_ref())
+            .and_then(|sidecar| containers_to_rebuild(&sidecar))
+            .and_then(|containers| passphrase_needs(&containers, &passphrases));
+        (keys, passphrases, needs)
+    })
+    .await
+    .map_err(|e| Status::internal(format!("container check panicked: {e}")))?;
+    luks_gate(needs.map_err(|e| Status::failed_precondition(e.to_string()))?)?;
+    Ok((keys, passphrases))
+}
+
 /// [`manual_keys`] on a blocking thread, **before** the operation reserves the
 /// machine.
 ///
@@ -2881,6 +2940,11 @@ impl BackupService for BackupServiceImpl {
                 target_disk: u32,
                 #[serde(default)]
                 force: bool,
+                /// The LUKS containers' own passphrases, by source partition
+                /// index: each container the copy holds decrypted is put back
+                /// under its saved header. Not the copy's password (`secret`).
+                #[serde(default)]
+                passphrases: std::collections::HashMap<u32, String>,
                 #[serde(flatten)]
                 secret: ManualSecret,
             }
@@ -2892,20 +2956,27 @@ impl BackupService for BackupServiceImpl {
             own_backup_restore::guard_target_disk(p.target_disk)
                 .map_err(|e| Status::failed_precondition(e.to_string()))?;
 
+            // The copy's keys, then its containers' passphrases — asked for
+            // before the slot is taken and before a byte is written.
+            let manifest_path = std::path::PathBuf::from(&p.manifest_path);
+            let keys = manual_keys_off_thread(manifest_path.clone(), p.secret).await?;
+            let (keys, passphrases) =
+                luks_needs(manifest_path.clone(), keys, p.passphrases).await?;
+
             let slot = self.reserve(
                 &tr!("grpc_server.busy_disk_restore"),
                 &tr!("grpc_server.busy_which_disk", disk = p.target_disk),
             )?;
             let cancel = slot.cancel();
             let events = self.state.events.clone();
-            let manifest_path = std::path::PathBuf::from(&p.manifest_path);
             let request = DiskRestoreRequest {
-                manifest_path: manifest_path.clone(),
+                manifest_path,
                 target_disk: p.target_disk,
                 verify_checksums: true,
                 // From what the person typed, never from the service's own
                 // store: that key is for scheduled COPIES (see `manual_keys`).
-                encryption: manual_keys_off_thread(manifest_path, p.secret).await?,
+                encryption: keys,
+                passphrases,
             };
 
             let summary = tokio::task::spawn_blocking(move || {
@@ -2944,10 +3015,21 @@ impl BackupService for BackupServiceImpl {
             .map_err(|e| Status::internal(format!("disk restore task panicked: {e}")))?
             .map_err(|e| Status::internal(e.to_string()))?;
 
-            json_reply(&DiskRestoreSummaryDto {
-                partitions: summary.partitions as u64,
-                bytes_written: summary.bytes_written,
-                duration_secs: summary.duration.as_secs_f64(),
+            #[derive(serde::Serialize)]
+            struct Out {
+                #[serde(flatten)]
+                summary: DiskRestoreSummaryDto,
+                /// Partitions put back as the LUKS containers they were.
+                #[serde(skip_serializing_if = "Vec::is_empty")]
+                luks_containers: Vec<u32>,
+            }
+            json_reply(&Out {
+                summary: DiskRestoreSummaryDto {
+                    partitions: summary.partitions as u64,
+                    bytes_written: summary.bytes_written,
+                    duration_secs: summary.duration.as_secs_f64(),
+                },
+                luks_containers: summary.containers,
             })
         }
         #[cfg(target_os = "linux")]

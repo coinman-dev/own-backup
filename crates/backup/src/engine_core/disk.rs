@@ -1290,8 +1290,13 @@ fn backup_disk_inner<P: DiskPlatform>(
         let (Some(c), Some(h)) = (p.session.opened_container().cloned(), &p.luks_header) else {
             continue;
         };
-        if let Some(now) = super::disk_luks::recheck::<P::Dev>(&c, h)? {
-            p.luks_header = Some(now);
+        if let Some(now) = super::disk_luks::recheck::<P::Dev>(&c, p.part_index, h)? {
+            if let Some(note) = now.note {
+                if !notes.contains(&note) {
+                    notes.push(note);
+                }
+            }
+            p.luks_header = Some(now.header);
         }
     }
     info.luks_headers = prepared

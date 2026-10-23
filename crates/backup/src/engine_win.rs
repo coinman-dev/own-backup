@@ -450,6 +450,12 @@ pub struct DiskRestoreRequest {
     /// by whoever asked for the restore — never from the service's own store,
     /// which exists so scheduled COPIES need no one present (§7.4).
     pub encryption: Option<crate::seal::context::ArchiveKeys>,
+    /// The passphrases of the LUKS containers the copy holds decrypted, by
+    /// SOURCE partition index (`luks_rebuild::containers_to_rebuild`): each
+    /// container is put back under its saved header. The containers' own
+    /// secrets, typed for this restore and never stored — not the copy's
+    /// archive password.
+    pub passphrases: HashMap<u32, zeroize::Zeroizing<String>>,
 }
 
 /// Progress for a whole-disk restore.
@@ -470,6 +476,8 @@ pub struct DiskRestoreSummary {
     pub partitions: usize,
     pub bytes_written: u64,
     pub duration: Duration,
+    /// Partitions put back as the LUKS containers they were.
+    pub containers: Vec<u32>,
 }
 
 /// Recreate a disk from its `.obdm`: write the captured GPT, then restore each
@@ -532,27 +540,19 @@ fn restore_disk_from_image(
             "image has no embedded whole-disk manifest — not a bootable disk image".into(),
         )
     })?;
-    // A Linux copy whose LUKS containers were captured in the clear: their
-    // data written as it is would put plaintext where the restored system
-    // waits for a container. Putting the container back is the Linux
-    // restore's (D19); here it is not implemented, so nothing is written.
-    let luks = crate::luks_rebuild::luks_in_clear(&sidecar);
-    if !luks.is_empty() {
+    // A LUKS container captured in the clear — opened by the engine with its
+    // passphrase (here or on Linux), or by the Linux system — comes back as
+    // the container it was, from its saved header (D19), exactly as the
+    // Linux restore does it. Every container and its passphrase are settled
+    // before the disk is touched; plaintext never lands where one was.
+    let containers = crate::luks_rebuild::containers_to_rebuild(&sidecar)?;
+    let checked = crate::luks_rebuild::check_passphrases(&containers, &req.passphrases)?;
+    if !checked.needs.is_empty() {
         return Err(OwnBackupError::RestoreIncompatible(
-            tr!(
-                "restore_win.luks_rebuild_not_implemented",
-                parts = luks
-                    .iter()
-                    .map(u32::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-            .into_owned(),
+            crate::luks_rebuild::describe_needs(&checked.needs),
         ));
     }
     let layout = &dm.layout; // real GUIDs
-    let bs = sidecar.manifest.block_size as u64;
-    let image_size = sidecar.manifest.source_disk.size_bytes;
 
     let target_path = format!(r"\\.\PhysicalDrive{}", req.target_disk);
     let target_size = WinRawDevice::open_read(&target_path)?.length();
@@ -563,14 +563,10 @@ fn restore_disk_from_image(
         target = %target_path,
         model = %dm.disk_model,
         partitions = dm.images.len(),
+        containers = containers.len(),
         "Whole-disk restore (embedded manifest): copying data"
     );
 
-    let mut image = ImageReadSource::open_with(
-        &req.manifest_path,
-        &sidecar.info.container,
-        chain_key.as_ref(),
-    )?;
     let mut td = WinRawDevice::open_write(&target_path)?;
     td.set_offline_writable(false)?;
 
@@ -578,43 +574,44 @@ fn restore_disk_from_image(
     // straddling the GPT head carries the image's random GPT bytes — harmless,
     // the real GPT below overwrites the GPT sectors while the partition data
     // stays. (data_offset is 0 for a whole-disk image → block N is at N*bs.)
-    let total = sidecar.checksums.len() as u64;
-    let mut done = 0u64;
-    let mut bytes = 0u64;
-    let mut buf = vec![0u8; bs as usize];
-    for entry in &sidecar.checksums {
-        let offset = entry.block_number * bs;
-        let len = bs.min(image_size - offset) as usize;
-        if offset + len as u64 > target_size {
-            return Err(OwnBackupError::RestoreIncompatible(format!(
-                "image block at {offset} exceeds the target disk size {target_size}"
-            )));
-        }
-        let data = &mut buf[..len];
-        image.read_at(offset, data)?;
-        if req.verify_checksums {
-            let actual = compute_block_checksum(data);
-            if actual != entry.checksum {
-                return Err(OwnBackupError::ChecksumMismatch {
-                    block_index: entry.block_number,
-                    expected: entry.checksum,
-                    actual,
-                });
-            }
-        }
-        td.write_at(offset, data)?;
-        done += 1;
-        bytes += len as u64;
-        progress(&DiskRestoreProgress {
-            phase: "partition".into(),
-            partition_index: 0,
-            partition_count: dm.images.len(),
-            part_label: tr!("engine_win.label_partition_data").into_owned(),
-            blocks_done: done,
-            blocks_total: total,
-            bytes_written: bytes,
-        })?;
-    }
+    // A container's slot gets its header and its data re-encrypted instead;
+    // the header is read back through a handle of its own (raw disk reads on
+    // Windows are not cached).
+    let count = dm.images.len();
+    let written = crate::luks_rebuild::write_disk_data(
+        &crate::luks_rebuild::DiskData {
+            image_path: &req.manifest_path,
+            keys: req.encryption.as_ref(),
+            chain_key: chain_key.as_ref(),
+            verify_checksums: req.verify_checksums,
+            passphrases: &req.passphrases,
+            label: &target_path,
+            target_size,
+        },
+        &sidecar,
+        &containers,
+        &checked.keys,
+        &mut td,
+        &mut |offset, size| {
+            Ok(Box::new(crate::volume_window::VolumeWindow::new(
+                Box::new(WinRawDevice::open_read(&target_path)?),
+                offset,
+                size,
+            )?) as Box<dyn crate::fat_map::RawVolume>)
+        },
+        &mut |t| {
+            progress(&DiskRestoreProgress {
+                phase: "partition".into(),
+                partition_index: t.partition_index,
+                partition_count: count,
+                part_label: t.part_label.clone(),
+                blocks_done: t.blocks_done,
+                blocks_total: t.blocks_total,
+                bytes_written: t.bytes_written,
+            })
+        },
+    )?;
+    let (bytes, total) = (written.bytes, written.blocks_total);
 
     // Overlay the REAL GPT last, so the restored disk carries the source's disk
     // and partition GUIDs (bootable) rather than the image's random ones.
@@ -633,7 +630,6 @@ fn restore_disk_from_image(
     td.flush()?;
     let _ = td.update_properties();
     drop(td);
-    drop(image);
 
     if let Ok(td) = WinRawDevice::open_write(&target_path) {
         let _ = td.set_online_this_session();
@@ -650,6 +646,7 @@ fn restore_disk_from_image(
         partitions: dm.images.len(),
         bytes_written: bytes,
         duration: started.elapsed(),
+        containers: containers.iter().map(|c| c.part_index).collect(),
     })
 }
 
@@ -784,6 +781,7 @@ fn restore_disk_legacy(
         partitions: count,
         bytes_written: total_bytes,
         duration: started.elapsed(),
+        containers: Vec::new(),
     })
 }
 

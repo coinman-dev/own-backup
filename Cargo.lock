@@ -3227,6 +3227,7 @@ dependencies = [
  "tower 0.4.13",
  "tracing",
  "windows 0.58.0",
+ "zeroize",
 ]
 
 [[package]]

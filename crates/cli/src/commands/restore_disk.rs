@@ -67,6 +67,7 @@ pub async fn run(args: RestoreDiskArgs) -> own_backup_common::Result<()> {
     // the summary below comes out of the sealed metadata, so for an encrypted
     // copy there is nothing to print until the key is open.
     let mut encryption = None;
+    let mut containers = Vec::new();
     let manifest: DiskBackupManifest = if whole_disk_image {
         let path = image_path.clone();
         let (keys, sidecar) = tokio::task::spawn_blocking(move || {
@@ -78,6 +79,9 @@ pub async fn run(args: RestoreDiskArgs) -> own_backup_common::Result<()> {
         .await
         .map_err(|e| OwnBackupError::Device(format!("reading the image panicked: {e}")))??;
         encryption = keys;
+        // LUKS containers the copy holds decrypted come back encrypted; one
+        // this program cannot rebuild stops the restore here.
+        containers = own_backup_backup::luks_rebuild::containers_to_rebuild(&sidecar)?;
         sidecar.disk_manifest.ok_or_else(|| {
             OwnBackupError::ImageFormat(
                 "у образа нет встроенного описания диска — это копия тома, а не диска".into(),
@@ -139,6 +143,32 @@ pub async fn run(args: RestoreDiskArgs) -> own_backup_common::Result<()> {
         }
     }
 
+    // The containers' passphrases, each checked against its saved header
+    // before the disk is touched (three tries).
+    let mut passphrases = std::collections::HashMap::new();
+    if !containers.is_empty() {
+        println!("В копии есть контейнеры LUKS: восстановление вернёт им шифрование.");
+    }
+    for _ in 0..3 {
+        let checked = {
+            let (c, p) = (containers.clone(), passphrases.clone());
+            tokio::task::spawn_blocking(move || {
+                own_backup_backup::luks_rebuild::check_passphrases(&c, &p)
+            })
+            .await
+            .map_err(|e| OwnBackupError::Device(format!("passphrase check panicked: {e}")))??
+        };
+        if checked.needs.is_empty() {
+            break;
+        }
+        for n in &checked.needs {
+            if n.wrong {
+                println!("  Пароль раздела {} не подходит.", n.part_index);
+            }
+            passphrases.insert(n.part_index, ask_luks_passphrase(n.part_index)?);
+        }
+    }
+
     // Already open: asked for above, before the summary was printed and long
     // before the target disk is touched. Asking again here would be a second
     // prompt for the same secret — and for a `.obdm` it asked a file that is
@@ -148,6 +178,9 @@ pub async fn run(args: RestoreDiskArgs) -> own_backup_common::Result<()> {
         target_disk,
         verify_checksums: !args.no_verify,
         encryption,
+        // Checked again by the engine before the first write; still wrong
+        // after three tries, it refuses there with the list.
+        passphrases,
     };
 
     let summary = tokio::task::spawn_blocking(move || {
@@ -186,10 +219,34 @@ pub async fn run(args: RestoreDiskArgs) -> own_backup_common::Result<()> {
         summary.bytes_written as f64 / 1e9,
         summary.duration.as_secs_f64()
     );
+    for p in &summary.containers {
+        println!("  Раздел {p}: контейнер LUKS возвращён с прежним заголовком.");
+    }
     println!(
         "If restoring to a fresh disk or new hardware, run `bcdboot` from WinPE to finalize boot."
     );
     Ok(())
+}
+
+/// Ask for the passphrase of the LUKS container on source partition `index`
+/// — the container's own, valid when the copy was made; not the copy's.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn ask_luks_passphrase(index: u32) -> own_backup_common::Result<zeroize::Zeroizing<String>> {
+    let typed = zeroize::Zeroizing::new(
+        crate::secret_prompt::ask_secret(&format!(
+            "  Пароль контейнера LUKS раздела {index} — тот, что был у него на момент копии \
+             (его спрашивала система при загрузке); не отображается: "
+        ))
+        .map_err(|e| own_backup_common::OwnBackupError::Config(e.to_string()))?,
+    );
+    if typed.is_empty() {
+        return Err(own_backup_common::OwnBackupError::Config(
+            "без пароля контейнер LUKS не вернуть, а писать на его место открытые данные \
+             восстановление не станет — отменено"
+                .into(),
+        ));
+    }
+    Ok(typed)
 }
 
 /// Linux: through the service, the same way the window restores a disk —
@@ -254,18 +311,7 @@ pub async fn run(args: RestoreDiskArgs) -> own_backup_common::Result<()> {
             if n.wrong {
                 println!("  Пароль раздела {} не подходит.", n.part_index);
             }
-            let typed = crate::secret_prompt::ask_secret(&format!(
-                "  Пароль контейнера LUKS раздела {} — тот, что был у него на момент копии (его спрашивала система при загрузке); не отображается: ",
-                n.part_index
-            ))
-            .map_err(|e| OwnBackupError::Config(e.to_string()))?;
-            if typed.is_empty() {
-                return Err(OwnBackupError::Config(
-                    "без пароля контейнер LUKS не вернуть, а писать на его место открытые данные \
-                     восстановление не станет — отменено"
-                        .into(),
-                ));
-            }
+            let typed = ask_luks_passphrase(n.part_index)?;
             passphrases.insert(n.part_index, typed);
         }
     };

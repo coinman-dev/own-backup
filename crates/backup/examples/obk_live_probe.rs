@@ -148,6 +148,7 @@ mod probe {
                 target_disk,
                 verify_checksums: true,
                 encryption: Some(keys),
+                passphrases: Default::default(),
             },
             |_| Ok(()),
         )?;
@@ -534,6 +535,7 @@ mod probe {
                 target_disk,
                 verify_checksums: true,
                 encryption: Some(portable),
+                passphrases: Default::default(),
             },
             |_| Ok(()),
         )?;

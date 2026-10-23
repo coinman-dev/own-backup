@@ -857,10 +857,34 @@ impl BackupClient {
         secret: &ArchiveSecret,
     ) -> std::result::Result<own_backup_common::engine_dto::DiskRestoreSummaryDto, tonic::Status>
     {
+        self.restore_disk_with_passphrases(
+            manifest_path,
+            target_disk,
+            force,
+            secret,
+            &Default::default(),
+        )
+        .await
+    }
+
+    /// [`Self::restore_disk_with_status`] with the passphrases of the LUKS
+    /// containers the copy holds decrypted, by source partition index —
+    /// asked for through [`luks_passphrases_in`]; not the copy's password.
+    #[allow(clippy::result_large_err)]
+    pub async fn restore_disk_with_passphrases(
+        &mut self,
+        manifest_path: &str,
+        target_disk: u32,
+        force: bool,
+        secret: &ArchiveSecret,
+        passphrases: &std::collections::HashMap<u32, zeroize::Zeroizing<String>>,
+    ) -> std::result::Result<own_backup_common::engine_dto::DiskRestoreSummaryDto, tonic::Status>
+    {
         let mut body = serde_json::json!({
             "manifest_path": manifest_path,
             "target_disk": target_disk,
             "force": force,
+            "passphrases": passphrase_json(passphrases),
         });
         secret.add_to(&mut body);
         let json = body.to_string();
@@ -884,7 +908,7 @@ impl BackupClient {
         secret: &ArchiveSecret,
         // The LUKS containers' own passphrases, by source partition index —
         // asked for through [`luks_passphrases_in`]; not the copy's password.
-        passphrases: &std::collections::HashMap<u32, String>,
+        passphrases: &std::collections::HashMap<u32, zeroize::Zeroizing<String>>,
     ) -> std::result::Result<serde_json::Value, tonic::Status> {
         let decision = identity_choice.into();
         let mut body = serde_json::json!({
@@ -892,7 +916,7 @@ impl BackupClient {
             "target_device": target_device,
             "identity_choice": decision.choice,
             "fix_references": decision.fix_references,
-            "passphrases": passphrases,
+            "passphrases": passphrase_json(passphrases),
         });
         secret.add_to(&mut body);
         let json = body.to_string();
@@ -1397,6 +1421,19 @@ pub fn identity_clashes_in(
         })
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default()
+}
+
+/// The containers' passphrases as the request's `passphrases` object
+/// (`{"<partition>": "<passphrase>"}`).
+fn passphrase_json(
+    passphrases: &std::collections::HashMap<u32, zeroize::Zeroizing<String>>,
+) -> serde_json::Value {
+    serde_json::Value::Object(
+        passphrases
+            .iter()
+            .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.as_str().into())))
+            .collect(),
+    )
 }
 
 /// The LUKS containers a whole-disk restore asked passphrases for (missing

@@ -63,21 +63,7 @@ pub(crate) fn capture_opened<D: SourceDevice>(
         ));
     }
     let area = read_whole::<D>(c, &mut dev, geometry.data_offset)?;
-    let note = match crate::luks::restore_obstacles(&area)? {
-        why if why.is_empty() => None,
-        why => {
-            warn!(part = part_index, why = ?why,
-                  "the container's header is kept, but a restore cannot put it back");
-            Some(
-                tr!(
-                    "engine.luks_not_rebuildable",
-                    index = part_index,
-                    why = why.join("; ")
-                )
-                .into_owned(),
-            )
-        }
-    };
+    let note = rebuild_note(part_index, &area)?;
     info!(
         part = part_index,
         mapping = %c.mapping,
@@ -115,9 +101,20 @@ fn read_whole<D: SourceDevice>(
         if attempt > 0 {
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
+        // Two reads in a row, each past the cache, must agree — a rewrite in
+        // between shows even where no checksum covers it (LUKS1, the keyslot
+        // areas of LUKS2) — and LUKS2's two headers must agree with their
+        // checksums and with each other.
         dev.drop_cache()?;
         let area = crate::luks::read_header_area_at(dev, data_offset)?;
-        match crate::luks::check_header_consistent(&area) {
+        dev.drop_cache()?;
+        let again = crate::luks::read_header_area_at(dev, data_offset)?;
+        let whole = if area == again {
+            crate::luks::check_header_consistent(&area)
+        } else {
+            Err(tr!("luks.torn_reads_differ").into_owned())
+        };
+        match whole {
             Ok(()) => return Ok(area),
             Err(e) => {
                 warn!(partition = %c.partition, attempt, error = %e,
@@ -141,41 +138,73 @@ fn read_whole<D: SourceDevice>(
 /// Changed in what does not touch the data (a key slot added or removed, a
 /// token, the UUID or label): the header as it is now, which is what the
 /// restored container should carry. Changed in its cipher, data area or
-/// master key: refused — the copy would hold data no saved header opens.
+/// master key: refused — the copy would hold data no saved header opens; a
+/// reencryption started meanwhile is said as such (a retry helps only once
+/// it is over).
 pub(crate) fn recheck<D: SourceDevice>(
     c: &OpenedContainer,
+    part_index: u32,
     captured: &LuksHeaderBackup,
-) -> Result<Option<LuksHeaderBackup>> {
+) -> Result<Option<CapturedContainer>> {
     let mut dev = D::open_read(&c.partition)?;
     let now = read_whole::<D>(c, &mut dev, captured.data_offset)?;
     let then = crate::luks::decode_stored_header(captured)?;
     if now == then {
         return Ok(None);
     }
-    let changed = || {
-        OwnBackupError::Device(
-            tr!(
-                "engine.luks_header_changed",
-                partition = c.partition.as_str()
-            )
-            .into_owned(),
-        )
-    };
+    if crate::luks::reencryption_in_progress(&now) {
+        warn!(partition = %c.partition, "the LUKS container started a reencryption during the copy");
+        return Err(OwnBackupError::Device(
+            tr!("engine.luks_reencrypting", partition = c.partition.as_str()).into_owned(),
+        ));
+    }
     let geometry = crate::luks::header_geometry(&mut HeaderBytes(&now))?;
     if geometry.data_offset != captured.data_offset
         || geometry.sector_size != captured.sector_size
         || crate::luks::data_identity(&now)? != crate::luks::data_identity(&then)?
     {
         warn!(partition = %c.partition, "the LUKS header changed its data key or layout during the copy");
-        return Err(changed());
+        return Err(OwnBackupError::Device(
+            tr!(
+                "engine.luks_header_changed",
+                partition = c.partition.as_str()
+            )
+            .into_owned(),
+        ));
     }
     warn!(partition = %c.partition,
           "the LUKS header changed during the copy (key slots, tokens, UUID): the copy keeps it as it is now");
     use base64::Engine;
-    Ok(Some(LuksHeaderBackup {
-        header_b64: base64::engine::general_purpose::STANDARD.encode(&now),
-        ..captured.clone()
+    Ok(Some(CapturedContainer {
+        kind: captured.kind.clone(),
+        header: LuksHeaderBackup {
+            header_b64: base64::engine::general_purpose::STANDARD.encode(&now),
+            ..captured.clone()
+        },
+        // A header that now opens only by a token (TPM) is said, as at the
+        // start of the copy.
+        note: rebuild_note(part_index, &now)?,
     }))
+}
+
+/// [`CapturedContainer::note`] for the header area `area` of partition
+/// `part_index`: why a restore cannot put it back, when it cannot.
+fn rebuild_note(part_index: u32, area: &[u8]) -> Result<Option<String>> {
+    Ok(match crate::luks::restore_obstacles(area)? {
+        why if why.is_empty() => None,
+        why => {
+            warn!(part = part_index, why = ?why,
+                  "the container's header is kept, but a restore cannot put it back");
+            Some(
+                tr!(
+                    "engine.luks_not_rebuildable",
+                    index = part_index,
+                    why = why.join("; ")
+                )
+                .into_owned(),
+            )
+        }
+    })
 }
 
 /// A header area in memory, read as a volume.
@@ -381,13 +410,33 @@ pub(crate) mod fixture {
 
         /// Copy the disk into `image`.
         pub(crate) fn backup(&self, image: &Path) {
-            crate::engine_core::disk::backup_disk(
-                &self.platform(HEADER),
-                &self.request(image),
-                |_| Ok(()),
-            )
-            .unwrap();
+            self.backup_sealed(image, None);
         }
+
+        /// The same, into an encrypted `.obk` when `keys` are given.
+        pub(crate) fn backup_sealed(
+            &self,
+            image: &Path,
+            keys: Option<crate::seal::context::ArchiveKeys>,
+        ) {
+            let req = DiskBackupRequest {
+                encryption: keys,
+                ..self.request(image)
+            };
+            crate::engine_core::disk::backup_disk(&self.platform(HEADER), &req, |_| Ok(()))
+                .unwrap();
+        }
+    }
+
+    /// Our private files left in `dir` (`.own-backup-new-*`): a refused or
+    /// failed copy must leave none.
+    pub(crate) fn private_leftovers(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".own-backup-new-") || n.starts_with(".own-backup-cow-"))
+            .collect()
     }
 }
 
@@ -466,6 +515,7 @@ mod tests {
                 .expect("refused");
         assert!(e.to_string().contains(&raw.part), "{e}");
         assert!(!refused.exists());
+        assert!(private_leftovers(dir.path()).is_empty());
     }
 
     /// Run the copy with the partition's bytes replaced by `changed` once
@@ -509,6 +559,7 @@ mod tests {
         let e = backup_changing(&disk, &image, key).expect_err("refused");
         assert!(e.to_string().contains(&disk.part), "{e}");
         assert!(!image.exists());
+        assert!(private_leftovers(dir.path()).is_empty());
     }
 
     /// A mapping that does not start where the header says, and a partition
@@ -527,6 +578,7 @@ mod tests {
         .expect("refused");
         assert!(e.to_string().contains(&disk.mapping), "{e}");
         assert!(!image.exists());
+        assert!(private_leftovers(dir.path()).is_empty());
 
         register_device(&disk.part, vec![0u8; disk.container.len()], 512);
         let e = crate::engine_core::disk::backup_disk(
@@ -538,5 +590,6 @@ mod tests {
         .expect("refused");
         assert!(e.to_string().contains("--header"), "{e}");
         assert!(!image.exists());
+        assert!(private_leftovers(dir.path()).is_empty());
     }
 }

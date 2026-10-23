@@ -204,11 +204,11 @@ async fn main() {
     let secret = ArchiveSecret::default();
     // `--luks=N:PASS`: the LUKS passphrase of source partition N, for a
     // container the restore puts back.
-    let luks: std::collections::HashMap<u32, String> = args
+    let luks: std::collections::HashMap<u32, zeroize::Zeroizing<String>> = args
         .iter()
         .filter_map(|a| a.strip_prefix("--luks="))
         .filter_map(|v| v.split_once(':'))
-        .filter_map(|(n, p)| Some((n.parse().ok()?, p.to_string())))
+        .filter_map(|(n, p)| Some((n.parse().ok()?, zeroize::Zeroizing::new(p.to_string()))))
         .collect();
     let cmd = pos.first().copied().unwrap_or_default();
 
