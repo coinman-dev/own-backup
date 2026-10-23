@@ -96,16 +96,17 @@ human() { du -sh "$1" 2>/dev/null | cut -f1; }
 
 usage() { sed -n '2,/^set -euo/p' "$SELF" | grep '^#' | sed 's/^# \{0,1\}//'; exit 0; }
 
-# find по дереву без target/.git/node_modules — иначе обход 16 ГБ ради пары
-# файлов мусора. win/ и linux-files/ тоже мимо: там точки монтирования, и
+# find по дереву без target/.git/node_modules/vendor — иначе обход 16 ГБ ради пары
+# файлов мусора, а в vendor/ лежат Cargo.toml.orig, проверяемые check-vendor.py.
+# win/ и linux-files/ тоже мимо: там точки монтирования, и
 # обход смонтированного диска на 2 ТБ через drvfs занял бы минуты, а удаление
 # по итогам писало бы на чужой раздел.
 prune_find() {
   find . -path ./.git -prune -o -path ./target -prune -o -name node_modules -prune \
-       -o -path ./win -prune -o -path ./linux-files -prune -o "$@"
+       -o -path ./win -prune -o -path ./linux-files -prune -o -path ./vendor -prune -o "$@"
 }
 
-# ── разбор аргументов ────────────────────────────────────────────────────────
+# ── разбор аргументов ──────────────────────────────────────────────────────
 MODE="dry"          # dry | force | archive
 WITH_GIT=0
 DO_STAND=0
@@ -126,7 +127,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-# ── режим архива ─────────────────────────────────────────────────────────────
+# ── режим архива ───────────────────────────────────────────────────────────
 if [ "$MODE" = "archive" ]; then
   ts="$(date +%Y%m%d-%H%M%S)"
   if [ -z "$OUT" ]; then
@@ -162,7 +163,7 @@ if [ "$MODE" = "archive" ]; then
   exit 0
 fi
 
-# ── чистка / пробный прогон ──────────────────────────────────────────────────
+# ── чистка / пробный прогон ────────────────────────────────────────────────
 total_kb=0
 found=0
 note() { printf '  %-9s %s\n' "$1" "$2"; }
@@ -240,7 +241,7 @@ if [ -d win ] || [ -d linux-files ]; then
   echo "  смонтированные диски Windows; трогаются только собранные exe/pdb в их корне."
 fi
 
-# ── стенд Linux ───────────────────────────────────────────────────────────────
+# ── стенд Linux ────────────────────────────────────────────────────────────
 if [ "$DO_STAND" -eq 1 ]; then
   echo
   echo "Стенд Linux (~/lab/linux):"
@@ -257,7 +258,7 @@ if [ "$DO_STAND" -eq 1 ]; then
   [ -d "$HOME/lab/linux/evidence" ] && note "$(human "$HOME/lab/linux/evidence")" "~/lab/linux/evidence — улики прогонов, остаются"
 fi
 
-# ── рабочие копии и ветки агентов ────────────────────────────────────────────
+# ── рабочие копии и ветки агентов ──────────────────────────────────────────
 if [ "$DO_AGENTS" -eq 1 ]; then
   echo
   echo "Агенты (рабочие копии .claude/worktrees и ветки worktree-agent-*):"
