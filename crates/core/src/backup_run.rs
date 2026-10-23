@@ -306,9 +306,6 @@ impl VolumeTotals {
         self.all_smart &= summary.smart_mode;
         run.vss_used |= summary.vss_used;
         run.categories = merge_categories(run.categories.take(), summary.categories);
-        if summary.key_store_excluded {
-            note_key_store_excluded(run);
-        }
         if summary.resident_in_journal {
             note_resident_in_journal(run);
         }
@@ -430,15 +427,6 @@ impl VolumeTotals {
     }
 }
 
-/// The service's key directory is not in this copy — not one of the job's
-/// rules, so the summary says it (decision 6/E4). Once per run.
-fn note_key_store_excluded(run: &mut JobRun) {
-    let note = own_backup_common::tr!("lib.key_store_excluded").into_owned();
-    if !run.notes.contains(&note) {
-        run.notes.push(note);
-    }
-}
-
 /// Resident content of excluded files may remain in the copy's NTFS journal
 /// — erased incompletely, and said so (CLAUDE.md). Once per run.
 fn note_resident_in_journal(run: &mut JobRun) {
@@ -476,9 +464,6 @@ pub(crate) fn record_disk(
     run.categories = summary.categories;
     run.file_scan_skipped = summary.file_scan_skipped.unwrap_or_default();
     run.excluded_entries_kept = summary.excluded_entries_kept.unwrap_or_default();
-    if summary.key_store_excluded {
-        note_key_store_excluded(run);
-    }
     run.notes.extend(summary.notes);
     if summary.resident_in_journal {
         note_resident_in_journal(run);

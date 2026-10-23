@@ -4371,16 +4371,13 @@ async fn perform_disk_backup(
     // through snapshots of all its logical volumes at once. Every provider of
     // this run shares its token, and no other run has it.
     let run_token = uuid::Uuid::new_v4().simple().to_string();
-    let provider = Arc::new(
-        own_backup_snapshot::LinuxSnapshotProvider::with_cow_dir(&folder).whole_disk(&run_token),
-    );
+    let mut provider =
+        own_backup_snapshot::LinuxSnapshotProvider::with_cow_dir(&folder).whole_disk(&run_token);
     let mut snapshots: Vec<own_backup_snapshot::Snapshot> = Vec::new();
     for part in &ds.parts {
         let token = source_token(&part.device);
-        let provider_for_part = own_backup_snapshot::LinuxSnapshotProvider::with_cow_dir(&folder)
-            .whole_disk(&run_token)
-            .container_key(container_key_from(passwords.resolve(&token)));
-        match provider_for_part.create_snapshot(&part.device).await {
+        provider = provider.container_key(container_key_from(passwords.resolve(&token)));
+        match provider.create_snapshot(&part.device).await {
             Ok(s) => {
                 note_dense_store(&mut run, &s, &folder);
                 snapshots.push(s)
@@ -4399,6 +4396,7 @@ async fn perform_disk_backup(
             }
         }
     }
+    let provider = Arc::new(provider);
     run.vss_used = snapshots.iter().any(|s| {
         matches!(
             s.metadata.get("mode").map(String::as_str),
