@@ -105,7 +105,8 @@ pub async fn assess(volume: &str, dest: Option<&Path>, whole_disk: bool) -> Resu
             tokio::task::spawn_blocking(move || {
                 let kernel = linux_block::kernel_name(Path::new(&volume));
                 if let (Some(k), false) = (&kernel, usage.holders.is_empty()) {
-                    match pv::facts(k).map(|(is_pv, dev, holders)| pv::judge(dev, is_pv, &holders))
+                    match pv::facts(k, &pv::held_reals())
+                        .map(|(is_pv, dev, holders)| pv::judge(dev, is_pv, &holders))
                     {
                         Ok(pv::PvJudgement::Plan(plan)) => {
                             return Assessment::PhysicalVolume(plan)
@@ -294,6 +295,10 @@ pub fn check_intact_blocking(snapshot: &Snapshot) -> Result<()> {
 /// ([`own_backup_common::lvm_pv::PvSnapshot`], JSON) — names and offsets
 /// only, never a table or a key.
 pub const PV_LAYOUT: &str = "pv_layout";
+
+/// Metadata key of a physical volume's snapshot: the ids of every snapshot
+/// taken with it (comma-separated), released with it.
+pub const PV_GROUP: &str = "pv_group";
 
 /// The record of a physical volume's snapshot (`mode` `pv`); `None` for any
 /// other snapshot, an error for a `pv` one without a readable record.
@@ -530,7 +535,7 @@ impl LinuxSnapshotProvider {
             .ok_or_else(|| bad(format!("{volume}: not a block device")))?;
         let vol = volume.to_string();
         // Blocking: suspends every logical volume and waits for them to flush.
-        let (sessions, layout) =
+        let (sessions, layout, group) =
             tokio::task::spawn_blocking(move || pv::create(&vol, &kernel, &plan, &dir))
                 .await
                 .map_err(|e| bad(format!("snapshot task: {e}")))??;
@@ -538,6 +543,9 @@ impl LinuxSnapshotProvider {
         let mut metadata = HashMap::new();
         metadata.insert("mode".into(), "pv".into());
         metadata.insert(PV_LAYOUT.into(), layout.to_json());
+        // Every snapshot taken for this partition, those of volumes that lie
+        // only on another partition of the disk included: released with it.
+        metadata.insert(PV_GROUP.into(), group.join(","));
         let dense: u64 = sessions.iter().filter_map(|s| s.dense_store).sum();
         if dense > 0 {
             metadata.insert(DENSE_STORE_BYTES.into(), dense.to_string());
@@ -559,15 +567,29 @@ impl LinuxSnapshotProvider {
     /// Release every logical volume's snapshot of a physical volume: those
     /// this provider holds through their sessions, the others from what the
     /// kernel shows. Every one is tried; the first failure is returned.
-    async fn release_pv(&self, layout: own_backup_common::lvm_pv::PvSnapshot) -> Result<()> {
+    async fn release_pv(
+        &self,
+        layout: own_backup_common::lvm_pv::PvSnapshot,
+        group: Vec<String>,
+    ) -> Result<()> {
+        let mut ids: Vec<String> = layout.volumes.iter().map(|v| v.dm_id.clone()).collect();
+        for id in group {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        pv::forget(&ids);
         let sessions: Vec<(String, Option<Session>)> = {
             let mut held = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-            layout
-                .volumes
-                .iter()
-                .map(|v| (v.dm_id.clone(), held.remove(&v.dm_id)))
+            ids.into_iter()
+                .map(|id| {
+                    let s = held.remove(&id);
+                    (id, s)
+                })
                 .collect()
         };
+        // Another partition of the disk may list the same volumes: one
+        // released already is simply not found again.
         tokio::task::spawn_blocking(move || {
             let mut first = None;
             for (id, session) in sessions {
@@ -674,7 +696,17 @@ impl SnapshotProvider for LinuxSnapshotProvider {
 
     async fn release_snapshot(&self, snapshot: &Snapshot) -> Result<()> {
         if let Some(layout) = pv_layout(snapshot)? {
-            return self.release_pv(layout).await;
+            let group = snapshot
+                .metadata
+                .get(PV_GROUP)
+                .map(|g| {
+                    g.split(',')
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            return self.release_pv(layout, group).await;
         }
         if let Some(id) = snapshot.metadata.get("hold_id") {
             let hold = self
