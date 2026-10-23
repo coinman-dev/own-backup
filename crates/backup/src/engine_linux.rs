@@ -411,6 +411,18 @@ pub fn restore_volume(
 ) -> Result<LinuxRestoreSummary> {
     let started = Instant::now();
     let (sidecar, chain_key) = read_sidecar_for(&req.image_path, req.encryption.as_ref())?;
+    // A copy of a whole disk restored as a volume wrote only some of its
+    // blocks and said "Restore complete" — a disk with no partition table
+    // (stand, 2026-10-23). It has its own path, which lays the table out.
+    if sidecar.disk_manifest.is_some() {
+        return Err(OwnBackupError::RestoreIncompatible(
+            own_backup_common::tr!(
+                "engine_linux.whole_disk_as_volume",
+                image = req.image_path.display()
+            )
+            .into_owned(),
+        ));
+    }
     let block_size = sidecar.manifest.block_size as u64;
     let volume_len = sidecar.manifest.source_disk.size_bytes;
     let data_offset = sidecar.info.volume_data_offset;

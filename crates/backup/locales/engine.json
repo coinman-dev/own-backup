@@ -1,5 +1,9 @@
 {
   "_version": 2,
+  "engine_linux.whole_disk_as_volume": {
+    "ru": "%{image} — копия целого диска; её восстанавливают на диск целиком (own-backup-cli restore-disk, или «Восстановление» в окне), а не как том",
+    "en": "%{image} is a copy of a whole disk; it is restored onto a whole disk (own-backup-cli restore-disk, or Restore in the window), not as a volume"
+  },
   "engine_win.no_patterns": {
     "ru": "исключения не заданы — файлы не перечислялись",
     "en": "no exclusions are set — files were not listed"

@@ -107,7 +107,7 @@ check first-instance-untouched "$(verdict $?)" "the running service keeps its so
 runuser -u lab -g own-backup -- /usr/bin/own-backup-cli jobs status >"$EV/ssh-user.out" 2>&1
 rc=$?
 [[ $rc -ne 0 ]]
-check remote-session-refused "$(verdict $?)" "lab from an SSH session is refused (rc $rc): $(grep -m1 -oE '(Отказано|Denied)[^.]*' "$EV/ssh-user.out")"
+check remote-session-refused "$(verdict $?)" "lab from an SSH session is refused (rc $rc): $(grep -m1 -oE '(Отказано|Access denied|Denied)[^.]*' "$EV/ssh-user.out")"
 
 # --- a job held to 25 MB/s (about a minute for 1.5 GiB) ---------------------------
 run job-new cli jobs new --name svc-scenario --source "$SRC" --dest "$IMG" \
@@ -188,7 +188,7 @@ PY
 run job-unpaced cli jobs save --file "$EV/job.json"
 before=$(last_run "$job" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))')
 run run-3 cli jobs run "$job"
-finished() { last_run "$job" | python3 -c 'import json,sys; r=json.load(sys.stdin); sys.exit(0 if r.get("id") not in ("",sys.argv[1]) and r.get("status")!="running" else 1)' "$before"; }
+finished() { last_run "$job" | python3 -c 'import json,sys; r=json.load(sys.stdin); sys.exit(0 if r.get("id","") not in ("",sys.argv[1]) and r.get("status")!="running" else 1)' "$before"; }
 wait_for 600 finished
 last_run "$job" >"$EV/run-3.json"
 python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("status")=="success" else 1)' "$EV/run-3.json"
@@ -280,7 +280,7 @@ churn=$!
 since=$(date '+%Y-%m-%d %H:%M:%S')
 before=$(last_run "$pvjob" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))')
 run pv-run cli jobs run "$pvjob"
-pv_finished() { last_run "$pvjob" | python3 -c 'import json,sys; r=json.load(sys.stdin); sys.exit(0 if r.get("id") not in ("",sys.argv[1]) and r.get("status")!="running" else 1)' "$before"; }
+pv_finished() { last_run "$pvjob" | python3 -c 'import json,sys; r=json.load(sys.stdin); sys.exit(0 if r.get("id","") not in ("",sys.argv[1]) and r.get("status")!="running" else 1)' "$before"; }
 wait_for 900 pv_finished
 kill "$churn" 2>/dev/null
 wait "$churn"

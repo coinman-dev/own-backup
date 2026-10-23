@@ -481,22 +481,35 @@ pv_kill() {
 # Restore the image onto data disk 3, rename the clone's VG, check it all.
 pv_restore() { # image
     local image=$1
-    run pv-restore timeout 1200 "$CLI" restore "$image" --target "$D3" --yes
+    # A whole-disk copy goes back through the service (restore-disk), which
+    # lays the partition table out; `restore` (a volume) refuses it. The
+    # clone's identities are the source's, whose VG is active: the service
+    # changes them (vgimportclone, filesystem UUIDs) — what a person restoring
+    # an LVM disk beside its running source does.
+    if ! systemctl is-active -q own-backup; then
+        check pv-restore-exit SKIP "the service is not running (restore-disk goes through it)"
+        return
+    fi
+    run pv-restore-as-volume timeout 120 "$CLI" restore "$image" --target "$D3" --yes
     local rc=$?
-    check pv-restore-exit "$(verdict $rc)" "restore $image -> $D3 (exit $rc)"
+    [[ $rc -ne 0 ]] && grep -q 'restore-disk' "$EV/pv-restore-as-volume.out"
+    check pv-restore-as-volume-refused "$(verdict $?)" "restore as a volume refused (exit $rc), restore-disk named"
+    run pv-restore timeout 1200 "$CLI" restore-disk "$image" --target-disk "$D3" --yes --identities change
+    rc=$?
+    check pv-restore-exit "$(verdict $rc)" "restore-disk $image -> $D3 (exit $rc)"
     blockdev --rereadpt "$D3" 2>/dev/null
     udevadm settle -t 10
     local R_ESP R_PV R_PV2
     R_ESP=$(part_of "$D3" 1) && R_PV=$(part_of "$D3" 2) && R_PV2=$(part_of "$D3" 3)
     check pv-restore-partitions "$(verdict $?)" "ESP ${R_ESP:-?}, PVs ${R_PV:-?} ${R_PV2:-?} on the restored disk"
     [[ -n ${R_PV2:-} ]] || return
-    # The clone carries the source's PV and VG UUIDs: renamed, it can be
-    # activated beside the source.
-    local import=(vgimportclone --basevgname "$PV_RST")
-    if [[ $(lvmconfig --typeconfig full devices/use_devicesfile 2>/dev/null) == *1 ]]; then
-        import+=(--importdevices)
-    fi
-    run pv-import "${import[@]}" "$R_PV" "$R_PV2"
+    # The service renamed the clone's VG (new PV/VG UUIDs): it activates
+    # beside the source under its new name.
+    pvscan --cache >/dev/null 2>&1
+    PV_RST=$(pvs --noheadings -o vg_name "$R_PV" 2>/dev/null | tr -d ' ')
+    [[ -n $PV_RST && $PV_RST != "$PVG" ]] && [[ $(pvs --noheadings -o vg_name "$R_PV2" 2>/dev/null | tr -d ' ') == "$PV_RST" ]]
+    check pv-restore-vg-renamed "$(verdict $?)" "the restored PVs form their own VG '${PV_RST:-?}' beside the source's '$PVG'"
+    [[ -n $PV_RST ]] || return
     run pv-activate vgchange -ay "$PV_RST"
     rc=$?
     run pv-restored-lvs lvs -a -o lv_name,lv_size,seg_pe_ranges --units b "$PV_RST"
@@ -522,8 +535,8 @@ pv_restore() { # image
         local dev=/dev/$PV_RST/$lv
         opts=ro
         [[ $lv == esp ]] && dev=$R_ESP
-        # The source's XFS is mounted with the same UUID; its log replays on mount.
-        [[ $lv == data ]] && opts=rw,nouuid
+        # Its log replays on mount (the UUID is the clone's own now).
+        [[ $lv == data ]] && opts=rw
         if mount -o "$opts" "$dev" "$mnt" 2>"$EV/pv-mount-$lv.err"; then
             compare "$mnt" "$EV/pv-$lv.sha256" >"$EV/pv-compare-$lv.txt" 2>&1
             check "pv-restored-$lv-files" "$(verdict $?)" \
