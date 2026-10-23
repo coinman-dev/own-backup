@@ -916,6 +916,140 @@ mod physical_volume {
             !disk.stored(&image, extent(2), extent(3)),
             "its metadata believed"
         );
+
+        // That other PV is in the copy after all — as a plain partition, no
+        // volume of it active: nothing to say.
+        let mut other = label(6 * MIB, PE_START, &[(4096, PE_START - 4096)]);
+        let uuid = "Other0-0000-0000-0000-0000-0000-000000".replace('-', "");
+        other[512 + 32..512 + 64].copy_from_slice(uuid.as_bytes());
+        let crc = own_backup_common::lvm_pv::calc_crc(0xf597_a6cf, &other[512 + 20..1024]);
+        other[512 + 16..512 + 20].copy_from_slice(&crc.to_le_bytes());
+        other.resize(6 * MIB as usize, 0);
+        register_device(&disk.esp, other, 512);
+        let image = dir.path().join("both.qcow2");
+        let sum = run(&disk.platform(disk.pv(None)), &disk.request(&image)).unwrap();
+        assert!(sum.notes.is_empty(), "{:?}", sum.notes);
+    }
+
+    /// A volume group on two partitions of one disk, a volume on both: the
+    /// volume is scanned once, its exclusions apply on both partitions and
+    /// its figures are counted once.
+    #[test]
+    fn a_volume_on_two_partitions_is_scanned_and_counted_once() {
+        let Some(ext4) = ext4_root() else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let half = EXT as usize;
+        let (p1_at, p2_at, part_len) = (MIB, 14 * MIB, 12 * MIB);
+        let pv_part = |data: &[u8]| {
+            let mut live = vec![0x33u8; part_len as usize];
+            live[..own_backup_common::lvm_pv::LABEL_SCAN_BYTES].copy_from_slice(&label(
+                part_len,
+                PE_START,
+                &[(4096, PE_START - 4096)],
+            ));
+            // Unreadable metadata: nothing is free, the parts are what counts.
+            live[PE_START as usize..PE_START as usize + half].copy_from_slice(data);
+            live
+        };
+        let (p1, p2) = (unique_path("pv1"), unique_path("pv2"));
+        let (live1, live2) = (
+            pv_part(&[0xEE; EXT as usize]),
+            pv_part(&[0xEE; EXT as usize]),
+        );
+        register_device(&p1, live1.clone(), 512);
+        register_device(&p2, live2.clone(), 512);
+        let snap = unique_path("span-snap");
+        register_device(&snap, ext4.clone(), 512);
+        let layout = DiskLayout {
+            disk_guid: "0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0".into(),
+            sector_size: 512,
+            size_bytes: 28 * MIB,
+            partitions: [(1u32, p1_at), (2, p2_at)]
+                .iter()
+                .map(|&(index, at)| GptPartitionEntry {
+                    index,
+                    type_guid: LINUX_LVM.into(),
+                    part_guid: format!("11111111-0000-0000-0000-00000000000{index}"),
+                    first_lba: at / 512,
+                    last_lba: (at + part_len) / 512 - 1,
+                    attributes: 0,
+                    name: format!("pv{index}"),
+                })
+                .collect(),
+        };
+        let device = unique_path("disk2pv");
+        let mut bytes = vec![0u8; layout.size_bytes as usize];
+        for op in crate::gpt_writer::disk_gpt_write_ops(&layout, layout.size_bytes).unwrap() {
+            let at = op.offset as usize;
+            bytes[at..at + op.bytes.len()].copy_from_slice(&op.bytes);
+        }
+        register_device(&device, bytes, 512);
+        let span = |lv_offset: u64| PhysicalVolume {
+            volumes: vec![PvVolume {
+                name: "vg0/span".into(),
+                read_path: snap.clone(),
+                len: 2 * EXT,
+                segments: vec![PvSegment {
+                    pv_offset: PE_START,
+                    lv_offset,
+                    length: EXT,
+                }],
+                frozen: true,
+                quiesced: true,
+                key_store: false,
+            }],
+        };
+        let platform = TestPlatform::new()
+            .source(&p1, TestSource::PhysicalVolume(span(0)))
+            .source(&p2, TestSource::PhysicalVolume(span(EXT)))
+            .slot(&p1, DISK, p1_at)
+            .slot(&p2, DISK, p2_at);
+        let image = dir.path().join("two.qcow2");
+        let req = DiskBackupRequest {
+            disk_number: DISK,
+            disk_device: Some(device),
+            disk_model: "Test disk".into(),
+            partitions: vec![
+                DiskPartitionBackup {
+                    device: p1,
+                    part_index: 1,
+                    passphrase: None,
+                },
+                DiskPartitionBackup {
+                    device: p2,
+                    part_index: 2,
+                    passphrase: None,
+                },
+            ],
+            image_path: image.clone(),
+            full_image_path: None,
+            block_size: BS,
+            image_format: ImageFormat::Qcow2,
+            job_id: None,
+            encryption: None,
+            exclusion_patterns_windows: Vec::new(),
+            exclusion_patterns_linux: vec!["*.tmp".into()],
+            kind: BackupType::Full,
+            parent_image: None,
+            source_disk: None,
+            bootable: false,
+            zstd_level: 0,
+        };
+        let sum = run(&platform, &req).unwrap();
+        assert_eq!(sum.excluded_files, 1, "counted once");
+        assert_eq!(sum.excluded_bytes, 300_000);
+        // Each half of the volume is where its partition keeps it, the
+        // junk in neither.
+        let a = image_bytes(&image, p1_at + PE_START, half);
+        let b = image_bytes(&image, p2_at + PE_START, half);
+        for part in [&a, &b] {
+            assert!(!part.chunks(4096).any(|c| c.iter().all(|&x| x == 0x5A)));
+            assert!(!part.chunks(4096).any(|c| c.iter().all(|&x| x == 0xEE)));
+        }
+        assert_eq!(&a[1024 + 56..1024 + 58], &[0x53, 0xEF], "root's superblock");
+        assert!(verify_image(&image, |_, _| Ok(())).unwrap().valid());
     }
 
     /// Without readable metadata nothing counts as free: every byte outside

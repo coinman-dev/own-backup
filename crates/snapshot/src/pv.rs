@@ -23,7 +23,7 @@
 
 #![cfg(target_os = "linux")]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
@@ -173,6 +173,11 @@ pub fn judge(part: (u32, u32), is_pv: bool, all: &[HolderFacts]) -> PvJudgement 
             PvJudgement::NotPv
         };
     }
+    // A PV that only our layers hold, but not this run's: what a cancelled
+    // run left. Said as such, never taken for ours.
+    if is_pv && !held_any && holders.iter().all(|h| h.uuid.starts_with("OBK-REAL-")) {
+        return PvJudgement::Refuse(PvRefusal::Leftover);
+    }
     if !held_any && !holders.iter().any(|h| h.uuid.starts_with("LVM-")) {
         if let Some(c) = holders.iter().find(|h| {
             h.uuid.starts_with("CRYPT-") && h.stacked_uuids.iter().any(|u| u.starts_with("LVM-"))
@@ -303,18 +308,26 @@ fn holders_of(kernel: &str) -> Vec<String> {
     names
 }
 
-/// Read `len` bytes at `offset` of the device `path`.
-/// The range is first dropped from the device's page cache, so what is read
-/// is what the device holds now, not what was cached before LVM rewrote it.
+/// Read `len` bytes at `offset` of the device `path`. The range, widened to
+/// whole pages (the kernel drops only pages entirely inside the range it is
+/// given), is first dropped from the device's page cache, so what is read is
+/// what the device holds now, not what was cached before LVM rewrote it.
 fn read_device(path: &str, offset: u64, len: u64) -> io::Result<Vec<u8>> {
     use std::os::unix::io::AsRawFd;
     let file = std::fs::File::open(path)?;
+    // SAFETY: sysconf takes no pointer.
+    let page = u64::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) })
+        .ok()
+        .filter(|p| *p > 0)
+        .unwrap_or(4096);
+    let from = offset / page * page;
+    let to = (offset + len).div_ceil(page) * page;
     // SAFETY: fadvise on an open descriptor; advice only, its result ignored.
     unsafe {
         libc::posix_fadvise(
             file.as_raw_fd(),
-            offset as libc::off_t,
-            len as libc::off_t,
+            from as libc::off_t,
+            (to - from) as libc::off_t,
             libc::POSIX_FADV_DONTNEED,
         )
     };
@@ -323,12 +336,28 @@ fn read_device(path: &str, offset: u64, len: u64) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// Is a holder with device-mapper UUID `uuid` the obk-real of snapshot `id`?
+fn is_our_real(uuid: &str, id: &str) -> bool {
+    uuid.strip_prefix("OBK-REAL-") == Some(id)
+}
+
+/// Mark the holders that are the obk-real of a snapshot in `held` (kernel
+/// name → snapshot id): by name AND by the UUID that names the snapshot, so
+/// a device that took the kernel name of one released meanwhile is no
+/// longer taken for ours.
+fn mark_held(holders: &mut [HolderFacts], held: &BTreeMap<String, String>) {
+    for h in holders {
+        h.held = held
+            .get(&h.kernel)
+            .is_some_and(|id| is_our_real(&h.uuid, id));
+    }
+}
+
 /// Is the partition (kernel name) an LVM2 PV, and what is stacked on it;
-/// `held`: the kernel names of our own obk-real layers this process holds
-/// ([`held_reals`]).
+/// `held`: our own obk-real layers of this run ([`held_reals`]).
 pub fn facts(
     kernel: &str,
-    held: &BTreeSet<String>,
+    held: &BTreeMap<String, String>,
 ) -> io::Result<(bool, (u32, u32), Vec<HolderFacts>)> {
     let sys = Path::new(SYS_CLASS_BLOCK);
     let dev = linux_block::dev_numbers(sys, kernel)
@@ -360,13 +389,14 @@ pub fn facts(
             uuid: read_sys(&h, "dm/uuid"),
             size_sectors: read_sys(&h, "size").parse().unwrap_or(0),
             name: if name.is_empty() { h.clone() } else { name },
-            held: held.contains(&h),
+            held: false,
             kernel: h,
             stacked,
             stacked_uuids,
             table,
         });
     }
+    mark_held(&mut holders, held);
     Ok((is_pv, dev, holders))
 }
 
@@ -428,7 +458,14 @@ fn kernel_of(dev: (u32, u32)) -> Option<String> {
 /// for the first then stands on the second too.
 #[derive(Debug, Clone)]
 pub struct HeldLv {
+    /// The run that took it: only that run's later partitions take it as
+    /// theirs. A run cancelled while its engine did not answer leaves its
+    /// snapshots in place for a while; the next run must not mistake them
+    /// for its own and copy that run's point in time.
+    pub run: String,
     pub dm_id: String,
+    /// Kernel name of its obk-real when it was made.
+    pub real_kernel: String,
     /// Device-mapper name of the volume.
     pub name: String,
     /// Its kernel name (`dm-1`).
@@ -449,10 +486,16 @@ fn held_lvs() -> &'static std::sync::Mutex<Vec<HeldLv>> {
     HELD.get_or_init(Default::default)
 }
 
-/// Kernel names of the obk-real devices of every volume this process holds.
-pub fn held_reals() -> BTreeSet<String> {
-    let held = held_lvs().lock().unwrap_or_else(|e| e.into_inner());
-    held.iter().filter_map(|h| kernel_of(h.real_dev)).collect()
+/// The obk-real layers the run `run` holds: kernel name → snapshot id.
+pub fn held_reals(run: &str) -> BTreeMap<String, String> {
+    held_reals_in(&held_lvs().lock().unwrap_or_else(|e| e.into_inner()), run)
+}
+
+fn held_reals_in(held: &[HeldLv], run: &str) -> BTreeMap<String, String> {
+    held.iter()
+        .filter(|h| h.run == run)
+        .map(|h| (h.real_kernel.clone(), h.dm_id.clone()))
+        .collect()
 }
 
 /// This process no longer holds the snapshots `ids`.
@@ -463,12 +506,17 @@ pub fn forget(ids: &[String]) {
         .retain(|h| !ids.contains(&h.dm_id));
 }
 
-/// The volumes this process holds whose obk-real stands on `kernel`.
-fn held_on(kernel: &str) -> Vec<HeldLv> {
+/// The volumes the run `run` holds whose obk-real (still the device of
+/// that snapshot) stands on `kernel`.
+fn held_on(kernel: &str, run: &str) -> Vec<HeldLv> {
     let holders: BTreeSet<String> = holders_of(kernel).into_iter().collect();
     let held = held_lvs().lock().unwrap_or_else(|e| e.into_inner());
     held.iter()
-        .filter(|h| kernel_of(h.real_dev).is_some_and(|k| holders.contains(&k)))
+        .filter(|h| {
+            h.run == run
+                && holders.contains(&h.real_kernel)
+                && is_our_real(&read_sys(&h.real_kernel, "dm/uuid"), &h.dm_id)
+        })
         .cloned()
         .collect()
 }
@@ -479,7 +527,7 @@ fn held_on(kernel: &str) -> Vec<HeldLv> {
 /// one point in time, and the second partition later finds its volumes held
 /// already ([`held_on`]). A partition whose volumes cannot be held is left to
 /// its own copy, which refuses it in words.
-fn coupled(kernel: &str, plan: &[LvPlan]) -> Vec<LvPlan> {
+fn coupled(kernel: &str, plan: &[LvPlan], run: &str) -> Vec<LvPlan> {
     let sys = Path::new(SYS_CLASS_BLOCK);
     let Some(disk) = linux_block::parent_disk(sys, kernel) else {
         return plan.to_vec();
@@ -489,7 +537,7 @@ fn coupled(kernel: &str, plan: &[LvPlan]) -> Vec<LvPlan> {
         .filter(|p| p != kernel)
         .filter_map(|p| linux_block::dev_numbers(sys, &p).map(|d| (p, d)))
         .collect();
-    let held = held_reals();
+    let held = held_reals(run);
     let mut out = plan.to_vec();
     let mut done: BTreeSet<String> = BTreeSet::from([kernel.to_string()]);
     let mut at = 0;
@@ -521,16 +569,18 @@ fn coupled(kernel: &str, plan: &[LvPlan]) -> Vec<LvPlan> {
 /// `volume` is the partition as named (`kernel` its kernel name). Volumes of
 /// it this process already holds are taken as they are. Blocking. On success
 /// the sessions are the caller's to release, and so is every snapshot of the
-/// group (`group`, ids), whether or not it lies on this partition.
+/// group (`group`, ids), whether or not it lies on this partition. `run`
+/// names the run the snapshots belong to ([`HeldLv::run`]).
 pub fn create(
     volume: &str,
     kernel: &str,
     plan: &[LvPlan],
     cow_dir: &Path,
+    run: &str,
 ) -> Result<(Vec<Session>, PvSnapshot, Vec<String>)> {
     let part = linux_block::dev_numbers(Path::new(SYS_CLASS_BLOCK), kernel)
         .ok_or_else(|| bad(format!("{volume}: no device number")))?;
-    let group = coupled(kernel, plan);
+    let group = coupled(kernel, plan, run);
     let labels: Vec<String> = group
         .iter()
         .map(|lv| format!("/dev/mapper/{}", lv.name))
@@ -560,7 +610,9 @@ pub fn create(
         .iter()
         .zip(&sessions)
         .map(|(lv, s)| HeldLv {
+            run: run.to_string(),
             dm_id: s.id.clone(),
+            real_kernel: kernel_of(s.real_dev).unwrap_or_else(|| format!("dm-{}", s.real_dev.1)),
             name: lv.name.clone(),
             kernel: lv.kernel.clone(),
             snap_path: s.snap_path.clone(),
@@ -573,7 +625,7 @@ pub fn create(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .extend(made);
-    match describe_taken(volume, kernel, part) {
+    match describe_taken(volume, kernel, part, run) {
         Ok(layout) => {
             info!(
                 volume,
@@ -599,9 +651,9 @@ pub fn create(
 /// What the snapshots held by this process hold of the partition: the parts
 /// of each volume on it, from the table it had when it was switched, and the
 /// guard — after making sure nothing but our layers is stacked on it now.
-fn describe_taken(volume: &str, kernel: &str, part: (u32, u32)) -> Result<PvSnapshot> {
-    let held = held_on(kernel);
-    let ours: BTreeSet<String> = held.iter().filter_map(|h| kernel_of(h.real_dev)).collect();
+fn describe_taken(volume: &str, kernel: &str, part: (u32, u32), run: &str) -> Result<PvSnapshot> {
+    let held = held_on(kernel, run);
+    let ours: BTreeSet<String> = held.iter().map(|h| h.real_kernel.clone()).collect();
     let now: BTreeSet<String> = holders_of(kernel).into_iter().collect();
     if now != ours || held.is_empty() {
         let extra: Vec<String> = now.difference(&ours).cloned().collect();
@@ -834,6 +886,56 @@ mod tests {
             vec![(8, 17), (252, 3)],
             "sorted, each once"
         );
+    }
+
+    /// Snapshots another run left in place (cancelled while its engine did
+    /// not answer) are not ours: their obk-real is refused as a leftover, not
+    /// taken as held — the copy would be that run's point in time. Ours are
+    /// taken only while the device still carries the UUID of the snapshot.
+    #[test]
+    fn another_runs_layers_are_never_taken_as_ours() {
+        let id = "0123456789abcdef0123456789abcdef";
+        let entry = |run: &str| HeldLv {
+            run: run.into(),
+            dm_id: id.into(),
+            real_kernel: "dm-9".into(),
+            name: "vg-data".into(),
+            kernel: "dm-1".into(),
+            snap_path: "/dev/dm-10".into(),
+            real_dev: (252, 9),
+            original: Vec::new(),
+        };
+        let registry = vec![entry("cancelled-run")];
+        let mut real = lv(
+            "dm-9",
+            &format!("obk-real-{id}"),
+            8192,
+            vec![Target::new(0, 8192, "linear", "252:4 2048")],
+        );
+        real.uuid = format!("OBK-REAL-{id}");
+        let sda4 = (252, 4);
+
+        let mut holders = vec![real.clone()];
+        mark_held(&mut holders, &held_reals_in(&registry, "this-run"));
+        assert!(!holders[0].held);
+        assert_eq!(
+            judge(sda4, true, &holders),
+            PvJudgement::Refuse(PvRefusal::Leftover)
+        );
+
+        // The same run: held.
+        let mut holders = vec![real.clone()];
+        mark_held(&mut holders, &held_reals_in(&registry, "cancelled-run"));
+        assert!(holders[0].held);
+        assert_eq!(judge(sda4, true, &holders), PvJudgement::Plan(Vec::new()));
+
+        // The same run, but the kernel name now belongs to another snapshot.
+        let mut other = real;
+        other.uuid = "OBK-REAL-ffffffffffffffffffffffffffffffff".into();
+        let mut holders = vec![other];
+        mark_held(&mut holders, &held_reals_in(&registry, "cancelled-run"));
+        assert!(!holders[0].held);
+        assert!(!is_our_real("LVM-abc", id));
     }
 
     #[test]

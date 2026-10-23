@@ -88,8 +88,15 @@ pub struct DmIdentity {
 /// (`None`: unknown — then no partition is held still, since nobody can tell
 /// whether the copy would write onto it). `whole_disk`: the copy is of a
 /// whole disk, where a physical volume in use is held through snapshots of
-/// its logical volumes.
-pub async fn assess(volume: &str, dest: Option<&Path>, whole_disk: bool) -> Result<Assessment> {
+/// its logical volumes — the run's token (see
+/// [`LinuxSnapshotProvider::whole_disk`]).
+pub async fn assess(
+    volume: &str,
+    dest: Option<&Path>,
+    whole_disk: Option<&str>,
+) -> Result<Assessment> {
+    let run = whole_disk.map(str::to_string);
+    let whole_disk = run.is_some();
     let usage = linux_block::device_usage(Path::new(volume))
         .map_err(|e| bad(format!("cannot tell what uses {volume}: {e}")))?;
     let Some(usage) = usage else {
@@ -105,7 +112,8 @@ pub async fn assess(volume: &str, dest: Option<&Path>, whole_disk: bool) -> Resu
             tokio::task::spawn_blocking(move || {
                 let kernel = linux_block::kernel_name(Path::new(&volume));
                 if let (Some(k), false) = (&kernel, usage.holders.is_empty()) {
-                    match pv::facts(k, &pv::held_reals())
+                    let held = run.as_deref().map(pv::held_reals).unwrap_or_default();
+                    match pv::facts(k, &held)
                         .map(|(is_pv, dev, holders)| pv::judge(dev, is_pv, &holders))
                     {
                         Ok(pv::PvJudgement::Plan(plan)) => {
@@ -314,6 +322,32 @@ pub fn pv_layout(snapshot: &Snapshot) -> Result<Option<own_backup_common::lvm_pv
         .ok_or_else(|| bad("a physical volume's snapshot without its record"))
 }
 
+/// Every snapshot id a physical volume's snapshot names: its volumes' and its
+/// group's ([`PV_GROUP`]). Empty for any other snapshot.
+fn pv_ids(snapshot: &Snapshot) -> Vec<String> {
+    let mut ids: Vec<String> = pv_layout(snapshot)
+        .ok()
+        .flatten()
+        .map(|l| l.volumes.into_iter().map(|v| v.dm_id).collect())
+        .unwrap_or_default();
+    if let Some(g) = snapshot.metadata.get(PV_GROUP) {
+        for id in g.split(',').filter(|id| !id.is_empty()) {
+            if !ids.iter().any(|i| i == id) {
+                ids.push(id.to_string());
+            }
+        }
+    }
+    ids
+}
+
+/// The run that took `snapshot` is over as far as its later partitions go:
+/// a copy left behind (cancelled while its engine did not answer) still
+/// holds its snapshots until its thread is done, and they must not count as
+/// anyone's from now on. Releasing them is still the caller's.
+pub fn forget_pv_snapshot(snapshot: &Snapshot) {
+    pv::forget(&pv_ids(snapshot));
+}
+
 /// Is a device-mapper snapshot in `state` still one point in time?
 fn dm_verdict(snapshot: &Snapshot, state: std::io::Result<SnapState>) -> Result<()> {
     match state {
@@ -396,8 +430,9 @@ pub struct LinuxSnapshotProvider {
     /// released (thawed, remounted read-write) on the way.
     holds: Mutex<HashMap<String, quiesce::Hold>>,
     /// The copy is of a whole disk: an LVM physical volume in use is held
-    /// through snapshots of its logical volumes ([`Self::whole_disk`]).
-    whole_disk: bool,
+    /// through snapshots of its logical volumes ([`Self::whole_disk`]). The
+    /// run's token.
+    whole_disk: Option<String>,
 }
 
 impl LinuxSnapshotProvider {
@@ -425,8 +460,14 @@ impl LinuxSnapshotProvider {
     /// at once (`pv.rs`), and the engine reads it piece by piece. A volume
     /// copy of such a partition is refused — its logical volumes are volumes
     /// of their own.
-    pub fn whole_disk(mut self) -> Self {
-        self.whole_disk = true;
+    ///
+    /// `run` names the copy: every provider of one copy gets the same, and no
+    /// other copy has it. Snapshots taken for one partition are taken as
+    /// already held by a later partition of the same run only (a volume group
+    /// on two partitions of the disk); a cancelled run's snapshots still in
+    /// place are someone else's, and refused as such.
+    pub fn whole_disk(mut self, run: impl Into<String>) -> Self {
+        self.whole_disk = Some(run.into());
         self
     }
 
@@ -534,9 +575,10 @@ impl LinuxSnapshotProvider {
         let kernel = linux_block::kernel_name(Path::new(volume))
             .ok_or_else(|| bad(format!("{volume}: not a block device")))?;
         let vol = volume.to_string();
+        let run = self.whole_disk.clone().unwrap_or_default();
         // Blocking: suspends every logical volume and waits for them to flush.
         let (sessions, layout, group) =
-            tokio::task::spawn_blocking(move || pv::create(&vol, &kernel, &plan, &dir))
+            tokio::task::spawn_blocking(move || pv::create(&vol, &kernel, &plan, &dir, &run))
                 .await
                 .map_err(|e| bad(format!("snapshot task: {e}")))??;
 
@@ -567,17 +609,7 @@ impl LinuxSnapshotProvider {
     /// Release every logical volume's snapshot of a physical volume: those
     /// this provider holds through their sessions, the others from what the
     /// kernel shows. Every one is tried; the first failure is returned.
-    async fn release_pv(
-        &self,
-        layout: own_backup_common::lvm_pv::PvSnapshot,
-        group: Vec<String>,
-    ) -> Result<()> {
-        let mut ids: Vec<String> = layout.volumes.iter().map(|v| v.dm_id.clone()).collect();
-        for id in group {
-            if !ids.contains(&id) {
-                ids.push(id);
-            }
-        }
+    async fn release_pv(&self, ids: Vec<String>) -> Result<()> {
         pv::forget(&ids);
         let sessions: Vec<(String, Option<Session>)> = {
             let mut held = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
@@ -649,8 +681,8 @@ impl SnapshotProvider for LinuxSnapshotProvider {
     }
 
     async fn create_snapshot(&self, volume: &str) -> Result<Snapshot> {
-        match assess(volume, self.cow_dir.as_deref(), self.whole_disk).await? {
-            Assessment::PhysicalVolume(plan) if self.whole_disk => {
+        match assess(volume, self.cow_dir.as_deref(), self.whole_disk.as_deref()).await? {
+            Assessment::PhysicalVolume(plan) if self.whole_disk.is_some() => {
                 self.pv_snapshot(volume, plan).await
             }
             Assessment::PhysicalVolume(plan) => Err(OwnBackupError::NoSnapshotProvider(
@@ -695,18 +727,8 @@ impl SnapshotProvider for LinuxSnapshotProvider {
     }
 
     async fn release_snapshot(&self, snapshot: &Snapshot) -> Result<()> {
-        if let Some(layout) = pv_layout(snapshot)? {
-            let group = snapshot
-                .metadata
-                .get(PV_GROUP)
-                .map(|g| {
-                    g.split(',')
-                        .filter(|id| !id.is_empty())
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default();
-            return self.release_pv(layout, group).await;
+        if pv_layout(snapshot)?.is_some() {
+            return self.release_pv(pv_ids(snapshot)).await;
         }
         if let Some(id) = snapshot.metadata.get("hold_id") {
             let hold = self

@@ -122,11 +122,12 @@ pub fn parse_label(head: &[u8]) -> Option<PvLabel> {
 }
 
 /// The current metadata text of a metadata area: `area` is the area itself,
-/// read from its offset (its header first). `Ok(None)`: the area is marked
-/// unused (`--metadataignore`) or holds nothing. An error: the header is not
-/// an LVM2 metadata area header, a checksum does not match, or the text does
-/// not fit the area — nothing in it is believed.
-pub fn metadata_text(area: &[u8]) -> Result<Option<String>, String> {
+/// read from `start`, its offset on the device (its header first). `Ok(None)`:
+/// the area is marked unused (`--metadataignore`) or holds nothing. An error:
+/// the header is not an LVM2 metadata area header of version 1 that says it
+/// starts at `start`, a checksum does not match, or the text does not fit
+/// the area — nothing in it is believed.
+pub fn metadata_text(area: &[u8], start: u64) -> Result<Option<String>, String> {
     let bad = |why: &str| Err(why.to_string());
     let (Some(magic), Some(header)) = (area.get(4..20), area.get(4..MDA_HEADER_SIZE as usize))
     else {
@@ -139,6 +140,12 @@ pub fn metadata_text(area: &[u8]) -> Result<Option<String>, String> {
         return bad("metadata area header checksum mismatch");
     }
     let field = |at| u64_at(area, at).ok_or("metadata area cut short".to_string());
+    if u32_at(area, 20) != Some(1) {
+        return bad("metadata area header of an unknown version");
+    }
+    if field(24)? != start {
+        return bad("metadata area header says it is elsewhere");
+    }
     let size = field(32)?.min(area.len() as u64);
     // The first raw location is the committed metadata.
     let (offset, len) = (field(40)?, field(48)?);
@@ -173,14 +180,15 @@ pub fn metadata_text(area: &[u8]) -> Result<Option<String>, String> {
 }
 
 /// The allocation of the PV `pv_uuid` as EVERY metadata area of it says:
-/// `areas` are the areas as read. An area marked unused is skipped; an area
+/// `areas` are the areas as read, each with its offset on the device. An
+/// area marked unused is skipped; an area
 /// that cannot be believed, or two that disagree (an interrupted write
 /// leaves them at different sequence numbers), make it an error — the caller
 /// then counts nothing as free.
-pub fn allocation_of_areas(areas: &[&[u8]], pv_uuid: &str) -> Result<Allocation, String> {
+pub fn allocation_of_areas(areas: &[(u64, &[u8])], pv_uuid: &str) -> Result<Allocation, String> {
     let mut found: Option<Allocation> = None;
-    for (i, area) in areas.iter().enumerate() {
-        let Some(text) = metadata_text(area).map_err(|e| format!("area {i}: {e}"))? else {
+    for (i, (start, area)) in areas.iter().enumerate() {
+        let Some(text) = metadata_text(area, *start).map_err(|e| format!("area {i}: {e}"))? else {
             continue;
         };
         let a = allocation(&text, pv_uuid).map_err(|e| format!("area {i}: {e}"))?;
@@ -471,7 +479,7 @@ pub fn allocation(text: &str, pv_uuid: &str) -> Result<Allocation, String> {
         let id: String = pv.str("id").unwrap_or_default().replace('-', "");
         if id == pv_uuid {
             ours = Some((name, pv));
-        } else {
+        } else if !id.is_empty() {
             others.push(id);
         }
     }
@@ -814,26 +822,32 @@ mod tests {
     fn metadata_text_is_read_even_round_the_end_of_its_buffer() {
         let text = vg_text(10, &[]);
         let area = mda(64 << 10, 8192, &text);
-        assert_eq!(metadata_text(&area).unwrap().unwrap(), text);
+        assert_eq!(metadata_text(&area, 4096).unwrap().unwrap(), text);
         // Starts 100 bytes before the end of the area, continues after the header.
         let size = 16 << 10;
         let wrapped = mda(size, size - 100, &text);
-        assert_eq!(metadata_text(&wrapped).unwrap().unwrap(), text);
+        assert_eq!(metadata_text(&wrapped, 4096).unwrap().unwrap(), text);
 
         let mut ignored = area.clone();
         ignored[60..64].copy_from_slice(&RAW_LOCN_IGNORED.to_le_bytes());
         seal_mda(&mut ignored);
-        assert_eq!(metadata_text(&ignored), Ok(None));
+        assert_eq!(metadata_text(&ignored, 4096), Ok(None));
         let mut bad = area.clone();
         bad[4] = b'X';
-        assert!(metadata_text(&bad).is_err());
+        assert!(metadata_text(&bad, 4096).is_err());
+        // Another version, an area that says it lies elsewhere.
+        assert!(metadata_text(&area, 8192).is_err());
+        let mut v2 = area.clone();
+        v2[20..24].copy_from_slice(&2u32.to_le_bytes());
+        seal_mda(&mut v2);
+        assert!(metadata_text(&v2, 4096).is_err());
         // A header edited without its checksum, a text changed under its own.
         let mut header = area.clone();
         header[60..64].copy_from_slice(&RAW_LOCN_IGNORED.to_le_bytes());
-        assert!(metadata_text(&header).is_err());
+        assert!(metadata_text(&header, 4096).is_err());
         let mut torn = area;
         torn[8192 + 20] ^= 0x20;
-        assert!(metadata_text(&torn).is_err());
+        assert!(metadata_text(&torn, 4096).is_err());
     }
 
     /// Every area in use must say the same; one that cannot be believed or
@@ -844,24 +858,24 @@ mod tests {
         let text = vg_text(10, &lvs);
         let a = mda(64 << 10, 8192, &text);
         let b = mda(64 << 10, 4096, &text);
-        let got = allocation_of_areas(&[&a, &b], UUID).unwrap();
+        let got = allocation_of_areas(&[(4096, &a), (4096, &b)], UUID).unwrap();
         assert_eq!(got.used, vec![(0, 4)]);
 
         let mut ignored = b.clone();
         ignored[60..64].copy_from_slice(&RAW_LOCN_IGNORED.to_le_bytes());
         seal_mda(&mut ignored);
-        assert!(allocation_of_areas(&[&a, &ignored], UUID).is_ok());
+        assert!(allocation_of_areas(&[(4096, &a), (4096, &ignored)], UUID).is_ok());
         assert!(
-            allocation_of_areas(&[&ignored], UUID).is_err(),
+            allocation_of_areas(&[(4096, &ignored)], UUID).is_err(),
             "none in use"
         );
 
         let newer = mda(64 << 10, 8192, &text.replace("seqno = 7", "seqno = 8"));
-        let e = allocation_of_areas(&[&a, &newer], UUID).unwrap_err();
+        let e = allocation_of_areas(&[(4096, &a), (4096, &newer)], UUID).unwrap_err();
         assert!(e.contains("disagree"), "{e}");
         let mut torn = b;
         torn[4096 + 30] ^= 0x01;
-        assert!(allocation_of_areas(&[&a, &torn], UUID).is_err());
+        assert!(allocation_of_areas(&[(4096, &a), (4096, &torn)], UUID).is_err());
     }
 
     #[test]

@@ -180,6 +180,9 @@ fn backup_disk_inner<P: DiskPlatform>(
     let mut key_store_excluded = false;
     // Excluded NTFS names on logical volumes no removal pass can reach.
     let mut pv_names_kept: Vec<String> = Vec::new();
+    // Logical volumes already scanned for an earlier partition (a volume
+    // group on two partitions of the disk): scanned once, counted once.
+    let mut scanned = super::disk_pv::ScannedVolumes::new();
     for p in &req.partitions {
         let entry = layout
             .partitions
@@ -256,6 +259,7 @@ fn backup_disk_inner<P: DiskPlatform>(
                 &req.exclusion_patterns_windows,
                 &req.exclusion_patterns_linux,
                 key_store,
+                &mut scanned,
                 |done, total| {
                     progress(&BackupProgress {
                         backup_id: "prepare".into(),
@@ -594,31 +598,57 @@ fn backup_disk_inner<P: DiskPlatform>(
     // alone, it is incomplete. Said in the run's summary, not just the log.
     let mut notes: Vec<String> = Vec::new();
     {
-        let in_copy: std::collections::HashSet<&str> = prepared
-            .iter()
-            .filter_map(|p| p.pv.as_ref().map(|pv| pv.uuid.as_str()))
-            .collect();
+        // Every PV in the copy, those copied as plain partitions included (a
+        // PV no active volume uses is idle and read as it is).
+        let mut in_copy: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for p in &prepared {
+            if let Some(pv) = &p.pv {
+                in_copy.insert(pv.uuid.clone());
+                continue;
+            }
+            if p.bitlocker.is_some() || p.locked_window.is_some() || p.luks.is_some() {
+                continue;
+            }
+            let mut head = vec![0u8; own_backup_common::lvm_pv::LABEL_SCAN_BYTES];
+            let label = P::Dev::open_read(&p.read_path)
+                .and_then(|mut d| d.read_at(0, &mut head))
+                .ok()
+                .and_then(|()| own_backup_common::lvm_pv::parse_label(&head));
+            if let Some(l) = label {
+                in_copy.insert(l.uuid);
+            }
+        }
+        // One note per volume group: the first partition of it, and every
+        // PV of it the copy does not hold.
+        let mut groups: Vec<(String, u32, std::collections::BTreeSet<String>)> = Vec::new();
         for p in &prepared {
             let Some((vg, others)) = p.pv.as_ref().and_then(|pv| pv.vg.as_ref()) else {
                 continue;
             };
             let missing = others
                 .iter()
-                .filter(|u| !in_copy.contains(u.as_str()))
-                .count();
-            if missing > 0 {
-                warn!(part = p.part_index, vg = %vg, missing,
-                      "the volume group has physical volumes outside this copy");
-                notes.push(
-                    tr!(
-                        "engine.pv_outside_copy",
-                        vg = vg,
-                        index = p.part_index,
-                        count = missing
-                    )
-                    .into_owned(),
-                );
+                .filter(|u| !u.is_empty() && !in_copy.contains(u.as_str()))
+                .cloned();
+            match groups.iter_mut().find(|g| &g.0 == vg) {
+                Some(g) => g.2.extend(missing),
+                None => groups.push((vg.clone(), p.part_index, missing.collect())),
             }
+        }
+        for (vg, index, missing) in groups {
+            if missing.is_empty() {
+                continue;
+            }
+            warn!(part = index, vg = %vg, missing = missing.len(),
+                  "the volume group has physical volumes outside this copy");
+            notes.push(
+                tr!(
+                    "engine.pv_outside_copy",
+                    vg = vg,
+                    index = index,
+                    count = missing.len()
+                )
+                .into_owned(),
+            );
         }
     }
 

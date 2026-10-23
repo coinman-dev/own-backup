@@ -468,7 +468,9 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
     // A partition that is an LVM physical volume in use is held through
     // snapshots of all its logical volumes at once.
     let provider = own_backup_snapshot::LinuxSnapshotProvider::with_cow_dir(&out_dir)
-        .whole_disk()
+        // One process, one run: the token only has to differ from other
+        // processes' — and their snapshots are not in this one's memory.
+        .whole_disk("cli")
         .container_key(container_key_from(
             args.password.clone().map(zeroize::Zeroizing::new),
         ));

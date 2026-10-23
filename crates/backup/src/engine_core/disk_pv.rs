@@ -18,6 +18,9 @@
 //! The image holds the partition sector for sector where it holds anything at
 //! all: restored, the volume group comes back with every volume where it was.
 
+use std::collections::HashMap;
+use std::rc::Rc;
+
 use tracing::{info, warn};
 
 use own_backup_common::lvm_pv;
@@ -125,9 +128,9 @@ fn pv_facts<D: SourceDevice>(
         }
         let mut area = vec![0u8; size.min(part_len - offset) as usize];
         dev.read_at(offset, &mut area)?;
-        areas.push(area);
+        areas.push((offset, area));
     }
-    let refs: Vec<&[u8]> = areas.iter().map(Vec::as_slice).collect();
+    let refs: Vec<(u64, &[u8])> = areas.iter().map(|(o, a)| (*o, a.as_slice())).collect();
     let alloc = lvm_pv::allocation_of_areas(&refs, &label.uuid).and_then(|alloc| {
         if Some(alloc.pe_start) != label.pe_start() {
             return Err("pe_start differs between the label and the metadata".into());
@@ -263,12 +266,7 @@ impl UsedSectorMap for PieceMap {
     }
 }
 
-fn piece_map(
-    part_len: u64,
-    bs: u64,
-    pieces: &[Piece],
-    maps: &[Box<dyn UsedSectorMap>],
-) -> PieceMap {
+fn piece_map(part_len: u64, bs: u64, pieces: &[Piece], maps: &[Rc<dyn UsedSectorMap>]) -> PieceMap {
     let mut used = vec![false; part_len.div_ceil(bs) as usize];
     let mut mark = |from: u64, to: u64| {
         if from < to {
@@ -300,10 +298,25 @@ fn piece_map(
     PieceMap { used, count }
 }
 
+/// A logical volume already scanned for an earlier partition of the same
+/// disk (a volume group on two partitions, a volume on both): its map and
+/// exclusions are taken again, its files are not walked twice, and its
+/// figures are counted once.
+pub(crate) struct Scanned {
+    map: Rc<dyn UsedSectorMap>,
+    zero_ranges: ByteRanges,
+    patches: Vec<(u64, Vec<u8>)>,
+}
+
+/// The volumes scanned so far in one disk copy, by the snapshot they were
+/// read from.
+pub(crate) type ScannedVolumes = HashMap<String, Scanned>;
+
 /// Prepare the physical volume `pv` read through `part_path` (`part_len`
 /// bytes): each volume's map and exclusions, the pieces, the partition's
 /// used map. `source` and `part_index` name it in messages; `key_store`: the
 /// session says the service's key directory is on it (decision 6/E4).
+/// `scanned`: the volumes earlier partitions of this copy scanned.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_pv<P: EnginePlatform>(
     platform: &P,
@@ -316,6 +329,7 @@ pub(crate) fn prepare_pv<P: EnginePlatform>(
     patterns_windows: &[String],
     patterns_linux: &[String],
     key_store: bool,
+    scanned: &mut ScannedVolumes,
     mut tick: impl FnMut(u64, u64) -> Result<()>,
 ) -> Result<PvPrepared> {
     let bs = block_size as u64;
@@ -344,8 +358,21 @@ pub(crate) fn prepare_pv<P: EnginePlatform>(
         uuid: facts.uuid.clone(),
         vg: facts.vg.clone(),
     };
-    let mut maps: Vec<Box<dyn UsedSectorMap>> = Vec::new();
+    let mut maps: Vec<Rc<dyn UsedSectorMap>> = Vec::new();
     for v in &pv.volumes {
+        if let Some(seen) = scanned.get(&v.read_path) {
+            info!(part = part_index, volume = %v.name,
+                  "whole-disk backup: logical volume already scanned for another partition");
+            // The key directory rule held for it when it was scanned.
+            out.key_store_excluded |= v.key_store;
+            out.volumes.push(VolumeRead {
+                read_path: v.read_path.clone(),
+                zero_ranges: seen.zero_ranges.clone(),
+                patches: seen.patches.clone(),
+            });
+            maps.push(seen.map.clone());
+            continue;
+        }
         let with_key_store = |list: &[String]| -> Vec<String> {
             if v.key_store && list.is_empty() {
                 vec![crate::seal::local::KEY_DIRECTORY_NAME.to_string()]
@@ -382,9 +409,10 @@ pub(crate) fn prepare_pv<P: EnginePlatform>(
             out.key_store_excluded = true;
             info!(volume = %shown, "the service key directory is left out of this copy");
         }
-        let map = pm
-            .map
-            .unwrap_or_else(|| Box::new(AllUsedMap::new(v.len.div_ceil(bs))));
+        let map: Rc<dyn UsedSectorMap> = match pm.map {
+            Some(m) => Rc::from(m),
+            None => Rc::new(AllUsedMap::new(v.len.div_ceil(bs))),
+        };
         info!(
             part = part_index,
             volume = %v.name,
@@ -427,6 +455,14 @@ pub(crate) fn prepare_pv<P: EnginePlatform>(
                 ),
             }
         }
+        scanned.insert(
+            v.read_path.clone(),
+            Scanned {
+                map: map.clone(),
+                zero_ranges: pm.zero_ranges.clone(),
+                patches: pm.patches.clone(),
+            },
+        );
         out.volumes.push(VolumeRead {
             read_path: v.read_path.clone(),
             zero_ranges: pm.zero_ranges,
@@ -656,7 +692,7 @@ mod tests {
                 from: Src::Free,
             },
         ];
-        let maps: Vec<Box<dyn UsedSectorMap>> = vec![Box::new(Used(vec![1, 3]))];
+        let maps: Vec<Rc<dyn UsedSectorMap>> = vec![Rc::new(Used(vec![1, 3]))];
         let map = piece_map(100, bs, &pieces, &maps);
         let used: Vec<u64> = (0..10).filter(|&b| map.is_block_used(b)).collect();
         assert_eq!(used, vec![0, 1, 2, 3, 4, 5]);
