@@ -323,6 +323,21 @@ fn wipe_gaps(
 /// which is how a restored Kubuntu's apt met the .deb files it had excluded.
 /// The plain sector path has wiped its gaps since D16; the encrypted path
 /// simply never did, and only an encrypted target could show it.
+/// How much of a slice of `slice_len` bytes at `payload_off` lies inside a
+/// data area of `payload_len` bytes, in whole encryption sectors; `None` when
+/// nothing does.
+fn payload_slice(
+    payload_off: u64,
+    slice_len: usize,
+    payload_len: u64,
+    params: &crate::luks::LuksParams,
+) -> Option<usize> {
+    let room = payload_len.checked_sub(payload_off)?;
+    let len = (slice_len as u64).min(room);
+    let len = len - len % params.sector_size.max(1) as u64;
+    (len > 0).then_some(len as usize)
+}
+
 fn wipe_gaps_encrypted(
     dev: &mut dyn SectorTarget,
     covered: &mut [(u64, u64)],
@@ -448,7 +463,25 @@ pub fn verify_partition_blocks(
             continue; // no point comparing the target against a bad reference
         }
 
-        let mut from_disk = vec![0u8; copy.slice_len];
+        let slice_len = match crypt {
+            None => copy.slice_len,
+            // Only what lies inside the data area was written
+            // ([`write_container_blocks`]).
+            Some(params) => {
+                // The copy's data area, as `container_fitting` measured it
+                // for the write — not the target's, which may be larger.
+                let payload_len = crate::restore_map::payload_len(
+                    window.len,
+                    params.data_offset,
+                    sidecar.disk_manifest.is_some(),
+                )?;
+                match payload_slice(copy.dst_offset, copy.slice_len, payload_len, params) {
+                    Some(len) => len,
+                    None => continue,
+                }
+            }
+        };
+        let mut from_disk = vec![0u8; slice_len];
         match crypt {
             None => dev.read_at(copy.dst_offset, &mut from_disk)?,
             Some(params) => {
@@ -459,12 +492,12 @@ pub fn verify_partition_blocks(
                 params.decrypt(payload_off, &mut from_disk)?;
             }
         }
-        if from_disk != from_image[copy.slice_start..copy.slice_start + copy.slice_len] {
+        if from_disk != from_image[copy.slice_start..copy.slice_start + slice_len] {
             out.mismatches.push(entry.block_number);
         }
 
         out.blocks_checked += 1;
-        out.bytes_checked += copy.slice_len as u64;
+        out.bytes_checked += slice_len as u64;
         progress(&SectorRestoreProgress {
             blocks_done: out.blocks_checked,
             blocks_total: total,
@@ -640,9 +673,13 @@ pub fn write_container_blocks(
         // `dst_offset` is where the byte sits inside the *payload*; on disk it
         // lands that far past the header.
         let payload_off = copy.dst_offset;
-        if payload_off + copy.slice_len as u64 > payload_len {
+        // A block that runs past the data area's end still carries its last
+        // bytes: only the part beyond it is dropped (a whole-disk block grid
+        // need not end where the payload does).
+        let Some(slice_len) = payload_slice(payload_off, copy.slice_len, payload_len, &params)
+        else {
             continue; // beyond the container's data area
-        }
+        };
 
         let mut buf = vec![0u8; copy.block_len];
         image.read_at(copy.image_offset, &mut buf)?;
@@ -657,14 +694,14 @@ pub fn write_container_blocks(
             }
         }
 
-        let mut slice = buf[copy.slice_start..copy.slice_start + copy.slice_len].to_vec();
+        let mut slice = buf[copy.slice_start..copy.slice_start + slice_len].to_vec();
         params.encrypt(payload_off, &mut slice)?;
         dev.write_at(req.header.data_offset + payload_off, &slice)?;
 
         out.blocks_restored += 1;
-        out.bytes_restored += copy.slice_len as u64;
+        out.bytes_restored += slice_len as u64;
         if opts.wipe_free_space {
-            covered.push((payload_off, copy.slice_len as u64));
+            covered.push((payload_off, slice_len as u64));
         }
         progress(&SectorRestoreProgress {
             blocks_done: out.blocks_restored,

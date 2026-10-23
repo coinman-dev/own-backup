@@ -121,6 +121,29 @@ pub(crate) trait SourceSession {
     fn physical_volume(&self) -> Option<&PhysicalVolume> {
         None
     }
+
+    /// The source is a partition whose LUKS container the system has open:
+    /// [`Self::read_path`] reads the container's mapping (or its snapshot) —
+    /// the data in the clear, a filesystem or an LVM physical volume — and
+    /// the container's header lies at the start of the partition. A
+    /// whole-disk copy keeps that header so a restore can put the container
+    /// back (D19). `None` for any other source (and always on Windows).
+    fn opened_container(&self) -> Option<&OpenedContainer> {
+        None
+    }
+}
+
+/// An opened LUKS container a whole-disk copy reads in the clear
+/// ([`SourceSession::opened_container`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OpenedContainer {
+    /// The partition the container is on: where its header is read.
+    pub(crate) partition: String,
+    /// Where the mapping's data starts on the partition, in bytes (the
+    /// offset of its crypt table) — checked against the header's own word.
+    pub(crate) data_offset: u64,
+    /// The mapping's name, for messages (`luks-…`).
+    pub(crate) mapping: String,
 }
 
 /// A partition that is an LVM physical volume in use, as its session holds

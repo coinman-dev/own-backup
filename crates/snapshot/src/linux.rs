@@ -72,8 +72,186 @@ pub enum Assessment {
     PhysicalVolume(Vec<pv::LvPlan>),
     /// In use, an LVM physical volume that cannot be held that way, and why.
     PvRefused(pv::PvRefusal),
+    /// A partition with an opened LUKS container on it, in a whole-disk
+    /// copy: the container's mapping is read in the clear, held as `how`
+    /// says — `Idle`, `ReadOnly`, `DeviceMapper` (a filesystem in use on
+    /// it) or `PhysicalVolume` (LUKS → LVM) — and the copy keeps the
+    /// container's header off the partition.
+    Container {
+        mapping: LuksMapping,
+        how: Box<Assessment>,
+    },
+    /// A partition with an opened LUKS container on it that a whole-disk
+    /// copy cannot take, and why.
+    ContainerRefused(ContainerRefusal),
     /// In use, and there is no way to hold a point in time.
     InUse(Usage),
+}
+
+/// The mapping of an opened LUKS container on a partition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LuksMapping {
+    /// Kernel name (`dm-0`).
+    pub kernel: String,
+    /// Device-mapper name (`luks-…`, `dm_crypt-0`).
+    pub name: String,
+    /// Where its data starts on the partition, in bytes (its crypt table's
+    /// offset).
+    pub data_offset: u64,
+}
+
+/// Why a partition's opened LUKS container is not copied as a whole disk's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContainerRefusal {
+    /// The partition does not start with the container's header: it is kept
+    /// elsewhere (`cryptsetup --header`), and the restore could not put it
+    /// back.
+    DetachedHeader { mapping: String },
+    /// The mapping is not one crypt target over the whole partition (a
+    /// dm-integrity layer under it, a table made by hand).
+    Table { mapping: String },
+}
+
+/// Metadata keys of a whole-disk copy's snapshot of a partition with an
+/// opened LUKS container ([`Assessment::Container`]): the partition (where
+/// the header is), the mapping's name, and where its data starts on the
+/// partition in bytes. Names and offsets only.
+pub const LUKS_PARTITION: &str = "luks_partition";
+pub const LUKS_MAPPING: &str = "luks_mapping";
+pub const LUKS_OFFSET: &str = "luks_offset";
+
+/// The opened container a snapshot reads in the clear: (partition, mapping
+/// name, data offset); `None` for any other snapshot.
+pub fn opened_container(snapshot: &Snapshot) -> Option<(String, String, u64)> {
+    let m = &snapshot.metadata;
+    Some((
+        m.get(LUKS_PARTITION)?.clone(),
+        m.get(LUKS_MAPPING).cloned().unwrap_or_default(),
+        m.get(LUKS_OFFSET)?.parse().ok()?,
+    ))
+}
+
+/// Is the one device stacked on the partition `part` an opened LUKS
+/// container a whole-disk copy can read in the clear? `None`: it is not a
+/// LUKS mapping alone on the partition (not this question's to answer).
+/// `magic`: the partition starts with a LUKS header.
+pub(crate) fn judge_container(
+    part: (u32, u32),
+    holders: &[pv::HolderFacts],
+    magic: bool,
+) -> Option<std::result::Result<(usize, LuksMapping), ContainerRefusal>> {
+    let [h] = holders else {
+        return None;
+    };
+    if !h.uuid.starts_with("CRYPT-LUKS") {
+        return None;
+    }
+    let mapping = || h.name.clone();
+    if !magic {
+        return Some(Err(ContainerRefusal::DetachedHeader { mapping: mapping() }));
+    }
+    let offset = match h.table.as_slice() {
+        [t] if t.kind == "crypt"
+            && t.start == 0
+            && t.length == h.size_sectors
+            && dm_snapshot::crypt_device(&t.params) == Some(part) =>
+        {
+            t.params
+                .split(' ')
+                .nth(4)
+                .and_then(|o| o.parse::<u64>().ok())
+        }
+        _ => None,
+    };
+    Some(match offset {
+        Some(sectors) => Ok((
+            0,
+            LuksMapping {
+                kernel: h.kernel.clone(),
+                name: h.name.clone(),
+                data_offset: sectors * 512,
+            },
+        )),
+        None => Err(ContainerRefusal::Table { mapping: mapping() }),
+    })
+}
+
+/// The refusal in words, naming the partition `volume`.
+fn describe_container_refusal(volume: &str, why: &ContainerRefusal) -> String {
+    match why {
+        ContainerRefusal::DetachedHeader { mapping } => tr!(
+            "linux.luks_detached_header",
+            volume = volume,
+            mapping = mapping
+        ),
+        ContainerRefusal::Table { mapping } => {
+            tr!("linux.luks_odd_table", volume = volume, mapping = mapping)
+        }
+    }
+    .into_owned()
+}
+
+/// How the opened container `mapping` on a partition is held in a
+/// whole-disk copy: its own users decide, as for any device-mapper device —
+/// or, with logical volumes on it, as a physical volume. Blocking.
+fn assess_container(mapping: LuksMapping, run: Option<&str>) -> Assessment {
+    let crypt = format!("/dev/{}", mapping.kernel);
+    let usage = match linux_block::device_usage(Path::new(&crypt)) {
+        Ok(Some(u)) => u,
+        _ => {
+            return Assessment::InUse(Usage {
+                holders: vec![mapping.kernel.clone()],
+                ..Default::default()
+            })
+        }
+    };
+    let how = if usage.holders.is_empty() {
+        let uuid = std::fs::read_to_string(format!(
+            "{}/{}/dm/uuid",
+            linux_block::SYS_CLASS_BLOCK,
+            mapping.kernel
+        ))
+        .map(|u| u.trim().to_string())
+        .unwrap_or_default();
+        decide(
+            usage,
+            None,
+            Some(DmIdentity {
+                kernel: mapping.kernel.clone(),
+                uuid,
+            }),
+        )
+    } else {
+        let held = run.map(pv::held_reals).unwrap_or_default();
+        match pv::facts(&mapping.kernel, &held)
+            .map(|(is_pv, dev, holders)| pv::judge(dev, is_pv, &holders))
+        {
+            Ok(pv::PvJudgement::Plan(plan)) => Assessment::PhysicalVolume(plan),
+            Ok(pv::PvJudgement::Refuse(why)) => return Assessment::PvRefused(why),
+            Ok(pv::PvJudgement::NotPv) => return Assessment::InUse(usage),
+            Err(e) => {
+                warn!(mapping = %mapping.name, error = %e, "cannot tell what is stacked on the container");
+                return Assessment::InUse(usage);
+            }
+        }
+    };
+    match how {
+        Assessment::InUse(usage) => Assessment::InUse(usage),
+        how => Assessment::Container {
+            mapping,
+            how: Box::new(how),
+        },
+    }
+}
+
+/// Does the device `kernel` start with a LUKS header?
+fn starts_with_luks(kernel: &str) -> bool {
+    use std::io::Read;
+    let mut magic = [0u8; 6];
+    std::fs::File::open(format!("/dev/{kernel}"))
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .is_ok()
+        && &magic == b"LUKS\xba\xbe"
 }
 
 /// What device-mapper says a device is: its kernel name (`dm-3`) and DM UUID
@@ -113,6 +291,20 @@ pub async fn assess(
                 let kernel = linux_block::kernel_name(Path::new(&volume));
                 if let (Some(k), false) = (&kernel, usage.holders.is_empty()) {
                     let held = run.as_deref().map(pv::held_reals).unwrap_or_default();
+                    // A whole disk: an opened LUKS container on the partition
+                    // is read in the clear through its mapping, its header
+                    // kept for the restore (LUKS → filesystem, LUKS → LVM).
+                    if whole_disk {
+                        if let Ok((_, dev, holders)) = pv::facts(k, &held) {
+                            match judge_container(dev, &holders, starts_with_luks(k)) {
+                                Some(Ok((_, mapping))) => {
+                                    return assess_container(mapping, run.as_deref())
+                                }
+                                Some(Err(why)) => return Assessment::ContainerRefused(why),
+                                None => {}
+                            }
+                        }
+                    }
                     match pv::facts(k, &held)
                         .map(|(is_pv, dev, holders)| pv::judge(dev, is_pv, &holders))
                     {
@@ -700,6 +892,37 @@ impl SnapshotProvider for LinuxSnapshotProvider {
             Assessment::PvRefused(why) => Err(OwnBackupError::NoSnapshotProvider(pv::describe(
                 volume, &why,
             ))),
+            Assessment::ContainerRefused(why) => Err(OwnBackupError::NoSnapshotProvider(
+                describe_container_refusal(volume, &why),
+            )),
+            Assessment::Container { mapping, how } => {
+                let crypt = format!("/dev/{}", mapping.kernel);
+                let mut snapshot = match *how {
+                    Assessment::Idle => direct(&crypt, "idle"),
+                    Assessment::ReadOnly => direct(&crypt, "readonly"),
+                    Assessment::DeviceMapper { kernel } => self.dm_snapshot(&crypt, kernel).await?,
+                    Assessment::PhysicalVolume(plan) => self.pv_snapshot(&crypt, plan).await?,
+                    other => {
+                        return Err(bad(format!(
+                            "{volume}: unexpected assessment of its container: {other:?}"
+                        )))
+                    }
+                };
+                // Found by the partition, read through the mapping.
+                snapshot.source_device = volume.into();
+                snapshot
+                    .metadata
+                    .insert(LUKS_PARTITION.into(), volume.into());
+                snapshot
+                    .metadata
+                    .insert(LUKS_MAPPING.into(), mapping.name.clone());
+                snapshot
+                    .metadata
+                    .insert(LUKS_OFFSET.into(), mapping.data_offset.to_string());
+                info!(volume, mapping = %mapping.name, mode = ?snapshot.metadata.get("mode"),
+                      "partition with an opened LUKS container held through its mapping");
+                Ok(snapshot)
+            }
             Assessment::File => Ok(direct(volume, "file")),
             Assessment::Idle => Ok(direct(volume, "idle")),
             Assessment::ReadOnly => Ok(direct(volume, "readonly")),
@@ -997,6 +1220,79 @@ fn snapshot_invalid(lv_attr: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn crypt_holder(params: &str, size: u64) -> pv::HolderFacts {
+        pv::HolderFacts {
+            kernel: "dm-0".into(),
+            name: "luks-1234".into(),
+            uuid: "CRYPT-LUKS2-1234-luks-1234".into(),
+            size_sectors: size,
+            stacked: Vec::new(),
+            stacked_uuids: Vec::new(),
+            table: vec![crate::dm_ioctl::Target::new(0, size, "crypt", params)],
+            held: false,
+        }
+    }
+
+    /// The one crypt mapping over the whole partition is read in the clear,
+    /// its data offset from the table; anything else about it is refused
+    /// with the reason, and a device that is not a LUKS mapping is left to
+    /// the other questions.
+    #[test]
+    fn an_opened_container_on_a_partition_is_judged_by_its_table() {
+        let part = (8, 3);
+        let ok = crypt_holder("aes-xts-plain64 :64:logon:cryptsetup:x 0 8:3 32768", 1000);
+        assert_eq!(
+            judge_container(part, std::slice::from_ref(&ok), true),
+            Some(Ok((
+                0,
+                LuksMapping {
+                    kernel: "dm-0".into(),
+                    name: "luks-1234".into(),
+                    data_offset: 32768 * 512
+                }
+            )))
+        );
+        // The header is not on the partition (`--header`).
+        assert_eq!(
+            judge_container(part, std::slice::from_ref(&ok), false),
+            Some(Err(ContainerRefusal::DetachedHeader {
+                mapping: "luks-1234".into()
+            }))
+        );
+        // Over another device (a dm-integrity layer under it).
+        let other = crypt_holder("aes-xts-plain64 :64:logon:cryptsetup:x 0 252:9 32768", 1000);
+        assert!(matches!(
+            judge_container(part, &[other], true),
+            Some(Err(ContainerRefusal::Table { .. }))
+        ));
+        // A table that does not cover the mapping.
+        let mut short = ok.clone();
+        short.size_sectors = 2000;
+        assert!(matches!(
+            judge_container(part, &[short], true),
+            Some(Err(ContainerRefusal::Table { .. }))
+        ));
+        // Not LUKS, or not alone: not this question.
+        let mut plain = ok.clone();
+        plain.uuid = "CRYPT-PLAIN-swap".into();
+        assert_eq!(judge_container(part, &[plain], true), None);
+        assert_eq!(judge_container(part, &[ok.clone(), ok], true), None);
+        assert_eq!(judge_container(part, &[], true), None);
+    }
+
+    #[test]
+    fn a_snapshot_names_the_opened_container_it_reads() {
+        let mut s = direct("/dev/dm-0", "dm");
+        assert_eq!(opened_container(&s), None);
+        s.metadata.insert(LUKS_PARTITION.into(), "/dev/sda3".into());
+        s.metadata.insert(LUKS_MAPPING.into(), "luks-1".into());
+        s.metadata.insert(LUKS_OFFSET.into(), "16777216".into());
+        assert_eq!(
+            opened_container(&s),
+            Some(("/dev/sda3".into(), "luks-1".into(), 16 * 1024 * 1024))
+        );
+    }
 
     #[test]
     fn parse_lvs_extracts_vg_lv_and_thin() {

@@ -882,6 +882,9 @@ impl BackupClient {
         target_device: &str,
         identity_choice: impl Into<own_backup_common::engine_dto::IdentityDecision>,
         secret: &ArchiveSecret,
+        // The LUKS containers' own passphrases, by source partition index —
+        // asked for through [`luks_passphrases_in`]; not the copy's password.
+        passphrases: &std::collections::HashMap<u32, String>,
     ) -> std::result::Result<serde_json::Value, tonic::Status> {
         let decision = identity_choice.into();
         let mut body = serde_json::json!({
@@ -889,6 +892,7 @@ impl BackupClient {
             "target_device": target_device,
             "identity_choice": decision.choice,
             "fix_references": decision.fix_references,
+            "passphrases": passphrases,
         });
         secret.add_to(&mut body);
         let json = body.to_string();
@@ -1389,6 +1393,22 @@ pub fn identity_clashes_in(
         .ok()
         .and_then(|v| {
             v.get(own_backup_common::engine_dto::IDENTITY_CLASHES_DETAIL)
+                .cloned()
+        })
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
+/// The LUKS containers a whole-disk restore asked passphrases for (missing
+/// or wrong), from the details of its `FAILED_PRECONDITION` status; empty for
+/// any other status.
+pub fn luks_passphrases_in(
+    s: &tonic::Status,
+) -> Vec<own_backup_common::engine_dto::LuksPassphraseNeedDto> {
+    serde_json::from_slice::<serde_json::Value>(s.details())
+        .ok()
+        .and_then(|v| {
+            v.get(own_backup_common::engine_dto::LUKS_PASSPHRASES_DETAIL)
                 .cloned()
         })
         .and_then(|v| serde_json::from_value(v).ok())

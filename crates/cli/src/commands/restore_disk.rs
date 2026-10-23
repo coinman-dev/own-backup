@@ -230,13 +230,53 @@ pub async fn run(args: RestoreDiskArgs) -> own_backup_common::Result<()> {
         .await
         .map_err(OwnBackupError::Config)?;
     let secret = crate::commands::archive_key::ask_for_image(&mut client, &args.manifest).await?;
-    println!("Восстанавливаю…");
-    match client
-        .restore_device_with_status(&args.manifest, &target, decision, &secret)
-        .await
-    {
+    // The LUKS containers the copy holds decrypted go back encrypted; the
+    // service names those whose passphrase it needs (missing or wrong), and
+    // only those are asked for — the containers' own passphrases, the ones
+    // the restored system asks at boot, never the copy's password.
+    let mut passphrases = std::collections::HashMap::new();
+    let mut rounds = 0;
+    let outcome = loop {
+        println!("Восстанавливаю…");
+        let done = client
+            .restore_device_with_status(&args.manifest, &target, decision, &secret, &passphrases)
+            .await;
+        let needs = match &done {
+            Err(s) => own_backup_client::luks_passphrases_in(s),
+            Ok(_) => Vec::new(),
+        };
+        if needs.is_empty() || rounds == 3 {
+            break done;
+        }
+        rounds += 1;
+        println!("В копии есть контейнеры LUKS: восстановление вернёт им шифрование.");
+        for n in &needs {
+            if n.wrong {
+                println!("  Пароль раздела {} не подходит.", n.part_index);
+            }
+            let typed = crate::secret_prompt::ask_secret(&format!(
+                "  Пароль контейнера LUKS раздела {} (его спрашивает система при загрузке; не отображается): ",
+                n.part_index
+            ))
+            .map_err(|e| OwnBackupError::Config(e.to_string()))?;
+            if typed.is_empty() {
+                return Err(OwnBackupError::Config(
+                    "без пароля контейнер LUKS не вернуть, а писать на его место открытые данные \
+                     восстановление не станет — отменено"
+                        .into(),
+                ));
+            }
+            passphrases.insert(n.part_index, typed);
+        }
+    };
+    match outcome {
         Ok(reply) => {
             println!("Готово.");
+            if let Some(parts) = reply.get("luks_containers").and_then(|n| n.as_array()) {
+                for p in parts {
+                    println!("  Раздел {p}: контейнер LUKS возвращён с прежним заголовком.");
+                }
+            }
             if let Some(notes) = reply.get("notes").and_then(|n| n.as_array()) {
                 for n in notes.iter().filter_map(|n| n.as_str()) {
                     println!("  {n}");

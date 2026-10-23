@@ -16,6 +16,34 @@
     "ru": "Блок копии по смещению %{offset} не помещается на диск назначения (%{size} байт).",
     "en": "The copy's block at offset %{offset} does not fit the target disk (%{size} bytes)."
   },
+  "restore_disk_linux.luks_no_header": {
+    "ru": "Раздел %{index} был контейнером LUKS и сохранён в копии расшифрованным, но заголовка контейнера в копии нет — вернуть шифрование нельзя, а писать открытые данные туда, где система ждёт контейнер, восстановление не станет. Данные раздела доступны: подключите копию или восстановите этот раздел отдельно.",
+    "en": "Partition %{index} was a LUKS container and the copy holds it decrypted, but without the container's header — the encryption cannot be put back, and the restore will not write plaintext where the system expects a container. The partition's data is still available: mount the copy or restore that partition on its own."
+  },
+  "restore_disk_linux.luks_cannot_rebuild": {
+    "ru": "Контейнер LUKS раздела %{index} не восстановить с шифрованием: %{why}. Данные раздела доступны: подключите копию или восстановите этот раздел отдельно.",
+    "en": "The LUKS container of partition %{index} cannot be restored with its encryption: %{why}. The partition's data is still available: mount the copy or restore that partition on its own."
+  },
+  "restore_disk_linux.luks_passphrases_needed": {
+    "ru": "Чтобы вернуть шифрование LUKS, нужны пароли контейнеров (те, что спрашивает система при загрузке, а не пароль копии): %{list}.",
+    "en": "Putting the LUKS encryption back needs the containers' passphrases (the ones the system asks for at boot, not the copy's password): %{list}."
+  },
+  "restore_disk_linux.luks_passphrase_missing": {
+    "ru": "раздел %{index} — пароль не указан",
+    "en": "partition %{index} — no passphrase given"
+  },
+  "restore_disk_linux.luks_passphrase_wrong": {
+    "ru": "раздел %{index} — пароль не подходит",
+    "en": "partition %{index} — the passphrase does not match"
+  },
+  "restore_disk_linux.label_container": {
+    "ru": "Раздел %{index}: контейнер LUKS",
+    "en": "Partition %{index}: LUKS container"
+  },
+  "restore_disk_linux.bitlocker_decrypted": {
+    "ru": "Раздел %{index} был зашифрован BitLocker и восстановлен расшифрованным: включите BitLocker в Windows заново.",
+    "en": "Partition %{index} was encrypted with BitLocker and is restored decrypted: turn BitLocker on again in Windows."
+  },
   "restore_disk_linux.udev_not_settled": {
     "ru": "Диск записан, но система не успела показать его разделы (%{error}). Если их не видно, переподключите диск или перезагрузитесь.",
     "en": "The disk is written, but the system did not finish showing its partitions (%{error}). If they are not visible, reconnect the disk or restart."

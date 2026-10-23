@@ -536,3 +536,21 @@ pub struct IdentityChangeDto {
 /// Key of the JSON object carried in the details of the `FAILED_PRECONDITION`
 /// status that asks for an [`IdentityChoice`]: `{"identity_clashes": [...]}`.
 pub const IDENTITY_CLASHES_DETAIL: &str = "identity_clashes";
+
+/// Key of the JSON object carried in the details of the `FAILED_PRECONDITION`
+/// status a whole-disk restore answers with when a LUKS container the copy
+/// holds decrypted needs its passphrase to be put back:
+/// `{"luks_passphrases": [...]}` ([`LuksPassphraseNeedDto`]).
+pub const LUKS_PASSPHRASES_DETAIL: &str = "luks_passphrases";
+
+/// A LUKS container of a whole-disk copy whose passphrase the restore needs —
+/// the container's own one, which opens the restored system at boot; never
+/// the copy's archive password.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LuksPassphraseNeedDto {
+    /// The source partition: the key of the request's `passphrases`.
+    pub part_index: u32,
+    pub kind: crate::image::VolumeEncryptionKind,
+    /// One was given, and no keyslot of the container accepted it.
+    pub wrong: bool,
+}

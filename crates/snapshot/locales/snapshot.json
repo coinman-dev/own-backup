@@ -140,6 +140,14 @@
     "ru": "Раздел %{volume} — контейнер LUKS (%{container}), внутри которого физический том LVM с логическими томами в работе. Копия диска с таким разделом пока не делается: снимки его логических томов есть, но восстановить контейнер вокруг них пока нельзя. Скопируйте логические тома по отдельности (как тома) или весь диск с загрузочного носителя.",
     "en": "Partition %{volume} is a LUKS container (%{container}) holding an LVM physical volume whose logical volumes are in use. A disk copy with such a partition is not made yet: its logical volumes can be snapshotted, but the container around them cannot be restored yet. Copy the logical volumes on their own (as volumes), or the whole disk from the bootable media."
   },
+  "linux.luks_detached_header": {
+    "ru": "На разделе %{volume} открыт контейнер LUKS (%{mapping}), но заголовок контейнера хранится не на разделе (--header): восстановление не смогло бы вернуть контейнер, поэтому копия диска с таким разделом не делается.",
+    "en": "A LUKS container (%{mapping}) is open on partition %{volume}, but its header is kept elsewhere (--header): a restore could not put the container back, so a disk copy with this partition is not made."
+  },
+  "linux.luks_odd_table": {
+    "ru": "Контейнер LUKS (%{mapping}) на разделе %{volume} открыт не одним шифрующим отображением на весь раздел (например, с проверкой целостности): копия диска с таким разделом не делается.",
+    "en": "The LUKS container (%{mapping}) on partition %{volume} is not opened as one crypt mapping over the whole partition (for example, with integrity protection): a disk copy with this partition is not made."
+  },
   "linux.pv_lv_stacked": {
     "ru": "На логическом томе %{lv} физического тома %{volume} открыто ещё одно устройство (%{holders}) — например, контейнер LUKS, пул тонких томов или классический снимок LVM. Снимок такого тома не удержит то, что над ним, поэтому копия диска не сделана. Скопируйте открытое устройство как том или весь диск с загрузочного носителя.",
     "en": "Another device (%{holders}) is opened on the logical volume %{lv} of the physical volume %{volume} — a LUKS container, a thin pool or a classic LVM snapshot, for example. A snapshot of that volume would not hold what sits on it, so no disk copy was made. Copy the opened device as a volume, or the whole disk from the bootable media."

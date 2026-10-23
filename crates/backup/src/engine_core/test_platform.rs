@@ -16,7 +16,7 @@ use own_backup_common::{OwnBackupError, Result};
 
 use super::platform::{
     userspace_vhdx, DiskIdentity, DiskPlatform, DiskRef, DiskWindow, EnginePlatform, FinishedImage,
-    NativeUsedMap, PhysicalVolume, SourceDevice, SourceSession, VolumeSpan,
+    NativeUsedMap, OpenedContainer, PhysicalVolume, SourceDevice, SourceSession, VolumeSpan,
 };
 use crate::block_reader::{BlockReader, RawVolumeBlockReader};
 use crate::efivars::BootBackup;
@@ -169,6 +169,15 @@ pub(crate) enum TestSource {
     /// An LVM physical volume in use: the partition itself is read where no
     /// logical volume of `pv` maps, each volume from its own device.
     PhysicalVolume(PhysicalVolume),
+    /// A partition whose LUKS container the system has open: its mapping,
+    /// registered at `mapping` and starting `data_offset` bytes into the
+    /// partition, is read — through `pv`'s volumes when it is an LVM
+    /// physical volume in use (LUKS → LVM).
+    Opened {
+        mapping: String,
+        data_offset: u64,
+        pv: Option<PhysicalVolume>,
+    },
 }
 
 pub(crate) struct TestSession {
@@ -178,6 +187,7 @@ pub(crate) struct TestSession {
     completed: bool,
     key_store: bool,
     pv: Option<PhysicalVolume>,
+    container: Option<OpenedContainer>,
     /// Not `Send`, like a VSS session: the engine must not need it to be.
     _not_send: PhantomData<*const ()>,
 }
@@ -215,6 +225,10 @@ impl SourceSession for TestSession {
 
     fn physical_volume(&self) -> Option<&PhysicalVolume> {
         self.pv.as_ref()
+    }
+
+    fn opened_container(&self) -> Option<&OpenedContainer> {
+        self.container.as_ref()
     }
 }
 
@@ -277,10 +291,24 @@ impl EnginePlatform for TestPlatform {
             TestSource::Snapshot { read_path } if use_snapshot => (read_path.clone(), true, true),
             TestSource::Snapshot { .. } => (source.to_string(), false, false),
             TestSource::PhysicalVolume(_) => (source.to_string(), true, true),
+            TestSource::Opened { mapping, .. } => (mapping.clone(), true, true),
         };
         Ok(TestSession {
             pv: match how {
                 TestSource::PhysicalVolume(pv) => Some(pv.clone()),
+                TestSource::Opened { pv, .. } => pv.clone(),
+                _ => None,
+            },
+            container: match how {
+                TestSource::Opened {
+                    mapping,
+                    data_offset,
+                    ..
+                } => Some(OpenedContainer {
+                    partition: source.to_string(),
+                    data_offset: *data_offset,
+                    mapping: mapping.clone(),
+                }),
                 _ => None,
             },
             key_store: self.key_stores.contains(source),

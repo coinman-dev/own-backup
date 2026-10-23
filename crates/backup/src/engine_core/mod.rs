@@ -10,6 +10,7 @@
 pub(crate) mod chain;
 pub(crate) mod disk;
 pub(crate) mod disk_image;
+pub(crate) mod disk_luks;
 pub(crate) mod disk_prepare;
 pub(crate) mod disk_pv;
 pub(crate) mod disk_target;

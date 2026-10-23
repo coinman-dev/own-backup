@@ -526,6 +526,24 @@ mod physical_volume {
 
     impl PvDisk {
         fn new(root: Vec<u8>, metadata_readable: bool) -> Self {
+            Self::build(root, metadata_readable, None)
+        }
+
+        /// The PV inside a LUKS container (LUKS → LVM) opened with `pass`:
+        /// `part` is then the container's mapping, `container` the partition.
+        fn in_luks(root: Vec<u8>, pass: &str) -> (Self, String, Vec<u8>) {
+            let mut made = None;
+            let disk = Self::build(root, true, Some((pass, &mut made)));
+            let (path, bytes) = made.expect("the container");
+            (disk, path, bytes)
+        }
+
+        #[allow(clippy::type_complexity)]
+        fn build(
+            root: Vec<u8>,
+            metadata_readable: bool,
+            luks: Option<(&str, &mut Option<(String, Vec<u8>)>)>,
+        ) -> Self {
             assert_eq!(root.len() as u64, 2 * EXT);
             let text = vg_text(
                 5,
@@ -549,13 +567,19 @@ mod physical_volume {
             live[extent(2) as usize..extent(3) as usize].fill(0xFF);
             live[extent(3) as usize..extent(4) as usize].fill(0xDD);
             let data: Vec<u8> = (0..EXT).map(|i| (i % 253) as u8 ^ 0x5C).collect();
+            // The partition: the PV itself, or the container around it.
+            let container = luks
+                .as_ref()
+                .map(|(pass, _)| crate::luks::test_luks1_container(pass.as_bytes(), &live));
+            let on_part: Vec<u8> = container.clone().unwrap_or_else(|| live.clone());
+            let slot = on_part.len() as u64;
 
             let mut esp_data = fat16(&[b'1'; 20_000]);
             esp_data.resize(6 * MIB as usize, 0);
             let layout = DiskLayout {
                 disk_guid: "0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0".into(),
                 sector_size: 512,
-                size_bytes: PV_AT + PV_LEN + MIB,
+                size_bytes: PV_AT + slot + MIB,
                 partitions: vec![
                     GptPartitionEntry {
                         index: 1,
@@ -571,7 +595,7 @@ mod physical_volume {
                         type_guid: LINUX_LVM.into(),
                         part_guid: "11111111-0000-0000-0000-000000000002".into(),
                         first_lba: PV_AT / 512,
-                        last_lba: (PV_AT + PV_LEN) / 512 - 1,
+                        last_lba: (PV_AT + slot) / 512 - 1,
                         attributes: 0,
                         name: "lvm".into(),
                     },
@@ -591,12 +615,17 @@ mod physical_volume {
                 bytes[at..at + op.bytes.len()].copy_from_slice(&op.bytes);
             }
             bytes[MIB as usize..7 * MIB as usize].copy_from_slice(&esp_data);
-            bytes[PV_AT as usize..(PV_AT + PV_LEN) as usize].copy_from_slice(&disk.live);
+            bytes[PV_AT as usize..(PV_AT + slot) as usize].copy_from_slice(&on_part);
             register_device(&disk.device, bytes, 512);
             register_device(&disk.esp, esp_data, 512);
             register_device(&disk.part, disk.live.clone(), 512);
             register_device(&disk.root.0, disk.root.1.clone(), 512);
             register_device(&disk.data.0, disk.data.1.clone(), 512);
+            if let (Some((_, made)), Some(container)) = (luks, container) {
+                let path = unique_path("luks-part");
+                register_device(&path, container.clone(), 512);
+                *made = Some((path, container));
+            }
             disk
         }
 
@@ -767,6 +796,63 @@ mod physical_volume {
         );
         assert!(verify_image(&image, |_, _| Ok(())).unwrap().valid());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    /// LUKS → LVM: the PV is the mapping of a container the system opened.
+    /// Its volumes come from their snapshots as on a plain PV, the image
+    /// holds the PV in the clear where the partition starts, and the
+    /// container's header is kept for the restore to put back (D19).
+    #[test]
+    fn a_physical_volume_inside_an_opened_container_keeps_the_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let (disk, part, container) = PvDisk::in_luks(raw_root(), "pv words");
+        let header = (container.len() as u64 - PV_LEN) as usize;
+        let platform = TestPlatform::new()
+            .source(&disk.esp, TestSource::Direct { frozen: true })
+            .source(
+                &part,
+                TestSource::Opened {
+                    mapping: disk.part.clone(),
+                    data_offset: header as u64,
+                    pv: Some(disk.pv(None)),
+                },
+            )
+            .slot(&disk.esp, DISK, MIB)
+            .slot(&part, DISK, PV_AT);
+        let image = dir.path().join("disk.qcow2");
+        let mut req = disk.request(&image);
+        req.partitions[1].device = part.clone();
+        run(&platform, &req).unwrap();
+
+        assert_same(
+            &disk.in_image(&image, 0, PE_START),
+            &disk.live[..PE_START as usize],
+            "the label and metadata area, in the clear",
+        );
+        assert_same(
+            &disk.in_image(&image, extent(0), extent(2)),
+            &disk.root.1,
+            "root, as its snapshot holds it",
+        );
+        assert_same(
+            &disk.in_image(&image, extent(4), PV_LEN),
+            &disk.live[extent(4) as usize..],
+            "the inactive volume and the tail, from the mapping",
+        );
+        let sidecar = load_sidecar_of(&image).unwrap();
+        let [h] = sidecar.info.luks_headers.as_slice() else {
+            panic!("one header: {}", sidecar.info.luks_headers.len());
+        };
+        assert_eq!((h.part_index, h.data_offset), (2, header as u64));
+        assert!(crate::luks::decode_stored_header(h).unwrap() == container[..header]);
+        let dm = sidecar.disk_manifest.unwrap();
+        assert_eq!(dm.images[1].filesystem, "LVM2_member");
+        let enc = dm.images[1].encryption.as_ref().expect("the container");
+        assert_eq!(
+            enc.capture_mode,
+            own_backup_common::image::VolumeCaptureMode::Plaintext
+        );
+        assert!(verify_image(&image, |_, _| Ok(())).unwrap().valid());
     }
 
     /// The partition's metadata area with `text` in it.

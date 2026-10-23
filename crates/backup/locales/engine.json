@@ -406,6 +406,14 @@
     "ru": "LUKS2: %{requirement} — том в особом состоянии, скопировать его целиком нельзя",
     "en": "LUKS2: %{requirement} — the volume is in a special state and cannot be copied whole"
   },
+  "luks.luks2_integrity": {
+    "ru": "LUKS2: шифрование с проверкой целостности (%{integrity}) не поддерживается",
+    "en": "LUKS2: authenticated encryption (%{integrity}) is not supported"
+  },
+  "luks.luks2_segments": {
+    "ru": "LUKS2: сегментов данных — %{count}: контейнер перешифровывается",
+    "en": "LUKS2: %{count} data segments: the container is being reencrypted"
+  },
   "luks.luks2_no_password_slots": {
     "ru": "LUKS2: нет слотов, которые открываются паролем",
     "en": "LUKS2: no key slots open with a password"
@@ -650,6 +658,18 @@
   "engine.pv_label_gone": {
     "ru": "На разделе %{volume} больше не читается метка физического тома LVM — он изменился после того, как были сняты снимки его логических томов. Копия не сделана.",
     "en": "The LVM physical volume label of %{volume} can no longer be read — it changed after its logical volumes were snapshotted. No copy was made."
+  },
+  "engine.luks_no_header_on_partition": {
+    "ru": "На разделе %{partition} нет заголовка LUKS, хотя на нём открыт контейнер %{mapping}: контейнеры с вынесенным заголовком (--header) копией целого диска не поддерживаются.",
+    "en": "Partition %{partition} has no LUKS header although the container %{mapping} is open on it: containers with a detached header (--header) are not supported by a whole-disk copy."
+  },
+  "engine.luks_mapping_mismatch": {
+    "ru": "Контейнер %{mapping} на разделе %{partition} открыт не так, как велит его заголовок (данные с %{header} Б по заголовку, с %{table} Б по таблице dm): восстановить такой контейнер нельзя, копия не делается.",
+    "en": "The container %{mapping} on partition %{partition} is not opened the way its header says (data at %{header} B per the header, at %{table} B per the dm table): such a container cannot be restored, the copy is not made."
+  },
+  "engine.luks_not_rebuildable": {
+    "ru": "Раздел %{index}: контейнер LUKS скопирован расшифрованным, но восстановление целого диска не сможет вернуть ему шифрование (%{why}). Данные будут доступны подключением копии.",
+    "en": "Partition %{index}: the LUKS container is copied decrypted, but a whole-disk restore will not be able to put its encryption back (%{why}). The data will be reachable by mounting the copy."
   },
   "engine.pv_outside_copy": {
     "ru": "Группа томов LVM %{vg} (раздел %{index}) лежит ещё на физических томах, которых нет в этой копии (%{count}). Восстановленная из неё одной, группа будет неполной, и её логические тома на тех дисках не откроются.",

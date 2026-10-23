@@ -18,8 +18,11 @@
 //! areas as they were when the snapshots were taken.
 //!
 //! Supported: logical volumes made of `linear` targets with nothing stacked
-//! on them. Thin pools, RAID, mirrors, caches, LUKS on an LV and a PV inside
-//! a LUKS container are refused with the reason.
+//! on them. Thin pools, RAID, mirrors, caches and LUKS on an LV are refused
+//! with the reason. A PV inside an opened LUKS container (LUKS → LVM) is the
+//! container's mapping: `linux.rs` judges the partition's container first and
+//! hands the mapping here as the PV; a container judged here (opened some
+//! other way) is still refused.
 
 #![cfg(target_os = "linux")]
 

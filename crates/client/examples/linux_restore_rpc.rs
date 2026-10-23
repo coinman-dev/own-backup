@@ -4,7 +4,7 @@
 //!     linux_restore_rpc verify-image IMG
 //!     linux_restore_rpc verify-job JOB_ID [--all]
 //!     linux_restore_rpc restore-volume IMG TARGET [--keep | --change [--fix-references]]
-//!     linux_restore_rpc restore-disk IMG DEVICE [--keep | --change [--fix-references]]
+//!     linux_restore_rpc restore-disk IMG DEVICE [--keep | --change [--fix-references]] [--luks=N:PASS…]
 //!     linux_restore_rpc mount IMG [--keep] | unmount IMG
 //!     linux_restore_rpc plan-disk IMG TARGET_DISK OUT.json [--entries]
 //!     linux_restore_rpc plan-volume IMG TARGET_DISK PART OUT.json [--extend]
@@ -28,7 +28,7 @@
 use std::io::{Read, Seek, SeekFrom};
 use std::time::Duration;
 
-use own_backup_client::{identity_clashes_in, ArchiveSecret, BackupClient};
+use own_backup_client::{identity_clashes_in, luks_passphrases_in, ArchiveSecret, BackupClient};
 use own_backup_common::engine_dto::{IdentityChoice, IdentityDecision};
 use own_backup_common::restore_plan::{
     PartRef, PartitionKind, PartitionScheme, PartitionSpec, PartitionTableSpec, RestoreMode,
@@ -43,6 +43,7 @@ fn refused(s: tonic::Status) -> ! {
         "code": format!("{:?}", s.code()),
         "message": s.message(),
         "identity_clashes": identity_clashes_in(&s),
+        "luks_passphrases": luks_passphrases_in(&s),
     });
     println!("{}", serde_json::to_string_pretty(&out).unwrap());
     std::process::exit(if s.code() == tonic::Code::FailedPrecondition {
@@ -201,6 +202,14 @@ async fn main() {
         flag("--keep").then_some(IdentityChoice::Keep).into()
     };
     let secret = ArchiveSecret::default();
+    // `--luks=N:PASS`: the LUKS passphrase of source partition N, for a
+    // container the restore puts back.
+    let luks: std::collections::HashMap<u32, String> = args
+        .iter()
+        .filter_map(|a| a.strip_prefix("--luks="))
+        .filter_map(|v| v.split_once(':'))
+        .filter_map(|(n, p)| Some((n.parse().ok()?, p.to_string())))
+        .collect();
     let cmd = pos.first().copied().unwrap_or_default();
 
     // Plans are built here, without the service.
@@ -348,7 +357,7 @@ async fn main() {
         }
         ("restore-disk", [image, device]) => {
             match client
-                .restore_device_with_status(image, device, choice, &secret)
+                .restore_device_with_status(image, device, choice, &secret, &luks)
                 .await
             {
                 Ok(v) => print(&v),

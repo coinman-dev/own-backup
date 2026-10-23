@@ -48,6 +48,9 @@ pub(crate) struct PreparedPartition<P: EnginePlatform> {
     /// The encrypted container this partition holds, if any — recorded whether
     /// or not it was opened, so the manifest can say how it was captured.
     pub(crate) container: Option<own_backup_common::image::VolumeEncryptionKind>,
+    /// The container was read in the clear — opened by the engine with its
+    /// passphrase, or by the system ([`super::platform::OpenedContainer`]).
+    pub(crate) opened: bool,
     /// An LVM physical volume in use, assembled from its volumes' snapshots
     /// and itself (`disk_pv`); `None` for any other partition.
     pub(crate) pv: Option<super::disk_pv::PvPrepared>,

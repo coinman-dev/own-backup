@@ -24,7 +24,7 @@ use crate::block_reader::{BlockReader, RawVolumeBlockReader};
 use crate::efivars::BootBackup;
 use crate::engine_core::platform::{
     userspace_vhdx, DiskIdentity, DiskPlatform, DiskRef, DiskWindow, EnginePlatform, FinishedImage,
-    NativeUsedMap, PhysicalVolume, PvVolume, SourceSession, VolumeSpan,
+    NativeUsedMap, OpenedContainer, PhysicalVolume, PvVolume, SourceSession, VolumeSpan,
 };
 use crate::exclusions::{ByteRanges, ExcludedPath, ExclusionScan};
 use crate::linux_device::LinuxRawDevice;
@@ -110,8 +110,18 @@ impl LinuxPlatform {
             Some("idle") => Some(hold_exclusively(&read_path)?),
             _ => None,
         };
+        // A partition whose opened LUKS container is read through its
+        // mapping: the header is on the partition.
+        let container = own_backup_snapshot::linux::opened_container(snapshot).map(
+            |(partition, mapping, data_offset)| OpenedContainer {
+                partition,
+                data_offset,
+                mapping,
+            },
+        );
         Ok(LinuxSession {
             key_store,
+            container,
             read_path,
             snapshot: matches!(mode, Some("lvm" | "dm" | "pv")),
             frozen: own_backup_snapshot::linux::is_frozen(snapshot),
@@ -190,6 +200,8 @@ pub(crate) struct LinuxSession {
     _hold: Option<std::fs::File>,
     /// An LVM physical volume held through its logical volumes' snapshots.
     pv: Option<PhysicalVolume>,
+    /// An opened LUKS container read through its mapping.
+    container: Option<OpenedContainer>,
 }
 
 impl SourceSession for LinuxSession {
@@ -229,6 +241,10 @@ impl SourceSession for LinuxSession {
 
     fn physical_volume(&self) -> Option<&PhysicalVolume> {
         self.pv.as_ref()
+    }
+
+    fn opened_container(&self) -> Option<&OpenedContainer> {
+        self.container.as_ref()
     }
 }
 

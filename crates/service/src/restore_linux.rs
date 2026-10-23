@@ -72,6 +72,28 @@ pub(super) fn identity_gate(
     }
 }
 
+/// Ask for the passphrases of the LUKS containers a whole-disk restore puts
+/// back, or let it through when nothing is missing or wrong. Asking is a
+/// `FAILED_PRECONDITION` whose details carry the list as JSON
+/// ([`own_backup_common::engine_dto::LUKS_PASSPHRASES_DETAIL`]), so a client
+/// asks for exactly those partitions and decides from structured fields.
+pub(super) fn luks_gate(
+    needs: Vec<own_backup_common::engine_dto::LuksPassphraseNeedDto>,
+) -> Result<(), Status> {
+    if needs.is_empty() {
+        return Ok(());
+    }
+    let text = own_backup_backup::restore_disk_linux::describe_needs(&needs);
+    warn!(needs = %text, "LUKS containers to put back: asking for their passphrases");
+    let details =
+        serde_json::json!({ own_backup_common::engine_dto::LUKS_PASSPHRASES_DETAIL: needs });
+    Err(Status::with_details(
+        tonic::Code::FailedPrecondition,
+        text,
+        serde_json::to_vec(&details).unwrap_or_default().into(),
+    ))
+}
+
 /// The duplicates a change leaves as they are — those without a command to
 /// change them: a PARTUUID is never changed (`root=PARTUUID=` may name it,
 /// and the restore keeps the copy's table), and a btrfs spanning several
@@ -205,8 +227,18 @@ fn volume_clashes_against(
         .as_ref()
         .map(|d| d.layout.partitions.iter().map(|p| p.index).collect())
         .unwrap_or_default();
-    let restored =
+    let mut restored =
         identity_check_linux::restored_identities(image, keys, &sidecar, &all, with_partuuids)?;
+    // A whole-disk restore puts every container the copy keeps a header of
+    // back with the source's LUKS UUID, which the decrypted copy does not
+    // show.
+    if with_partuuids {
+        for h in &sidecar.info.luks_headers {
+            if let Some(id) = identity_check_linux::saved_container_identity(h) {
+                restored.push((Some(h.part_index), id));
+            }
+        }
+    }
     Ok(identity_check_linux::clashes_here(&restored, overwritten))
 }
 
@@ -679,6 +711,11 @@ impl BackupServiceImpl {
             /// and boot configuration.
             #[serde(default)]
             fix_references: bool,
+            /// The LUKS containers' own passphrases, by source partition
+            /// index: each container the copy holds decrypted is put back
+            /// under its saved header. Not the copy's password (`secret`).
+            #[serde(default)]
+            passphrases: std::collections::HashMap<u32, String>,
             #[serde(flatten)]
             secret: ManualSecret,
         }
@@ -699,6 +736,32 @@ impl BackupServiceImpl {
                     .into_owned(),
                 )
             })?;
+        // The containers to put back and their passphrases come first: a
+        // missing or wrong one is asked for (structured details) before
+        // anything else, and before the slot is taken. Seconds of key
+        // derivation per container, off the runtime.
+        let (keys, passphrases, needs) = {
+            let image = image_path.clone();
+            let passphrases = p.passphrases;
+            tokio::task::spawn_blocking(move || {
+                let needs =
+                    own_backup_backup::sidecar::read_sidecar_with_keys(&image, keys.as_ref())
+                        .and_then(|sidecar| {
+                            own_backup_backup::restore_disk_linux::containers_to_rebuild(&sidecar)
+                        })
+                        .and_then(|containers| {
+                            own_backup_backup::restore_disk_linux::passphrase_needs(
+                                &containers,
+                                &passphrases,
+                            )
+                        });
+                (keys, passphrases, needs)
+            })
+            .await
+            .map_err(|e| Status::internal(format!("container check panicked: {e}")))?
+        };
+        luks_gate(needs.map_err(|e| Status::failed_precondition(e.to_string()))?)?;
+
         let (keys, clashes) = {
             let image = image_path.clone();
             let disk = disk.clone();
@@ -731,6 +794,7 @@ impl BackupServiceImpl {
             target_device: format!("/dev/{disk}"),
             verify_checksums: true,
             encryption: keys,
+            passphrases,
         };
         let summary = tokio::task::spawn_blocking(move || {
             let _slot = slot;
@@ -786,7 +850,13 @@ impl BackupServiceImpl {
                             own_backup_backup::identity_change_linux::RestoredDevice {
                                 node,
                                 part_index: Some(i),
-                                passphrase: None,
+                                // A container put back opens with its own
+                                // passphrase: what is inside changes too.
+                                passphrase: summary
+                                    .containers
+                                    .contains(&i)
+                                    .then(|| request.passphrases.get(&i).cloned())
+                                    .flatten(),
                             }
                         })
                     })
@@ -827,6 +897,9 @@ impl BackupServiceImpl {
             edited_files: Vec<String>,
             #[serde(skip_serializing_if = "Vec::is_empty")]
             warnings: Vec<String>,
+            /// Partitions put back as the LUKS containers they were.
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            luks_containers: Vec<u32>,
         }
         json_reply(&Out {
             summary: DiskRestoreSummaryDto {
@@ -834,6 +907,7 @@ impl BackupServiceImpl {
                 bytes_written: summary.bytes_written,
                 duration_secs: summary.duration.as_secs_f64(),
             },
+            luks_containers: summary.containers,
             identity_clashes: kept,
             identity_changes: outcome.dtos(),
             edited_files: outcome.edited,
@@ -879,6 +953,24 @@ mod tests {
             serde_json::from_value(details[IDENTITY_CLASHES_DETAIL].clone()).unwrap();
         assert_eq!(list, vec![clash()]);
         assert!(identity_gate(vec![label], None).is_err());
+    }
+
+    #[test]
+    fn missing_luks_passphrases_are_asked_for_in_structured_details() {
+        use own_backup_common::engine_dto::{LuksPassphraseNeedDto, LUKS_PASSPHRASES_DETAIL};
+        assert!(luks_gate(Vec::new()).is_ok());
+        let need = LuksPassphraseNeedDto {
+            part_index: 3,
+            kind: own_backup_common::image::VolumeEncryptionKind::Luks2,
+            wrong: true,
+        };
+        let s = luks_gate(vec![need.clone()]).unwrap_err();
+        assert_eq!(s.code(), tonic::Code::FailedPrecondition);
+        let v: serde_json::Value = serde_json::from_slice(s.details()).unwrap();
+        let back: Vec<LuksPassphraseNeedDto> =
+            serde_json::from_value(v[LUKS_PASSPHRASES_DETAIL].clone()).unwrap();
+        assert_eq!(back, vec![need]);
+        assert!(s.message().contains('3'), "{}", s.message());
     }
 
     #[test]

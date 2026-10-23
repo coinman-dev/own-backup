@@ -251,6 +251,17 @@ fn backup_disk_inner<P: DiskPlatform>(
                     p.part_index
                 )));
             }
+            // A PV inside an opened LUKS container (LUKS → LVM): the PV is
+            // the mapping, and the container's header comes along (D19).
+            let captured = match session.opened_container() {
+                Some(c) => Some(super::disk_luks::capture_opened::<P::Dev>(
+                    c,
+                    p.part_index,
+                    part_len,
+                )?),
+                None => None,
+            };
+            prepare_notes.extend(captured.as_ref().and_then(|c| c.note.clone()));
             let mut pvp = super::disk_pv::prepare_pv(
                 platform,
                 &pv,
@@ -303,11 +314,12 @@ fn backup_disk_inner<P: DiskPlatform>(
                 volume_len: part_len,
                 part_offset,
                 filesystem: super::disk_pv::PV_FILESYSTEM.into(),
-                luks_header: None,
+                opened: captured.is_some(),
+                container: captured.as_ref().map(|c| c.kind.clone()),
+                luks_header: captured.map(|c| c.header),
                 zero_ranges: ByteRanges::new(),
                 patches: Vec::new(),
                 removal_paths: Vec::new(),
-                container: None,
                 pv: Some(pvp),
                 used,
                 session,
@@ -442,6 +454,18 @@ fn backup_disk_inner<P: DiskPlatform>(
                 }
             }
         });
+        // A container the system has open: the session reads its mapping —
+        // the data in the clear — and the header comes off the partition.
+        let mut container = container;
+        let mut luks_header = luks_header;
+        let mut opened = luks.is_some();
+        if let Some(c) = session.opened_container() {
+            let captured = super::disk_luks::capture_opened::<P::Dev>(c, p.part_index, device_len)?;
+            prepare_notes.extend(captured.note);
+            container = Some(captured.kind);
+            luks_header = Some(captured.header);
+            opened = true;
+        }
         let volume_len = match &luks {
             Some(l) => device_len.saturating_sub(l.data_offset),
             None => device_len,
@@ -601,6 +625,7 @@ fn backup_disk_inner<P: DiskPlatform>(
             patches: pm.patches,
             removal_paths: pm.removal_paths,
             container,
+            opened,
             pv: None,
             used,
             session,
@@ -1187,7 +1212,7 @@ fn backup_disk_inner<P: DiskPlatform>(
             // brings it back encrypted, password and all.
             encryption: p.container.clone().map(|kind| {
                 use own_backup_common::image::{VolumeCaptureMode, VolumeEncryptionState};
-                let opened = p.luks.is_some();
+                let opened = p.opened;
                 VolumeEncryptionState {
                     kind,
                     capture_mode: if opened {
