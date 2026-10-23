@@ -346,9 +346,9 @@
     "ru": "run list продолжения не разобран",
     "en": "the extension record's run list could not be parsed"
   },
-  "ntfs_scan.extension_value": {
-    "ru": "значение продолжения: %{error}",
-    "en": "extension record value: %{error}"
+  "ntfs_scan.extension_foreign": {
+    "ru": "запись %{record} не продолжает запись %{base}",
+    "en": "record %{record} does not extend record %{base}"
   },
   "ntfs_scan.seek_from_end_unsupported": {
     "ru": "seek от конца тома не поддержан",

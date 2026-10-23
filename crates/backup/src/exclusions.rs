@@ -318,6 +318,52 @@ pub fn recreated_by_windows(rel: &str) -> bool {
         .eq_ignore_ascii_case("System Volume Information")
 }
 
+/// The longest value that may be resident — kept inside an NTFS file record
+/// rather than in clusters: no longer than the record itself (1 KiB, or 4 KiB
+/// on a volume of 4K-sector disks). The deletion passes overwrite a wholly
+/// excluded file's content and named streams up to this length before the
+/// file goes: deleting frees the record but leaves its bytes, here and on
+/// Windows. Anything longer is in clusters, which the `$MFT` scan already
+/// left out of the copy.
+pub const NTFS_RESIDENT_MAX: u64 = 4096;
+
+/// The named data streams in a `FILE_STREAM_INFO` chain (what
+/// `GetFileInformationByHandleEx(FileStreamInfo)` fills in): their full names
+/// as a path suffix (`:Zone.Identifier:$DATA`) and sizes. The unnamed stream
+/// (`::$DATA`) and anything that is not a data stream are left out; a
+/// truncated or malformed entry ends the list.
+///
+/// Layout: `NextEntryOffset` u32, `StreamNameLength` u32 (bytes),
+/// `StreamSize` i64, `StreamAllocationSize` i64, then the UTF-16 name.
+pub fn named_streams_from_info(buf: &[u8]) -> Vec<(String, u64)> {
+    const NAME_AT: usize = 24;
+    let mut out = Vec::new();
+    let mut off = 0usize;
+    while let Some(rec) = buf.get(off..).filter(|r| r.len() >= NAME_AT) {
+        let next = u32::from_le_bytes(rec[0..4].try_into().unwrap()) as usize;
+        let name_len = u32::from_le_bytes(rec[4..8].try_into().unwrap()) as usize;
+        let size = i64::from_le_bytes(rec[8..16].try_into().unwrap()).max(0) as u64;
+        let Some(raw) = rec.get(NAME_AT..NAME_AT + name_len) else {
+            break;
+        };
+        let units: Vec<u16> = raw
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
+            .collect();
+        let name = String::from_utf16_lossy(&units);
+        if name != "::$DATA" && name.starts_with(':') && name.ends_with(":$DATA") {
+            out.push((name, size));
+        }
+        if next == 0 {
+            break;
+        }
+        off += next;
+    }
+    out
+}
+
 /// Match pattern components against path components. A `**` component matches
 /// zero or more whole path components; any other component is a single-component
 /// glob (`*` / `?`). Root-anchored, must consume the entire path. Iterative
@@ -566,9 +612,11 @@ pub struct ExcludedPath {
     /// Junction/symlink: delete the reparse entry itself, never its target.
     pub is_reparse: bool,
     /// From the `$MFT` scan, sorted: the MFT records at or under this path
-    /// every name of which is excluded, so the deletion takes the whole file
-    /// (`ntfs_scan::MatchedPath::whole_records`). Linux clears the resident
-    /// content of these only; empty where no scan said so.
+    /// every name of which is excluded, so the deletion takes the whole file,
+    /// and which hold content inside the record
+    /// (`ntfs_scan::MatchedPath::whole_records`). The deletion passes — ntfs-3g
+    /// on Linux, the Windows driver in `true_removal_win` — clear the resident
+    /// content and named streams of these only; empty where no scan said so.
     pub whole_records: Vec<u64>,
 }
 
@@ -699,6 +747,52 @@ mod mandatory_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stream_info(entries: &[(&str, i64)]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        for (i, (name, size)) in entries.iter().enumerate() {
+            let name: Vec<u8> = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
+            // Entries are 8-byte aligned, as Windows lays them out.
+            let len = (24 + name.len()).div_ceil(8) * 8;
+            let next = if i + 1 == entries.len() {
+                0
+            } else {
+                len as u32
+            };
+            buf.extend_from_slice(&next.to_le_bytes());
+            buf.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&size.to_le_bytes());
+            buf.extend_from_slice(&((size + 4095) / 4096 * 4096).to_le_bytes());
+            buf.extend_from_slice(&name);
+            buf.resize(buf.len().div_ceil(8) * 8, 0);
+        }
+        buf
+    }
+
+    /// What `FileStreamInfo` reports, named data streams only: the unnamed
+    /// one is the file's own data, and a cut-off entry ends the list.
+    #[test]
+    fn named_streams_are_read_from_a_stream_info_chain() {
+        let buf = stream_info(&[
+            ("::$DATA", 9000),
+            (":Zone.Identifier:$DATA", 26),
+            (":Поток:$DATA", 70_000),
+        ]);
+        assert_eq!(
+            named_streams_from_info(&buf),
+            vec![
+                (":Zone.Identifier:$DATA".to_string(), 26),
+                (":Поток:$DATA".to_string(), 70_000)
+            ]
+        );
+        assert!(named_streams_from_info(&[]).is_empty());
+        let cut = &buf[..buf.len() - 4];
+        assert_eq!(
+            named_streams_from_info(cut).len(),
+            1,
+            "the cut-off entry is dropped"
+        );
+    }
 
     /// Decision 6/E4: content left under any directory of the key store's
     /// name, in any letter case, or a directory nobody walked, stands in the

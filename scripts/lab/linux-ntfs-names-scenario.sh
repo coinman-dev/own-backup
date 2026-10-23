@@ -14,14 +14,18 @@
 # to judge (chkdsk, see the end of this header) are left in $WORK/for-windows.
 #
 #   n1  qcow2 and VHDX copies of a populated NTFS volume with exclusions: the
-#       names leave the image, nothing excluded is left in its bytes, the
-#       restored volume is clean (ntfsfix -n), mounts with ntfs3 and ntfs-3g,
-#       keeps every other file bit for bit, takes writes, stays clean.
+#       names leave the image, nothing excluded is left in its bytes (named
+#       streams too: in clusters, inside the record, and behind an attribute
+#       list), the restored volume is clean (ntfsfix -n), mounts with ntfs3
+#       and ntfs-3g, keeps every other file and stream bit for bit, takes
+#       writes, stays clean.
 #   n2  a qcow2 chain: the source moves on, the increment is judged the same
 #       way, and the parent is not changed by the child's pass.
 #   n3  a whole disk with two NTFS partitions, one image, and an increment.
 #   n4  a volume Windows left hibernated: ntfs-3g refuses to write it, the
-#       copy is still good and the result says the names were kept.
+#       copy is still good and the result says the names were kept — and an
+#       excluded file's named stream is not in it all the same (the MFT scan
+#       alone keeps it out, no deletion pass runs).
 #
 # Needs: ntfs-3g (mkntfs, ntfsfix), nbd.ko, /dev/fuse, qemu-img, sfdisk.
 #
@@ -36,7 +40,8 @@
 #      *.dmp, the contents of System Volume Information) are not listed; the
 #      kept tree is (`dir /s /a`), and `Get-FileHash` of the kept files matches
 #      $WORK/for-windows/<name>.sums (sha256, paths relative to the volume).
-#   3. The named stream survives: `Get-Content keep\ads.txt -Stream Zone.Identifier`.
+#   3. The named streams survive: `Get-Content keep\ads.txt -Stream Zone.Identifier`,
+#      and `-Stream keepbig` is 20000 × "K".
 #   4. Write: copy a few hundred MiB onto the volume, delete them, `chkdsk X:`
 #      again — no problems.
 #   5. The qcow2 copies (n1-q.qcow2, n2-inc.qcow2, n3-disk-inc.qcow2) the same
@@ -137,6 +142,20 @@ populate() { # dir
         "$d/keep/ads.txt"
     python3 -c 'import os,sys; os.setxattr(sys.argv[1], "user.hidden", (sys.argv[2] * 400).encode())' \
         "$d/Users/u/AppData/Local/Temp/x.tmp" "$MARK"
+    # A short (resident) marked stream on an excluded file, a kept file with a
+    # stream in clusters of its own, and an excluded file with so many streams
+    # that its record overflows into extension records behind an attribute
+    # list (its name moves there too) — the MFT scan must follow it.
+    python3 -c 'import os,sys; os.setxattr(sys.argv[1], "user.Zone.Identifier", ("[ZoneTransfer]\r\nZoneId=3 " + sys.argv[2]).encode())' \
+        "$d/MEMORY.DMP" "$MARK"
+    python3 -c 'import os,sys; os.setxattr(sys.argv[1], "user.keepbig", b"K" * 20000)' "$d/keep/ads.txt"
+    printf '%s many\n' "$MARK" >"$d/cache/ads_many.tmp"
+    python3 -c '
+import os, sys
+p, m = sys.argv[1], sys.argv[2]
+for i in range(30):
+    os.setxattr(p, "user.s%02d" % i, ("%s list %02d " % (m, i)).encode().ljust(100, b"q"))
+os.setxattr(p, "user.bigx", (m * 1200).encode())' "$d/cache/ads_many.tmp" "$MARK"
     sync
 }
 
@@ -144,6 +163,7 @@ RULES=(--exclude cache --exclude 'Users\*\AppData\Local\Temp\**' --exclude pagef
     --exclude '*.dmp' --exclude 'System Volume Information')
 
 stream_of() { python3 -c 'import os,sys; print(os.getxattr(sys.argv[1], "user.Zone.Identifier").decode(), end="")' "$1"; }
+keepbig_ok() { python3 -c 'import os,sys; sys.exit(os.getxattr(sys.argv[1], "user.keepbig") != b"K" * 20000)' "$1"; }
 
 hashes() { (cd "$1" && find keep Users/u/Documents -type f -print0 | sort -z | xargs -0 sha256sum) >"$2"; }
 compare() { (cd "$1" && sha256sum -c --quiet "$2") >/dev/null 2>&1; }
@@ -170,7 +190,7 @@ judge() {
         check "$id-ntfs3" SKIP "no ntfs3 in this kernel"
     fi
     mnt3g "$dev" "$WORK/rst" && names_gone "$WORK/rst" && compare "$WORK/rst" "$sums" \
-        && [[ $(stream_of "$WORK/rst/keep/ads.txt") == *ZoneId=3* ]]
+        && [[ $(stream_of "$WORK/rst/keep/ads.txt") == *ZoneId=3* ]] && keepbig_ok "$WORK/rst/keep/ads.txt"
     check "$id-ntfs3g" "$(verdict $?)" "ntfs-3g: excluded names gone, kept files and streams intact"
     local i=0
     while head -c 1M /dev/urandom >"$WORK/rst/fill$i.bin" 2>/dev/null && ((i < 4000)); do i=$((i + 1)); done
@@ -207,6 +227,8 @@ stage_n1() {
     mkntfs -F -Q -q "$src" && mnt3g "$src" "$WORK/m-n1" && populate "$WORK/m-n1" \
         && hashes "$WORK/m-n1" "$WORK/n1.sums" && umnt "$WORK/m-n1"
     check n1-source "$(verdict $?)" "NTFS volume populated with the corpus"
+    ntfsinfo -F /cache/ads_many.tmp "$src" >"$EV/n1-ads-many.txt" 2>&1 && grep -q 'ATTRIBUTE_LIST' "$EV/n1-ads-many.txt"
+    check n1-attr-list "$(verdict $?)" "the many-streams file really has an attribute list"
     local fmt
     for fmt in qcow2 vhdx; do
         run "n1-$fmt" "$CLI" backup "$src" -o "$out/n1.$fmt" --format "$fmt" "${RULES[@]}" --verify
@@ -290,10 +312,16 @@ stage_n3() {
 }
 
 stage_n4() {
-    local src out=$WORK/out
-    loopdev src n4-src 256 || return
+    local src dst out=$WORK/out
+    local smark=OBK-EXCLUDED-STREAM-MARKER
+    loopdev src n4-src 256 && loopdev dst n4-dst 256 || return
+    # The names stay here (nothing deletes them), so whatever is inside the
+    # records stays too; a stream in clusters of its own must not — only the
+    # MFT scan keeps it out, with no deletion pass behind it.
     mkntfs -F -Q -q "$src" && mnt3g "$src" "$WORK/m-n4" && mkdir -p "$WORK/m-n4/cache" \
         && printf '%s\n' "$MARK" >"$WORK/m-n4/cache/a.tmp" \
+        && python3 -c 'import os,sys; os.setxattr(sys.argv[1], "user.big", (sys.argv[2] * 800).encode())' \
+            "$WORK/m-n4/cache/a.tmp" "$smark" \
         && { printf 'HIBR'; head -c 65532 /dev/zero; } >"$WORK/m-n4/hiberfil.sys" && umnt "$WORK/m-n4"
     run n4 "$CLI" backup "$src" -o "$out/n4.qcow2" --format qcow2 --exclude cache --verify
     check n4-copy "$(verdict $?)" "a hibernated volume is still copied and verified"
@@ -301,6 +329,8 @@ stage_n4() {
     check n4-said "$(verdict $?)" "the result says the names were kept"
     ! grep -qa "$MARK" "$out/n4.qcow2"
     check n4-no-bytes "$(verdict $?)" "the excluded data is still left out"
+    run n4-restore "$CLI" restore "$out/n4.qcow2" -t "$dst" --yes && ! grep -qa "$smark" "$dst"
+    check n4-no-stream "$(verdict $?)" "an excluded file's named stream is not in the restored volume"
     no_leftovers n4
 }
 

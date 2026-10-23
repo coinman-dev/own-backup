@@ -21,9 +21,9 @@ use windows::Win32::Foundation::{
     CloseHandle, ERROR_HANDLE_EOF, ERROR_MORE_DATA, ERROR_NO_MORE_FILES, HANDLE,
 };
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FileFullDirectoryInfo, GetFileInformationByHandleEx, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileW, FileFullDirectoryInfo, FileStreamInfo, GetFileInformationByHandleEx,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows::Win32::System::Ioctl::{FSCTL_GET_RETRIEVAL_POINTERS, STARTING_VCN_INPUT_BUFFER};
 use windows::Win32::System::IO::DeviceIoControl;
@@ -230,6 +230,10 @@ fn collect_excluded_ranges_inner(
             } else if matched && !is_reparse {
                 match file_extent_ranges(&child, cluster_size, &mut scan.ranges) {
                     Ok(bytes) => {
+                        // Its named streams (Zone.Identifier, any ADS) are its
+                        // content too, in clusters of their own.
+                        let bytes =
+                            bytes + stream_extent_ranges(&child, cluster_size, &mut scan.ranges);
                         scan.files_excluded += 1;
                         scan.bytes_excluded += bytes;
                         if collect_file_bytes {
@@ -267,6 +271,92 @@ fn collect_excluded_ranges_inner(
         "Exclusion scan complete"
     );
     Ok(scan)
+}
+
+/// The named data streams of the open file `handle`: their path suffixes
+/// (`:Zone.Identifier:$DATA`) and sizes. Needs no access right beyond the
+/// open itself.
+pub(crate) fn named_streams(handle: HANDLE) -> Result<Vec<(String, u64)>> {
+    let mut buf = vec![0u8; 16 * 1024];
+    loop {
+        // SAFETY: the buffer is valid for the size passed.
+        let call = unsafe {
+            GetFileInformationByHandleEx(
+                handle,
+                FileStreamInfo,
+                buf.as_mut_ptr() as *mut _,
+                buf.len() as u32,
+            )
+        };
+        match call {
+            Ok(()) => return Ok(crate::exclusions::named_streams_from_info(&buf)),
+            // A file with no data stream at all (a directory without one).
+            Err(e) if e.code() == ERROR_HANDLE_EOF.to_hresult() => return Ok(Vec::new()),
+            Err(e) if e.code() == ERROR_MORE_DATA.to_hresult() && buf.len() < 4 << 20 => {
+                let grown = buf.len() * 4;
+                buf = vec![0u8; grown];
+            }
+            Err(e) => {
+                return Err(own_backup_common::OwnBackupError::Device(format!(
+                    "FileStreamInfo: {e}"
+                )))
+            }
+        }
+    }
+}
+
+/// Append the cluster extents of every named stream of `path` to `ranges`
+/// and return their bytes. A stream that cannot be resolved stays in the
+/// backup, said in the log — as a file that cannot be resolved does.
+fn stream_extent_ranges(path: &Path, cluster_size: u32, ranges: &mut ByteRanges) -> u64 {
+    let wide = to_wide(&path.to_string_lossy());
+    // SAFETY: `wide` outlives the call.
+    let opened = unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            FILE_READ_ATTRIBUTES.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+    };
+    let streams = match opened {
+        Ok(h) => {
+            let handle = FileHandle(h);
+            named_streams(handle.0)
+        }
+        Err(e) => Err(own_backup_common::OwnBackupError::Device(format!(
+            "CreateFileW failed: {e}"
+        ))),
+    };
+    let streams = match streams {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(file = %path.display(), error = %e,
+                  "Exclusion scan: cannot list the named streams — they stay in the backup");
+            return 0;
+        }
+    };
+    let mut bytes = 0u64;
+    for (name, _) in streams {
+        let stream = PathBuf::from(format!("{}{name}", path.to_string_lossy()));
+        // Collected apart and merged only when complete: half a stream's
+        // extents would cut it, not exclude it.
+        let mut own = ByteRanges::new();
+        match file_extent_ranges(&stream, cluster_size, &mut own) {
+            Ok(n) => {
+                for (s, e) in own.iter() {
+                    ranges.add(s, e);
+                }
+                bytes += n;
+            }
+            Err(e) => warn!(stream = %stream.display(), error = %e,
+                            "Exclusion scan: cannot resolve a named stream — it stays in the backup"),
+        }
+    }
+    bytes
 }
 
 /// RAII handle for the queried file.

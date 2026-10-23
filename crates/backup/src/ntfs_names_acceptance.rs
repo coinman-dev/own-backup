@@ -143,6 +143,19 @@ fn ntfs_source(dir: &Path) -> Option<(PathBuf, PathBuf, Corpus, Extras)> {
     let (corpus, extras) = with_mount(&src, &mnt, || {
         (populate(&mnt, Caps::ntfs()), add_extras(&mnt))
     });
+    // The corpus' many-streams file must really have overflowed into
+    // extension records, or its case is not tested at all.
+    if let Ok(out) = Command::new("ntfsinfo")
+        .args(["-F", "/cache/ads_many.bin"])
+        .arg(&src)
+        .output()
+    {
+        let dump = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            dump.contains("$ATTRIBUTE_LIST"),
+            "ads_many.bin has no attribute list:\n{dump}"
+        );
+    }
     Some((src, mnt, corpus, extras))
 }
 
@@ -243,7 +256,10 @@ fn judge(file: &Path, mnt: &Path, corpus: &Corpus, extras: &Extras, tag: &str) {
         &b"RESIDENT-SECRET"[..],
         b"STREAM-SECRET",
         b"SHORTNAME-SECRET",
-    ] {
+    ]
+    .into_iter()
+    .chain(corpus.secrets.iter().map(Vec::as_slice))
+    {
         assert!(
             !data.windows(secret.len()).any(|w| w == secret),
             "{tag}: resident content of an excluded file survived: {}",
@@ -459,17 +475,18 @@ fn names_that_cannot_be_deleted_are_reported_kept() {
         .valid());
     let size = std::fs::metadata(&src).unwrap().len();
     let restored = restore(&image, size, None);
-    // The files' data is gone — all but the named stream of an excluded file
-    // (9000 bytes: two whole 4 KiB runs). The MFT scan subtracts unnamed
-    // `$DATA` only, here and on Windows; only the deletion pass, which erases
-    // what the deletions freed, takes the streams away. Pinned, so that a
-    // scanner fix shows up here.
+    // The files' data is gone, their named streams in clusters of their own
+    // included: the MFT scan leaves every `$DATA` stream out of the copy,
+    // here and on Windows, with no deletion pass to rely on. (Until
+    // 2026-10-23 it took unnamed `$DATA` only, and the 9000-byte stream of
+    // an excluded file — two whole 4 KiB runs — was left here.) What is
+    // inside the records of the files stays: nothing deleted them.
     let data = std::fs::read(&restored).unwrap();
     let runs = data
         .chunks(4096)
         .filter(|c| c.len() == 4096 && c.iter().all(|&b| b == 0xAB))
         .count();
-    assert_eq!(runs, 2, "only the excluded file's named stream is left");
+    assert_eq!(runs, 0, "no excluded run is left, streams included");
     drop(data);
     with_mount(&restored, &mnt, || {
         assert!(mnt.join("cache").is_dir(), "the names are still there");

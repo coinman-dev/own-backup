@@ -23,10 +23,12 @@
 //!    its record but does not clear it, here or on Windows;
 //! 4. every cluster the deletions freed is erased — `$Bitmap` before and
 //!    after, as the Windows in-image pass does it. The scan subtracted the
-//!    files' data before the copy, but not everything a deleted file held:
-//!    the clusters of its named streams (`Zone.Identifier`, anything an
-//!    application hides in an ADS) were copied, and would linger in the
-//!    image's free space;
+//!    files' data before the copy — every `$DATA` stream, named ones
+//!    (`Zone.Identifier`, anything an application hides in an ADS)
+//!    included — but not everything a deleted file held: what the scan had
+//!    to keep (a torn run list, an unreadable record) and the file's own
+//!    metadata clusters (a non-resident attribute list, an index) were
+//!    copied, and would linger in the image's free space;
 //! 5. only when every volume went through cleanly is the change folded into
 //!    the image and the touched blocks re-checksummed.
 //!
@@ -674,11 +676,12 @@ fn clears_content(meta: &std::fs::Metadata, whole: &[u64]) -> bool {
     meta.file_type().is_file() && whole.binary_search(&meta.ino()).is_ok()
 }
 
-/// What can live inside an MFT record (1 KiB, minus its headers): a value
-/// this short may be resident. Anything longer is in clusters, which the scan
-/// left out of the copy (unnamed data) or the deletion frees and
-/// [`erase_freed`] clears (named streams).
-const RESIDENT_MAX: u64 = 1024;
+/// What can live inside an MFT record (1 KiB, or 4 KiB on a volume of
+/// 4K-sector disks, minus its headers): a value this short may be resident.
+/// Anything longer is in clusters, which the scan left out of the copy —
+/// unnamed data and named streams alike — and the deletion frees and
+/// [`erase_freed`] clears all the same.
+const RESIDENT_MAX: u64 = crate::exclusions::NTFS_RESIDENT_MAX;
 
 /// Overwrite, in place and through the mount, the content of the file at
 /// `path` and of its named streams (ntfs-3g's `user.*` attributes) that may
@@ -1186,6 +1189,105 @@ mod tests {
         assert_eq!(
             std::fs::read(mnt.join("keep/twin.bin")).unwrap(),
             b"TWIN-KEPT-CONTENT"
+        );
+        user_unmount(&mut m);
+    }
+
+    /// Named streams of excluded files, end to end as far as a user can go:
+    /// the corpus' stream files written through ntfs-3g, the scan, what the
+    /// copy does with its ranges (they read as zeros), the deletion through
+    /// the mount. No excluded byte is left — a stream in clusters of its own,
+    /// a short one in the record, thirty in extension records behind an
+    /// attribute list — and the kept file keeps its streams.
+    #[test]
+    fn named_streams_of_excluded_files_leave_the_volume() {
+        use std::os::unix::fs::FileExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let vol = tmp.path().join("v.ntfs");
+        let mnt = tmp.path().join("m");
+        let Some(mut m) = user_ntfs_volume(&vol, &mnt, 32 << 20) else {
+            return;
+        };
+        let set = crate::exclusion_corpus::setxattr;
+        std::fs::create_dir(mnt.join("cache")).unwrap();
+        std::fs::create_dir(mnt.join("keep")).unwrap();
+        let big = mnt.join("cache/ads_big.bin");
+        std::fs::write(&big, [0xAB; 8192]).unwrap();
+        set(&big, "user.big", &[0xAB; 20_000]);
+        set(&big, "user.Zone.Identifier", b"ZoneId=3 ADS-ZONE-SECRET");
+        let many = mnt.join("cache/ads_many.bin");
+        std::fs::write(&many, [0xAB; 4096]).unwrap();
+        for i in 0..30 {
+            let mut v = format!("ADS-LIST-SECRET-{i:02}-").into_bytes();
+            v.resize(100, b'q');
+            set(&many, &format!("user.s{i:02}"), &v);
+        }
+        set(&many, "user.bigx", &[0xAB; 40_000]);
+        let small = mnt.join("small.tmp");
+        std::fs::write(&small, b"RESIDENT-SECRET").unwrap();
+        set(&small, "user.bulk", &[0xAB; 12_000]);
+        let kept = mnt.join("keep/kept.bin");
+        let kept_stream = crate::exclusion_corpus::pattern(904, 20_000);
+        std::fs::write(&kept, crate::exclusion_corpus::pattern(903, 8192)).unwrap();
+        set(&kept, "user.keepstream", &kept_stream);
+        user_unmount(&mut m);
+
+        let scan = crate::ntfs_scan::scan_mft(
+            &mut std::fs::File::open(&vol).unwrap(),
+            &["cache".to_string(), "*.tmp".to_string()],
+        )
+        .unwrap();
+        // What the copy does: the subtracted ranges are not in the image.
+        {
+            let f = std::fs::OpenOptions::new().write(true).open(&vol).unwrap();
+            for (s, e) in scan.ranges.iter() {
+                f.write_all_at(&vec![0u8; (e - s) as usize], s).unwrap();
+            }
+        }
+        let paths: Vec<ExcludedPath> = scan
+            .paths
+            .iter()
+            .map(|p| ExcludedPath {
+                rel: p.rel.clone(),
+                is_dir: p.is_dir,
+                is_reparse: p.is_reparse,
+                whole_records: p.whole_records.clone(),
+            })
+            .collect();
+        let cache = paths.iter().find(|p| p.rel == "cache").expect("cache");
+        assert_eq!(cache.whole_records.len(), 2, "both stream files go whole");
+        let mut m = Ntfs3gMount::mount(&ntfs3g().unwrap(), vol.to_str().unwrap(), &mnt).unwrap();
+        assert_eq!(delete_paths(&mnt, &paths, &mut |_| {}), (4, 0));
+        user_unmount(&mut m);
+        check_volume(vol.to_str().unwrap()).unwrap();
+
+        let data = std::fs::read(&vol).unwrap();
+        let runs = data
+            .chunks(4096)
+            .filter(|c| c.iter().all(|&b| b == 0xAB))
+            .count();
+        assert_eq!(runs, 0, "an excluded stream's clusters are left");
+        for secret in [
+            &b"ADS-ZONE-SECRET"[..],
+            b"ADS-LIST-SECRET",
+            b"RESIDENT-SECRET",
+        ] {
+            assert!(
+                !data.windows(secret.len()).any(|w| w == secret),
+                "{} is left",
+                String::from_utf8_lossy(secret)
+            );
+        }
+        drop(data);
+        let mut m = Ntfs3gMount::mount(&ntfs3g().unwrap(), vol.to_str().unwrap(), &mnt).unwrap();
+        assert!(!mnt.join("cache").exists() && !small.exists());
+        assert_eq!(
+            std::fs::read(&kept).unwrap(),
+            crate::exclusion_corpus::pattern(903, 8192)
+        );
+        assert_eq!(
+            crate::exclusion_corpus::getxattr(&kept, "user.keepstream"),
+            kept_stream
         );
         user_unmount(&mut m);
     }
