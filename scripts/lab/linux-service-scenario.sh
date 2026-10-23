@@ -10,7 +10,11 @@
 # SRC_DISK and DEST_DISK (default: the stand's virtio-ob-data-2 and
 # virtio-ob-data-3) are wiped: the source gets an ext4 with incompressible
 # data, the destination an ext4 for the images. The copy is held to a speed
-# limit so it lasts long enough to be cut. Each check prints
+# limit so it lasts long enough to be cut. Last, the source disk becomes two
+# LVM PV partitions of one volume group (a volume on each, one on both, two of
+# them mounted and one written during the copy) copied whole by a service job:
+# one suspend for all, the second PV held by the first one's layers, every
+# layer released by id, no metadata written. Each check prints
 # `CHECK <id> PASS|FAIL <text>`; the exit code is the number of FAILs.
 # Evidence: /var/tmp/obk-service-evidence.
 set -uo pipefail
@@ -194,5 +198,115 @@ no_pending
 check final-no-private-image "$(verdict $?)" "only published images in the destination"
 
 cli jobs delete "$job" >/dev/null 2>&1
+
+# --- a disk whose volume group lies on two of its partitions, through the service
+# One VG on PV1 and PV2 of the source disk: `a` (PV1, mounted, written during
+# the copy), `span` (on both, mounted), `b` (PV2 only, active, unmounted). The
+# service takes each partition's snapshot with a provider of its own and
+# releases them with yet another one (by id, from the kernel's state): all
+# three volumes must be held in one suspend, the second PV taken as held by
+# the first one's layers, and every layer gone afterwards.
+PVG=obksvcpv
+PV_MNT=/mnt/obk-svc-pv
+pv_cleanup() {
+    pkill -f obk-svc-churn 2>/dev/null
+    for m in "$PV_MNT"-a "$PV_MNT"-span; do
+        mountpoint -q "$m" && { umount "$m" || umount -l "$m"; }
+    done
+    vgs "$PVG" >/dev/null 2>&1 && { vgchange -an "$PVG" >/dev/null 2>&1; vgremove -ff -y "$PVG" >/dev/null 2>&1; }
+    wipefs -a -q "$D_SRC"?* 2>/dev/null
+    pvremove -ff -y "$D_SRC"?* >/dev/null 2>&1
+    wipefs -a -q "$D_SRC" 2>/dev/null
+}
+trap 'pv_cleanup; cleanup' EXIT
+pv_tables() { for lv in a span b; do dmsetup table "$PVG-$lv" 2>&1; done | sha256sum | cut -d' ' -f1; }
+
+pv_cleanup
+parted -s "$D_SRC" mklabel gpt mkpart pv1 1MiB 50% mkpart pv2 50% 95% set 1 lvm on set 2 lvm on &&
+    udevadm settle -t 10
+PV1=$(lsblk -lnpo NAME "$D_SRC" | sed -n 2p)
+PV2=$(lsblk -lnpo NAME "$D_SRC" | sed -n 3p)
+(
+    set -e
+    pvcreate -ff -y "$PV1" "$PV2"
+    vgcreate "$PVG" "$PV1" "$PV2"
+    lvcreate -y -Wy -Zy -L 300M -n a "$PVG" "$PV1"
+    lvcreate -y -Wy -Zy -L 200M -n span "$PVG" "$PV1"
+    lvextend -y -L +200M "$PVG/span" "$PV2"
+    lvcreate -y -Wy -Zy -L 100M -n b "$PVG" "$PV2"
+    for lv in a span b; do mkfs.ext4 -q -F -L "obk-svc-$lv" "/dev/$PVG/$lv"; done
+    mkdir -p "$PV_MNT"-a "$PV_MNT"-span
+    mount "/dev/$PVG/a" "$PV_MNT"-a
+    mount "/dev/$PVG/span" "$PV_MNT"-span
+    head -c 150M /dev/urandom >"$PV_MNT"-a/a.bin
+    head -c 300M /dev/urandom >"$PV_MNT"-span/span.bin
+    sync
+    lvs -a -o lv_name,lv_size,devices,seg_pe_ranges "$PVG"
+) >"$EV/pv-setup.out" 2>&1
+check pv-setup "$(verdict $?)" "VG $PVG on $PV1 and $PV2: a (PV1), span (both), b (PV2)"
+(cd "$PV_MNT"-a && sha256sum a.bin) >"$EV/pv-a.sha256"
+(cd "$PV_MNT"-span && sha256sum span.bin) >"$EV/pv-span.sha256"
+tables=$(pv_tables)
+seqno=$(vgs --noheadings -o vg_seqno "$PVG" | tr -d ' ')
+
+run pv-job-new cli jobs new --name svc-pv-disk --source "$PV1" --dest "$IMG" \
+    --method full --no-exclusions --schedule none --validate-after
+pvjob=$(job_id_named svc-pv-disk)
+cli jobs show "$pvjob" >"$EV/pv-job.json" 2>/dev/null
+python3 - "$EV/pv-job.json" "$D_SRC" "$PV1" "$PV2" <<'PY'
+import json, sys
+p, disk, pv1, pv2 = sys.argv[1:5]
+j = json.load(open(p))
+j["sources"] = []
+j["disk_source"] = {
+    "disk_number": 0,
+    "device": disk,
+    "disk_model": "",
+    "parts": [
+        {"part_index": 1, "device": pv1, "filesystem": "LVM2_member"},
+        {"part_index": 2, "device": pv2, "filesystem": "LVM2_member"},
+    ],
+    "bootable": False,
+}
+json.dump(j, open(p, "w"))
+PY
+run pv-job-save cli jobs save --file "$EV/pv-job.json"
+[[ -n $pvjob ]]
+check pv-job-created "$(verdict $?)" "whole-disk job $pvjob over $D_SRC (partitions 1 and 2)"
+
+# Writes to `a` throughout the copy.
+(exec -a obk-svc-churn bash -c 'i=0; while :; do dd if=/dev/urandom of="$0/c$((i % 20))" bs=64K count=4 conv=fsync status=none || exit 1; i=$((i + 1)); sleep 0.05; done' "$PV_MNT"-a) &
+churn=$!
+since=$(date '+%Y-%m-%d %H:%M:%S')
+before=$(last_run "$pvjob" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))')
+run pv-run cli jobs run "$pvjob"
+pv_finished() { last_run "$pvjob" | python3 -c 'import json,sys; r=json.load(sys.stdin); sys.exit(0 if r.get("id") not in ("",sys.argv[1]) and r.get("status")!="running" else 1)' "$before"; }
+wait_for 900 pv_finished
+kill "$churn" 2>/dev/null
+wait "$churn"
+churn_rc=$?
+pkill -f obk-svc-churn 2>/dev/null
+last_run "$pvjob" >"$EV/pv-run.json"
+journalctl -u own-backup --since "$since" -o cat >"$EV/pv-journal.txt" 2>&1
+python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("status")=="success" else 1)' "$EV/pv-run.json"
+check pv-run-success "$(verdict $?)" "$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r.get("status"), r.get("image_path"), (r.get("error") or "")[:160], r.get("notes"))' "$EV/pv-run.json")"
+[[ $(grep -c 'device-mapper snapshot created' "$EV/pv-journal.txt") -eq 3 ]]
+check pv-one-suspend "$(verdict $?)" "a, span and b held by device-mapper snapshots taken together ($(grep -c 'device-mapper snapshot created' "$EV/pv-journal.txt") created)"
+! grep -q 'снимок прерванного копирования\|snapshot of an interrupted backup' "$EV/pv-journal.txt" "$EV/pv-run.json"
+check pv-second-pv-held "$(verdict $?)" "the second PV is taken as held by the first one's layers, not refused"
+[[ $(grep -c 'volume put back on its own table' "$EV/pv-journal.txt") -ge 3 ]]
+check pv-released-by-id "$(verdict $?)" "every volume put back from the kernel's state by the releasing provider ($(grep -c 'volume put back on its own table' "$EV/pv-journal.txt"))"
+! our_dm && [[ $(pv_tables) == "$tables" ]]
+check pv-nothing-held "$(verdict $?)" "no obk-* device left, a/span/b on exactly their own tables"
+[[ $(vgs --noheadings -o vg_seqno "$PVG" | tr -d ' ') == "$seqno" ]]
+check pv-no-metadata-written "$(verdict $?)" "VG seqno $seqno unchanged"
+! grep -q 'вне этой копии\|not in this copy' "$EV/pv-run.json"
+check pv-no-false-note "$(verdict $?)" "both PVs in the copy: no note about PVs outside it"
+[[ $churn_rc -eq 0 || $churn_rc -eq 143 ]] && findmnt -no OPTIONS "$PV_MNT"-a | grep -qw rw
+check pv-source-stayed-rw "$(verdict $?)" "a was written throughout the copy and stays rw (writer exit $churn_rc)"
+(cd "$PV_MNT"-a && sha256sum -c --quiet "$EV/pv-a.sha256") && (cd "$PV_MNT"-span && sha256sum -c --quiet "$EV/pv-span.sha256")
+check pv-sources-intact "$(verdict $?)" "the files on a and span still match"
+cli jobs delete "$pvjob" >/dev/null 2>&1
+
 echo "FAILS=$FAILS (evidence: $EV)"
 exit "$FAILS"
