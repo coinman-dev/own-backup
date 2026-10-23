@@ -570,6 +570,10 @@
     "en": "the partition manager refused the new layout of disk %{disk}: %{error}. Usually this means one of the affected volumes is in use — close the files open on it and try again."
   },
 
+  "restore_win.sector_mismatch": {
+    "ru": "Копия диска рассчитана на сектор %{planned} Б, а у диска %{disk} сектор %{actual} Б: таблица разделов и данные легли бы не на свои места. Восстановите на диск с сектором %{planned} Б.",
+    "en": "The disk copy is laid out in %{planned}-byte sectors, but disk %{disk} has %{actual}-byte sectors: the partition table and data would land in the wrong places. Restore onto a disk with %{planned}-byte sectors."
+  },
   "disk_session_linux.sector_mismatch": {
     "ru": "план рассчитан на сектор %{planned} Б, а у диска %{disk} — %{actual} Б",
     "en": "the plan assumes %{planned} B sectors, but disk %{disk} has %{actual} B"

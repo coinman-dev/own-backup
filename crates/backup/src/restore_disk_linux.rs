@@ -43,6 +43,7 @@ use own_backup_common::restore_plan::{
 use own_backup_common::{tr, OwnBackupError, Result};
 
 use crate::disk_session_linux::{DiskIo, HostView, LinuxDiskSession, RealDisk, RealOpener};
+use crate::engine_core::read::ImageReadSource;
 use crate::fat_map::RawVolume;
 use crate::linux_device::LinuxRawDevice;
 use crate::sector_restore::SectorTarget;
@@ -211,6 +212,10 @@ pub struct LinuxDiskRestoreRequest {
     /// containers' own secrets, typed for this restore and never stored — a
     /// different thing from the archive password of an encrypted copy.
     pub passphrases: HashMap<u32, Zeroizing<String>>,
+    /// Keys an earlier check of the same passphrases recovered (the
+    /// service's), by source partition: taken when they belong to the
+    /// container's header, instead of deriving them again.
+    pub known_keys: HashMap<u32, crate::luks::LuksParams>,
 }
 
 pub use crate::luks_rebuild::{
@@ -278,12 +283,23 @@ pub fn restore_disk(
     // touched: a wrong one found at the container's turn would leave the
     // disk half written.
     let containers = containers_to_rebuild(&sidecar)?;
-    let checked = check_passphrases(&containers, &req.passphrases)?;
+    let checked = crate::luks_rebuild::check_passphrases_with(
+        &containers,
+        &req.passphrases,
+        &req.known_keys,
+    )?;
     if !checked.needs.is_empty() {
         return Err(OwnBackupError::RestoreIncompatible(describe_needs(
             &checked.needs,
         )));
     }
+    let fits = crate::luks_rebuild::fit_containers(&sidecar, &containers, &checked.keys)?;
+    // The image opens — before the disk is held.
+    drop(ImageReadSource::open_with(
+        &req.image_path,
+        &sidecar.info.container,
+        chain_key.as_ref(),
+    )?);
 
     let mut session = open_disk(&req.target_device)?;
     let target_size = session.length();
@@ -322,6 +338,7 @@ pub fn restore_disk(
         },
         &sidecar,
         &containers,
+        fits,
         &checked.keys,
         &mut DiskWindow::new(session.device_mut(), 0, target_size),
         &mut |offset, size| {
@@ -581,11 +598,12 @@ mod tests {
                 .map(|p| (2u32, Zeroizing::new(p.to_string())))
                 .into_iter()
                 .collect(),
+            known_keys: HashMap::new(),
         }
     }
 
     /// Restore `image` onto a zeroed disk of `size` bytes; with `known`, the
-    /// keys the passphrase check recovered are handed on (no second unlock).
+    /// keys are taken as handed on by an earlier check (no derivation).
     fn restore_onto(image: &std::path::Path, size: u64, pass: &str, known: bool) -> Vec<u8> {
         restore_sealed_onto(image, None, size, pass, known)
     }
@@ -602,13 +620,21 @@ mod tests {
         let chain_key = sealed.map(|k| k.open_chain_of(image).unwrap().key);
         let containers = containers_to_rebuild(&sidecar).unwrap();
         let req = request(image, Some(pass));
+        let checked = check_passphrases(&containers, &req.passphrases)
+            .unwrap()
+            .keys;
         let keys = if known {
-            check_passphrases(&containers, &req.passphrases)
-                .unwrap()
-                .keys
+            // As the service hands them on: taken for belonging to the
+            // header, with no passphrase at hand to derive them again.
+            let again =
+                crate::luks_rebuild::check_passphrases_with(&containers, &HashMap::new(), &checked)
+                    .unwrap();
+            assert!(again.needs.is_empty());
+            again.keys
         } else {
-            HashMap::new()
+            checked
         };
+        let fits = crate::luks_rebuild::fit_containers(&sidecar, &containers, &keys).unwrap();
         let disk = std::rc::Rc::new(std::cell::RefCell::new(vec![0u8; size as usize]));
         let mut io = Shared(disk.clone());
         let reader = disk.clone();
@@ -625,6 +651,7 @@ mod tests {
             },
             &sidecar,
             &containers,
+            fits,
             &keys,
             &mut DiskWindow::new(&mut io, 0, size),
             &mut |offset, size| {
@@ -768,6 +795,19 @@ mod tests {
         odd.disk_manifest.as_mut().unwrap().layout.partitions[1].first_lba += 1;
         let e = containers_to_rebuild(&odd).unwrap_err();
         assert!(e.to_string().contains("4096"), "{e}");
+        // Settled before the disk is opened: a container without its key,
+        // or with a key that is not its header's.
+        let sidecar = load();
+        let containers = containers_to_rebuild(&sidecar).unwrap();
+        assert!(
+            crate::luks_rebuild::fit_containers(&sidecar, &containers, &HashMap::new()).is_err()
+        );
+        let mut keys = check_passphrases(&containers, &request(&image, Some(PASS)).passphrases)
+            .unwrap()
+            .keys;
+        assert!(crate::luks_rebuild::fit_containers(&sidecar, &containers, &keys).is_ok());
+        keys.get_mut(&2).unwrap().master_key[0] ^= 1;
+        assert!(crate::luks_rebuild::fit_containers(&sidecar, &containers, &keys).is_err());
         // And the Windows question: which partitions are LUKS in the clear.
         assert_eq!(crate::luks_rebuild::luks_in_clear(&load()), vec![2]);
         assert_eq!(crate::luks_rebuild::luks_in_clear(&headless), vec![2]);

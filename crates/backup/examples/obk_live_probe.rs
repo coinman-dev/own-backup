@@ -149,6 +149,7 @@ mod probe {
                 verify_checksums: true,
                 encryption: Some(keys),
                 passphrases: Default::default(),
+                known_keys: Default::default(),
             },
             |_| Ok(()),
         )?;
@@ -536,6 +537,7 @@ mod probe {
                 verify_checksums: true,
                 encryption: Some(portable),
                 passphrases: Default::default(),
+                known_keys: Default::default(),
             },
             |_| Ok(()),
         )?;

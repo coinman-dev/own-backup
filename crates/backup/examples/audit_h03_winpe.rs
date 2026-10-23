@@ -87,6 +87,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 verify_checksums: true,
                 encryption: Some(keys),
                 passphrases: Default::default(),
+                known_keys: Default::default(),
             },
             |_| Ok(()),
         )?;

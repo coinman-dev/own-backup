@@ -240,6 +240,7 @@ fn ntfs(image: &Path, target: u32) -> Result<()> {
             verify_checksums: true,
             encryption: Some(keys),
             passphrases: Default::default(),
+            known_keys: Default::default(),
         },
         |_| Ok(()),
     )?;

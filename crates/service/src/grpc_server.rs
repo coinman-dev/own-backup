@@ -799,35 +799,44 @@ fn luks_gate(
 /// `passphrases` the client sent (by source partition): settled on a blocking
 /// thread — seconds of key derivation per container — before the operation
 /// reserves the machine, and asked for through [`luks_gate`] when one is
-/// missing or wrong. Gives back the keys and the passphrases, zeroized on drop.
+/// missing or wrong. Gives back the copy's keys, the passphrases (zeroized on
+/// drop) and the containers' keys they gave — handed to the engine, which
+/// then does not derive them again.
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-#[allow(clippy::type_complexity, clippy::result_large_err)]
+#[allow(clippy::result_large_err)]
 async fn luks_needs(
     image: std::path::PathBuf,
     keys: Option<own_backup_backup::seal::context::ArchiveKeys>,
     passphrases: std::collections::HashMap<u32, String>,
-) -> Result<
-    (
-        Option<own_backup_backup::seal::context::ArchiveKeys>,
-        std::collections::HashMap<u32, zeroize::Zeroizing<String>>,
-    ),
-    Status,
-> {
+) -> Result<LuksSecrets, Status> {
     let passphrases: std::collections::HashMap<u32, zeroize::Zeroizing<String>> = passphrases
         .into_iter()
         .map(|(k, v)| (k, zeroize::Zeroizing::new(v)))
         .collect();
-    let (keys, passphrases, needs) = tokio::task::spawn_blocking(move || {
-        use own_backup_backup::luks_rebuild::{containers_to_rebuild, passphrase_needs};
-        let needs = own_backup_backup::sidecar::read_sidecar_with_keys(&image, keys.as_ref())
+    let (keys, passphrases, checked) = tokio::task::spawn_blocking(move || {
+        use own_backup_backup::luks_rebuild::{check_passphrases, containers_to_rebuild};
+        let checked = own_backup_backup::sidecar::read_sidecar_with_keys(&image, keys.as_ref())
             .and_then(|sidecar| containers_to_rebuild(&sidecar))
-            .and_then(|containers| passphrase_needs(&containers, &passphrases));
-        (keys, passphrases, needs)
+            .and_then(|containers| check_passphrases(&containers, &passphrases));
+        (keys, passphrases, checked)
     })
     .await
     .map_err(|e| Status::internal(format!("container check panicked: {e}")))?;
-    luks_gate(needs.map_err(|e| Status::failed_precondition(e.to_string()))?)?;
-    Ok((keys, passphrases))
+    let checked = checked.map_err(|e| Status::failed_precondition(e.to_string()))?;
+    luks_gate(checked.needs)?;
+    Ok(LuksSecrets {
+        keys,
+        passphrases,
+        known: checked.keys,
+    })
+}
+
+/// What [`luks_needs`] settled.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+struct LuksSecrets {
+    keys: Option<own_backup_backup::seal::context::ArchiveKeys>,
+    passphrases: std::collections::HashMap<u32, zeroize::Zeroizing<String>>,
+    known: std::collections::HashMap<u32, own_backup_backup::luks::LuksParams>,
 }
 
 /// [`manual_keys`] on a blocking thread, **before** the operation reserves the
@@ -2960,8 +2969,11 @@ impl BackupService for BackupServiceImpl {
             // before the slot is taken and before a byte is written.
             let manifest_path = std::path::PathBuf::from(&p.manifest_path);
             let keys = manual_keys_off_thread(manifest_path.clone(), p.secret).await?;
-            let (keys, passphrases) =
-                luks_needs(manifest_path.clone(), keys, p.passphrases).await?;
+            let LuksSecrets {
+                keys,
+                passphrases,
+                known,
+            } = luks_needs(manifest_path.clone(), keys, p.passphrases).await?;
 
             let slot = self.reserve(
                 &tr!("grpc_server.busy_disk_restore"),
@@ -2977,6 +2989,7 @@ impl BackupService for BackupServiceImpl {
                 // store: that key is for scheduled COPIES (see `manual_keys`).
                 encryption: keys,
                 passphrases,
+                known_keys: known,
             };
 
             let summary = tokio::task::spawn_blocking(move || {

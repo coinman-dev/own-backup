@@ -719,7 +719,11 @@ impl BackupServiceImpl {
         // missing or wrong one is asked for (structured details) before
         // anything else, and before the slot is taken. Seconds of key
         // derivation per container, off the runtime.
-        let (keys, passphrases) = luks_needs(image_path.clone(), keys, p.passphrases).await?;
+        let super::LuksSecrets {
+            keys,
+            passphrases,
+            known,
+        } = luks_needs(image_path.clone(), keys, p.passphrases).await?;
 
         let (keys, clashes) = {
             let image = image_path.clone();
@@ -754,6 +758,7 @@ impl BackupServiceImpl {
             verify_checksums: true,
             encryption: keys,
             passphrases,
+            known_keys: known,
         };
         let summary = tokio::task::spawn_blocking(move || {
             let _slot = slot;

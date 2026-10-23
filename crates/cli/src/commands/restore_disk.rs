@@ -149,18 +149,24 @@ pub async fn run(args: RestoreDiskArgs) -> own_backup_common::Result<()> {
     if !containers.is_empty() {
         println!("В копии есть контейнеры LUKS: восстановление вернёт им шифрование.");
     }
-    for _ in 0..3 {
+    // Keys the accepted passphrases gave: not derived again in the next
+    // round, nor by the engine.
+    let mut known = std::collections::HashMap::new();
+    for round in 0..4 {
         let checked = {
-            let (c, p) = (containers.clone(), passphrases.clone());
+            let (c, p, k) = (containers.clone(), passphrases.clone(), known.clone());
             tokio::task::spawn_blocking(move || {
-                own_backup_backup::luks_rebuild::check_passphrases(&c, &p)
+                own_backup_backup::luks_rebuild::check_passphrases_with(&c, &p, &k)
             })
             .await
             .map_err(|e| OwnBackupError::Device(format!("passphrase check panicked: {e}")))??
         };
-        if checked.needs.is_empty() {
+        known = checked.keys;
+        if checked.needs.is_empty() || round == 3 {
+            // Still wrong after three tries: the engine refuses with the list.
             break;
         }
+        // Only the partitions not accepted yet are asked again.
         for n in &checked.needs {
             if n.wrong {
                 println!("  Пароль раздела {} не подходит.", n.part_index);
@@ -178,9 +184,10 @@ pub async fn run(args: RestoreDiskArgs) -> own_backup_common::Result<()> {
         target_disk,
         verify_checksums: !args.no_verify,
         encryption,
-        // Checked again by the engine before the first write; still wrong
-        // after three tries, it refuses there with the list.
+        // Checked again by the engine before the first write — the keys
+        // already recovered without a second derivation.
         passphrases,
+        known_keys: known,
     };
 
     let summary = tokio::task::spawn_blocking(move || {

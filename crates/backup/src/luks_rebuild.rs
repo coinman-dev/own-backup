@@ -161,11 +161,31 @@ pub fn check_passphrases(
     containers: &[Container],
     passphrases: &HashMap<u32, Zeroizing<String>>,
 ) -> Result<Checked> {
+    check_passphrases_with(containers, passphrases, &HashMap::new())
+}
+
+/// [`check_passphrases`], taking the keys in `known` — recovered by an
+/// earlier check of the same passphrases (the service's, the CLI's previous
+/// round) — when they belong to the container's header
+/// ([`crate::luks::key_belongs_to`], a fraction of a second) instead of
+/// deriving them again (seconds of Argon2 each).
+pub fn check_passphrases_with(
+    containers: &[Container],
+    passphrases: &HashMap<u32, Zeroizing<String>>,
+    known: &HashMap<u32, crate::luks::LuksParams>,
+) -> Result<Checked> {
     let mut out = Checked {
         needs: Vec::new(),
         keys: HashMap::new(),
     };
     for c in containers {
+        if let Some(key) = known.get(&c.part_index) {
+            let bytes = crate::luks::decode_stored_header(&c.header)?;
+            if crate::luks::key_belongs_to(&bytes, key)? {
+                out.keys.insert(c.part_index, key.clone());
+                continue;
+            }
+        }
         let wrong = match passphrases.get(&c.part_index) {
             None => false,
             Some(p) => {
@@ -314,6 +334,47 @@ pub struct DataWritten {
     pub blocks_total: u64,
 }
 
+/// Everything about the `containers` that can be wrong before the disk is
+/// touched: each header decodes and fits its slot (with its data), and each
+/// has a key in `keys` — recovered when its passphrase was checked — that
+/// belongs to it. The fits, in the containers' order, for
+/// [`write_disk_data`]. Called before the target is opened for writing (or
+/// taken offline), so a damaged copy leaves the disk as it was.
+pub fn fit_containers(
+    sidecar: &Sidecar,
+    containers: &[Container],
+    keys: &HashMap<u32, crate::luks::LuksParams>,
+) -> Result<Vec<crate::sector_restore::ContainerFit>> {
+    use crate::sector_restore::{container_fitting, ReencryptRequest};
+    let mut fits = Vec::with_capacity(containers.len());
+    for c in containers {
+        let fit = container_fitting(
+            sidecar,
+            c.part_index,
+            c.size,
+            &ReencryptRequest {
+                header: &c.header,
+                passphrase: "",
+            },
+        )?;
+        let label = || format!("{}:{}", c.part_index, c.offset);
+        let key = keys.get(&c.part_index).ok_or_else(|| {
+            OwnBackupError::RestoreIncompatible(describe_needs(&[LuksPassphraseNeedDto {
+                part_index: c.part_index,
+                kind: c.header.kind.clone(),
+                wrong: false,
+            }]))
+        })?;
+        if !crate::luks::key_belongs_to(&fit.header, key)? {
+            return Err(OwnBackupError::Device(
+                tr!("sector_restore.key_not_this_header", target = label()).into_owned(),
+            ));
+        }
+        fits.push(fit);
+    }
+    Ok(fits)
+}
+
 /// Write the copy's data onto the whole disk `dev`: every stored block at its
 /// own offset, except inside the slots of `containers`, which are put back as
 /// the containers they were — header first, then the data re-encrypted
@@ -321,17 +382,19 @@ pub struct DataWritten {
 /// recovered when the passphrase was checked). A block wholly inside a slot
 /// is read only once, by the container's pass. `read_back(offset, size)`
 /// reads a slot from the disk itself, past every cache.
+#[allow(clippy::too_many_arguments)]
 pub fn write_disk_data(
     job: &DiskData<'_>,
     sidecar: &Sidecar,
     containers: &[Container],
+    fits: Vec<crate::sector_restore::ContainerFit>,
     known: &HashMap<u32, crate::luks::LuksParams>,
     dev: &mut dyn SectorTarget,
     read_back: &mut dyn FnMut(u64, u64) -> Result<Box<dyn RawVolume>>,
     progress: &mut dyn FnMut(&DataTick) -> Result<()>,
 ) -> Result<DataWritten> {
     use crate::sector_restore::{
-        container_fitting, write_container_blocks_with, ReencryptRequest, SectorRestoreOptions,
+        write_container_blocks_with, ReencryptRequest, SectorRestoreOptions,
     };
 
     let bs = sidecar.manifest.block_size as u64;
@@ -422,22 +485,38 @@ pub fn write_disk_data(
     // Never set: cancelling is the progress callback's, which every loop
     // asks after each block.
     let cancel = own_backup_common::cancel::CancelToken::new(uuid::Uuid::new_v4());
-    for (n, c) in containers.iter().enumerate() {
-        let passphrase = job.passphrases.get(&c.part_index).ok_or_else(|| {
-            OwnBackupError::RestoreIncompatible(describe_needs(&[LuksPassphraseNeedDto {
-                part_index: c.part_index,
-                kind: c.header.kind.clone(),
-                wrong: false,
-            }]))
-        })?;
+    if fits.len() != containers.len() {
+        return Err(OwnBackupError::Device(
+            "write_disk_data: one fit per container".into(),
+        ));
+    }
+    for (c, fit) in containers.iter().zip(fits) {
+        // The key is the one the passphrase check recovered
+        // ([`fit_containers`] made sure there is one): the passphrase itself
+        // is not derived again.
+        let passphrase = job
+            .passphrases
+            .get(&c.part_index)
+            .map(|p| p.as_str())
+            .unwrap_or_default();
         let creq = ReencryptRequest {
             header: &c.header,
-            passphrase: passphrase.as_str(),
+            passphrase,
         };
-        let fit = container_fitting(sidecar, c.part_index, c.size, &creq)?;
         let label = format!("{}:{}:{}", job.label, c.offset, c.size);
         let part_label =
             tr!("restore_disk_linux.label_container", index = c.part_index).into_owned();
+        // Where the partition stands in the copy's table, for "[k/N]".
+        let position = sidecar
+            .disk_manifest
+            .as_ref()
+            .and_then(|dm| {
+                dm.layout
+                    .partitions
+                    .iter()
+                    .position(|p| p.index == c.part_index)
+            })
+            .unwrap_or_default();
         let (offset, size) = (c.offset, c.size);
         let (base, base_done) = (bytes, done);
         let mut slot = Slot {
@@ -464,7 +543,7 @@ pub fn write_disk_data(
             &cancel,
             &mut |pr| {
                 progress(&DataTick {
-                    partition_index: n + 1,
+                    partition_index: position,
                     part_label: part_label.clone(),
                     blocks_done: (base_done + pr.blocks_done).min(total),
                     blocks_total: total,

@@ -456,6 +456,10 @@ pub struct DiskRestoreRequest {
     /// secrets, typed for this restore and never stored — not the copy's
     /// archive password.
     pub passphrases: HashMap<u32, zeroize::Zeroizing<String>>,
+    /// Keys an earlier check of the same passphrases recovered (the
+    /// service's, the CLI's), by source partition: taken when they belong to
+    /// the container's header, instead of deriving them again.
+    pub known_keys: HashMap<u32, crate::luks::LuksParams>,
 }
 
 /// Progress for a whole-disk restore.
@@ -507,6 +511,27 @@ pub fn restore_disk(
     restore_disk_legacy(req, progress)
 }
 
+/// The target disk, remembering whether anything was written to it yet.
+struct FirstWrite {
+    dev: WinRawDevice,
+    wrote: bool,
+}
+
+impl crate::sector_restore::SectorTarget for FirstWrite {
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
+        self.wrote = true;
+        self.dev.write_at(offset, data)
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        self.dev.flush()
+    }
+
+    fn sector_size(&self) -> u32 {
+        self.dev.sector_size()
+    }
+}
+
 /// Restore a whole disk from a single embedded-manifest image (plan D3): copy
 /// the image's used blocks to the target at their real offsets, then overlay
 /// the REAL GPT (real disk + partition GUIDs from the manifest — the image
@@ -546,16 +571,45 @@ fn restore_disk_from_image(
     // Linux restore does it. Every container and its passphrase are settled
     // before the disk is touched; plaintext never lands where one was.
     let containers = crate::luks_rebuild::containers_to_rebuild(&sidecar)?;
-    let checked = crate::luks_rebuild::check_passphrases(&containers, &req.passphrases)?;
+    let checked = crate::luks_rebuild::check_passphrases_with(
+        &containers,
+        &req.passphrases,
+        &req.known_keys,
+    )?;
     if !checked.needs.is_empty() {
         return Err(OwnBackupError::RestoreIncompatible(
             crate::luks_rebuild::describe_needs(&checked.needs),
         ));
     }
+    // Everything that can be wrong with the copy is found before the disk is
+    // opened for writing and taken offline: each container fits its slot and
+    // its key is its header's, and the image opens.
+    let fits = crate::luks_rebuild::fit_containers(&sidecar, &containers, &checked.keys)?;
+    drop(ImageReadSource::open_with(
+        &req.manifest_path,
+        &sidecar.info.container,
+        chain_key.as_ref(),
+    )?);
     let layout = &dm.layout; // real GUIDs
 
     let target_path = format!(r"\\.\PhysicalDrive{}", req.target_disk);
-    let target_size = WinRawDevice::open_read(&target_path)?.length();
+    let (target_size, target_sector) = {
+        let probe = WinRawDevice::open_read(&target_path)?;
+        (probe.length(), probe.sector_size())
+    };
+    // The copy's table and data are laid out in its own sectors: a disk with
+    // others would read them at the wrong places.
+    if target_sector != layout.sector_size {
+        return Err(OwnBackupError::RestoreIncompatible(
+            tr!(
+                "restore_win.sector_mismatch",
+                planned = layout.sector_size,
+                disk = target_path.as_str(),
+                actual = target_sector
+            )
+            .into_owned(),
+        ));
+    }
     // Validates every partition fits the target (and rejects a smaller disk).
     let ops = disk_gpt_write_ops(layout, target_size)?;
 
@@ -567,8 +621,14 @@ fn restore_disk_from_image(
         "Whole-disk restore (embedded manifest): copying data"
     );
 
-    let mut td = WinRawDevice::open_write(&target_path)?;
+    let td = WinRawDevice::open_write(&target_path)?;
     td.set_offline_writable(false)?;
+    // Failing before its first write, the restore gives the disk back online,
+    // as it found it.
+    let mut td = FirstWrite {
+        dev: td,
+        wrote: false,
+    };
 
     // Copy every stored image block to the same offset on the target. A block
     // straddling the GPT head carries the image's random GPT bytes — harmless,
@@ -577,7 +637,7 @@ fn restore_disk_from_image(
     // A container's slot gets its header and its data re-encrypted instead;
     // the header is read back through a handle of its own (raw disk reads on
     // Windows are not cached).
-    let count = dm.images.len();
+    let count = layout.partitions.len();
     let written = crate::luks_rebuild::write_disk_data(
         &crate::luks_rebuild::DiskData {
             image_path: &req.manifest_path,
@@ -590,6 +650,7 @@ fn restore_disk_from_image(
         },
         &sidecar,
         &containers,
+        fits,
         &checked.keys,
         &mut td,
         &mut |offset, size| {
@@ -610,7 +671,18 @@ fn restore_disk_from_image(
                 bytes_written: t.bytes_written,
             })
         },
-    )?;
+    );
+    let written = match written {
+        Ok(w) => w,
+        Err(e) => {
+            if !td.wrote {
+                let _ = td.dev.set_online_this_session();
+                let _ = td.dev.update_properties();
+            }
+            return Err(e);
+        }
+    };
+    let mut td = td.dev;
     let (bytes, total) = (written.bytes, written.blocks_total);
 
     // Overlay the REAL GPT last, so the restored disk carries the source's disk

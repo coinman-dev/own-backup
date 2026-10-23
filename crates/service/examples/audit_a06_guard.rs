@@ -314,6 +314,7 @@ mod probe {
                 verify_checksums: true,
                 encryption: None,
                 passphrases: Default::default(),
+                known_keys: Default::default(),
             },
             |_| Ok(()),
         )?;
