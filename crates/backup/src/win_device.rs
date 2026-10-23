@@ -802,4 +802,10 @@ impl crate::engine_core::platform::SourceDevice for WinRawDevice {
     fn sector_size(&self) -> u32 {
         WinRawDevice::sector_size(self)
     }
+
+    /// Asked only of an LVM physical volume, which Windows never copies
+    /// live; nothing to drop.
+    fn drop_cache(&mut self) -> Result<()> {
+        Ok(())
+    }
 }

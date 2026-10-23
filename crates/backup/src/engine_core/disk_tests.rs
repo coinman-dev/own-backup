@@ -769,6 +769,155 @@ mod physical_volume {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
+    /// The partition's metadata area with `text` in it.
+    fn put_metadata(live: &mut [u8], text: &str) {
+        live[4096..PE_START as usize].copy_from_slice(&mda(PE_START - 4096, 8192, text));
+    }
+
+    /// The partition's page cache does not see what device-mapper wrote under
+    /// it: an inactive volume written (activated, written, deactivated) since
+    /// the cache was filled, and metadata that then still called its extent
+    /// free. The copy drops the cache first and takes the device as it is.
+    #[test]
+    fn what_the_partition_cache_kept_from_before_is_not_copied() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = PvDisk::new(raw_root(), true);
+        let mut stale = disk.live.clone();
+        stale[extent(4) as usize..extent(5) as usize].fill(0x44);
+        put_metadata(
+            &mut stale,
+            &vg_text(
+                5,
+                &[
+                    ("root", vec![("striped", vec![("pv0", 0)], 2)]),
+                    ("data", vec![("striped", vec![("pv0", 3)], 1)]),
+                ],
+            ),
+        );
+        crate::engine_core::test_platform::register_stale_cache(&disk.part, stale);
+        let image = dir.path().join("disk.qcow2");
+        run(&disk.platform(disk.pv(None)), &disk.request(&image)).unwrap();
+        assert_same(
+            &disk.in_image(&image, extent(4), extent(5)),
+            &disk.live[extent(4) as usize..extent(5) as usize],
+            "the inactive volume as the device holds it now",
+        );
+        assert!(disk.stored(&image, extent(4), extent(5)));
+    }
+
+    /// A child image over a PV whose allocation changed: `data` (extent 3)
+    /// was removed and `new` created on the extent that was free (2). The
+    /// new volume's data is in the child over the parent's nothing; the
+    /// freed extent is not part of the child's state — its parent bytes
+    /// are inherited and never restored — and the chain verifies.
+    #[test]
+    fn a_child_follows_extents_freed_and_taken_since_its_parent() {
+        for kind in [BackupType::Incremental, BackupType::Differential] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut disk = PvDisk::new(raw_root(), true);
+            let full = dir.path().join("full.qcow2");
+            run(&disk.platform(disk.pv(None)), &disk.request(&full)).unwrap();
+            assert!(
+                disk.stored(&full, extent(3), extent(4)),
+                "data in the parent"
+            );
+
+            // Since then: data removed, new on extent 2, idle still on 4.
+            put_metadata(
+                &mut disk.live,
+                &vg_text(
+                    5,
+                    &[
+                        ("root", vec![("striped", vec![("pv0", 0)], 2)]),
+                        ("new", vec![("striped", vec![("pv0", 2)], 1)]),
+                        ("idle", vec![("striped", vec![("pv0", 4)], 1)]),
+                    ],
+                ),
+            );
+            register_device(&disk.part, disk.live.clone(), 512);
+            let new_snap = unique_path("new-snap");
+            let new_data: Vec<u8> = (0..EXT).map(|i| (i % 239) as u8 ^ 0x6B).collect();
+            register_device(&new_snap, new_data.clone(), 512);
+            let mut pv = disk.pv(None);
+            pv.volumes[1] = PvVolume {
+                name: "vg0/new".into(),
+                read_path: new_snap,
+                len: EXT,
+                segments: vec![PvSegment {
+                    pv_offset: extent(2),
+                    lv_offset: 0,
+                    length: EXT,
+                }],
+                frozen: true,
+                quiesced: true,
+                key_store: false,
+            };
+            let child = dir.path().join("child.qcow2");
+            let sum = run(
+                &disk.platform(pv),
+                &DiskBackupRequest {
+                    kind,
+                    parent_image: Some(full.clone()),
+                    ..disk.request(&child)
+                },
+            )
+            .unwrap();
+            assert_eq!(sum.backup_kind, kind);
+            assert!(sum.blocks_copied > 0);
+            assert_same(
+                &disk.in_image(&child, extent(2), extent(3)),
+                &new_data,
+                "the new volume, over the parent's free extent",
+            );
+            assert!(disk.stored(&child, extent(2), extent(3)));
+            assert!(
+                !disk.stored(&child, extent(3), extent(4)),
+                "{kind}: the freed extent is no longer part of the image's state"
+            );
+            assert_same(
+                &disk.in_image(&child, extent(0), extent(2)),
+                &disk.root.1,
+                "root, unchanged through the chain",
+            );
+            assert!(verify_image(&child, |_, _| Ok(())).unwrap().valid());
+        }
+    }
+
+    /// A volume group that also lies on a PV outside this copy is copied,
+    /// and the run's summary says the group restored alone is incomplete.
+    #[test]
+    fn a_group_with_physical_volumes_elsewhere_is_named_in_the_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut disk = PvDisk::new(raw_root(), true);
+        let image = dir.path().join("alone.qcow2");
+        let sum = run(&disk.platform(disk.pv(None)), &disk.request(&image)).unwrap();
+        assert!(sum.notes.is_empty(), "{:?}", sum.notes);
+
+        let text = vg_text(
+            5,
+            &[
+                ("root", vec![("striped", vec![("pv0", 0)], 2)]),
+                ("data", vec![("striped", vec![("pv0", 3)], 1)]),
+                ("idle", vec![("striped", vec![("pv0", 4)], 1)]),
+            ],
+        )
+        .replace(
+            "physical_volumes {\n",
+            "physical_volumes {\npv1 {\nid = \"Other0-0000-0000-0000-0000-0000-000000\"\n\
+             pe_start = 2048\npe_count = 10\n}\n",
+        );
+        put_metadata(&mut disk.live, &text);
+        register_device(&disk.part, disk.live.clone(), 512);
+        let image = dir.path().join("spread.qcow2");
+        let sum = run(&disk.platform(disk.pv(None)), &disk.request(&image)).unwrap();
+        assert_eq!(sum.notes.len(), 1, "{:?}", sum.notes);
+        assert!(sum.notes[0].contains("vg0"), "{}", sum.notes[0]);
+        assert!(
+            !disk.stored(&image, extent(2), extent(3)),
+            "its metadata believed"
+        );
+    }
+
     /// Without readable metadata nothing counts as free: every byte outside
     /// the active volumes is copied from the partition.
     #[test]

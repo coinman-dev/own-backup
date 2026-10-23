@@ -643,6 +643,10 @@
     "ru": "На разделе %{volume} больше не читается метка физического тома LVM — он изменился после того, как были сняты снимки его логических томов. Копия не сделана.",
     "en": "The LVM physical volume label of %{volume} can no longer be read — it changed after its logical volumes were snapshotted. No copy was made."
   },
+  "engine.pv_outside_copy": {
+    "ru": "Группа томов LVM %{vg} (раздел %{index}) лежит ещё на физических томах, которых нет в этой копии (%{count}). Восстановленная из неё одной, группа будет неполной, и её логические тома на тех дисках не откроются.",
+    "en": "The LVM volume group %{vg} (partition %{index}) also lies on physical volumes that are not in this copy (%{count}). Restored from it alone, the group is incomplete, and its logical volumes on those disks will not open."
+  },
   "engine.pv_volume_copy": {
     "ru": "%{volume} — физический том LVM в работе: он копируется только вместе с диском целиком.",
     "en": "%{volume} is an LVM physical volume in use: it is copied only as part of its whole disk."

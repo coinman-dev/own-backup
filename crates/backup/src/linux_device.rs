@@ -233,6 +233,12 @@ impl crate::engine_core::platform::SourceDevice for LinuxRawDevice {
     fn sector_size(&self) -> u32 {
         LinuxRawDevice::sector_size(self)
     }
+
+    /// `BLKFLSBUF` (or `POSIX_FADV_DONTNEED`): the partition's own page cache
+    /// does not see what device-mapper wrote under it.
+    fn drop_cache(&mut self) -> Result<()> {
+        LinuxRawDevice::drop_cache(self).map(|_| ())
+    }
 }
 
 #[cfg(test)]

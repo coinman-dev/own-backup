@@ -49,6 +49,26 @@ impl PvLabel {
     }
 }
 
+/// LVM's `INITIAL_CRC`.
+const INITIAL_CRC: u32 = 0xf597_a6cf;
+
+/// LVM's `calc_crc`: the reflected CRC-32 polynomial, from `initial`, with no
+/// final inversion.
+pub fn calc_crc(initial: u32, buf: &[u8]) -> u32 {
+    let mut crc = initial;
+    for &b in buf {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    crc
+}
+
 fn u32_at(b: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?))
 }
@@ -67,6 +87,10 @@ pub fn parse_label(head: &[u8]) -> Option<PvLabel> {
         };
         if &s[..8] != LABEL_ID || &s[24..32] != LABEL_TYPE || u64_at(s, 8)? != sector {
             continue;
+        }
+        // The label's own checksum, from `offset_xl` to the end of its sector.
+        if u32_at(s, 16)? != calc_crc(INITIAL_CRC, &s[20..]) {
+            return None;
         }
         let pv = u32_at(s, 20)? as usize;
         if pv + 40 > s.len() {
@@ -98,35 +122,80 @@ pub fn parse_label(head: &[u8]) -> Option<PvLabel> {
 }
 
 /// The current metadata text of a metadata area: `area` is the area itself,
-/// read from its offset (its header first). `None` when the header is not an
-/// LVM2 metadata area header, the area is marked unused, or the text does not
-/// fit it.
-pub fn metadata_text(area: &[u8]) -> Option<String> {
-    if area.get(4..20)? != MDA_MAGIC {
-        return None;
+/// read from its offset (its header first). `Ok(None)`: the area is marked
+/// unused (`--metadataignore`) or holds nothing. An error: the header is not
+/// an LVM2 metadata area header, a checksum does not match, or the text does
+/// not fit the area — nothing in it is believed.
+pub fn metadata_text(area: &[u8]) -> Result<Option<String>, String> {
+    let bad = |why: &str| Err(why.to_string());
+    let (Some(magic), Some(header)) = (area.get(4..20), area.get(4..MDA_HEADER_SIZE as usize))
+    else {
+        return bad("metadata area cut short");
+    };
+    if magic != MDA_MAGIC {
+        return bad("no metadata area header");
     }
-    let size = u64_at(area, 32)?.min(area.len() as u64);
+    if u32_at(area, 0) != Some(calc_crc(INITIAL_CRC, header)) {
+        return bad("metadata area header checksum mismatch");
+    }
+    let field = |at| u64_at(area, at).ok_or("metadata area cut short".to_string());
+    let size = field(32)?.min(area.len() as u64);
     // The first raw location is the committed metadata.
-    let (offset, len, flags) = (u64_at(area, 40)?, u64_at(area, 48)?, u32_at(area, 60)?);
-    if flags & RAW_LOCN_IGNORED != 0 || len == 0 || offset < MDA_HEADER_SIZE || offset >= size {
-        return None;
+    let (offset, len) = (field(40)?, field(48)?);
+    let (checksum, flags) = (u32_at(area, 56).unwrap_or(0), u32_at(area, 60).unwrap_or(0));
+    if flags & RAW_LOCN_IGNORED != 0 || len == 0 {
+        return Ok(None);
+    }
+    if offset < MDA_HEADER_SIZE || offset >= size {
+        return bad("metadata text outside its area");
     }
     let mut text = Vec::with_capacity(len as usize);
     let first = len.min(size - offset);
-    text.extend_from_slice(area.get(offset as usize..(offset + first) as usize)?);
+    text.extend_from_slice(&area[offset as usize..(offset + first) as usize]);
     // The buffer is circular: what does not fit continues after the header.
     let rest = len - first;
     if rest > 0 {
-        let end = MDA_HEADER_SIZE.checked_add(rest)?;
+        let end = MDA_HEADER_SIZE.saturating_add(rest);
         if end > offset {
-            return None;
+            return bad("metadata text larger than its area");
         }
-        text.extend_from_slice(area.get(MDA_HEADER_SIZE as usize..end as usize)?);
+        text.extend_from_slice(&area[MDA_HEADER_SIZE as usize..end as usize]);
+    }
+    if calc_crc(INITIAL_CRC, &text) != checksum {
+        return bad("metadata text checksum mismatch");
     }
     if let Some(nul) = text.iter().position(|&b| b == 0) {
         text.truncate(nul);
     }
-    String::from_utf8(text).ok()
+    String::from_utf8(text)
+        .map(Some)
+        .map_err(|_| "metadata text is not UTF-8".to_string())
+}
+
+/// The allocation of the PV `pv_uuid` as EVERY metadata area of it says:
+/// `areas` are the areas as read. An area marked unused is skipped; an area
+/// that cannot be believed, or two that disagree (an interrupted write
+/// leaves them at different sequence numbers), make it an error — the caller
+/// then counts nothing as free.
+pub fn allocation_of_areas(areas: &[&[u8]], pv_uuid: &str) -> Result<Allocation, String> {
+    let mut found: Option<Allocation> = None;
+    for (i, area) in areas.iter().enumerate() {
+        let Some(text) = metadata_text(area).map_err(|e| format!("area {i}: {e}"))? else {
+            continue;
+        };
+        let a = allocation(&text, pv_uuid).map_err(|e| format!("area {i}: {e}"))?;
+        match &found {
+            None => found = Some(a),
+            Some(f) if *f == a => {}
+            Some(f) => {
+                return Err(format!(
+                    "metadata areas disagree (seqno {} and {})",
+                    f.seqno, a.seqno
+                ))
+            }
+        }
+    }
+    found.ok_or_else(|| "no metadata area in use".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -338,8 +407,8 @@ pub struct Allocation {
     pub pe_count: u64,
     /// Allocated extents: `(first, count)`, sorted, merged.
     pub used: Vec<(u64, u64)>,
-    /// The volume group has physical volumes besides this one.
-    pub other_pvs: bool,
+    /// The UUIDs (no dashes) of the volume group's other physical volumes.
+    pub other_pvs: Vec<String>,
 }
 
 impl Allocation {
@@ -397,12 +466,13 @@ pub fn allocation(text: &str, pv_uuid: &str) -> Result<Allocation, String> {
     let seqno = nonneg(vg.int("seqno"), "seqno")?;
     let pvs = vg.get("physical_volumes").ok_or("no physical_volumes")?;
     let mut ours = None;
-    let mut count = 0;
+    let mut others = Vec::new();
     for (name, pv) in pvs.sections() {
-        count += 1;
         let id: String = pv.str("id").unwrap_or_default().replace('-', "");
         if id == pv_uuid {
             ours = Some((name, pv));
+        } else {
+            others.push(id);
         }
     }
     let (pv_name, pv) = ours.ok_or("this PV is not in its volume group's metadata")?;
@@ -475,7 +545,7 @@ pub fn allocation(text: &str, pv_uuid: &str) -> Result<Allocation, String> {
         pe_start,
         pe_count,
         used: merged,
-        other_pvs: count > 1,
+        other_pvs: others,
     })
 }
 
@@ -610,6 +680,8 @@ pub mod fixtures {
             put(s, o, l);
         }
         put(s, 0, 0);
+        let crc = calc_crc(INITIAL_CRC, &s[20..]);
+        s[16..20].copy_from_slice(&crc.to_le_bytes());
         head
     }
 
@@ -631,7 +703,15 @@ pub mod fixtures {
             }
             area[at as usize] = b;
         }
+        area[56..60].copy_from_slice(&calc_crc(INITIAL_CRC, bytes).to_le_bytes());
+        seal_mda(&mut area);
         area
+    }
+
+    /// Set a metadata area header's own checksum (after a test edits it).
+    pub fn seal_mda(area: &mut [u8]) {
+        let crc = calc_crc(INITIAL_CRC, &area[4..MDA_HEADER_SIZE as usize]);
+        area[..4].copy_from_slice(&crc.to_le_bytes());
     }
 
     /// A segment: `(type, [(pv, first extent)…], extent_count)`.
@@ -716,24 +796,72 @@ mod tests {
         moved[512 + 8..512 + 16].copy_from_slice(&2u64.to_le_bytes());
         assert!(parse_label(&moved).is_none());
         assert!(parse_label(&head[..600]).is_none(), "cut short");
+        // A label whose checksum does not match is not believed.
+        let mut damaged = head.clone();
+        damaged[512 + 64] ^= 1;
+        assert!(parse_label(&damaged).is_none());
+    }
+
+    /// `calc_crc` is the reflected CRC-32 without final inversion: from
+    /// !0 and inverted, it is the standard CRC-32 of the check string.
+    #[test]
+    fn the_checksum_is_lvms() {
+        assert_eq!(calc_crc(!0, b"123456789") ^ !0, 0xCBF4_3926);
+        assert_eq!(calc_crc(INITIAL_CRC, b""), INITIAL_CRC);
     }
 
     #[test]
     fn metadata_text_is_read_even_round_the_end_of_its_buffer() {
         let text = vg_text(10, &[]);
         let area = mda(64 << 10, 8192, &text);
-        assert_eq!(metadata_text(&area).unwrap(), text);
+        assert_eq!(metadata_text(&area).unwrap().unwrap(), text);
         // Starts 100 bytes before the end of the area, continues after the header.
         let size = 16 << 10;
         let wrapped = mda(size, size - 100, &text);
-        assert_eq!(metadata_text(&wrapped).unwrap(), text);
+        assert_eq!(metadata_text(&wrapped).unwrap().unwrap(), text);
 
         let mut ignored = area.clone();
         ignored[60..64].copy_from_slice(&RAW_LOCN_IGNORED.to_le_bytes());
-        assert!(metadata_text(&ignored).is_none());
-        let mut bad = area;
+        seal_mda(&mut ignored);
+        assert_eq!(metadata_text(&ignored), Ok(None));
+        let mut bad = area.clone();
         bad[4] = b'X';
-        assert!(metadata_text(&bad).is_none());
+        assert!(metadata_text(&bad).is_err());
+        // A header edited without its checksum, a text changed under its own.
+        let mut header = area.clone();
+        header[60..64].copy_from_slice(&RAW_LOCN_IGNORED.to_le_bytes());
+        assert!(metadata_text(&header).is_err());
+        let mut torn = area;
+        torn[8192 + 20] ^= 0x20;
+        assert!(metadata_text(&torn).is_err());
+    }
+
+    /// Every area in use must say the same; one that cannot be believed or
+    /// says something else leaves nothing to call free.
+    #[test]
+    fn every_metadata_area_must_agree() {
+        let lvs: [Lv<'_>; 1] = [("root", vec![("striped", vec![("pv0", 0)], 4)])];
+        let text = vg_text(10, &lvs);
+        let a = mda(64 << 10, 8192, &text);
+        let b = mda(64 << 10, 4096, &text);
+        let got = allocation_of_areas(&[&a, &b], UUID).unwrap();
+        assert_eq!(got.used, vec![(0, 4)]);
+
+        let mut ignored = b.clone();
+        ignored[60..64].copy_from_slice(&RAW_LOCN_IGNORED.to_le_bytes());
+        seal_mda(&mut ignored);
+        assert!(allocation_of_areas(&[&a, &ignored], UUID).is_ok());
+        assert!(
+            allocation_of_areas(&[&ignored], UUID).is_err(),
+            "none in use"
+        );
+
+        let newer = mda(64 << 10, 8192, &text.replace("seqno = 7", "seqno = 8"));
+        let e = allocation_of_areas(&[&a, &newer], UUID).unwrap_err();
+        assert!(e.contains("disagree"), "{e}");
+        let mut torn = b;
+        torn[4096 + 30] ^= 0x01;
+        assert!(allocation_of_areas(&[&a, &torn], UUID).is_err());
     }
 
     #[test]
@@ -762,7 +890,7 @@ mod tests {
         assert_eq!(a.extent_size, 4 << 20);
         assert_eq!(a.pe_start, 1 << 20);
         assert_eq!(a.used, vec![(0, 20), (30, 10), (60, 10)]);
-        assert!(!a.other_pvs, "only pv0 is listed");
+        assert!(a.other_pvs.is_empty(), "only pv0 is listed");
         let mib = 1u64 << 20;
         assert_eq!(
             a.free_ranges(),

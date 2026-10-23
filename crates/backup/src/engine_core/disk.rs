@@ -590,6 +590,38 @@ fn backup_disk_inner<P: DiskPlatform>(
         });
     }
 
+    // A volume group with physical volumes this copy does not hold: restored
+    // alone, it is incomplete. Said in the run's summary, not just the log.
+    let mut notes: Vec<String> = Vec::new();
+    {
+        let in_copy: std::collections::HashSet<&str> = prepared
+            .iter()
+            .filter_map(|p| p.pv.as_ref().map(|pv| pv.uuid.as_str()))
+            .collect();
+        for p in &prepared {
+            let Some((vg, others)) = p.pv.as_ref().and_then(|pv| pv.vg.as_ref()) else {
+                continue;
+            };
+            let missing = others
+                .iter()
+                .filter(|u| !in_copy.contains(u.as_str()))
+                .count();
+            if missing > 0 {
+                warn!(part = p.part_index, vg = %vg, missing,
+                      "the volume group has physical volumes outside this copy");
+                notes.push(
+                    tr!(
+                        "engine.pv_outside_copy",
+                        vg = vg,
+                        index = p.part_index,
+                        count = missing
+                    )
+                    .into_owned(),
+                );
+            }
+        }
+    }
+
     // Разделы подготовлены — значит сводка по типам файлов посчитана по всем
     // сразу. Отправляем её одним сообщением, до первого скопированного блока.
     report_categories(
@@ -1259,6 +1291,7 @@ fn backup_disk_inner<P: DiskPlatform>(
         },
         excluded_entries_kept,
         key_store_excluded,
+        notes,
     })
 }
 

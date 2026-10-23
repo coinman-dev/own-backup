@@ -456,6 +456,7 @@ pub(crate) fn record_disk(
     if summary.key_store_excluded {
         note_key_store_excluded(run);
     }
+    run.notes.extend(summary.notes);
     run.duration_secs = summary.duration.as_secs_f64();
     // Record what was ACTUALLY produced (the engine may have fallen back
     // to a full when the parent chain was unusable) so the next run plans

@@ -90,6 +90,10 @@ pub struct DiskBackupSummary {
     /// The service's key directory was on one of the partitions and is not in
     /// the copy (decision 6/E4).
     pub key_store_excluded: bool,
+    /// What the person should know about this copy besides its figures —
+    /// a volume group with physical volumes outside it, for one. Shown in
+    /// the run's summary.
+    pub notes: Vec<String>,
 }
 
 /// Create a differencing CHILD target over `parent_path` for an incremental /

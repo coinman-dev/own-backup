@@ -56,6 +56,22 @@ pub(crate) fn register_device(path: &str, data: Vec<u8>, sector_size: u32) {
     );
 }
 
+/// What the system has cached of a device, by path: read instead of the
+/// device until [`SourceDevice::drop_cache`] is asked of it.
+fn stale_caches() -> &'static Mutex<HashMap<String, Arc<Vec<u8>>>> {
+    static STALE: OnceLock<Mutex<HashMap<String, Arc<Vec<u8>>>>> = OnceLock::new();
+    STALE.get_or_init(Default::default)
+}
+
+/// Make `stale` what reads of the device at `path` return until its cache
+/// is dropped — as a partition's page cache that device-mapper wrote under.
+pub(crate) fn register_stale_cache(path: &str, stale: Vec<u8>) {
+    stale_caches()
+        .lock()
+        .unwrap()
+        .insert(path.to_string(), Arc::new(stale));
+}
+
 /// A registered device, opened.
 pub(crate) struct MemDevice {
     path: String,
@@ -74,7 +90,9 @@ impl RawVolume for MemDevice {
                     buf.len()
                 ))
             })?;
-        buf.copy_from_slice(&self.disk.data[offset as usize..end as usize]);
+        let stale = stale_caches().lock().unwrap().get(&self.path).cloned();
+        let data = stale.as_ref().unwrap_or(&self.disk.data);
+        buf.copy_from_slice(&data[offset as usize..end as usize]);
         Ok(())
     }
 
@@ -99,6 +117,11 @@ impl SourceDevice for MemDevice {
 
     fn sector_size(&self) -> u32 {
         self.disk.sector_size
+    }
+
+    fn drop_cache(&mut self) -> Result<()> {
+        stale_caches().lock().unwrap().remove(&self.path);
+        Ok(())
     }
 }
 

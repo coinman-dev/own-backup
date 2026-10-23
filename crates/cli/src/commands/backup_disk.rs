@@ -584,6 +584,9 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
     if let Some(why) = &summary.excluded_entries_kept {
         println!("Excluded names kept: {why}");
     }
+    for note in &summary.notes {
+        println!("Note: {note}");
+    }
     if summary.backup_kind != kind {
         println!(
             "The parent could not be continued — a {:?} copy was written instead (see the log).",

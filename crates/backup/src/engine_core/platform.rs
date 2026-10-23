@@ -39,6 +39,12 @@ pub(crate) trait SourceDevice: RawVolume + Send + Sized + 'static {
 
     /// Logical sector size of the device in bytes.
     fn sector_size(&self) -> u32;
+
+    /// Forget what the system cached of this device, so the next reads come
+    /// from the device itself. Needed where the same sectors are also
+    /// written through another device that bypasses this one's cache — a
+    /// partition whose logical volumes device-mapper writes to.
+    fn drop_cache(&mut self) -> Result<()>;
 }
 
 /// The used-block map the system itself can answer for, tried before the

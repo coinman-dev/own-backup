@@ -78,17 +78,38 @@ pub(crate) struct PvPrepared {
     /// One line per volume whose files nobody walked.
     pub(crate) skips: Vec<String>,
     pub(crate) key_store_excluded: bool,
+    /// The PV's UUID, and its volume group with the UUIDs of its other PVs
+    /// when the metadata was read: the copy says when some are not in it.
+    pub(crate) uuid: String,
+    pub(crate) vg: Option<(String, Vec<String>)>,
 }
 
-/// What the PV's own metadata says is free on it, as partition byte
-/// ranges; `None` when it cannot be told — then nothing is free.
-fn free_ranges<D: SourceDevice>(
+/// What the PV's label and metadata say.
+struct PvFacts {
+    /// The PV's UUID (no dashes).
+    uuid: String,
+    /// Free extents as partition byte ranges; `None` when it cannot be told
+    /// — then nothing is free.
+    free: Option<Vec<(u64, u64)>>,
+    /// The volume group and the UUIDs of its other PVs, when the metadata
+    /// was read.
+    vg: Option<(String, Vec<String>)>,
+}
+
+/// Read the PV's label and every metadata area of it — after dropping what
+/// the system cached of the partition: device-mapper writes the volumes on
+/// it past the partition's own page cache, and an inactive volume written
+/// since the last copy (activated, written, deactivated) would otherwise be
+/// read as it was then. The pieces read from the partition later come from
+/// the same, freshly filled cache.
+fn pv_facts<D: SourceDevice>(
     part_path: &str,
     part_len: u64,
     pv: &PhysicalVolume,
     source: &str,
-) -> Result<Option<Vec<(u64, u64)>>> {
+) -> Result<PvFacts> {
     let mut dev = D::open_read(part_path)?;
+    dev.drop_cache()?;
     let mut head = vec![0u8; lvm_pv::LABEL_SCAN_BYTES.min(part_len as usize)];
     dev.read_at(0, &mut head)?;
     let label = lvm_pv::parse_label(&head).ok_or_else(|| {
@@ -96,7 +117,7 @@ fn free_ranges<D: SourceDevice>(
             tr!("engine.pv_label_gone", volume = source).into_owned(),
         )
     })?;
-    let mut why = String::from("no metadata area");
+    let mut areas = Vec::new();
     for &(offset, size) in &label.metadata_areas {
         let size = size.min(lvm_pv::MAX_METADATA_AREA);
         if offset >= part_len || size == 0 {
@@ -104,20 +125,12 @@ fn free_ranges<D: SourceDevice>(
         }
         let mut area = vec![0u8; size.min(part_len - offset) as usize];
         dev.read_at(offset, &mut area)?;
-        let Some(text) = lvm_pv::metadata_text(&area) else {
-            why = format!("metadata area at {offset} unreadable");
-            continue;
-        };
-        let alloc = match lvm_pv::allocation(&text, &label.uuid) {
-            Ok(a) => a,
-            Err(e) => {
-                why = e;
-                continue;
-            }
-        };
+        areas.push(area);
+    }
+    let refs: Vec<&[u8]> = areas.iter().map(Vec::as_slice).collect();
+    let alloc = lvm_pv::allocation_of_areas(&refs, &label.uuid).and_then(|alloc| {
         if Some(alloc.pe_start) != label.pe_start() {
-            why = "pe_start differs between the label and the metadata".into();
-            continue;
+            return Err("pe_start differs between the label and the metadata".into());
         }
         // Every part of every active volume must be on extents the metadata
         // gives to a volume; otherwise it is not believed.
@@ -126,29 +139,40 @@ fn free_ranges<D: SourceDevice>(
             used.iter()
                 .any(|&(a, b)| a <= s.pv_offset && s.pv_offset + s.length <= b)
         });
-        if !inside {
-            why = "an active volume lies on extents the metadata calls free".into();
-            continue;
+        if inside {
+            Ok(alloc)
+        } else {
+            Err("an active volume lies on extents the metadata calls free".into())
         }
-        info!(
-            volume = %source,
-            vg = %alloc.vg,
-            seqno = alloc.seqno,
-            extent = alloc.extent_size,
-            extents = alloc.pe_count,
-            used = alloc.used.iter().map(|u| u.1).sum::<u64>(),
-            other_pvs = alloc.other_pvs,
-            "LVM physical volume: free extents are not copied"
-        );
-        if alloc.other_pvs {
-            warn!(volume = %source, vg = %alloc.vg,
-                  "the volume group has physical volumes on other disks: only this one is in the copy");
+    });
+    match alloc {
+        Ok(alloc) => {
+            info!(
+                volume = %source,
+                vg = %alloc.vg,
+                seqno = alloc.seqno,
+                extent = alloc.extent_size,
+                extents = alloc.pe_count,
+                used = alloc.used.iter().map(|u| u.1).sum::<u64>(),
+                other_pvs = alloc.other_pvs.len(),
+                "LVM physical volume: free extents are not copied"
+            );
+            Ok(PvFacts {
+                uuid: label.uuid,
+                free: Some(alloc.free_ranges()),
+                vg: Some((alloc.vg, alloc.other_pvs)),
+            })
         }
-        return Ok(Some(alloc.free_ranges()));
+        Err(why) => {
+            warn!(volume = %source, reason = %why,
+                  "LVM metadata not believed — every extent outside the active volumes is copied");
+            Ok(PvFacts {
+                uuid: label.uuid,
+                free: None,
+                vg: None,
+            })
+        }
     }
-    warn!(volume = %source, reason = %why,
-          "LVM metadata not read — every extent outside the active volumes is copied");
-    Ok(None)
 }
 
 /// Cut the partition into pieces: the volumes' parts, and between them free
@@ -295,8 +319,8 @@ pub(crate) fn prepare_pv<P: EnginePlatform>(
     mut tick: impl FnMut(u64, u64) -> Result<()>,
 ) -> Result<PvPrepared> {
     let bs = block_size as u64;
-    let free = free_ranges::<P::Dev>(part_path, part_len, pv, source)?;
-    let pieces = pieces(part_len, pv, free.as_deref(), source)?;
+    let facts = pv_facts::<P::Dev>(part_path, part_len, pv, source)?;
+    let pieces = pieces(part_len, pv, facts.free.as_deref(), source)?;
 
     if key_store && !pv.volumes.iter().any(|v| v.key_store) {
         return Err(super::volume_exclusions::key_store_refusal(
@@ -317,6 +341,8 @@ pub(crate) fn prepare_pv<P: EnginePlatform>(
         categories: None,
         skips: Vec::new(),
         key_store_excluded: false,
+        uuid: facts.uuid.clone(),
+        vg: facts.vg.clone(),
     };
     let mut maps: Vec<Box<dyn UsedSectorMap>> = Vec::new();
     for v in &pv.volumes {
