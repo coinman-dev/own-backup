@@ -31,7 +31,7 @@ use tracing::{info, warn};
 
 use super::proto::{JsonReply, JsonRequest};
 use super::{
-    emit_engine, json_reply, keep_awake, luks_gate, luks_needs, manual_keys_off_thread,
+    emit_engine, json_reply, keep_awake, luks_needs, manual_keys_off_thread,
     BackupServiceImpl, ManualSecret,
 };
 use own_backup_backup::identity_check_linux;
@@ -882,6 +882,7 @@ impl BackupServiceImpl {
 
 #[cfg(test)]
 mod tests {
+    use super::super::luks_gate;
     use super::*;
 
     fn clash() -> IdentityClashDto {

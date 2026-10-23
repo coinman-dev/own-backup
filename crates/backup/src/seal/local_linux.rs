@@ -865,6 +865,7 @@ pub fn key_store_rule(source: &str) -> KeyStoreRule {
 /// service's key directory even when the service runs with another
 /// `--data-dir`.
 fn key_store_data_dirs() -> Vec<PathBuf> {
+    #[allow(unused_mut)]
     let mut dirs: Vec<PathBuf> = KEY_STORE_DATA_DIRS
         .lock()
         .map(|d| d.clone())

@@ -19,6 +19,7 @@
 /// The signature a compound file starts with.
 pub const MAGIC: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
+#[allow(dead_code)]
 const END_OF_CHAIN: u32 = 0xFFFF_FFFE;
 const MAX_SPECIAL: u32 = 0xFFFF_FFFA;
 /// Directory entry kind: a stream (2), as opposed to a storage or the root.

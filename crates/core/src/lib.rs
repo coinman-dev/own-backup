@@ -5709,12 +5709,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = JobStore::load(dir.path());
         let (_, good, _) = job_with_last(dir.path(), "incremental", "incremental", 1, true);
-        store.record_run(good.clone());
-        store.record_run(JobRun {
-            job_id: "job1".into(),
-            status: "error".into(),
-            ..Default::default()
-        });
+        store.record_run(good.clone()).unwrap();
+        store
+            .record_run(JobRun {
+                job_id: "job1".into(),
+                status: "error".into(),
+                ..Default::default()
+            })
+            .unwrap();
         let found = store.last_success("job1").expect("success run found");
         assert_eq!(found.image_path, good.image_path);
         // Other jobs' runs are invisible.

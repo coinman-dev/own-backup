@@ -446,7 +446,7 @@ fn directory_extent(dirs: &[DirNode], idx: usize, joliet: bool) -> Vec<u8> {
     // image outright. Directories only exceed 2048 bytes once they hold a few
     // dozen entries, so a small tree never notices; the WebView2 runtime has
     // hundreds of files in one folder and did.
-    let mut push = |rec: Vec<u8>, out: &mut Vec<u8>| {
+    let push = |rec: Vec<u8>, out: &mut Vec<u8>| {
         let used = out.len() % SECTOR;
         if used + rec.len() > SECTOR {
             out.resize(out.len() + (SECTOR - used), 0);

@@ -47,6 +47,7 @@ const W_C1: &[Op] = &[
 ];
 const W_C2: &[Op] = &[(1024, 512, 21), (MIB + 512, 512, 0), (50 * MIB, 512, 22)];
 /// What Windows writes into a child made here.
+#[allow(dead_code)]
 const W_WIN: &[Op] = &[
     (2048, 512, 31),
     (3 * MIB + 512, 512, 32),

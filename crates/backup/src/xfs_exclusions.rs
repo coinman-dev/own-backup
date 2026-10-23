@@ -326,6 +326,7 @@ pub(crate) struct RemovableFile {
     /// name, and the inode number alone does not identify one.
     pub(crate) name: String,
     pub(crate) extents: Vec<Extent>,
+    #[allow(dead_code)]
     pub(crate) size: u64,
 }
 
@@ -1291,7 +1292,6 @@ mod xfs_integration {
     #[ignore = "needs root: loop-mounts the patched image and writes to it"]
     fn stage2_removes_the_files_and_repair_stays_clean() {
         use crate::exclusion_corpus as corpus;
-        use std::os::unix::fs::FileExt;
         if !corpus::is_root() {
             eprintln!("не root — пропускаю");
             return;

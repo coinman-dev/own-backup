@@ -16,6 +16,8 @@
 //! щадим целиком, так что дерево refcount'ов не трогается по построению) и
 //! журнал (вход требует чистого лога, LSN в заголовках оставляем старыми).
 
+#![allow(dead_code)]
+
 use own_backup_common::{tr, OwnBackupError, Result};
 use tracing::{info, warn};
 

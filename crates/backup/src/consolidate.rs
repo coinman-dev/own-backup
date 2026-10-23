@@ -410,6 +410,7 @@ fn fold_vhdx(base: &Path, victim: &Path) -> Result<()> {
 /// is still openable through the Windows API after a successful merge.
 /// A victim whose blocks already match the base answers `true`, which is the
 /// right answer either way: folding them in would change nothing.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn merge_already_applied(base: &Path, victim: &Path) -> Result<bool> {
     let carried = crate::vhdx_bat::allocated_payload_blocks(victim)?;
     let mut vic = crate::vhdx_bat::VhdxGuestReader::open(victim)?;

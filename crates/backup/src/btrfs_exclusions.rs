@@ -71,10 +71,10 @@ const EXTENT_CSUM_OBJECTID: u64 = u64::MAX - 9;
 /// `EXTENT_ITEM.flags` bit: a data extent (vs tree block).
 const EXTENT_FLAG_DATA: u64 = 0x1;
 
-/// Test-only: make `EditSet::finalize` refuse, so the Stage-1 fallback can be
-/// exercised without hunting for a filesystem that triggers it naturally.
 #[cfg(test)]
 thread_local! {
+    /// Test-only: make `EditSet::finalize` refuse, so the Stage-1 fallback can be
+    /// exercised without hunting for a filesystem that triggers it naturally.
     static FAIL_FINALIZE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 

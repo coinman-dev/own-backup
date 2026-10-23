@@ -26,7 +26,7 @@ for name, version in [("glib", "0.18.5"), ("glib-macros", "0.18.5"), ("gtk3-macr
     actual = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
     assert actual == set(originals) | {"OWN-BACKUP-PATCH.json"}, f"{name}: unexpected files"
     if name == "glib":
-        assert set(changed) == {"src/variant_iter.rs"}
+        assert set(changed) == {"src/lib.rs", "src/variant_iter.rs"}
         assert manifest["fix_commit"] == "05dff0ee696f9bcd8617cd48c4b812d046d440cb"
     for file, original_hash in originals.items():
         data = (root / file).read_bytes()
@@ -36,13 +36,19 @@ for name, version in [("glib", "0.18.5"), ("glib-macros", "0.18.5"), ("gtk3-macr
         change = changed[file]
         assert change["before"] == original_hash and sha(data) == change["after"], f"{name}/{file}: hash mismatch"
         text = data.decode()
-        if name == "glib":
+        if name == "glib" and file == "src/variant_iter.rs":
             assert text.count("let mut p: *mut libc::c_char = std::ptr::null_mut();") == 1
             assert text.count("                &mut p,") == 1
             text = text.replace("let mut p: *mut libc::c_char", "let p: *mut libc::c_char").replace("                &mut p,", "                &p,")
+        elif name == "glib" and file == "src/lib.rs":
+            assert text.count("#![allow(warnings)]\n") == 1
+            text = text.replace("#![allow(warnings)]\n", "", 1)
         elif file.endswith(".rs"):
             assert "proc_macro_error3::" in text
             text = text.replace("proc_macro_error3::", "proc_macro_error::")
+            if name == "gtk3-macros" and file == "src/lib.rs":
+                assert text.count("#![allow(warnings)]\n\n") == 1
+                text = text.replace("#![allow(warnings)]\n\n", "", 1)
         elif file == "Cargo.toml":
             new = '[dependencies.proc-macro-error3]\nversion = "3.1.1"\ndefault-features = false\nfeatures = ["syn2-error"]'
             assert text.count(new) == 1

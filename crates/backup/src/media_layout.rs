@@ -1490,8 +1490,6 @@ mod tests {
         assert!(!names.contains(&"en-US.pak".to_string()));
     }
 
-    use super::*;
-
     /// Both halves of the rule matter, and the cases below are the ones a real
     /// machine actually produced (2026-08-01).
     #[test]

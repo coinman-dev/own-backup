@@ -1,6 +1,10 @@
 {
   "advisory": "RUSTSEC-2024-0429",
   "changed_files": {
+    "src/lib.rs": {
+      "after": "f932e782959c5704f203220861802c0bc5fb16924869b72f84bb5921dc12e27c",
+      "before": "70abc92bf0d02f3c4989034501065cdf64d70901e511f6720d8cd65fcbb662e1"
+    },
     "src/variant_iter.rs": {
       "after": "a0f5ee8acb8faa089bcdfbc9a57372609fce7654026ccef7d9a224d05a654ccc",
       "before": "1fd02859333761c45321b32f28b24233446b97d0022a90d3a937ed162585b90e"
