@@ -82,6 +82,36 @@ pub(super) trait CredentialSealer: Send + Sync {
 /// `systemd-creds` from systemd 250+ (Ubuntu 24.04 has 255, Debian 13 257).
 pub(super) struct SystemdCreds;
 
+/// What a person should read of systemd-creds' complaint: its own sentences,
+/// without the TPM library's trace lines (`WARNING:esys:src/tss2-esys/…`),
+/// which go to the log in full. On a foreign TPM that leaves "TPM key
+/// integrity check failed. Key most likely does not belong to this TPM."
+/// instead of two lines of source file names (stand, 2026-10-23).
+fn creds_reason(stderr: &str) -> String {
+    let trace = |l: &str| {
+        let mut parts = l.splitn(3, ':');
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some("WARNING" | "ERROR" | "INFO" | "DEBUG" | "TRACE"), Some(module), Some(rest)) => {
+                !module.is_empty()
+                    && module.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                    && rest.starts_with("src/")
+            }
+            _ => false,
+        }
+    };
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.contains("not located on encrypted media"))
+        .collect();
+    let kept: Vec<&str> = lines.iter().copied().filter(|l| !trace(l)).collect();
+    if kept.is_empty() {
+        lines.last().copied().unwrap_or_default().to_string()
+    } else {
+        kept.join("; ")
+    }
+}
+
 impl SystemdCreds {
     fn program() -> &'static str {
         ["/usr/bin/systemd-creds", "/bin/systemd-creds"]
@@ -117,13 +147,11 @@ impl SystemdCreds {
         let status = child.wait()?;
         wrote?;
         if !status.success() {
+            tracing::warn!(stderr = %err.trim(), ?args, "systemd-creds failed");
             return Err(no_store(format!(
                 "systemd-creds {}: {}",
                 args.first().copied().unwrap_or_default(),
-                err.lines()
-                    .filter(|l| !l.contains("not located on encrypted media"))
-                    .collect::<Vec<_>>()
-                    .join("; ")
+                creds_reason(&err)
             )));
         }
         if out.len() > MAX_CREDENTIAL {
@@ -978,6 +1006,23 @@ pub fn protection(data_dir: &Path) -> Result<KeyProtection> {
 
 #[cfg(test)]
 pub(super) mod tests {
+    #[test]
+    fn the_tpm_library_trace_is_left_to_the_log() {
+        let stderr = "WARNING:esys:src/tss2-esys/api/Esys_Load.c:324:Esys_Load_Finish() Received TPM Error \n\
+             ERROR:esys:src/tss2-esys/api/Esys_Load.c:112:Esys_Load() Esys Finish ErrorCode (0x000001df) \n\
+             TPM key integrity check failed. Key most likely does not belong to this TPM.\n";
+        assert_eq!(
+            super::creds_reason(stderr),
+            "TPM key integrity check failed. Key most likely does not belong to this TPM."
+        );
+        // Only trace lines: the last one is still better than nothing.
+        assert!(super::creds_reason("ERROR:esys:src/x.c:1:f() boom\n").contains("boom"));
+        assert_eq!(
+            super::creds_reason("Credential file not located on encrypted media\nbad\n"),
+            "bad"
+        );
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
