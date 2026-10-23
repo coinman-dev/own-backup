@@ -300,7 +300,7 @@ check pv-released-by-id "$(verdict $?)" "every volume put back from the kernel's
 check pv-nothing-held "$(verdict $?)" "no obk-* device left, a/span/b on exactly their own tables"
 [[ $(vgs --noheadings -o vg_seqno "$PVG" | tr -d ' ') == "$seqno" ]]
 check pv-no-metadata-written "$(verdict $?)" "VG seqno $seqno unchanged"
-! grep -q 'вне этой копии\|not in this copy' "$EV/pv-run.json"
+python3 -c 'import json,sys; sys.exit(0 if not json.load(open(sys.argv[1])).get("notes") else 1)' "$EV/pv-run.json"
 check pv-no-false-note "$(verdict $?)" "both PVs in the copy: no note about PVs outside it"
 [[ $churn_rc -eq 0 || $churn_rc -eq 143 ]] && findmnt -no OPTIONS "$PV_MNT"-a | grep -qw rw
 check pv-source-stayed-rw "$(verdict $?)" "a was written throughout the copy and stays rw (writer exit $churn_rc)"

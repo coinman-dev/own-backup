@@ -601,7 +601,14 @@ fn backup_disk_inner<P: DiskPlatform>(
         // Every PV in the copy, those copied as plain partitions included (a
         // PV no active volume uses is idle and read as it is).
         let mut in_copy: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for p in &prepared {
+        // Only worth reading labels when some group names PVs elsewhere —
+        // never on Windows, where no partition is held as a PV.
+        let any_others = prepared.iter().any(|p| {
+            p.pv.as_ref()
+                .and_then(|pv| pv.vg.as_ref())
+                .is_some_and(|(_, others)| !others.is_empty())
+        });
+        for p in prepared.iter().filter(|_| any_others) {
             if let Some(pv) = &p.pv {
                 in_copy.insert(pv.uuid.clone());
                 continue;
