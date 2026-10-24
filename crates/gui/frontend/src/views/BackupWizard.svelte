@@ -1053,12 +1053,10 @@
   // state of C: — and asking it for "пароль" is asking for something that does
   // not exist on that volume.
   function needsRecoveryKey(e: EncryptedVolume): boolean {
-    if (e.recoveryKeyOnly !== undefined) return e.recoveryKeyOnly;
-    // A service from before the flag names the protectors in Russian, always.
-    return (
-      !e.methods.includes('пароль') &&
-      e.methods.some((m) => m.startsWith('ключ восстановления'))
-    );
+    // Decided by the service's flag, never by the protectors' names: the
+    // window and the service ship together, and the guess from Russian words
+    // kept for services older than the flag is gone.
+    return e.recoveryKeyOnly ?? false;
   }
   // What to ask this volume for, in the words of its own metadata.
   function promptFor(e: EncryptedVolume): string {
