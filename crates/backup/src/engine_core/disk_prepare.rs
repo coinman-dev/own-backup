@@ -99,6 +99,7 @@ pub(crate) fn prepare_partition_map<P: EnginePlatform>(
         patches: Vec::new(),
         removal_paths: Vec::new(),
         excluded_files: 0,
+        kept_named: 0,
         excluded_bytes: 0,
         categories: None,
         skipped: None,

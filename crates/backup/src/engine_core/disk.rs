@@ -183,6 +183,8 @@ fn backup_disk_inner<P: DiskPlatform>(
     let mut key_store_excluded = false;
     // Excluded NTFS names on logical volumes no removal pass can reach.
     let mut pv_names_kept: Vec<String> = Vec::new();
+    // Excluded files the Linux filesystems still list, over all partitions.
+    let mut kept_named = super::partition_prep::KeptNamed::default();
     // Logical volumes already scanned for an earlier partition (a volume
     // group on two partitions of the disk): scanned once, counted once.
     let mut scanned = super::disk_pv::ScannedVolumes::new();
@@ -294,6 +296,7 @@ fn backup_disk_inner<P: DiskPlatform>(
             }
             scan_skips.append(&mut pvp.skips);
             pv_names_kept.append(&mut pvp.names_kept);
+            kept_named.merge(&pvp.kept_named);
             key_store_excluded |= pvp.key_store_excluded;
             let used = std::mem::replace(&mut pvp.used, Box::new(AllUsedMap::new(0)));
             info!(
@@ -525,6 +528,7 @@ fn backup_disk_inner<P: DiskPlatform>(
                 patches: Vec::new(),
                 removal_paths: Vec::new(),
                 excluded_files: 0,
+                kept_named: 0,
                 excluded_bytes: 0,
                 categories: None,
                 skipped: Some(tr!("engine_win.skip_bitlocker_no_password").into_owned()),
@@ -577,6 +581,7 @@ fn backup_disk_inner<P: DiskPlatform>(
             .map
             .unwrap_or_else(|| Box::new(AllUsedMap::new(volume_len.div_ceil(bs))));
         excluded_files += pm.excluded_files;
+        kept_named.add(&pm.filesystem, pm.kept_named);
         excluded_bytes += pm.excluded_bytes;
         if let Some(c) = &pm.categories {
             categories.get_or_insert_with(Default::default).merge(c);
@@ -1189,6 +1194,7 @@ fn backup_disk_inner<P: DiskPlatform>(
             }
         };
     }
+    pv_names_kept.extend(kept_named.line(excluded_files));
     if !pv_names_kept.is_empty() {
         let mut all: Vec<String> = excluded_entries_kept.take().into_iter().collect();
         all.append(&mut pv_names_kept);

@@ -75,6 +75,8 @@ pub(crate) struct PvPrepared {
     pub(crate) removals: Vec<(u64, u64, Vec<ExcludedPath>)>,
     /// Why some excluded NTFS names stay in the copy.
     pub(crate) names_kept: Vec<String>,
+    /// Excluded files the volumes' Linux filesystems still list by name.
+    pub(crate) kept_named: super::partition_prep::KeptNamed,
     pub(crate) excluded_files: u64,
     pub(crate) excluded_bytes: u64,
     pub(crate) categories: Option<CategorySizes>,
@@ -350,6 +352,7 @@ pub(crate) fn prepare_pv<P: EnginePlatform>(
         len: part_len,
         removals: Vec::new(),
         names_kept: Vec::new(),
+        kept_named: Default::default(),
         excluded_files: 0,
         excluded_bytes: 0,
         categories: None,
@@ -423,6 +426,7 @@ pub(crate) fn prepare_pv<P: EnginePlatform>(
             "whole-disk backup: logical volume prepared"
         );
         out.excluded_files += pm.excluded_files;
+        out.kept_named.add(&pm.filesystem, pm.kept_named);
         out.excluded_bytes += pm.excluded_bytes;
         if let Some(c) = &pm.categories {
             out.categories.get_or_insert_with(Default::default).merge(c);

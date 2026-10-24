@@ -168,6 +168,10 @@ pub struct BtrfsExclusionScan {
     /// Files matched but kept whole because their data is shared (snapshot /
     /// reflink) — the catalog entry survives as-is in Stage 1.
     pub files_kept_shared: u64,
+    /// Of [`Self::files_excluded`], those whose entries stay in the catalog
+    /// with their exclusively owned contents zeroed — the ones Stage 2 did not remove. The
+    /// result screen says how many (`engine.entries_kept_named`).
+    pub files_kept_named: u64,
     pub categories: CategorySizes,
     /// Metadata patches (PHYSICAL offset → bytes): checksum-tree rewrites for
     /// the zeroed ranges (Stage 1) — and, once Stage 2 lands, the full catalog
@@ -188,6 +192,7 @@ impl BtrfsExclusionScan {
             entries_scanned: 0,
             bytes_excluded: 0,
             files_kept_shared: 0,
+            files_kept_named: 0,
             categories: CategorySizes::default(),
             patches: Vec::new(),
             left: Vec::new(),
@@ -1811,9 +1816,17 @@ pub fn scan_btrfs_exclusions(
     }
 
     scan.files_excluded = matched_pairs.len() as u64;
+    // What Stage 2 did not remove stays listed: the files spared to Stage 1
+    // (leaf guards, hard links, a swap file) and the ones kept whole for their
+    // shared data — those are counted apart, as kept shared.
+    scan.files_kept_named = scan
+        .files_excluded
+        .saturating_sub(removable.len() as u64)
+        .saturating_sub(scan.files_kept_shared);
     info!(
         files = scan.files_excluded,
         removed = removable.len(),
+        kept_named = scan.files_kept_named,
         kept_shared = scan.files_kept_shared,
         bytes = scan.bytes_excluded,
         freed_bytes,
@@ -3830,6 +3843,7 @@ mod btrfs_integration {
         }
 
         let (scan, _) = run_scan(&img, &["swapfile"]);
+        assert_eq!(scan.files_kept_named, 1, "the swap file stays listed");
         let patched = dir.path().join("patched.img");
         apply(&img, &scan, &patched);
         let (ok, log) = btrfs_check(&patched, true);
@@ -4143,6 +4157,7 @@ mod btrfs_integration {
             "btrfs restore failed: {}",
             String::from_utf8_lossy(&r.stderr)
         );
+        let mut ghosts = 0u64;
         for i in 0..600u32 {
             let keep = i % 3 != 0;
             let name = format!("f{i:04}.{}", if keep { "keep" } else { "log" });
@@ -4157,8 +4172,11 @@ mod btrfs_integration {
                 // A spared file survives only as a zero-filled ghost.
                 let data = std::fs::read(&p).unwrap();
                 assert!(data.iter().all(|&b| b == 0), "{name} kept non-zero data");
+                ghosts += 1;
             }
         }
+        // The result screen's count is the names the filesystem still lists.
+        assert_eq!(scan.files_kept_named, ghosts);
     }
 
     /// A filesystem big enough for a MULTI-LEVEL checksum tree — the shape

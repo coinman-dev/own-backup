@@ -477,6 +477,11 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
                     excluded_files,
                     excluded_bytes,
                 )?;
+                // Counted, not inferred from the data: an empty file left in
+                // the catalog has no blocks to compare.
+                let mut kept = super::partition_prep::KeptNamed::default();
+                kept.add(scan.fs, scan.kept_named);
+                entries_kept = kept.line(scan.files);
                 if !scan.ranges.is_empty() {
                     // Only what Stage 2 freed leaves the map: a file it spared
                     // is still listed, and its blocks must be stored as the
@@ -488,10 +493,6 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
                         m.apply_excluded_ranges(&scan.droppable, bs);
                     } else if let Some(m) = maps.xfs_map.as_mut() {
                         m.apply_excluded_ranges(&scan.droppable, bs);
-                    }
-                    if scan.ranges.total_bytes() > scan.droppable.total_bytes() {
-                        entries_kept =
-                            Some(tr!("engine.entries_kept_zeroed", fs = scan.fs).into_owned());
                     }
                     zero_ranges = Some(scan.ranges);
                     meta_patches = scan.patches;
@@ -670,6 +671,8 @@ impl crate::fat_map::RawVolume for AlignedSource {
 struct LinuxFsScan {
     fs: &'static str,
     files: u64,
+    /// Of `files`, those still listed by name with their contents zeroed.
+    kept_named: u64,
     bytes: u64,
     categories: crate::exclusions::CategorySizes,
     /// Excluded data, zeroed in the copy.
@@ -686,6 +689,7 @@ impl LinuxFsScan {
         Self {
             fs,
             files: s.files_excluded,
+            kept_named: s.files_kept_named,
             bytes: s.bytes_excluded,
             categories: s.categories,
             ranges: s.ranges,
@@ -699,6 +703,7 @@ impl LinuxFsScan {
         Self {
             fs,
             files: s.files_excluded,
+            kept_named: s.files_kept_named,
             bytes: s.bytes_excluded,
             categories: s.categories,
             ranges: s.ranges,
@@ -712,6 +717,7 @@ impl LinuxFsScan {
         Self {
             fs,
             files: s.files_excluded,
+            kept_named: s.files_kept_named,
             bytes: s.bytes_excluded,
             categories: s.categories,
             ranges: s.ranges,

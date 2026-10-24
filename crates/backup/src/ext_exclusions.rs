@@ -101,6 +101,10 @@ pub struct ExtExclusionScan {
     /// file the filesystem still lists.
     pub droppable: ByteRanges,
     pub files_excluded: u64,
+    /// Of [`Self::files_excluded`], those whose entries stay in the catalog
+    /// with their contents zeroed — the ones Stage 2 did not remove. The
+    /// result screen says how many (`engine.entries_kept_named`).
+    pub files_kept_named: u64,
     pub entries_scanned: u64,
     pub bytes_excluded: u64,
     pub categories: CategorySizes,
@@ -119,6 +123,7 @@ impl ExtExclusionScan {
             ranges: ByteRanges::new(),
             droppable: ByteRanges::new(),
             files_excluded: 0,
+            files_kept_named: 0,
             entries_scanned: 0,
             bytes_excluded: 0,
             categories: CategorySizes::default(),
@@ -673,9 +678,13 @@ pub fn scan_ext_exclusions(
         &dir_parents,
         &xattr_dec,
     );
+    // Without Stage 2 every excluded file keeps its entry; with it, all but
+    // the removed ones (a swap file keeps its entry and its header).
+    scan.files_kept_named = scan.files_excluded;
     match stage2 {
         Ok(patches) => {
             scan.patches = patches;
+            scan.files_kept_named -= freed_inodes.len() as u64;
             // Only what Stage 2 freed in the bitmaps: an emptied file still
             // owns its blocks and the filesystem still reads them, so those
             // stay in the image (as zeros).
@@ -698,6 +707,7 @@ pub fn scan_ext_exclusions(
         files = scan.files_excluded,
         bytes = scan.bytes_excluded,
         freed_inodes = freed_inodes.len(),
+        kept_named = scan.files_kept_named,
         freed_blocks = freed_blocks.len(),
         patches = scan.patches.len(),
         "ext exclusions: scan complete"
@@ -1533,6 +1543,10 @@ mod ext_integration {
             assert!(
                 !scan.patches.is_empty(),
                 "bs={bs}: Stage 2 produced no patches"
+            );
+            assert_eq!(
+                scan.files_kept_named, 0,
+                "bs={bs}: every excluded file removed"
             );
 
             // Apply the metadata patches to a copy of the image.

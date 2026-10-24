@@ -1606,12 +1606,21 @@ mod tests {
         let sum = backup_volume(&req, &snapshot_of(source, &src, "lvm"), no_progress).unwrap();
         assert!(sum.excluded_files >= 1, "{:?}", sum.file_scan_skipped);
         assert!(sum.excluded_bytes > 0);
+        let said = sum.excluded_entries_kept.clone().unwrap_or_default();
+        let kept: u64 = said
+            .split(' ')
+            .next()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("no count in {said:?}"));
+        assert!((1..=sum.excluded_files).contains(&kept), "{said}");
         assert_eq!(
-            sum.excluded_entries_kept.as_deref(),
-            Some(&*own_backup_common::tr!(
-                "engine.entries_kept_zeroed",
+            said,
+            own_backup_common::tr!(
+                "engine.entries_kept_named",
+                kept = kept,
+                total = sum.excluded_files,
                 fs = "xfs"
-            ))
+            )
         );
         // Only vouched to hold still, not captured frozen: the dirty log may
         // be a crash's, and the scan refuses — said, not hidden.

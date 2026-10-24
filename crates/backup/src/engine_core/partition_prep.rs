@@ -28,6 +28,9 @@ pub(crate) struct PreparedMap {
     /// (patched directly) and Linux filesystems.
     pub(crate) removal_paths: Vec<crate::exclusions::ExcludedPath>,
     pub excluded_files: u64,
+    /// Of `excluded_files`, those a Linux filesystem still lists by name, their
+    /// contents zeroed (`ExtExclusionScan::files_kept_named` and its kin).
+    pub(crate) kept_named: u64,
     pub excluded_bytes: u64,
     /// Per-category byte breakdown of the KEPT files on this partition (powers
     /// the dashboard's data breakdown); `None` when no exclusion walk ran.
@@ -41,6 +44,48 @@ pub(crate) struct PreparedMap {
     /// What the result screen says about this partition's exclusions besides
     /// the figures — files its `$MFT` scan could not reach, for one.
     pub(crate) notes: Vec<String>,
+}
+
+/// Excluded files a Linux filesystem still lists by name, added up over the
+/// partitions and logical volumes of one copy.
+///
+/// Until this was counted, a whole-disk copy of a btrfs root that left 18 of
+/// 24 475 excluded files in place with their contents zeroed (2026-10-18)
+/// said so only in the service log, and the run showed a plain success.
+#[derive(Default)]
+pub(crate) struct KeptNamed {
+    files: u64,
+    filesystems: std::collections::BTreeSet<String>,
+}
+
+impl KeptNamed {
+    pub(crate) fn add(&mut self, filesystem: &str, files: u64) {
+        if files > 0 {
+            self.files += files;
+            self.filesystems.insert(filesystem.to_string());
+        }
+    }
+
+    pub(crate) fn merge(&mut self, other: &KeptNamed) {
+        self.files += other.files;
+        self.filesystems.extend(other.filesystems.iter().cloned());
+    }
+
+    /// The result screen's sentence, `None` when every excluded file left the
+    /// catalog. `total` is the copy's excluded-file count, the figure next to
+    /// which the sentence is read.
+    pub(crate) fn line(&self, total: u64) -> Option<String> {
+        (self.files > 0).then(|| {
+            let fs: Vec<&str> = self.filesystems.iter().map(String::as_str).collect();
+            tr!(
+                "engine.entries_kept_named",
+                kept = self.files,
+                total = total.max(self.files),
+                fs = fs.join(", ")
+            )
+            .into_owned()
+        })
+    }
 }
 
 /// Карта и исключения для раздела, который Windows не монтирует: NTFS внутри
@@ -63,6 +108,7 @@ pub(crate) fn prepare_encrypted_partition_map(
         patches: Vec::new(),
         removal_paths: Vec::new(),
         excluded_files: 0,
+        kept_named: 0,
         excluded_bytes: 0,
         categories: None,
         skipped: None,
@@ -162,6 +208,7 @@ pub(crate) fn linux_fs_exclusions(
         patches: Vec::new(),
         removal_paths: Vec::new(),
         excluded_files: 0,
+        kept_named: 0,
         excluded_bytes: 0,
         categories: None,
         skipped: None,
@@ -183,6 +230,7 @@ pub(crate) fn linux_fs_exclusions(
                 ) {
                     Ok(scan) => {
                         out.excluded_files = scan.files_excluded;
+                        out.kept_named = scan.files_kept_named;
                         out.excluded_bytes = scan.bytes_excluded;
                         out.categories = Some(scan.categories);
                         out.patches = scan.patches;
@@ -246,6 +294,7 @@ pub(crate) fn linux_fs_exclusions(
                 ) {
                     Ok(scan) => {
                         out.excluded_files = scan.files_excluded;
+                        out.kept_named = scan.files_kept_named;
                         out.excluded_bytes = scan.bytes_excluded;
                         out.categories = Some(scan.categories);
                         out.patches = scan.patches;
@@ -307,6 +356,7 @@ pub(crate) fn linux_fs_exclusions(
                 match scanned {
                     Ok(scan) => {
                         out.excluded_files = scan.files_excluded;
+                        out.kept_named = scan.files_kept_named;
                         out.excluded_bytes = scan.bytes_excluded;
                         out.categories = Some(scan.categories);
                         out.patches = scan.patches;
@@ -569,5 +619,35 @@ mod tests {
         assert_ne!(why, no_patterns());
         assert_eq!(out.excluded_files, 0);
         assert!(out.removal_paths.is_empty() && out.zero_ranges.is_empty());
+    }
+
+    #[test]
+    fn kept_named_says_nothing_until_a_file_is_kept() {
+        let mut k = KeptNamed::default();
+        k.add("ext4", 0);
+        assert_eq!(k.line(10), None);
+    }
+
+    #[test]
+    fn kept_named_adds_up_partitions_and_volumes() {
+        let mut disk = KeptNamed::default();
+        disk.add("btrfs", 17);
+        disk.add("ext4", 0);
+        let mut pv = KeptNamed::default();
+        pv.add("xfs", 1);
+        pv.add("btrfs", 2);
+        disk.merge(&pv);
+        let said = |kept: u64, total: u64| {
+            tr!(
+                "engine.entries_kept_named",
+                kept = kept,
+                total = total,
+                fs = "btrfs, xfs"
+            )
+            .into_owned()
+        };
+        assert_eq!(disk.line(24_475), Some(said(20, 24_475)));
+        // Never fewer in total than kept, whatever the caller added up.
+        assert_eq!(disk.line(3), Some(said(20, 20)));
     }
 }

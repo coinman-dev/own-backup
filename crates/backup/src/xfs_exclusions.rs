@@ -115,6 +115,10 @@ pub struct XfsExclusionScan {
     /// Files matched but kept because their data is shared — a reflink/CoW
     /// extent, or a hard link (the other name is not excluded).
     pub files_kept_shared: u64,
+    /// Of [`Self::files_excluded`], those whose entries stay in the catalog
+    /// with their contents zeroed — the ones Stage 2 did not remove. The
+    /// result screen says how many (`engine.entries_kept_named`).
+    pub files_kept_named: u64,
     pub categories: CategorySizes,
     pub patches: Vec<(u64, Vec<u8>)>,
     /// Кого Stage 2 пощадил и почему: файл остался в каталоге нулевым
@@ -137,6 +141,7 @@ impl XfsExclusionScan {
             entries_scanned: 0,
             bytes_excluded: 0,
             files_kept_shared: 0,
+            files_kept_named: 0,
             categories: CategorySizes::default(),
             patches: Vec::new(),
             stage2_spared: Vec::new(),
@@ -856,6 +861,8 @@ fn scan_xfs(
         });
     }
     scan.ranges.finalize();
+    // Every zeroed file stays listed unless Stage 2 below removes it.
+    scan.files_kept_named = scan.removable.len() as u64;
 
     // Stage 2: настоящее удаление. Патчи появляются только если весь набор
     // прошёл все три шага; пощажённые файлы остаются нулевыми призраками, и их
@@ -875,6 +882,11 @@ fn scan_xfs(
                     }
                 }
                 scan.droppable.finalize();
+                scan.files_kept_named = scan
+                    .removable
+                    .iter()
+                    .filter(|f| !removed.contains(&f.ino))
+                    .count() as u64;
                 // По одной строке на файл — это тысячи строк; журналу нужна
                 // сводка по причинам, а подробности лежат в самом результате.
                 let mut tally: std::collections::BTreeMap<&str, u64> = Default::default();
@@ -904,6 +916,7 @@ fn scan_xfs(
 
     info!(
         files = scan.files_excluded,
+        kept_named = scan.files_kept_named,
         kept_shared = scan.files_kept_shared,
         bytes = scan.bytes_excluded,
         ranges = scan.ranges.iter().count(),
@@ -974,6 +987,8 @@ mod xfs_integration {
             "shared file not detected as shared"
         );
         assert!(!scan.ranges.is_empty(), "private file not zeroed");
+        assert!(scan.files_kept_named >= 1, "the zeroed file stays listed");
+        assert_eq!(scan.files_kept_named, scan.removable.len() as u64);
 
         // No zeroed byte may be the kept file's 0xCD; must cover the private 0xAB.
         let mut buf = vec![0u8; 65536];
