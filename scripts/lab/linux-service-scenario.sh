@@ -10,11 +10,13 @@
 # SRC_DISK and DEST_DISK (default: the stand's virtio-ob-data-2 and
 # virtio-ob-data-3) are wiped: the source gets an ext4 with incompressible
 # data, the destination an ext4 for the images. The copy is held to a speed
-# limit so it lasts long enough to be cut. Last, the source disk becomes two
+# limit so it lasts long enough to be cut. Then the source disk becomes two
 # LVM PV partitions of one volume group (a volume on each, one on both, two of
 # them mounted and one written during the copy) copied whole by a service job:
 # one suspend for all, the second PV held by the first one's layers, every
-# layer released by id, no metadata written. Each check prints
+# layer released, no metadata written. Last, a whole disk with an ESP and a
+# btrfs whose excluded files are partly kept by name: the run says how many,
+# and the image's btrfs lists exactly that many. Each check prints
 # `CHECK <id> PASS|FAIL <text>`; the exit code is the number of FAILs.
 # Evidence: /var/tmp/obk-service-evidence.
 set -uo pipefail
@@ -202,10 +204,10 @@ cli jobs delete "$job" >/dev/null 2>&1
 # --- a disk whose volume group lies on two of its partitions, through the service
 # One VG on PV1 and PV2 of the source disk: `a` (PV1, mounted, written during
 # the copy), `span` (on both, mounted), `b` (PV2 only, active, unmounted). The
-# service takes each partition's snapshot with a provider of its own and
-# releases them with yet another one (by id, from the kernel's state): all
-# three volumes must be held in one suspend, the second PV taken as held by
-# the first one's layers, and every layer gone afterwards.
+# service keeps one snapshot provider for the whole disk (2f2a46b; before,
+# each partition had its own and the layers were put back by id from the
+# kernel's state): all three volumes must be held in one suspend, the second
+# PV taken as held by the first one's layers, and every layer gone afterwards.
 PVG=obksvcpv
 PV_MNT=/mnt/obk-svc-pv
 pv_cleanup() {
@@ -294,8 +296,9 @@ check pv-run-success "$(verdict $?)" "$(python3 -c 'import json,sys; r=json.load
 check pv-one-suspend "$(verdict $?)" "a, span and b held by device-mapper snapshots taken together ($(grep -c 'device-mapper snapshot created' "$EV/pv-journal.txt") created)"
 ! grep -q 'снимок прерванного копирования\|snapshot of an interrupted backup' "$EV/pv-journal.txt" "$EV/pv-run.json"
 check pv-second-pv-held "$(verdict $?)" "the second PV is taken as held by the first one's layers, not refused"
-[[ $(grep -c 'volume put back on its own table' "$EV/pv-journal.txt") -ge 3 ]]
-check pv-released-by-id "$(verdict $?)" "every volume put back from the kernel's state by the releasing provider ($(grep -c 'volume put back on its own table' "$EV/pv-journal.txt"))"
+released=$(($(grep -c 'device-mapper snapshot removed' "$EV/pv-journal.txt") + $(grep -c 'volume put back on its own table' "$EV/pv-journal.txt")))
+[[ $released -ge 3 ]]
+check pv-released "$(verdict $?)" "every snapshot taken is released again ($released of 3)"
 ! our_dm && [[ $(pv_tables) == "$tables" ]]
 check pv-nothing-held "$(verdict $?)" "no obk-* device left, a/span/b on exactly their own tables"
 [[ $(vgs --noheadings -o vg_seqno "$PVG" | tr -d ' ') == "$seqno" ]]
@@ -307,6 +310,122 @@ check pv-source-stayed-rw "$(verdict $?)" "a was written throughout the copy and
 (cd "$PV_MNT"-a && sha256sum -c --quiet "$EV/pv-a.sha256") && (cd "$PV_MNT"-span && sha256sum -c --quiet "$EV/pv-span.sha256")
 check pv-sources-intact "$(verdict $?)" "the files on a and span still match"
 cli jobs delete "$pvjob" >/dev/null 2>&1
+
+# --- excluded files a btrfs keeps by name, a whole disk through the service ------
+# An ESP and an idle btrfs with a swap file and 600 small files, every third
+# one excluded: the swap file stays listed (its header is kept), and Stage 2
+# may spare more for the leaves' sake. The run must say how many, and that
+# number must be the excluded names the image's btrfs still lists (CHECKS 21).
+KN_MNT=/mnt/obk-svc-kn
+KN_OUT=/var/tmp/obk-svc-kn-restored
+kn_cleanup() {
+    mountpoint -q "$KN_MNT" && umount "$KN_MNT"
+    qemu-nbd -d /dev/nbd0 >/dev/null 2>&1
+    rm -rf "$KN_OUT"
+}
+trap 'kn_cleanup; pv_cleanup; cleanup' EXIT
+pv_cleanup
+parted -s "$D_SRC" mklabel gpt mkpart esp fat32 1MiB 65MiB set 1 esp on \
+    mkpart root btrfs 65MiB 1100MiB && udevadm settle -t 10
+KP1=$(lsblk -lnpo NAME "$D_SRC" | sed -n 2p)
+KP2=$(lsblk -lnpo NAME "$D_SRC" | sed -n 3p)
+(
+    set -e
+    mkfs.vfat -F 32 "$KP1"
+    mkfs.btrfs -q -f "$KP2"
+    mkdir -p "$KN_MNT"
+    mount "$KP2" "$KN_MNT"
+    mkdir -p "$KN_MNT/data/logs" "$KN_MNT/data/cache"
+    for i in $(seq 0 599); do
+        ext=keep
+        ((i % 3 == 0)) && ext=log
+        head -c 8192 /dev/urandom >"$KN_MNT/data/logs/f$(printf %04d "$i").$ext"
+    done
+    head -c 4M /dev/urandom >"$KN_MNT/data/cache/junk.bin"
+    btrfs filesystem mkswapfile --size 64m "$KN_MNT/swapfile"
+    sync
+    umount "$KN_MNT"
+) >"$EV/kn-setup.out" 2>&1
+check kn-setup "$(verdict $?)" "ESP $KP1, btrfs $KP2: 600 files (200 *.log), data/cache, a swap file"
+
+run kn-job-new cli jobs new --name svc-kn-disk --source "$KP2" --dest "$IMG" \
+    --method full --schedule none --validate-after
+knjob=$(job_id_named svc-kn-disk)
+cli jobs show "$knjob" >"$EV/kn-job.json" 2>/dev/null
+python3 - "$EV/kn-job.json" "$D_SRC" "$KP1" "$KP2" <<'PY'
+import json, sys
+p, disk, p1, p2 = sys.argv[1:5]
+j = json.load(open(p))
+j["sources"] = []
+j["disk_source"] = {
+    "disk_number": 0,
+    "device": disk,
+    "disk_model": "",
+    "parts": [
+        {"part_index": 1, "device": p1, "filesystem": "vfat"},
+        {"part_index": 2, "device": p2, "filesystem": "btrfs"},
+    ],
+    "bootable": False,
+}
+j["exclusions"]["enabled"] = True
+j["exclusions"]["patterns_linux"] = ["*.log", "data/cache/**", "swapfile"]
+json.dump(j, open(p, "w"))
+PY
+run kn-job-save cli jobs save --file "$EV/kn-job.json"
+[[ -n $knjob ]]
+check kn-job-created "$(verdict $?)" "whole-disk job $knjob over $D_SRC with Linux exclusions"
+
+since=$(date '+%Y-%m-%d %H:%M:%S')
+before=$(last_run "$knjob" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))')
+run kn-run cli jobs run "$knjob"
+kn_finished() { last_run "$knjob" | python3 -c 'import json,sys; r=json.load(sys.stdin); sys.exit(0 if r.get("id","") not in ("",sys.argv[1]) and r.get("status")!="running" else 1)' "$before"; }
+wait_for 600 kn_finished
+last_run "$knjob" >"$EV/kn-run.json"
+journalctl -u own-backup --since "$since" -o cat >"$EV/kn-journal.txt" 2>&1
+python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("status")=="success" else 1)' "$EV/kn-run.json"
+check kn-run-success "$(verdict $?)" "$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r.get("status"), r.get("image_path"), r.get("excluded_files"), (r.get("error") or "")[:160])' "$EV/kn-run.json")"
+# "N из M исключённых файлов (btrfs) …" / "N of M excluded files (btrfs) …"
+read -r said_kept said_total said_fs < <(python3 - "$EV/kn-run.json" <<'PY'
+import json, re, sys
+r = json.load(open(sys.argv[1]))
+m = re.match(r"(\d+) (?:из|of) (\d+) \S+ \S+ \(([^)]*)\)", r.get("excluded_entries_kept") or "")
+print(*(m.groups() if m else ("-", "-", "-")))
+PY
+)
+run_excluded=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("excluded_files"))' "$EV/kn-run.json")
+[[ $said_kept =~ ^[0-9]+$ && $said_kept -ge 1 && $said_total == "$run_excluded" && $said_fs == btrfs ]]
+check kn-said "$(verdict $?)" "the run says $said_kept of $said_total ($said_fs) kept by name; excluded $run_excluded: $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("excluded_entries_kept"))' "$EV/kn-run.json")"
+
+# What the image's btrfs really lists: read through qemu-nbd, unmounted (the
+# source's fsid is already known to the kernel), with btrfs's own tools.
+image=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("image_path",""))' "$EV/kn-run.json")
+modprobe nbd max_part=8 2>/dev/null
+rm -rf "$KN_OUT" && mkdir -p "$KN_OUT"
+(
+    set -e
+    qemu-nbd -r -c /dev/nbd0 "$image"
+    udevadm settle -t 10
+    btrfs check --readonly /dev/nbd0p2
+    btrfs restore /dev/nbd0p2 "$KN_OUT"
+) >"$EV/kn-image.out" 2>&1
+check kn-image-clean "$(verdict $?)" "btrfs check clean on the image's partition 2, files read back"
+listed=$(find "$KN_OUT" -type f \( -name '*.log' -o -path '*/data/cache/*' -o -name swapfile \) | wc -l)
+# The swap file keeps its 4 KiB header (as on ext): only the rest is zeroed.
+nonzero=$(find "$KN_OUT" -type f \( -name '*.log' -o -path '*/data/cache/*' \) \
+    -exec sh -c 'tr -d "\000" <"$1" | head -c1 | grep -q .' _ {} \; -print | wc -l)
+swap=$(find "$KN_OUT" -type f -name swapfile | head -1)
+if [[ -n $swap ]] && tail -c +4097 "$swap" | tr -d '\000' | head -c1 | grep -q .; then
+    nonzero=$((nonzero + 1))
+fi
+[[ $listed == "$said_kept" ]]
+check kn-count-true "$(verdict $?)" "excluded names still in the image: $listed, the run said $said_kept"
+[[ $nonzero -eq 0 ]]
+check kn-kept-zeroed "$(verdict $?)" "every one of them holds only zeros ($nonzero with data)"
+kept_ok=$(find "$KN_OUT" -type f -name '*.keep' | wc -l)
+[[ $kept_ok -eq 400 ]]
+check kn-others-kept "$(verdict $?)" "all 400 *.keep files are in the image ($kept_ok)"
+kn_cleanup
+cli jobs delete "$knjob" >/dev/null 2>&1
 
 echo "FAILS=$FAILS (evidence: $EV)"
 exit "$FAILS"
