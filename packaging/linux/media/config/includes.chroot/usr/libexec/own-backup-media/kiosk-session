@@ -1,7 +1,7 @@
 #!/bin/sh
-# What cage runs on the medium (own-backup-kiosk.service): the window, with
-# the language the boot menu chose. When it exits, cage exits and systemd
-# starts the session again.
+# What cage runs on the medium when labwc cannot (kiosk-desktop's fallback):
+# the window, with the language the boot menu chose. When it exits, cage
+# exits and systemd starts the session again.
 set -u
 
 # live-config writes the locale it was given on the kernel command line.

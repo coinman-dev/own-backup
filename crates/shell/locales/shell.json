@@ -8,6 +8,10 @@
     "ru": "Резервное копирование",
     "en": "Backup"
   },
+  "menu.terminal": {
+    "ru": "Терминал",
+    "en": "Terminal"
+  },
   "menu.reboot": {
     "ru": "Перезагрузка",
     "en": "Restart"
@@ -31,5 +35,13 @@
   "win.confirm_shutdown": {
     "ru": "Выключить компьютер?",
     "en": "Shut down the computer?"
+  },
+  "linux.layout_hint": {
+    "ru": "Раскладка клавиатуры: Alt+Shift",
+    "en": "Keyboard layout: Alt+Shift"
+  },
+  "linux.cancel": {
+    "ru": "Отмена",
+    "en": "Cancel"
   }
 }

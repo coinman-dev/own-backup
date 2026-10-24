@@ -74,6 +74,85 @@ while [ "$i" -lt 90 ]; do
 done
 report "kiosk=$(systemctl is-active own-backup-kiosk.service) window=$state"
 
+# The desktop: labwc with our strip, or cage alone (kiosk-desktop's fallback).
+# By its path: the kernel cuts a process name to 15 letters, and
+# "own-backup-shell" has 16.
+strip=/usr/libexec/own-backup/own-backup-shell
+desktop=$(cut -d' ' -f1 /run/own-backup-kiosk.desktop 2>/dev/null)
+shell=absent
+i=0
+while [ "$i" -lt 30 ]; do
+    if pgrep -xf "$strip" >/dev/null; then
+        shell=running
+        break
+    fi
+    i=$((i + 1))
+    sleep 1
+done
+report "desktop=${desktop:-unknown} shell=$shell"
+
+if [ "$shell" = running ]; then
+    # The strip's window buttons, as it wrote them: the window is listed.
+    list=/run/user/0/own-backup-shell.windows
+    i=0
+    while [ "$i" -lt 30 ] && ! [ -s "$list" ]; do
+        i=$((i + 1))
+        sleep 1
+    done
+    n=$(grep -c . "$list" 2>/dev/null)
+    report "shell_windows=${n:-0} front=$(awk -F'\t' '$1 == "front" {print $3; exit}' "$list" 2>/dev/null | tr ' ' '_')"
+
+    # A terminal opened on the desktop gets a button of its own, and goes
+    # again when it is closed.
+    sock=$(find /run/user/0 -maxdepth 1 -name 'wayland-*' -type s 2>/dev/null | grep -v lock | head -n1)
+    if [ -n "$sock" ] && command -v foot >/dev/null; then
+        XDG_RUNTIME_DIR=/run/user/0 WAYLAND_DISPLAY=$(basename "$sock") foot -T obk-selftest-terminal sleep 60 &
+        term=$!
+        listed=no
+        i=0
+        while [ "$i" -lt 20 ]; do
+            if grep -q 'obk-selftest-terminal' "$list" 2>/dev/null; then
+                listed=yes
+                break
+            fi
+            i=$((i + 1))
+            sleep 1
+        done
+        kill "$term" 2>/dev/null
+        gone=no
+        i=0
+        while [ "$i" -lt 20 ]; do
+            if ! grep -q 'obk-selftest-terminal' "$list" 2>/dev/null; then
+                gone=yes
+                break
+            fi
+            i=$((i + 1))
+            sleep 1
+        done
+        report "terminal_listed=$listed terminal_gone=$gone"
+    else
+        report "terminal_listed=unknown terminal_gone=unknown"
+    fi
+
+    # A strip that dies comes back (shell-loop).
+    old=$(pgrep -xf "$strip")
+    pkill -xf "$strip"
+    back=no
+    i=0
+    while [ "$i" -lt 20 ]; do
+        new=$(pgrep -xf "$strip")
+        if [ -n "$new" ] && [ "$new" != "$old" ]; then
+            back=yes
+            break
+        fi
+        i=$((i + 1))
+        sleep 1
+    done
+    report "shell_restart=$back"
+    # Back in place before the host's screenshot.
+    sleep 3
+fi
+
 if [ -r /run/own-backup-media-log.dir ]; then
     report "logs=$(cat /run/own-backup-media-log.dir)"
 else

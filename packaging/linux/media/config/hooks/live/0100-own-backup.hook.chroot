@@ -16,6 +16,8 @@ systemctl mask systemd-networkd-wait-online.service
 sed -i -e 's/^# *\(ru_RU.UTF-8 UTF-8\)/\1/' -e 's/^# *\(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen
 locale-gen
 
-chmod 0755 /usr/libexec/own-backup-media/kiosk-session \
+chmod 0755 /usr/libexec/own-backup-media/kiosk-desktop \
+    /usr/libexec/own-backup-media/kiosk-session \
+    /usr/libexec/own-backup-media/shell-loop \
     /usr/libexec/own-backup-media/media-log \
     /usr/libexec/own-backup-media/selftest

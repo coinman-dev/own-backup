@@ -38,7 +38,7 @@ TARGETS = {
     'windows': ('x86_64-pc-windows-msvc',
                 ('own-backup-gui', 'own-backup-service', 'own-backup-cli', 'own-backup-shell')),
     'linux': ('x86_64-unknown-linux-gnu',
-              ('own-backup-gui', 'own-backup-service', 'own-backup-cli')),
+              ('own-backup-gui', 'own-backup-service', 'own-backup-cli', 'own-backup-shell')),
 }
 FRONTEND = REPO / 'crates/gui/frontend'
 # Inlined into the page by the bundler though npm calls them dev dependencies.

@@ -33,6 +33,19 @@ changes recorded in each `OWN-BACKUP-PATCH.json` and validated by the same
 script. These local compatibility copies must be reviewed when the GUI
 stack can move to newer upstream GTK bindings.
 
+## Linux: system libraries and the boot medium
+
+The `.deb` links against libraries of the system it is installed on — GTK 3,
+WebKitGTK, gtk-layer-shell (the boot medium's strip), libayatana-appindicator
+and others named in its `Depends` — which the package manager installs under
+their own licenses; the package does not carry them.
+
+The Linux boot medium is a Debian 13 live system built from unmodified Debian
+packages (the kernel, systemd, labwc, cage, foot, Mesa, firmware and the rest
+of its package list), each under its own license, with its copyright file in
+`/usr/share/doc/<package>/copyright` on the medium and its source in the
+Debian archive.
+
 ## Windows: mounting a backup image needs no third-party component
 
 An image is shown to Windows as a disk by serving it from this program as an

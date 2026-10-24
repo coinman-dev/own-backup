@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  labwc on the boot medium (kiosk-desktop): ordinary windows, as on WinPE.
+  The window opens maximised (its app id is "own-backup", crates/gui main.rs);
+  Alt+Tab and the rest of labwc's default key and mouse bindings stay. The
+  empty desktop is our backdrop (own-backup-shell), so clicks on it never reach
+  labwc's root menu; menu.xml keeps that menu harmless anyway.
+-->
+<labwc_config>
+  <core>
+    <decoration>server</decoration>
+    <gap>0</gap>
+  </core>
+  <theme>
+    <cornerRadius>0</cornerRadius>
+    <font>
+      <name>Sans</name>
+      <size>10</size>
+    </font>
+  </theme>
+  <windowSwitcher show="yes" preview="no" outlines="no"/>
+  <keyboard>
+    <default/>
+  </keyboard>
+  <mouse>
+    <default/>
+  </mouse>
+  <windowRules>
+    <windowRule identifier="own-backup">
+      <action name="Maximize"/>
+    </windowRule>
+  </windowRules>
+</labwc_config>

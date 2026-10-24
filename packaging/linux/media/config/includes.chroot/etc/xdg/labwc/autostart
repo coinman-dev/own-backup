@@ -1,0 +1,6 @@
+# labwc runs this once the screen is up (kiosk-desktop starts labwc on tty1).
+# The strip first, so the window opens above it and is maximised to the room
+# the strip leaves; the window once — closing it ends nothing, the Start menu
+# opens it again (it keeps to one instance itself).
+/usr/libexec/own-backup-media/shell-loop &
+/usr/bin/own-backup-gui &

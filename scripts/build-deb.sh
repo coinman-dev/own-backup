@@ -13,7 +13,7 @@
 # Build dependencies (once):
 #   sudo apt install build-essential pkg-config protobuf-compiler nodejs npm \
 #       libwebkit2gtk-4.1-dev libsoup-3.0-dev libayatana-appindicator3-dev \
-#       librsvg2-dev dpkg-dev desktop-file-utils lintian
+#       librsvg2-dev libgtk-layer-shell-dev dpkg-dev desktop-file-utils lintian
 #
 # OUTPUT names another file for the result. Nothing here talks to GitHub
 # Actions: Linux packages are built locally (AGENTS.md).
@@ -67,10 +67,11 @@ if [[ "$skip_build" -eq 0 ]]; then
         [[ -d node_modules ]] || npm ci
         npm run build
     )
-    cargo build --locked --release -p own-backup-gui -p own-backup-service -p own-backup-cli
+    cargo build --locked --release -p own-backup-gui -p own-backup-service -p own-backup-cli \
+        -p own-backup-shell
 fi
 
-for name in own-backup-gui own-backup-service own-backup-cli; do
+for name in own-backup-gui own-backup-service own-backup-cli own-backup-shell; do
     if [[ ! -x "$bin_dir/$name" ]]; then
         echo "executable not found: $bin_dir/$name" >&2
         exit 1
@@ -87,10 +88,16 @@ mkdir -p "$stage/DEBIAN"
 install -D -m755 "$bin_dir/own-backup-gui" "$stage/usr/bin/own-backup-gui"
 install -D -m755 "$bin_dir/own-backup-cli" "$stage/usr/bin/own-backup-cli"
 install -D -m755 "$bin_dir/own-backup-service" "$stage/usr/libexec/own-backup/own-backup-service"
+# The boot medium's strip (labwc's autostart there runs it); an installed
+# system never starts it. Its one library of its own, libgtk-layer-shell0, is
+# small and in both Ubuntu 24.04 and Debian 13, so it is an honest Depends
+# rather than a second package.
+install -D -m755 "$bin_dir/own-backup-shell" "$stage/usr/libexec/own-backup/own-backup-shell"
 # Debian ships stripped binaries; the symbols would triple the package.
 strip --strip-unneeded --remove-section=.comment --remove-section=.note \
     "$stage/usr/bin/own-backup-gui" "$stage/usr/bin/own-backup-cli" \
-    "$stage/usr/libexec/own-backup/own-backup-service"
+    "$stage/usr/libexec/own-backup/own-backup-service" \
+    "$stage/usr/libexec/own-backup/own-backup-shell"
 
 # --- the boot medium's builder ---------------------------------------------------
 # The window builds the Linux boot medium through the service (Tools → boot
@@ -175,7 +182,8 @@ printf 'Source: own-backup\n\nPackage: own-backup\nArchitecture: %s\n' "$arch" >
 shlibs="$(
     cd "$shlib_dir"
     dpkg-shlibdeps -O -e"$stage/usr/bin/own-backup-gui" -e"$stage/usr/bin/own-backup-cli" \
-        -e"$stage/usr/libexec/own-backup/own-backup-service" 2>/dev/null |
+        -e"$stage/usr/libexec/own-backup/own-backup-service" \
+        -e"$stage/usr/libexec/own-backup/own-backup-shell" 2>/dev/null |
         sed -n 's/^shlibs:Depends=//p'
 )"
 if [[ -z "$shlibs" ]]; then

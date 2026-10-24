@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the Linux boot medium's ISO: a Debian 13 "trixie" live system with
-# the engine and the window in a cage kiosk (this directory's auto/ and
+# the engine and the window on a labwc desktop (this directory's auto/ and
 # config/, PLAN §6 stage 6, decision 11). UEFI with Secure Boot through
 # Debian's signed shim/GRUB/kernel, BIOS through ISOLINUX, a USB stick through
 # the isohybrid MBR.

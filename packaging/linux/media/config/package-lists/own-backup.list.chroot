@@ -2,11 +2,19 @@
 # package (config/packages.chroot, put there by scripts/build-linux-media.sh;
 # its Depends bring WebKitGTK, GTK and the rest of the window's libraries).
 
-# The window: a Wayland kiosk compositor, no desktop. cage runs one program
-# full screen and nothing else; DRM drivers and Mesa for the screen, a font
-# with Cyrillic, polkit's daemon for the engine (root needs no question, but
-# the engine asks polkit about callers and must reach it).
+# The desktop: labwc (ordinary windows; layer-shell for our strip and the
+# foreign-toplevel list for its window buttons), cage as the fallback that
+# shows the window alone when labwc cannot start (kiosk-desktop), foot for the
+# strip's Terminal, gtk-layer-shell for the strip itself (also in our
+# package's Depends). DRM drivers and Mesa for the screen, fonts with Cyrillic
+# (DejaVu has the monospace the terminal needs), polkit's daemon for the
+# engine (root needs no question, but the engine asks polkit about callers and
+# must reach it).
+labwc
 cage
+foot
+libgtk-layer-shell0
+fonts-dejavu-core
 libgl1-mesa-dri
 libegl-mesa0
 fonts-noto-core

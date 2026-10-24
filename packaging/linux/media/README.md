@@ -1,9 +1,20 @@
 # Linux boot medium
 
 A Debian 13 "trixie" live system that boots straight into the Own Backup
-window: the engine (`own-backup.service` from our `.deb`) and the window in a
-`cage` kiosk on tty1, no desktop. Plan §6, stage 6, decision 11.
+window: the engine (`own-backup.service` from our `.deb`) and the window on a
+small desktop on tty1, no login. Plan §6, stage 6, decision 11.
 
+- **Desktop:** `kiosk-desktop` runs labwc; its autostart
+  (`/etc/xdg/labwc/autostart`) starts our strip `own-backup-shell` in a loop
+  (`shell-loop`) and the window, which labwc maximises above the strip. The
+  strip is the WinPE one on GTK/layer-shell: Start menu (Backup, Terminal —
+  `foot`, Restart, Shut down, both asked first), a button per open window
+  (wlr foreign-toplevel: click brings it forward or folds it away), the clock,
+  the window's language. The keyboard is `us,ru`, Alt+Shift switches (from
+  `/etc/default/keyboard`, written by live-config). When labwc is missing or
+  dies within 10 s, or `own-backup.kiosk=cage` is on the kernel command line,
+  the session is cage with the window full screen, as before the strip;
+  `/run/own-backup-kiosk.desktop` says which it is.
 - **Build in the window:** Tools → boot medium → Linux (or
   `own-backup-cli media build-linux --out DIR [--stick /dev/sdX]`). The
   service packs the INSTALLED package (`dpkg -L own-backup`, checked against

@@ -1,0 +1,60 @@
+#!/bin/sh
+# What own-backup-kiosk.service runs on tty1: labwc, a wlroots compositor with
+# ordinary windows, our strip along the bottom (own-backup-shell, started by
+# /etc/xdg/labwc/autostart) and the window maximised — the Linux medium's
+# counterpart of the WinPE desktop (plan §6, stage 6, "taskbar").
+#
+# A failure must end on a working screen, never a black one: when labwc is
+# missing, cannot start (no usable GPU, a broken package) or is turned off on
+# the kernel command line (`own-backup.kiosk=cage`), the session falls back to
+# cage with the window full screen, as the medium was before the strip. What
+# was chosen is in /run/own-backup-kiosk.desktop for the self-test.
+set -u
+
+# live-config writes the locale and the keyboard it was given on the kernel
+# command line (auto/config: us,ru, Alt+Shift).
+if [ -r /etc/default/locale ]; then
+    # shellcheck source=/dev/null
+    . /etc/default/locale
+    export LANG
+fi
+if [ -r /etc/default/keyboard ]; then
+    # shellcheck source=/dev/null
+    . /etc/default/keyboard
+fi
+# xkbcommon reads these when the compositor names no keymap of its own.
+export XKB_DEFAULT_MODEL="${XKBMODEL:-pc105}"
+export XKB_DEFAULT_LAYOUT="${XKBLAYOUT:-us,ru}"
+export XKB_DEFAULT_VARIANT="${XKBVARIANT:-}"
+export XKB_DEFAULT_OPTIONS="${XKBOPTIONS:-grp:alt_shift_toggle}"
+# GTK as a Wayland client; no accessibility bus on the medium (the warning
+# about it would be the first line of every log).
+export GDK_BACKEND=wayland
+export NO_AT_BRIDGE=1
+
+marker=/run/own-backup-kiosk.desktop
+
+fallback() { # why
+    echo "kiosk: cage instead of labwc: $1" >&2
+    echo "cage $1" >"$marker"
+    exec /usr/bin/cage -d -s -- /usr/libexec/own-backup-media/kiosk-session
+}
+
+if grep -qw 'own-backup.kiosk=cage' /proc/cmdline; then
+    fallback "asked for on the kernel command line"
+fi
+command -v labwc >/dev/null 2>&1 || fallback "no labwc on the medium"
+
+echo "labwc" >"$marker"
+started=$(date +%s)
+labwc
+rc=$?
+lasted=$(($(date +%s) - started))
+# A compositor that dies within seconds never showed anything: the screen
+# goes to cage rather than to systemd restarting the same failure forever.
+if [ "$lasted" -lt 10 ]; then
+    fallback "labwc exited after ${lasted} s with $rc"
+fi
+# It ran, then ended (a crash later on): the unit starts the session again.
+echo "kiosk: labwc exited after ${lasted} s with $rc" >&2
+exit "$rc"

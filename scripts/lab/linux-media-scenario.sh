@@ -38,8 +38,10 @@
 # packaging/linux/media/.../selftest): own-backup.media on the command line;
 # the firmware it was booted with, and Secure Boot on under uefi-sb; the
 # engine answering (`media sticks` over its socket) with its state on the RAM
-# disk (media mode); the kiosk active and the page drawn; and on the screen
-# shot more than a handful of colours, none covering 90 % of it.
+# disk (media mode); the kiosk active and the page drawn; labwc with our strip
+# (its window list names the window and a terminal opened and closed beside
+# it, a killed strip comes back); and on the screen shot more than a handful
+# of colours, none covering 90 % of it.
 #
 # Evidence: ~/lab/linux/run/evidence/ (media-<label>.txt and .png per boot)
 # and, for `boot`, ~/lab/linux/evidence/<run-id>/ after each clean. Exit 0 only
@@ -82,6 +84,13 @@ judge() {
     expect "$label:service" "$txt" '^OBK-SELFTEST service=ok$' "the engine answers on its socket"
     expect "$label:media-mode" "$txt" '^OBK-SELFTEST service_media=1$' "the engine is in media mode"
     expect "$label:window" "$txt" 'kiosk=active window=drawn$' "the kiosk runs and the page drew"
+    expect "$label:desktop" "$txt" '^OBK-SELFTEST desktop=labwc shell=running$' \
+        "labwc with our strip (not the cage fallback)"
+    expect "$label:strip-lists" "$txt" '^OBK-SELFTEST shell_windows=[1-9][0-9]* front=.' \
+        "the strip has a button for the window, one of them in front"
+    expect "$label:strip-terminal" "$txt" '^OBK-SELFTEST terminal_listed=yes terminal_gone=yes$' \
+        "a terminal gets a button and loses it when closed"
+    expect "$label:strip-restart" "$txt" '^OBK-SELFTEST shell_restart=yes$' "a killed strip comes back"
     if [[ $logs == stick ]]; then
         expect "$label:logs" "$txt" '^OBK-SELFTEST logs=/run/own-backup-media-log/own-backup-logs/' \
             "logs go to the stick's OBK-LOGS"
