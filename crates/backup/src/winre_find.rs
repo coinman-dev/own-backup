@@ -374,16 +374,24 @@ pub fn find_base_images() -> Vec<BaseImage> {
 }
 
 /// Build number of the running Windows, 0 when it cannot be read.
+///
+/// `RtlGetVersion`, not `GetVersionExW`: without a compatibility manifest the
+/// latter answers 9200 (Windows 8) on every later Windows, and the media card
+/// told a Windows 11 machine that it "runs 9200" (2026-10-24).
 #[cfg(target_os = "windows")]
 fn running_windows_build() -> u32 {
-    use windows::Win32::System::SystemInformation::GetVersionExW;
     use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
+    #[link(name = "ntdll")]
+    extern "system" {
+        fn RtlGetVersion(info: *mut OSVERSIONINFOW) -> i32;
+    }
     let mut vi = OSVERSIONINFOW {
         dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32,
         ..Default::default()
     };
-    // SAFETY: the struct's size field is set as the API requires.
-    if unsafe { GetVersionExW(&mut vi) }.is_ok() {
+    // SAFETY: the struct's size field is set as the API requires; the call
+    // only fills the struct (STATUS_SUCCESS is 0).
+    if unsafe { RtlGetVersion(&mut vi) } == 0 {
         vi.dwBuildNumber
     } else {
         0
