@@ -11,6 +11,51 @@
 # was chosen is in /run/own-backup-kiosk.desktop for the self-test.
 set -u
 
+# The session's processes live in logind's scope of it, not in the unit
+# (pam_systemd moves them), so stopping the unit leaves them running: the old
+# compositor, the strip and a window that keeps the window's single-instance
+# lock without a screen — after a restart the new window found it "already
+# running" and left, and the screen stayed black (stand, 24.10). So the unit's
+# ExecStopPost ends the session (`kiosk-desktop stop`), and a new session
+# first ends whatever earlier one of this service is left.
+session_file=/run/own-backup-kiosk.session
+
+# Ending a session that logind already calls "closing" kills nothing (stand,
+# 24.10: its window outlived `loginctl terminate-session`), so its scope's
+# processes are signalled directly: TERM, and KILL for what is left after 3 s.
+end_session() { # id
+    scope="session-$1.scope"
+    loginctl terminate-session "$1" 2>/dev/null
+    systemctl kill --signal=TERM "$scope" 2>/dev/null || return 0
+    cg=$(systemctl show -p ControlGroup --value "$scope" 2>/dev/null)
+    procs="/sys/fs/cgroup$cg/cgroup.procs"
+    i=0
+    while [ -n "$cg" ] && [ -s "$procs" ] && [ "$i" -lt 30 ]; do
+        i=$((i + 1))
+        sleep 0.1
+    done
+    if [ -n "$cg" ] && [ -s "$procs" ]; then
+        systemctl kill --signal=KILL "$scope" 2>/dev/null
+    fi
+}
+
+if [ "${1:-}" = stop ]; then
+    if [ -r "$session_file" ]; then
+        end_session "$(cat "$session_file")"
+        rm -f "$session_file"
+    fi
+    exit 0
+fi
+
+me=${XDG_SESSION_ID:-}
+for id in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do
+    [ "$id" = "$me" ] && continue
+    [ "$(loginctl show-session "$id" -p Service --value 2>/dev/null)" = own-backup-kiosk ] || continue
+    echo "kiosk: ending the earlier session $id left behind" >&2
+    end_session "$id"
+done
+[ -n "$me" ] && echo "$me" >"$session_file"
+
 # live-config writes the locale and the keyboard it was given on the kernel
 # command line (auto/config: us,ru, Alt+Shift).
 if [ -r /etc/default/locale ]; then
@@ -37,6 +82,9 @@ marker=/run/own-backup-kiosk.desktop
 fallback() { # why
     echo "kiosk: cage instead of labwc: $1" >&2
     echo "cage $1" >"$marker"
+    # The fallback is for a screen labwc could not use, often one without a
+    # GPU driver: cage (wlroots) refuses a software renderer unless allowed.
+    export WLR_RENDERER_ALLOW_SOFTWARE=1
     exec /usr/bin/cage -d -s -- /usr/libexec/own-backup-media/kiosk-session
 }
 

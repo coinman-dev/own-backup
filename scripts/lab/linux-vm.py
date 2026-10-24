@@ -772,7 +772,10 @@ def media_argv(cfg: dict, q: Qemu, args, label: str) -> list:
     # dullest display there is, and screendump reads it. The EDID offers
     # `--screen` as the preferred mode.
     xres, yres = args.screen
-    argv += ['-device', f'VGA,edid=on,xres={xres},yres={yres}']
+    # 16 MiB of video memory by default: enough up to 1920x1200 at 32 bits,
+    # with room for the double buffer only below that.
+    vgamem = max(16, -(-xres * yres * 4 * 2 // (1 << 20)))
+    argv += ['-device', f'VGA,edid=on,xres={xres},yres={yres},vgamem_mb={vgamem}']
     if args.stick:
         argv += stick_argv(bootindex=0)
     elif args.attach == 'cdrom':

@@ -149,8 +149,49 @@ if [ "$shell" = running ]; then
         sleep 1
     done
     report "shell_restart=$back"
-    # Back in place before the host's screenshot.
-    sleep 3
+
+    # The fallback: a labwc that cannot start must leave the window on the
+    # screen through cage, not a black one. labwc is swapped for one that
+    # fails at once, the session restarted, and labwc put back afterwards.
+    kiosk_state() { # what the session is now: marker, unit, cage, window
+        echo "$(cut -d' ' -f1 /run/own-backup-kiosk.desktop 2>/dev/null) $(systemctl is-active own-backup-kiosk.service) cage=$(pgrep -x cage >/dev/null && echo 1 || echo 0) window=$(pgrep -x own-backup-gui >/dev/null && echo 1 || echo 0)"
+    }
+    labwc_bin=$(command -v labwc)
+    mv "$labwc_bin" "$labwc_bin.selftest"
+    printf '#!/bin/sh\nexit 1\n' >"$labwc_bin"
+    chmod 0755 "$labwc_bin"
+    systemctl restart own-backup-kiosk.service
+    state=
+    i=0
+    while [ "$i" -lt 40 ]; do
+        state=$(kiosk_state)
+        [ "$state" = "cage active cage=1 window=1" ] && break
+        i=$((i + 1))
+        sleep 1
+    done
+    # Still so a few seconds later: not a cage on its way out again.
+    sleep 5
+    state=$(kiosk_state)
+    report "fallback=$(echo "$state" | tr ' ' ',')"
+    if [ "$state" != "cage active cage=1 window=1" ]; then
+        journalctl -b -u own-backup-kiosk.service -n 40 -o cat --no-pager 2>&1 |
+            while IFS= read -r line; do report "journal $line"; done
+    fi
+    mv "$labwc_bin.selftest" "$labwc_bin"
+    systemctl reset-failed own-backup-kiosk.service 2>/dev/null
+    systemctl restart own-backup-kiosk.service
+    i=0
+    while [ "$i" -lt 40 ]; do
+        state=$(kiosk_state)
+        if [ "$state" = "labwc active cage=0 window=1" ] && pgrep -xf "$strip" >/dev/null; then
+            break
+        fi
+        i=$((i + 1))
+        sleep 1
+    done
+    report "fallback_back=$(echo "$state" | tr ' ' ',') shell=$(pgrep -xf "$strip" >/dev/null && echo running || echo absent)"
+    # The desktop drawn again before the host's screenshot.
+    sleep 8
 fi
 
 if [ -r /run/own-backup-media-log.dir ]; then

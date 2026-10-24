@@ -312,10 +312,12 @@ check pv-sources-intact "$(verdict $?)" "the files on a and span still match"
 cli jobs delete "$pvjob" >/dev/null 2>&1
 
 # --- excluded files a btrfs keeps by name, a whole disk through the service ------
-# An ESP and an idle btrfs with a swap file and 600 small files, every third
-# one excluded: the swap file stays listed (its header is kept), and Stage 2
-# may spare more for the leaves' sake. The run must say how many, and that
-# number must be the excluded names the image's btrfs still lists (CHECKS 21).
+# An ESP and an idle btrfs with a swap file, 600 files every third one
+# excluded, and a directory of 6000 small excluded files between two kept
+# ones: the swap file stays listed (its header is kept), and Stage 2 may
+# spare files whose removal would empty FS-tree leaves (the owner's Kubuntu,
+# 18.10). The run must say how many, and that number must be the excluded
+# names the image's btrfs still lists (CHECKS 21).
 KN_MNT=/mnt/obk-svc-kn
 KN_OUT=/var/tmp/obk-svc-kn-restored
 kn_cleanup() {
@@ -341,12 +343,19 @@ KP2=$(lsblk -lnpo NAME "$D_SRC" | sed -n 3p)
         ((i % 3 == 0)) && ext=log
         head -c 8192 /dev/urandom >"$KN_MNT/data/logs/f$(printf %04d "$i").$ext"
     done
-    head -c 4M /dev/urandom >"$KN_MNT/data/cache/junk.bin"
+    mkdir -p "$KN_MNT/data/a-keep" "$KN_MNT/data/z-keep"
+    for d in a-keep cache z-keep; do
+        n=400 ext=keep
+        [[ $d == cache ]] && n=6000 ext=bin
+        for i in $(seq 0 $((n - 1))); do
+            head -c $((100 + i * 37 % 3000)) /dev/urandom >"$KN_MNT/data/$d/f$(printf %05d "$i").$ext"
+        done
+    done
     btrfs filesystem mkswapfile --size 64m "$KN_MNT/swapfile"
     sync
     umount "$KN_MNT"
 ) >"$EV/kn-setup.out" 2>&1
-check kn-setup "$(verdict $?)" "ESP $KP1, btrfs $KP2: 600 files (200 *.log), data/cache, a swap file"
+check kn-setup "$(verdict $?)" "ESP $KP1, btrfs $KP2: 600 files (200 *.log), 6000 in data/cache, a swap file"
 
 run kn-job-new cli jobs new --name svc-kn-disk --source "$KP2" --dest "$IMG" \
     --method full --schedule none --validate-after
@@ -422,8 +431,13 @@ check kn-count-true "$(verdict $?)" "excluded names still in the image: $listed,
 [[ $nonzero -eq 0 ]]
 check kn-kept-zeroed "$(verdict $?)" "every one of them holds only zeros ($nonzero with data)"
 kept_ok=$(find "$KN_OUT" -type f -name '*.keep' | wc -l)
-[[ $kept_ok -eq 400 ]]
-check kn-others-kept "$(verdict $?)" "all 400 *.keep files are in the image ($kept_ok)"
+[[ $kept_ok -eq 1200 ]]
+check kn-others-kept "$(verdict $?)" "all 1200 *.keep files are in the image ($kept_ok)"
+# Not a verdict: whether the leaf guards have to spare anything depends on
+# how the trees came out (a filesystem written through the kernel lets Stage 2
+# unlink whole leaves; a `mkfs.btrfs -r` one spares, see the unit test
+# stage2_leaf_guards_count_the_names_they_keep). The count above holds either way.
+echo "NOTE kn: besides the swap file, $((said_kept - 1)) excluded files spared by the leaf guards" | tee -a "$EV/summary.txt"
 kn_cleanup
 cli jobs delete "$knjob" >/dev/null 2>&1
 

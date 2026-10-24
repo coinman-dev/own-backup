@@ -35,6 +35,9 @@ EnvironmentFile=-/run/own-backup-media-log.env
 # Ctrl+Alt+F2… still reach the text consoles for repairs by hand, under labwc
 # and under cage (-s) alike.
 ExecStart=/usr/libexec/own-backup-media/kiosk-desktop
+# The session's processes are in logind's scope, not in this unit: ended here,
+# or a stopped session would leave its window holding the single-instance lock.
+ExecStopPost=/usr/libexec/own-backup-media/kiosk-desktop stop
 # A compositor that ends brings the session back. Under cage (the fallback)
 # that includes closing the window: there is nothing else on that screen.
 Restart=always

@@ -91,6 +91,10 @@ judge() {
     expect "$label:strip-terminal" "$txt" '^OBK-SELFTEST terminal_listed=yes terminal_gone=yes$' \
         "a terminal gets a button and loses it when closed"
     expect "$label:strip-restart" "$txt" '^OBK-SELFTEST shell_restart=yes$' "a killed strip comes back"
+    expect "$label:fallback" "$txt" '^OBK-SELFTEST fallback=cage,active,cage=1,window=1$' \
+        "a labwc that cannot start: the window comes up in cage"
+    expect "$label:fallback-back" "$txt" '^OBK-SELFTEST fallback_back=labwc,active,cage=0,window=1 shell=running$' \
+        "labwc back: the desktop and the strip return"
     if [[ $logs == stick ]]; then
         expect "$label:logs" "$txt" '^OBK-SELFTEST logs=/run/own-backup-media-log/own-backup-logs/' \
             "logs go to the stick's OBK-LOGS"
