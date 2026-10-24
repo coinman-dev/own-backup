@@ -65,8 +65,8 @@
     "en": "Could not get the key of container %{volume} for the snapshot: %{error}. No copy was made."
   },
   "linux.dm_snapshot_invalid": {
-    "ru": "Снимок тома %{volume} перестал быть целым во время копирования (%{state}): область изменений в папке назначения переполнилась или в неё не удалось записать. Копия не согласована и не сохранена — проверьте свободное место в папке назначения и повторите.",
-    "en": "The snapshot of %{volume} stopped being whole during the copy (%{state}): its change area in the destination folder filled up or could not be written. The copy is not consistent and was not kept — check the free space in the destination folder and try again."
+    "ru": "Снимок тома %{volume} перестал быть целым во время копирования (%{state}): его область изменений в папке назначения переполнилась — пока шла копия, на том записали больше, чем она вмещает, — или в неё не удалось записать. Копия не согласована и не сохранена. Повторите, когда на томе меньше записи (сборки, загрузки, виртуальные машины), и проверьте свободное место в папке назначения.",
+    "en": "The snapshot of %{volume} stopped being whole during the copy (%{state}): its change area in the destination folder filled up — more was written to the volume during the copy than it holds — or could not be written. The copy is not consistent and was not kept. Try again when the volume is less busy (builds, downloads, virtual machines), and check the free space in the destination folder."
   },
   "linux.in_use_partition": {
     "ru": "Раздел %{volume} сейчас используется (%{users}). Снимка обычного раздела в Linux нет; на время своего копирования неизменным удерживается только небольшой раздел (не больше 4 ГиБ — например, /boot или ESP), на котором нет ни корня системы, ни данных и журналов программы, ни папки назначения. Этот раздел не подходит: %{reason}. Копия тома, в который идёт запись, может не открыться, поэтому она не сделана. Скопируйте его с загрузочного носителя или отключите (отмонтируйте) перед копированием.",

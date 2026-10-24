@@ -429,14 +429,38 @@ fn delete_if_unused(path: &Path) -> bool {
 /// Size of a store on a filesystem without sparse files (FAT, exFAT, NTFS
 /// through ntfs3), where every byte of it is allocated up front: a fifth of
 /// the origin, as LVM gives a classic snapshot, at least 256 MiB, at most half
-/// the free space and what FAT holds in one file. If more is written to the
-/// origin during the copy, the snapshot overflows and the copy is refused
-/// ([`SnapState::intact`]).
-pub(crate) fn dense_store_size(full: u64, free: u64) -> u64 {
+/// the free space and `max_file`, the largest file the filesystem holds. If
+/// more is written to the origin during the copy, the snapshot overflows and
+/// the copy is refused ([`SnapState::intact`]).
+///
+/// Only FAT stops a file at 4 GiB. That limit used to be applied to every
+/// such filesystem, and a 128 GB LUKS root copied to an NTFS disk got a 4 GiB
+/// store, which six minutes of builds on `/home` filled (owner, 24.10); a
+/// fifth of that root is 25 GiB, which NTFS and exFAT hold in one file.
+pub(crate) fn dense_store_size(full: u64, free: u64, max_file: u64) -> u64 {
     let chunk = CHUNK_SECTORS * 512;
     let want = (full / 5).max(256 << 20).min(full);
-    let cap = (free / 2).min((4 << 30) - chunk);
+    let cap = (free / 2).min(max_file.saturating_sub(chunk));
     (want.min(cap) / chunk) * chunk
+}
+
+/// Above what size the filesystem of `file` holds no file: 4 GiB on FAT
+/// (`vfat`, `msdos`; the store stays a chunk below it), no limit that matters
+/// here on anything else (exFAT, NTFS through ntfs3 or ntfs-3g). Unknown when
+/// it cannot be asked: FAT's, the cautious answer.
+fn max_file_size(file: &File) -> u64 {
+    const MSDOS_SUPER_MAGIC: i64 = 0x4d44;
+    const FAT_MAX: u64 = 4 << 30;
+    // SAFETY: fstatfs into a zeroed struct.
+    let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatfs(file.as_raw_fd(), &mut st) } != 0 {
+        return FAT_MAX;
+    }
+    if st.f_type as i64 == MSDOS_SUPER_MAGIC {
+        FAT_MAX
+    } else {
+        u64::MAX
+    }
 }
 
 /// A new store, locked for as long as it is used: a sparse file as large as
@@ -473,7 +497,7 @@ fn create_cow(dir: &Path, id: &str, origin_bytes: u64) -> io::Result<(PathBuf, F
         } else {
             0
         };
-        let size = dense_store_size(full, free);
+        let size = dense_store_size(full, free, max_file_size(&file));
         if size < chunk * 2 {
             return Err(io::Error::from_raw_os_error(libc::ENOSPC));
         }
@@ -1901,16 +1925,29 @@ mod tests {
     #[test]
     fn store_size_without_sparse_files() {
         const G: u64 = 1 << 30;
+        const FAT: u64 = 4 * G;
+        const ANY: u64 = u64::MAX;
         // A fifth of a large volume, when there is room for it.
-        assert_eq!(dense_store_size(10 * G, 100 * G), 2 * G);
+        assert_eq!(dense_store_size(10 * G, 100 * G, FAT), 2 * G);
         // Never more than FAT holds in one file, nor half the free space.
-        assert_eq!(dense_store_size(100 * G, 100 * G), 4 * G - 4096);
-        assert_eq!(dense_store_size(10 * G, G), G / 2);
+        assert_eq!(dense_store_size(100 * G, 100 * G, FAT), 4 * G - 4096);
+        assert_eq!(dense_store_size(10 * G, G, ANY), G / 2);
+        // NTFS and exFAT hold the whole fifth: the owner's 128 GB LUKS root
+        // on a 1.8 TB NTFS disk gets 25.6 GB, not 4 (24.10).
+        assert_eq!(
+            dense_store_size(128 * G, 1500 * G, ANY),
+            (128 * G / 5) / 4096 * 4096
+        );
+        assert_eq!(
+            dense_store_size(128 * G, 20 * G, ANY),
+            10 * G,
+            "half the free space"
+        );
         // At least 256 MiB, but never more than the volume.
-        assert_eq!(dense_store_size(G, 100 * G), 256 << 20);
-        assert_eq!(dense_store_size(100 << 20, 100 * G), 100 << 20);
+        assert_eq!(dense_store_size(G, 100 * G, FAT), 256 << 20);
+        assert_eq!(dense_store_size(100 << 20, 100 * G, ANY), 100 << 20);
         // Chunk-aligned.
-        assert_eq!(dense_store_size(10 * G, 3 * G + 1234) % 4096, 0);
+        assert_eq!(dense_store_size(10 * G, 3 * G + 1234, ANY) % 4096, 0);
     }
 
     #[test]

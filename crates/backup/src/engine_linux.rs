@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use tracing::info;
+use tracing::{info, warn};
 use zeroize::Zeroizing;
 
 use own_backup_common::progress::{BackupProgress, RestoreProgress};
@@ -69,14 +69,49 @@ fn backup_volume_checked(
     mut progress: impl FnMut(&BackupProgress) -> Result<()>,
 ) -> Result<VolumeBackupSummary> {
     let platform = LinuxPlatform::new([snapshot.clone()]);
-    crate::engine_core::volume::backup_volume(&platform, req, |p| {
+    let mut asked_at_publication = false;
+    let copied = crate::engine_core::volume::backup_volume(&platform, req, |p| {
         progress(p)?;
         if p.backup_id == "publish" {
+            asked_at_publication = true;
             check_intact(snapshot)?;
             info!(source = %snapshot.source_device, "the snapshot held to the end of the copy");
         }
         Ok(())
-    })
+    });
+    if asked_at_publication {
+        return copied;
+    }
+    explain_broken_snapshot(copied, std::slice::from_ref(snapshot), &mut check_intact)
+}
+
+/// A copy that failed before its publication while a snapshot it read broke
+/// under it is reported as the snapshot's failure (one that reached the
+/// publication was asked there already). device-mapper invalidates an overflowed snapshot,
+/// and every read of it then fails with EIO: the run said only
+/// `read(/dev/dm-2) at 74284269568: Input/output error` (owner, 24.10), where
+/// the snapshot's own error says what happened and what to do about it.
+fn explain_broken_snapshot<T>(
+    copied: Result<T>,
+    snapshots: &[Snapshot],
+    check_intact: &mut impl FnMut(&Snapshot) -> Result<()>,
+) -> Result<T> {
+    match copied {
+        Err(e) if !matches!(e, OwnBackupError::Cancelled) => {
+            for snapshot in snapshots {
+                if let Err(broken) = check_intact(snapshot) {
+                    warn!(
+                        source = %snapshot.source_device,
+                        error = %e,
+                        "the copy failed with its snapshot broken: reported as the snapshot's failure"
+                    );
+                    return Err(broken);
+                }
+            }
+            Err(e)
+        }
+        other => other,
+    }
 }
 
 /// Back up a whole disk (`req.disk_device`, a `/dev/disk/by-id/…` path — R1)
@@ -115,9 +150,11 @@ fn backup_disk_checked(
         ));
     }
     let platform = LinuxPlatform::new(snapshots.iter().cloned());
-    crate::engine_core::disk::backup_disk(&platform, req, |p| {
+    let mut asked_at_publication = false;
+    let copied = crate::engine_core::disk::backup_disk(&platform, req, |p| {
         progress(p)?;
         if p.backup_id == "publish" {
+            asked_at_publication = true;
             for snapshot in snapshots {
                 check_intact(snapshot)?;
             }
@@ -127,7 +164,11 @@ fn backup_disk_checked(
             );
         }
         Ok(())
-    })
+    });
+    if asked_at_publication {
+        return copied;
+    }
+    explain_broken_snapshot(copied, snapshots, &mut check_intact)
 }
 
 /// The reader of a finished image, picked by the sidecar's `container` field.
@@ -809,6 +850,46 @@ mod tests {
             created_at: chrono::Utc::now(),
             metadata: HashMap::from([("mode".to_string(), mode.to_string())]),
         }
+    }
+
+    /// A read that failed under a broken snapshot is the snapshot's failure;
+    /// a cancel, a success and a failure under a whole snapshot are left as
+    /// they are (24.10: `read(/dev/dm-2) … Input/output error` over an
+    /// overflowed one).
+    #[test]
+    fn a_failure_under_a_broken_snapshot_is_reported_as_the_snapshot() {
+        let snap = snapshot_of("/dev/root", Path::new("/dev/dm-2"), "dm");
+        let eio = || -> Result<()> {
+            Err(OwnBackupError::Io(std::io::Error::from_raw_os_error(
+                libc::EIO,
+            )))
+        };
+        let mut broken = |_: &Snapshot| -> Result<()> {
+            Err(OwnBackupError::NoSnapshotProvider("overflowed".into()))
+        };
+        let got = explain_broken_snapshot(eio(), std::slice::from_ref(&snap), &mut broken);
+        assert!(
+            matches!(&got, Err(OwnBackupError::NoSnapshotProvider(m)) if m == "overflowed"),
+            "{got:?}"
+        );
+        let cancelled = explain_broken_snapshot::<()>(
+            Err(OwnBackupError::Cancelled),
+            std::slice::from_ref(&snap),
+            &mut broken,
+        );
+        assert!(matches!(cancelled, Err(OwnBackupError::Cancelled)));
+        let mut asked = 0;
+        let mut whole = |_: &Snapshot| -> Result<()> {
+            asked += 1;
+            Ok(())
+        };
+        assert!(explain_broken_snapshot(Ok(()), std::slice::from_ref(&snap), &mut whole).is_ok());
+        let got = explain_broken_snapshot(eio(), std::slice::from_ref(&snap), &mut whole);
+        assert!(
+            matches!(got, Err(OwnBackupError::Io(_))),
+            "a whole snapshot: the read's own error"
+        );
+        assert_eq!(asked, 1, "a success asks nothing");
     }
 
     /// An image file as a source, read as it is; `vouched`: its caller says
