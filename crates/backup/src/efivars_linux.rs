@@ -1200,3 +1200,244 @@ mod tests {
         assert_eq!(fs.read_config().unwrap().order, vec![0, created]);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Which disk a boot entry without a partition booted from
+// ---------------------------------------------------------------------------
+
+/// The disks (kernel names: `nvme0n1`, `vda`) behind the device a boot entry
+/// names, when it names a device and no partition.
+///
+/// The firmware's own entries for a disk it booted through the removable-media
+/// path (`\EFI\BOOT\BOOTX64.EFI`) — «UEFI Misc Device», «UEFI OS» — carry
+/// `PciRoot(…)/Pci(…)/…` and no Hard Drive node: which partition was the ESP
+/// is not said, but which device was is. The chain of `Pci(device,function)`
+/// nodes is exactly the nesting of the device's directory under
+/// `/sys/devices/pciDDDD:BB/`, so the disks below that directory are the ones
+/// the machine can have booted from; an NVMe node narrows it to its namespace.
+/// The restore guard then protects the ESPs of those disks instead of every
+/// ESP on every disk (24.10: on such a machine no disk with an ESP could be
+/// restored at all).
+///
+/// `None` when the path does not start with a PCI root followed by PCI nodes,
+/// or when nothing in sysfs answers to it — then nothing is known, and the
+/// caller keeps protecting every ESP.
+pub fn disks_behind_boot_device(
+    nodes: &[crate::efivars::DevicePathNode],
+    sys_devices: &std::path::Path,
+    sys_block: &std::path::Path,
+) -> Option<Vec<String>> {
+    use crate::efivars::DevicePathNode as N;
+    const ACPI: u8 = 0x02;
+    const ACPI_DP: u8 = 0x01;
+    const HARDWARE: u8 = 0x01;
+    const HW_PCI: u8 = 0x01;
+    const MESSAGING: u8 = 0x03;
+    const MSG_NVME: u8 = 0x17;
+
+    let mut it = nodes.iter();
+    // PciRoot(UID): EISA HID, then the UID the root bridge has in ACPI.
+    let uid = match it.next()? {
+        N::Other {
+            kind: ACPI,
+            subtype: ACPI_DP,
+            data,
+        } if data.len() >= 8 => u32::from_le_bytes([data[4], data[5], data[6], data[7]]),
+        _ => return None,
+    };
+    let mut dir = pci_root(sys_devices, uid)?;
+    let mut namespace = None;
+    let mut any_pci = false;
+    for node in it {
+        match node {
+            N::Other {
+                kind: HARDWARE,
+                subtype: HW_PCI,
+                data,
+            } if data.len() >= 2 => {
+                let (function, device) = (data[0], data[1]);
+                let suffix = format!(":{device:02x}.{function:x}");
+                dir = std::fs::read_dir(&dir)
+                    .ok()?
+                    .flatten()
+                    .map(|e| e.path())
+                    .find(|p| {
+                        p.is_dir()
+                            && p.file_name()
+                                .and_then(|n| n.to_str())
+                                .is_some_and(|n| n.len() == 12 && n.ends_with(&suffix))
+                    })?;
+                any_pci = true;
+            }
+            N::Other {
+                kind: MESSAGING,
+                subtype: MSG_NVME,
+                data,
+            } if data.len() >= 4 => {
+                namespace = Some(u32::from_le_bytes([data[0], data[1], data[2], data[3]]));
+                break;
+            }
+            // USB, SATA, SCSI and the like: the disks behind this controller,
+            // all of them — finer than that is not needed to be safe.
+            _ => break,
+        }
+    }
+    if !any_pci {
+        return None;
+    }
+    let mut disks: Vec<String> = std::fs::read_dir(sys_block)
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.to_string();
+            let real = std::fs::canonicalize(e.path()).ok()?;
+            real.starts_with(&dir).then_some(name)
+        })
+        .filter(|name| match namespace {
+            Some(ns) => name
+                .rsplit_once('n')
+                .is_some_and(|(_, n)| n == ns.to_string()),
+            None => true,
+        })
+        .collect();
+    disks.sort();
+    (!disks.is_empty()).then_some(disks)
+}
+
+/// The sysfs directory of the PCI root bridge whose ACPI UID is `uid`: the
+/// one whose `firmware_node/uid` says so, or — where ACPI does not expose it
+/// — `pci0000:00` for UID 0, the only root most machines have.
+fn pci_root(sys_devices: &std::path::Path, uid: u32) -> Option<std::path::PathBuf> {
+    let roots: Vec<std::path::PathBuf> = std::fs::read_dir(sys_devices)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("pci"))
+        })
+        .collect();
+    let by_uid = roots.iter().find(|r| {
+        std::fs::read_to_string(r.join("firmware_node/uid"))
+            .ok()
+            .and_then(|t| t.trim().parse::<u32>().ok())
+            == Some(uid)
+    });
+    if let Some(r) = by_uid {
+        return Some(r.clone());
+    }
+    let any_uid = roots.iter().any(|r| r.join("firmware_node/uid").exists());
+    (uid == 0 && !any_uid)
+        .then(|| sys_devices.join("pci0000:00"))
+        .filter(|p| p.is_dir())
+}
+
+#[cfg(test)]
+mod boot_device_tests {
+    use super::disks_behind_boot_device;
+    use crate::efivars::DevicePathNode as N;
+
+    fn pci_root(uid: u32) -> N {
+        let mut data = 0x0A03_41D0u32.to_le_bytes().to_vec();
+        data.extend(uid.to_le_bytes());
+        N::Other {
+            kind: 2,
+            subtype: 1,
+            data,
+        }
+    }
+    fn pci(device: u8, function: u8) -> N {
+        N::Other {
+            kind: 1,
+            subtype: 1,
+            data: vec![function, device],
+        }
+    }
+    fn nvme(ns: u32) -> N {
+        let mut data = ns.to_le_bytes().to_vec();
+        data.extend([0u8; 8]);
+        N::Other {
+            kind: 3,
+            subtype: 0x17,
+            data,
+        }
+    }
+
+    /// A machine with a virtio disk on 00:01.0, an NVMe controller behind the
+    /// bridge 00:1c.0 holding two namespaces, and a SATA disk on 00:17.0.
+    fn machine() -> tempfile::TempDir {
+        let t = tempfile::tempdir().unwrap();
+        let dev = t.path().join("devices");
+        let block = t.path().join("block");
+        std::fs::create_dir_all(&block).unwrap();
+        let root = dev.join("pci0000:00");
+        std::fs::create_dir_all(root.join("firmware_node")).unwrap();
+        std::fs::write(root.join("firmware_node/uid"), "0\n").unwrap();
+        let disk = |path: std::path::PathBuf, name: &str| {
+            let d = path.join("block").join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            std::os::unix::fs::symlink(&d, block.join(name)).unwrap();
+        };
+        disk(root.join("0000:00:01.0/virtio1"), "vda");
+        let nv = root.join("0000:00:1c.0/0000:03:00.0/nvme/nvme0");
+        disk(nv.clone(), "nvme0n1");
+        disk(nv, "nvme0n2");
+        disk(
+            root.join("0000:00:17.0/ata1/host0/target0:0:0/0:0:0:0"),
+            "sda",
+        );
+        t
+    }
+
+    fn found(t: &tempfile::TempDir, nodes: &[N]) -> Option<Vec<String>> {
+        disks_behind_boot_device(nodes, &t.path().join("devices"), &t.path().join("block"))
+    }
+
+    #[test]
+    fn a_boot_entry_without_a_partition_still_names_its_disk() {
+        let t = machine();
+        // The stand's «UEFI Misc Device»: PciRoot(0x0)/Pci(0x1,0x0).
+        assert_eq!(
+            found(&t, &[pci_root(0), pci(1, 0), N::End]),
+            Some(vec!["vda".into()])
+        );
+        // NVMe behind a bridge, the second namespace.
+        assert_eq!(
+            found(&t, &[pci_root(0), pci(0x1c, 0), pci(0, 0), nvme(2), N::End]),
+            Some(vec!["nvme0n2".into()])
+        );
+        // The controller only: both namespaces.
+        assert_eq!(
+            found(&t, &[pci_root(0), pci(0x1c, 0), pci(0, 0), N::End]),
+            Some(vec!["nvme0n1".into(), "nvme0n2".into()])
+        );
+        // SATA: every disk behind that controller.
+        let sata = N::Other {
+            kind: 3,
+            subtype: 0x12,
+            data: vec![0; 6],
+        };
+        assert_eq!(
+            found(&t, &[pci_root(0), pci(0x17, 0), sata, N::End]),
+            Some(vec!["sda".into()])
+        );
+    }
+
+    #[test]
+    fn a_path_that_names_nothing_here_says_nothing() {
+        let t = machine();
+        assert_eq!(
+            found(&t, &[pci_root(0), pci(5, 0), N::End]),
+            None,
+            "no such device"
+        );
+        assert_eq!(
+            found(&t, &[pci_root(3), pci(1, 0), N::End]),
+            None,
+            "no such root"
+        );
+        assert_eq!(found(&t, &[pci(1, 0), N::End]), None, "no root first");
+        assert_eq!(found(&t, &[pci_root(0), N::End]), None, "the root alone");
+    }
+}

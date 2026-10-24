@@ -385,6 +385,18 @@ fn boot_esp_refusal(
         // none); the disks here are the machines being rescued, whose ESPs
         // are exactly what a restore writes.
         LinuxBootEsp::Unknown if boot_media => None,
+        // Booted through one of these disks, partition not said: any ESP on
+        // them — or a partition whose type udev does not know — might be it.
+        LinuxBootEsp::Disks(disks) => stack
+            .iter()
+            .filter(|n| lb::is_partition(sys, n))
+            .filter(|n| lb::parent_disk(sys, n).is_some_and(|d| disks.contains(&d)))
+            .any(|n| {
+                lb::dev_numbers(sys, n)
+                    .and_then(|(ma, mi)| lb::partition_type(udev, ma, mi))
+                    .is_none_or(|t| t == lb::ESP_TYPE_GUID)
+            })
+            .then(|| tr!("guard.linux_boot_esp_unknown").into_owned()),
         // Which ESP started the machine is not known: any ESP — or any
         // partition whose type udev does not know — might be it.
         LinuxBootEsp::Unknown => stack
@@ -433,6 +445,10 @@ enum LinuxBootEsp {
     NotUefi,
     /// The PARTUUID (lowercase) out of `BootCurrent`'s device path.
     PartUuid(String),
+    /// `BootCurrent` names a device and no partition (the firmware's own
+    /// entry for a disk booted through `\EFI\BOOT\BOOTX64.EFI`): the disks
+    /// behind that device, by kernel name. Their ESPs are the candidates.
+    Disks(Vec<String>),
     /// UEFI, but the firmware variables could not be read or understood.
     Unknown,
 }
@@ -457,12 +473,22 @@ fn linux_boot_esp() -> LinuxBootEsp {
     let Some(entry) = read(&own_backup_backup::efivars::entry_name(number)) else {
         return LinuxBootEsp::Unknown;
     };
-    own_backup_backup::efivars::LoadOption::parse(&entry)
-        .ok()
-        .and_then(|o| o.hard_drive())
-        .and_then(|hd| hd.partition_guid())
-        .map(|g| LinuxBootEsp::PartUuid(g.to_ascii_lowercase()))
-        .unwrap_or(LinuxBootEsp::Unknown)
+    let Ok(option) = own_backup_backup::efivars::LoadOption::parse(&entry) else {
+        return LinuxBootEsp::Unknown;
+    };
+    if let Some(guid) = option.hard_drive().and_then(|hd| hd.partition_guid()) {
+        return LinuxBootEsp::PartUuid(guid.to_ascii_lowercase());
+    }
+    // No partition in the path: which disk it was, from the PCI device the
+    // entry names (24.10: «UEFI Misc Device», and every ESP was protected).
+    own_backup_backup::efivars_linux::disks_behind_boot_device(
+        &option.device_path(),
+        std::path::Path::new("/sys/devices"),
+        // Disks only: `/sys/class/block` lists their partitions too.
+        std::path::Path::new("/sys/block"),
+    )
+    .map(LinuxBootEsp::Disks)
+    .unwrap_or(LinuxBootEsp::Unknown)
 }
 
 /// Partition numbers of the whole disk at `device` that the running Linux
@@ -571,6 +597,12 @@ pub fn protection_of_device(device: &str) -> Protection {
         let boot_esp = match &esp {
             LinuxBootEsp::NotUefi => false,
             LinuxBootEsp::PartUuid(boot) => lb::partuuid(sys, p).as_deref() == Some(boot.as_str()),
+            // Booted through one of these disks: their ESPs (or partitions
+            // whose type cannot be read) are protected, other disks' are not.
+            LinuxBootEsp::Disks(disks) if !disks.contains(&name) => false,
+            LinuxBootEsp::Disks(_) => lb::dev_numbers(sys, p)
+                .and_then(|(ma, mi)| lb::partition_type(udev, ma, mi))
+                .is_none_or(|t| t == lb::ESP_TYPE_GUID),
             LinuxBootEsp::Unknown if is_boot_media() => false,
             LinuxBootEsp::Unknown => lb::dev_numbers(sys, p)
                 .and_then(|(ma, mi)| lb::partition_type(udev, ma, mi))
