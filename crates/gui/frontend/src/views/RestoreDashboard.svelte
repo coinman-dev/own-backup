@@ -1978,7 +1978,10 @@
         <!-- An imported copy has no job to draw a map from: everything is
              inside the sealed file, and "the map below" would point at
              nothing. -->
-        <span>{backedUpDisks.length > 0 ? m.rd_key_note() : m.rd_key_note_no_map()}</span>
+        <span>
+          {backedUpDisks.length > 0 ? m.rd_key_note() : m.rd_key_note_no_map()}
+          {#if decryptedParts.length > 0}{m.rd_key_note_encryption()}{/if}
+        </span>
         <button class="btn ghost tiny" onclick={() => askKey()}>{m.rd_enter_password()}</button>
       </div>
     {/if}
@@ -2061,7 +2064,11 @@
           </div>
         {/if}
       </div>
-    {:else if decryptedParts.length > 0}
+    {:else if decryptedParts.length > 0 && !keyNeeded && !infoLoading}
+      <!-- Not while the copy is sealed or still being read: until then the
+           screen knows only the job's record, not what the copy kept, and
+           «the copy did not record the container» was said over a copy that
+           kept its LUKS header (owner, 24.10). -->
       {@const one = decryptedParts.length === 1}
       {@const kind = allBitLocker ? ' (BitLocker)' : allLuks ? ' (LUKS)' : ''}
       <div class="luks-warn">
