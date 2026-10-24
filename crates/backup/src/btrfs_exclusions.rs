@@ -4503,4 +4503,89 @@ mod btrfs_integration {
             complaints.join("\n")
         );
     }
+
+    /// The leaf guards at work, and counted: a directory of thousands of small
+    /// excluded files between two kept ones empties whole FS-tree leaves, and
+    /// Stage 2 spares some files to keep those leaves (as on the owner's
+    /// Kubuntu root, 18.10: 17 of 24 475). The result screen's count must be
+    /// exactly the excluded names the filesystem still lists — each a ghost of
+    /// zeros — and the patched filesystem must stay clean.
+    #[test]
+    fn stage2_leaf_guards_count_the_names_they_keep() {
+        use std::io::Write;
+        if !have("mkfs.btrfs") {
+            eprintln!("mkfs.btrfs unavailable — skipping");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        for (name, n) in [("a-keep", 400u32), ("cache", 6000), ("z-keep", 400)] {
+            std::fs::create_dir_all(src.join(name)).unwrap();
+            for i in 0..n {
+                let len = 100 + (i as usize * 37) % 3000;
+                let mut f =
+                    std::fs::File::create(src.join(name).join(format!("f{i:05}.bin"))).unwrap();
+                f.write_all(&vec![(i % 251) as u8 + 1; len]).unwrap();
+            }
+        }
+        let img = dir.path().join("fs.img");
+        std::fs::File::create(&img)
+            .unwrap()
+            .set_len(512 * 1024 * 1024)
+            .unwrap();
+        let out = std::process::Command::new("mkfs.btrfs")
+            .args(["-q", "-r"])
+            .arg(&src)
+            .arg(&img)
+            .output()
+            .unwrap();
+        if !out.status.success() {
+            eprintln!("mkfs.btrfs failed — skipping");
+            return;
+        }
+
+        let (scan, _) = run_scan(&img, &["cache/**"]);
+        assert_eq!(scan.files_excluded, 6000);
+        assert!(
+            scan.files_kept_named > 0 && scan.files_kept_named < 6000,
+            "the guards spare some and remove the rest: {}",
+            scan.files_kept_named
+        );
+
+        let patched = dir.path().join("patched.img");
+        apply(&img, &scan, &patched);
+        let (ok, log) = btrfs_check(&patched, true);
+        assert!(ok, "btrfs check after the leaf guards:\n{log}");
+
+        let outdir = dir.path().join("restored");
+        std::fs::create_dir_all(&outdir).unwrap();
+        let r = std::process::Command::new("btrfs")
+            .arg("restore")
+            .arg(&patched)
+            .arg(&outdir)
+            .output()
+            .unwrap();
+        assert!(
+            r.status.success(),
+            "btrfs restore failed: {}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        let mut ghosts = 0u64;
+        for e in std::fs::read_dir(outdir.join("cache")).unwrap() {
+            let data = std::fs::read(e.unwrap().path()).unwrap();
+            assert!(data.iter().all(|&b| b == 0), "a spared file kept its data");
+            ghosts += 1;
+        }
+        assert_eq!(scan.files_kept_named, ghosts);
+        for name in ["a-keep", "z-keep"] {
+            for i in 0..400u32 {
+                let data = std::fs::read(outdir.join(name).join(format!("f{i:05}.bin"))).unwrap();
+                let len = 100 + (i as usize * 37) % 3000;
+                assert!(
+                    data.len() == len && data.iter().all(|&b| b == (i % 251) as u8 + 1),
+                    "{name}/f{i:05}.bin damaged"
+                );
+            }
+        }
+    }
 }

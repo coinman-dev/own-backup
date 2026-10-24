@@ -769,8 +769,10 @@ def media_argv(cfg: dict, q: Qemu, args, label: str) -> list:
         argv += ['-drive', f'if=pflash,format=raw,unit=0,readonly=on,file={code}',
                  '-drive', f"if=pflash,format=raw,unit=1,file={RUN / f'vars-{label}.fd'}"]
     # A plain VGA (bochs-drm in the guest): the kiosk must come up on the
-    # dullest display there is, and screendump reads it.
-    argv += ['-device', 'VGA,edid=on,xres=1280,yres=800']
+    # dullest display there is, and screendump reads it. The EDID offers
+    # `--screen` as the preferred mode.
+    xres, yres = args.screen
+    argv += ['-device', f'VGA,edid=on,xres={xres},yres={yres}']
     if args.stick:
         argv += stick_argv(bootindex=0)
     elif args.attach == 'cdrom':
@@ -1058,6 +1060,14 @@ def cmd_clean(args) -> int:
     return 0
 
 
+def screen_size(text):
+    """`WxH` for `media --screen`: what the VGA's EDID offers as preferred."""
+    m = re.fullmatch(r'(\d{3,4})x(\d{3,4})', text)
+    if not m:
+        raise argparse.ArgumentTypeError(f'want WxH, e.g. 1024x768: {text!r}')
+    return int(m.group(1)), int(m.group(2))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     sub = parser.add_subparsers(dest='cmd', required=True)
@@ -1092,6 +1102,8 @@ def main() -> int:
     media.add_argument('--timeout', type=int, default=600,
                        help='seconds to wait for the self-test (default 600)')
     media.add_argument('--label', default='', help='name of the evidence files')
+    media.add_argument('--screen', type=screen_size, default=(1280, 800), metavar='WxH',
+                       help="the display's preferred mode (default 1280x800)")
     ssh = sub.add_parser('ssh', help='run a command in the guest: ssh -- <command...>')
     ssh.add_argument('command', nargs=argparse.REMAINDER)
     put = sub.add_parser('put', help='copy host -> guest')
