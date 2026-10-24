@@ -14,6 +14,7 @@
 //! a loop with a pause, and a crash here costs the strip for two seconds and
 //! nothing on the screen behind it.
 
+mod layer;
 mod toplevels;
 
 use std::cell::RefCell;
@@ -21,9 +22,9 @@ use std::rc::Rc;
 
 use gtk::prelude::*;
 use gtk::{gdk, glib, pango};
-use gtk_layer_shell::{Edge, Layer, LayerShell};
 use own_backup_common::tr;
 
+use self::layer::{Edge, Layer, LayerShell};
 use crate::{layout, menu};
 
 type Rgb = (f64, f64, f64);
@@ -80,7 +81,7 @@ pub fn log(message: &str) {
 
 pub fn run() -> Result<(), String> {
     gtk::init().map_err(|e| format!("GTK: {e}"))?;
-    if !gtk_layer_shell::is_supported() {
+    if !layer::is_supported() {
         return Err("the compositor offers no layer-shell".into());
     }
     let on_medium = own_backup_common::media_mode::is_linux_medium();

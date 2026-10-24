@@ -29,11 +29,11 @@ windows = { version = "0.58", features = [
 
 # The boot medium's strip on Linux (plan §6, stage 6, "taskbar"): GTK 3, as
 # the window's own Tauri build already links it, on a layer-shell surface of
-# labwc, and the open windows through wlroots' foreign-toplevel protocol on a
-# Wayland connection of its own.
+# labwc (libgtk-layer-shell, called directly: src/linux/layer.rs), and the
+# open windows through wlroots' foreign-toplevel protocol on a Wayland
+# connection of its own.
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
-gtk-layer-shell = { version = "0.8", features = ["v0_6"] }
 pangocairo = "0.18"
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }

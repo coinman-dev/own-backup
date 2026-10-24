@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use own_backup_common::tr;
 use tonic::transport::server::UdsConnectInfo;
 use tonic::{Request, Status};
-use zbus::zvariant::Value;
+use zbus::Variant;
 
 /// The polkit actions of `com.ownbackup.policy` that the engine checks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,7 +73,7 @@ trait Authority {
     /// the reply `(is_authorized, is_challenge, details)`.
     fn check_authorization(
         &self,
-        subject: &(&str, HashMap<&str, Value<'_>>),
+        subject: &(&str, HashMap<&str, Variant<'_>>),
         action_id: &str,
         details: HashMap<&str, &str>,
         flags: u32,
@@ -152,9 +152,9 @@ async fn check_with(
 ) -> zbus::Result<bool> {
     let uid = i32::try_from(uid).map_err(|_| zbus::Error::Failure("uid out of range".into()))?;
     let subject_details = HashMap::from([
-        ("pid", Value::from(pid)),
-        ("start-time", Value::from(start_time)),
-        ("uid", Value::from(uid)),
+        ("pid", Variant::from(pid)),
+        ("start-time", Variant::from(start_time)),
+        ("uid", Variant::from(uid)),
     ]);
     let (authorized, _challenge, _details) = authority
         .check_authorization(
@@ -181,7 +181,7 @@ fn process_start_time(stat: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zbus::zvariant::OwnedValue;
+    use zbus::OwnedVariant;
 
     #[test]
     fn the_start_time_is_field_22_even_with_an_odd_command_name() {
@@ -242,7 +242,7 @@ mod tests {
     impl FakeAuthority {
         fn check_authorization(
             &self,
-            subject: (String, HashMap<String, OwnedValue>),
+            subject: (String, HashMap<String, OwnedVariant>),
             action_id: String,
             _details: HashMap<String, String>,
             flags: u32,
@@ -273,18 +273,16 @@ mod tests {
             asked: asked.clone(),
         };
         let server = async {
-            zbus::connection::Builder::async_io_unix_stream(theirs)
+            zbus::connection::Builder::unix_stream(theirs)
                 .server(zbus::Guid::generate())
-                .unwrap()
                 .p2p()
                 .serve_at("/org/freedesktop/PolicyKit1/Authority", fake)
-                .unwrap()
                 .build()
                 .await
                 .unwrap()
         };
         let client = async {
-            zbus::connection::Builder::async_io_unix_stream(ours)
+            zbus::connection::Builder::unix_stream(ours)
                 .p2p()
                 .build()
                 .await

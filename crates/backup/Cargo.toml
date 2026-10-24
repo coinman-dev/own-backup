@@ -46,7 +46,7 @@ libc = "0.2"
 flate2 = "1"
 # systemd-logind over D-Bus (power_linux): sleep inhibitors, suspend, the
 # scheduled poweroff after a copy, shutdown and session signals.
-zbus = "5"
+zbus = "6"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [
@@ -86,4 +86,4 @@ gpt = { workspace = true }
 
 # power_linux's tests talk to a stand-in logind over a private connection.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-zbus = { version = "5", features = ["p2p"] }
+zbus = { version = "6", features = ["p2p"] }

@@ -39,13 +39,7 @@ use tracing::{info, warn};
 )]
 pub trait Login1Manager {
     /// Take an inhibitor lock; it is held while the returned descriptor is open.
-    fn inhibit(
-        &self,
-        what: &str,
-        who: &str,
-        why: &str,
-        mode: &str,
-    ) -> zbus::Result<zbus::zvariant::OwnedFd>;
+    fn inhibit(&self, what: &str, who: &str, why: &str, mode: &str) -> zbus::Result<zbus::OwnedFd>;
 
     fn suspend(&self, interactive: bool) -> zbus::Result<()>;
 
@@ -61,34 +55,46 @@ pub trait Login1Manager {
     fn session_new(
         &self,
         session_id: String,
-        object_path: zbus::zvariant::OwnedObjectPath,
+        object_path: zbus::OwnedObjectPath,
     ) -> zbus::Result<()>;
 
     #[zbus(signal)]
     fn session_removed(
         &self,
         session_id: String,
-        object_path: zbus::zvariant::OwnedObjectPath,
+        object_path: zbus::OwnedObjectPath,
     ) -> zbus::Result<()>;
 }
 
 /// Who the inhibitor locks name in `systemd-inhibit --list`.
 const WHO: &str = "Own Backup";
 
-type Manager = Login1ManagerProxyBlocking<'static>;
+type Manager = Login1ManagerProxy<'static>;
 
-fn manager() -> zbus::Result<Manager> {
-    let connection = zbus::blocking::Connection::system()?;
-    Login1ManagerProxyBlocking::new(&connection)
+// zbus is async only (6.0 dropped its blocking API). Everything here is
+// called from plain threads — and, for a moment, from Tokio tasks — so each
+// call is one `zbus::block_on` on the calling thread, never one inside
+// another: zbus panics on that. A connection that outlives its call is run
+// by zbus's helper thread until the next one.
+
+async fn manager() -> zbus::Result<Manager> {
+    let connection = zbus::Connection::system().await?;
+    Login1ManagerProxy::new(&connection).await
+}
+
+fn system_manager() -> zbus::Result<Manager> {
+    zbus::block_on(manager())
 }
 
 /// An inhibitor lock: logind holds it while this descriptor is open.
 fn inhibit(what: &str, why: &str, mode: &str) -> zbus::Result<OwnedFd> {
-    inhibit_with(&manager()?, what, why, mode)
+    inhibit_with(&system_manager()?, what, why, mode)
 }
 
 fn inhibit_with(manager: &Manager, what: &str, why: &str, mode: &str) -> zbus::Result<OwnedFd> {
-    Ok(OwnedFd::from(manager.inhibit(what, WHO, why, mode)?))
+    Ok(OwnedFd::from(zbus::block_on(
+        manager.inhibit(what, WHO, why, mode),
+    )?))
 }
 
 /// The machine does not go to sleep while this is alive — neither on its own
@@ -228,14 +234,14 @@ impl Drop for BackgroundIo {
 /// Put the machine to sleep now.
 pub fn sleep_now() -> std::result::Result<(), String> {
     info!("after backup: putting the machine to sleep");
-    manager()
+    system_manager()
         .and_then(|m| sleep_with(&m))
         .map_err(|e| tr!("power_linux.logind_failed", error = e).into_owned())
 }
 
 /// Not interactive: the engine is root, and nobody is there to answer polkit.
 fn sleep_with(manager: &Manager) -> zbus::Result<()> {
-    manager.suspend(false)
+    zbus::block_on(manager.suspend(false))
 }
 
 /// Turn the machine off after `grace_secs`. logind tells everyone signed in,
@@ -243,7 +249,7 @@ fn sleep_with(manager: &Manager) -> zbus::Result<()> {
 pub fn shutdown_in(grace_secs: u32, message: &str) -> std::result::Result<(), String> {
     info!(grace_secs, "after backup: shutting the machine down");
     let manager =
-        manager().map_err(|e| tr!("power_linux.logind_failed", error = e).into_owned())?;
+        system_manager().map_err(|e| tr!("power_linux.logind_failed", error = e).into_owned())?;
     shutdown_with(&manager, std::time::SystemTime::now(), grace_secs, message)
 }
 
@@ -256,11 +262,10 @@ fn shutdown_with(
     let at = shutdown_time_usec(now, grace_secs)
         .ok_or_else(|| tr!("power_linux.clock_before_epoch").into_owned())?;
     // Our words in the announcement; without them it is logind's generic one.
-    if let Err(e) = manager.set_wall_message(message, true) {
+    if let Err(e) = zbus::block_on(manager.set_wall_message(message, true)) {
         warn!(error = %e, "the shutdown notice keeps logind's own text");
     }
-    manager
-        .schedule_shutdown("poweroff", at)
+    zbus::block_on(manager.schedule_shutdown("poweroff", at))
         .map_err(|e| tr!("power_linux.logind_failed", error = e).into_owned())
 }
 
@@ -307,7 +312,7 @@ pub enum LogindEvent {
 /// Follow logind's signals until `on_event` says to stop or the bus goes
 /// away. Blocking: run it on a thread of its own.
 pub fn follow_events(on_event: impl FnMut(LogindEvent) -> bool) -> std::result::Result<(), String> {
-    let manager = manager().map_err(|e| e.to_string())?;
+    let manager = system_manager().map_err(|e| e.to_string())?;
     follow_events_with(&manager, on_event)
 }
 
@@ -315,69 +320,106 @@ fn follow_events_with(
     manager: &Manager,
     mut on_event: impl FnMut(LogindEvent) -> bool,
 ) -> std::result::Result<(), String> {
-    // One stream per signal, merged on this thread through a channel: the
-    // blocking iterators each wait on their own.
+    // The signals are heard on a thread of their own, inside one `block_on`
+    // that polls all three streams; `on_event` runs here, outside it. It
+    // takes logind locks itself (`ShutdownDelay::take`), and a `block_on`
+    // inside another one panics.
     let (tx, rx) = std::sync::mpsc::channel::<LogindEvent>();
-    let shutdown = manager
-        .receive_prepare_for_shutdown()
-        .map_err(|e| e.to_string())?;
-    let new = manager.receive_session_new().map_err(|e| e.to_string())?;
-    let removed = manager
-        .receive_session_removed()
-        .map_err(|e| e.to_string())?;
-    {
-        let tx = tx.clone();
-        std::thread::Builder::new()
-            .name("logind-shutdown".into())
-            .spawn(move || {
-                for signal in shutdown {
-                    let Ok(args) = signal.args() else { continue };
-                    let event = if args.start {
-                        LogindEvent::ShuttingDown
-                    } else {
-                        LogindEvent::ShutdownCancelled
-                    };
-                    if tx.send(event).is_err() {
-                        return;
-                    }
-                }
-            })
-            .map_err(|e| e.to_string())?;
-    }
-    {
-        let tx = tx.clone();
-        std::thread::Builder::new()
-            .name("logind-session-new".into())
-            .spawn(move || {
-                for signal in new {
-                    let Ok(args) = signal.args() else { continue };
-                    if tx.send(LogindEvent::SessionNew(args.session_id)).is_err() {
-                        return;
-                    }
-                }
-            })
-            .map_err(|e| e.to_string())?;
-    }
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<std::result::Result<(), String>>();
+    let manager = manager.clone();
     std::thread::Builder::new()
-        .name("logind-session-removed".into())
-        .spawn(move || {
-            for signal in removed {
-                let Ok(args) = signal.args() else { continue };
-                if tx
-                    .send(LogindEvent::SessionRemoved(args.session_id))
-                    .is_err()
-                {
-                    return;
-                }
-            }
-        })
+        .name("logind-signals".into())
+        .spawn(move || zbus::block_on(hear_signals(manager, tx, ready_tx)))
         .map_err(|e| e.to_string())?;
+    ready_rx
+        .recv()
+        .map_err(|_| "the logind signal thread ended".to_string())??;
     for event in rx {
         if !on_event(event) {
             return Ok(());
         }
     }
     Err("the system bus connection to logind was lost".into())
+}
+
+/// Subscribe to the three signals, say whether that worked, then forward
+/// each one as it arrives until the bus or the receiver goes away. Within one
+/// signal the order is the bus's; across them, a shutdown is looked at first.
+async fn hear_signals(
+    manager: Manager,
+    tx: std::sync::mpsc::Sender<LogindEvent>,
+    ready: std::sync::mpsc::Sender<std::result::Result<(), String>>,
+) {
+    use std::task::Poll;
+    use zbus::export::futures_core::Stream;
+
+    let subscribed = async {
+        Ok::<_, zbus::Error>((
+            manager.receive_prepare_for_shutdown().await?,
+            manager.receive_session_new().await?,
+            manager.receive_session_removed().await?,
+        ))
+    }
+    .await;
+    let (shutdown, new, removed) = match subscribed {
+        Ok(streams) => {
+            let _ = ready.send(Ok(()));
+            streams
+        }
+        Err(e) => {
+            let _ = ready.send(Err(e.to_string()));
+            return;
+        }
+    };
+    let mut shutdown = std::pin::pin!(shutdown);
+    let mut new = std::pin::pin!(new);
+    let mut removed = std::pin::pin!(removed);
+    loop {
+        // `None`: a stream ended — the connection is gone.
+        let next = std::future::poll_fn(|cx| loop {
+            let mut again = false;
+            match shutdown.as_mut().poll_next(cx) {
+                Poll::Ready(Some(signal)) => match signal.args() {
+                    Ok(args) => {
+                        return Poll::Ready(Some(if args.start {
+                            LogindEvent::ShuttingDown
+                        } else {
+                            LogindEvent::ShutdownCancelled
+                        }))
+                    }
+                    Err(_) => again = true,
+                },
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Pending => {}
+            }
+            match new.as_mut().poll_next(cx) {
+                Poll::Ready(Some(signal)) => match signal.args() {
+                    Ok(args) => return Poll::Ready(Some(LogindEvent::SessionNew(args.session_id))),
+                    Err(_) => again = true,
+                },
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Pending => {}
+            }
+            match removed.as_mut().poll_next(cx) {
+                Poll::Ready(Some(signal)) => match signal.args() {
+                    Ok(args) => {
+                        return Poll::Ready(Some(LogindEvent::SessionRemoved(args.session_id)))
+                    }
+                    Err(_) => again = true,
+                },
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Pending => {}
+            }
+            if !again {
+                return Poll::Pending;
+            }
+        })
+        .await;
+        let Some(event) = next else { return };
+        if tx.send(event).is_err() {
+            return;
+        }
+    }
 }
 
 /// A timer that wakes the machine from sleep at the time it is armed for,
@@ -524,7 +566,7 @@ mod tests {
             who: &str,
             why: &str,
             mode: &str,
-        ) -> zbus::fdo::Result<zbus::zvariant::OwnedFd> {
+        ) -> zbus::fdo::Result<zbus::OwnedFd> {
             self.calls
                 .lock()
                 .unwrap()
@@ -559,7 +601,7 @@ mod tests {
     /// A client connection to a [`FakeLogind`], peer to peer.
     fn fake_logind() -> (
         Manager,
-        zbus::blocking::Connection,
+        zbus::Connection,
         std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     ) {
         let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
@@ -567,26 +609,29 @@ mod tests {
         let fake = FakeLogind {
             calls: calls.clone(),
         };
+        // Each side is built in a `block_on` of its own thread (the two
+        // handshakes wait for each other); zbus's helper thread runs both
+        // connections afterwards.
         let server = std::thread::spawn(move || {
-            zbus::blocking::connection::Builder::async_io_unix_stream(theirs)
-                .server(zbus::Guid::generate())
-                .unwrap()
-                .p2p()
-                .serve_at("/org/freedesktop/login1", fake)
-                .unwrap()
-                .build()
-                .unwrap()
+            zbus::block_on(
+                zbus::connection::Builder::unix_stream(theirs)
+                    .server(zbus::Guid::generate())
+                    .p2p()
+                    .serve_at("/org/freedesktop/login1", fake)
+                    .build(),
+            )
+            .unwrap()
         });
-        let client = zbus::blocking::connection::Builder::async_io_unix_stream(ours)
-            .p2p()
-            .build()
-            .unwrap();
+        let manager = zbus::block_on(async {
+            let client = zbus::connection::Builder::unix_stream(ours)
+                .p2p()
+                .build()
+                .await?;
+            Login1ManagerProxy::new(&client).await
+        })
+        .unwrap();
         let server = server.join().unwrap();
-        (
-            Login1ManagerProxyBlocking::new(&client).unwrap(),
-            server,
-            calls,
-        )
+        (manager, server, calls)
     }
 
     #[test]
@@ -630,26 +675,36 @@ mod tests {
         let emitter = std::thread::spawn(move || {
             // Give the follower time to subscribe before anything is sent.
             std::thread::sleep(Duration::from_millis(300));
-            let path = zbus::zvariant::ObjectPath::try_from("/org/freedesktop/login1/session/_33")
-                .unwrap();
-            let emit =
-                |member: &str, body: &dyn Fn(&zbus::blocking::Connection) -> zbus::Result<()>| {
-                    body(&server).unwrap_or_else(|e| panic!("{member}: {e}"));
-                    std::thread::sleep(Duration::from_millis(50));
-                };
+            let path = zbus::ObjectPath::try_from("/org/freedesktop/login1/session/_33").unwrap();
+            let emit = |member: &str, body: &dyn Fn(&zbus::Connection) -> zbus::Result<()>| {
+                body(&server).unwrap_or_else(|e| panic!("{member}: {e}"));
+                std::thread::sleep(Duration::from_millis(50));
+            };
             let iface = "org.freedesktop.login1.Manager";
             let at = "/org/freedesktop/login1";
             emit("SessionNew", &|c| {
-                c.emit_signal(None::<()>, at, iface, "SessionNew", &("3", &path))
+                zbus::block_on(c.emit_signal(None::<()>, at, iface, "SessionNew", &("3", &path)))
             });
             emit("SessionRemoved", &|c| {
-                c.emit_signal(None::<()>, at, iface, "SessionRemoved", &("3", &path))
+                zbus::block_on(c.emit_signal(
+                    None::<()>,
+                    at,
+                    iface,
+                    "SessionRemoved",
+                    &("3", &path),
+                ))
             });
             emit("PrepareForShutdown", &|c| {
-                c.emit_signal(None::<()>, at, iface, "PrepareForShutdown", &(true,))
+                zbus::block_on(c.emit_signal(None::<()>, at, iface, "PrepareForShutdown", &(true,)))
             });
             emit("PrepareForShutdown", &|c| {
-                c.emit_signal(None::<()>, at, iface, "PrepareForShutdown", &(false,))
+                zbus::block_on(c.emit_signal(
+                    None::<()>,
+                    at,
+                    iface,
+                    "PrepareForShutdown",
+                    &(false,),
+                ))
             });
             server
         });
@@ -660,8 +715,8 @@ mod tests {
         })
         .unwrap();
         let _server = emitter.join().unwrap();
-        // Each signal has a thread of its own, so only the order within one
-        // signal is promised; the shutdown pair is one signal.
+        // Only the order within one signal is promised; the shutdown pair is
+        // one signal.
         assert!(
             seen.contains(&LogindEvent::SessionNew("3".into())),
             "{seen:?}"
@@ -689,7 +744,8 @@ mod tests {
     /// the copy runs unprotected and the log says so.
     #[test]
     fn without_a_reachable_logind_the_locks_are_simply_absent() {
-        let logind_here = manager().is_ok_and(|m| m.inner().introspect().is_ok());
+        let logind_here =
+            zbus::block_on(async { manager().await?.inner().introspect().await }).is_ok();
         if logind_here {
             return; // a real logind is here; this test is about its absence
         }

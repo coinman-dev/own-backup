@@ -1112,12 +1112,25 @@ mod tests {
     /// Unmount a mount this user made, as FUSE lets a user (`umount2` is
     /// root's), and wait for its ntfs-3g to have written everything and exited.
     fn user_unmount(m: &mut Ntfs3gMount) {
-        let out = Command::new("fusermount3")
-            .arg("-u")
-            .arg(&m.dir)
-            .output()
-            .or_else(|_| Command::new("fusermount").arg("-u").arg(&m.dir).output())
-            .unwrap();
+        let unmount = || {
+            Command::new("fusermount3")
+                .arg("-u")
+                .arg(&m.dir)
+                .output()
+                .or_else(|_| Command::new("fusermount").arg("-u").arg(&m.dir).output())
+                .unwrap()
+        };
+        // Under the whole suite's load the mount was still "busy" for a
+        // moment after the test had closed its files (2026-10-24, one run in
+        // the release gate), and the test failed on the unmount alone.
+        let mut out = unmount();
+        for _ in 0..50 {
+            if out.status.success() || !String::from_utf8_lossy(&out.stderr).contains("busy") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            out = unmount();
+        }
         assert!(
             out.status.success(),
             "{}",
