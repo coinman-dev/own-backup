@@ -1,12 +1,14 @@
 //! CLI logging, mirroring the service (`service/src/main.rs`): everything from
 //! `info` up goes to `Logs\own-backup-cli-YYYY-MM-DD.log` beside the exe
-//! (fallbacks: data dir, temp; no ANSI), while the console keeps the old quiet
-//! `warn` default. `RUST_LOG` overrides both filters. The file is what survives
-//! an elevated relaunch closing its console window.
+//! (fallbacks: data dir, temp; no ANSI; on Linux `/var/log/own-backup` for
+//! root, else the user's `~/.local/state/own-backup/Logs`), while the console
+//! keeps the old quiet `warn` default. `RUST_LOG` overrides both filters. The
+//! file is what survives an elevated relaunch closing its console window.
 //!
 //! One file per day and thirty days kept — see [`own_backup_common::log_files`]
 //! for why the date is in the name. The sweeping is the service's job: it is
-//! the one process that is always there.
+//! the one process that is always there (a Linux user's own folder is swept
+//! when the folder is chosen).
 
 use std::path::PathBuf;
 

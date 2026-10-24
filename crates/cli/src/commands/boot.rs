@@ -103,9 +103,10 @@ pub struct CreateArgs {
     /// Название для меню
     #[arg(long)]
     pub name: String,
-    /// Номер диска, как его печатает `list-disks`
+    /// Диск: в Windows — номер, как его печатает `list-disks`; в Linux —
+    /// устройство целого диска, как его печатает `boot loaders` (/dev/nvme0n1)
     #[arg(long)]
-    pub disk: u32,
+    pub disk: String,
     /// Номер раздела в разметке
     #[arg(long)]
     pub partition: u32,
@@ -189,7 +190,59 @@ fn loaders(args: LoadersArgs) -> own_backup_common::Result<()> {
 
     let cfg = efivars_win::read_config()?;
     let esps = esp_scan_win::scan(&cfg.entries)?;
+    let views: Vec<EspView> = esps
+        .iter()
+        .map(|e| EspView {
+            disk: serde_json::json!(e.disk),
+            partition: e.partition,
+            guid: e.partition_guid.clone(),
+            size_bytes: e.size_bytes,
+            unreadable: e.unreadable.clone(),
+            loaders: e
+                .loaders
+                .iter()
+                .map(|l| LoaderView {
+                    path: l.path.clone(),
+                    size: l.size,
+                    kind: l.kind,
+                    fallback: l.fallback,
+                    role: l.role,
+                    named_by: l.named_by,
+                })
+                .collect(),
+        })
+        .collect();
+    print_loaders(&views, &args)
+}
 
+/// One EFI System Partition as both systems print it. `disk` is a number on
+/// Windows and a device path on Linux.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+struct EspView {
+    disk: serde_json::Value,
+    partition: u32,
+    guid: String,
+    size_bytes: u64,
+    unreadable: Option<String>,
+    loaders: Vec<LoaderView>,
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+struct LoaderView {
+    path: String,
+    size: u64,
+    kind: &'static str,
+    fallback: bool,
+    role: own_backup_backup::esp_scan::Role,
+    named_by: Option<u16>,
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn print_loaders(esps: &[EspView], args: &LoadersArgs) -> own_backup_common::Result<()> {
+    let disk_text = |d: &serde_json::Value| match d {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
     if args.json {
         let out: Vec<_> = esps
             .iter()
@@ -197,7 +250,7 @@ fn loaders(args: LoadersArgs) -> own_backup_common::Result<()> {
                 serde_json::json!({
                     "disk": e.disk,
                     "partition": e.partition,
-                    "guid": e.partition_guid,
+                    "guid": e.guid,
                     "size_bytes": e.size_bytes,
                     "unreadable": e.unreadable,
                     "loaders": e.loaders.iter().map(|l| serde_json::json!({
@@ -219,13 +272,13 @@ fn loaders(args: LoadersArgs) -> own_backup_common::Result<()> {
     }
 
     let mut orphans = 0usize;
-    for esp in &esps {
+    for esp in esps {
         println!(
             "Раздел EFI: диск {} раздел {} · {:.0} МиБ · {}",
-            esp.disk,
+            disk_text(&esp.disk),
             esp.partition,
             esp.size_bytes as f64 / 1048576.0,
-            esp.partition_guid
+            esp.guid
         );
         if let Some(why) = &esp.unreadable {
             println!("  {why}");
@@ -279,7 +332,7 @@ fn loaders(args: LoadersArgs) -> own_backup_common::Result<()> {
             "Загрузчиков без записи: {orphans}. Файлы на месте, но ни одна запись на них не \
              указывает — в меню платы их нет."
         );
-        println!("Добавить такой: own-backup-cli boot create --name НАЗВАНИЕ --disk N --partition M --file ПУТЬ");
+        println!("Добавить такой: own-backup-cli boot create --name НАЗВАНИЕ --disk ДИСК --partition M --file ПУТЬ");
         if !args.all {
             println!("Показать вообще все файлы: добавьте --all");
         }
@@ -289,7 +342,7 @@ fn loaders(args: LoadersArgs) -> own_backup_common::Result<()> {
 
 /// `000F`, `f`, `0x000F` — all the same entry. The number is shown in hex, so
 /// it is read in hex; a decimal reading would silently pick a different entry.
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn parse_entry(s: &str) -> own_backup_common::Result<u16> {
     let t = s.trim().trim_start_matches("0x").trim_start_matches("0X");
     u16::from_str_radix(t, 16).map_err(|_| {
@@ -436,7 +489,13 @@ fn create(args: CreateArgs) -> own_backup_common::Result<()> {
     use own_backup_backup::{efivars_win, gpt_reader};
     use own_backup_common::OwnBackupError;
 
-    let layout = gpt_reader::read_disk_layout(args.disk)?;
+    let disk: u32 = args.disk.trim().parse().map_err(|_| {
+        OwnBackupError::Config(format!(
+            "«{}» не похоже на номер диска — нужен номер, как его печатает `list-disks`",
+            args.disk
+        ))
+    })?;
+    let layout = gpt_reader::read_disk_layout(disk)?;
     let part = layout
         .partitions
         .iter()
@@ -444,7 +503,7 @@ fn create(args: CreateArgs) -> own_backup_common::Result<()> {
         .ok_or_else(|| {
             OwnBackupError::Config(format!(
                 "на диске {} нет раздела {}",
-                args.disk, args.partition
+                disk, args.partition
             ))
         })?;
     let hd = HardDrive::from_gpt(part.index, part.first_lba, part.last_lba, &part.part_guid)
@@ -463,7 +522,7 @@ fn create(args: CreateArgs) -> own_backup_common::Result<()> {
     println!("Новая запись «{}»", args.name);
     println!(
         "  диск {} раздел {} · {}",
-        args.disk, part.index, part.part_guid
+        disk, part.index, part.part_guid
     );
     println!("  загрузчик: {file}");
     println!("  есть ли он там на самом деле, эта команда не проверяет: раздел EFI Windows не показывает.");
@@ -646,7 +705,53 @@ fn list(args: ListArgs) -> own_backup_common::Result<()> {
     use own_backup_backup::efivars_win;
 
     let cfg = efivars_win::read_config()?;
+    print_list(
+        &ConfigView {
+            entries: cfg
+                .entries
+                .iter()
+                .map(|e| EntryView {
+                    number: e.number,
+                    option: &e.option,
+                    order_index: e.order_index,
+                    is_current: e.is_current,
+                    is_next: e.is_next,
+                })
+                .collect(),
+            order: &cfg.order,
+            current: cfg.current,
+            next: cfg.next,
+            timeout: cfg.timeout,
+            found_by: cfg.found_by.to_string(),
+            dangling: &cfg.dangling,
+        },
+        &args,
+    )
+}
 
+/// The firmware's boot configuration as both systems print it.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+struct ConfigView<'a> {
+    entries: Vec<EntryView<'a>>,
+    order: &'a [u16],
+    current: Option<u16>,
+    next: Option<u16>,
+    timeout: Option<u16>,
+    found_by: String,
+    dangling: &'a [u16],
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+struct EntryView<'a> {
+    number: u16,
+    option: &'a own_backup_backup::efivars::LoadOption,
+    order_index: Option<usize>,
+    is_current: bool,
+    is_next: bool,
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn print_list(cfg: &ConfigView, args: &ListArgs) -> own_backup_common::Result<()> {
     if args.json {
         let entries: Vec<_> = cfg
             .entries
@@ -660,7 +765,7 @@ fn list(args: ListArgs) -> own_backup_common::Result<()> {
                     "hidden": e.option.is_hidden(),
                     "current": e.is_current,
                     "next": e.is_next,
-                    "device_entry": e.is_device_entry(),
+                    "device_entry": e.option.file_path().is_none(),
                     "file": e.option.file_path(),
                     "partition": e.option.hard_drive().map(|h| serde_json::json!({
                         "number": h.partition_number,
@@ -786,7 +891,7 @@ fn list(args: ListArgs) -> own_backup_common::Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn trim(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         return s.to_string();
@@ -794,14 +899,348 @@ fn trim(s: &str, n: usize) -> String {
     s.chars().take(n.saturating_sub(1)).collect::<String>() + "…"
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-#[cfg(not(target_os = "windows"))]
+// ---- Linux: efivarfs ---------------------------------------------------------
+//
+// The same commands over `efivars_linux`. Every change goes through
+// `Efivarfs::apply_action`, which takes the safety copy and guards the entry
+// this machine booted from — the same door the service's boot page uses.
+// Writing needs root; reading the entries does not.
+
+#[cfg(target_os = "linux")]
+pub async fn run(args: BootArgs) -> own_backup_common::Result<()> {
+    use own_backup_backup::efivars_linux::Action;
+    match args.action {
+        BootAction::List(a) => linux::list(a),
+        BootAction::Export(a) => linux::export(a),
+        BootAction::Import(a) => linux::import(a),
+        BootAction::Probe => linux::probe(),
+        BootAction::Loaders(a) => linux::loaders(a),
+        BootAction::Rename(a) => linux::change(Action::Rename {
+            entry: parse_entry(&a.entry)?,
+            name: a.name,
+        }),
+        BootAction::Enable(a) => linux::change(Action::SetActive {
+            entry: parse_entry(&a.entry)?,
+            on: true,
+            force: a.force,
+        }),
+        BootAction::Disable(a) => linux::change(Action::SetActive {
+            entry: parse_entry(&a.entry)?,
+            on: false,
+            force: a.force,
+        }),
+        BootAction::Move(a) => linux::move_entry(a),
+        BootAction::Delete(a) => linux::change(Action::Delete {
+            entry: parse_entry(&a.entry)?,
+            force: a.force,
+        }),
+        BootAction::Create(a) => linux::create(a),
+        BootAction::Next(a) => linux::change(Action::BootNext {
+            entry: if a.clear {
+                None
+            } else {
+                Some(parse_entry(a.entry.as_deref().ok_or_else(|| {
+                    own_backup_common::OwnBackupError::Config(
+                        "скажите номер записи или --clear".into(),
+                    )
+                })?)?)
+            },
+        }),
+        BootAction::Timeout(a) => linux::change(Action::Timeout { secs: a.secs }),
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use super::*;
+    use own_backup_backup::efivars_linux::{safety_copy_dir, Action, Efivarfs};
+    use own_backup_common::OwnBackupError;
+
+    /// The service's data directory (its published one, when it runs with
+    /// another `--data-dir`): the safety copies go where the boot page puts
+    /// them.
+    fn copy_dir() -> (std::path::PathBuf, bool) {
+        let data = own_backup_common::service_data_dir::published()
+            .unwrap_or_else(|| own_backup_common::config::AppConfig::default().data_dir);
+        safety_copy_dir(&data)
+    }
+
+    fn not_uefi() -> own_backup_common::Result<()> {
+        println!("Эта машина загружается через обычный BIOS — записей UEFI у неё нет.");
+        Ok(())
+    }
+
+    pub fn list(args: ListArgs) -> own_backup_common::Result<()> {
+        let efi = Efivarfs::default();
+        if !efi.is_uefi() {
+            return not_uefi();
+        }
+        let cfg = efi.read_config()?;
+        print_list(
+            &ConfigView {
+                entries: cfg
+                    .entries
+                    .iter()
+                    .map(|e| EntryView {
+                        number: e.number,
+                        option: &e.option,
+                        order_index: e.order_index,
+                        is_current: e.is_current,
+                        is_next: e.is_next,
+                    })
+                    .collect(),
+                order: &cfg.order,
+                current: cfg.current,
+                next: cfg.next,
+                timeout: cfg.timeout,
+                found_by: "efivarfs".into(),
+                dangling: &cfg.dangling,
+            },
+            &args,
+        )
+    }
+
+    pub fn loaders(args: LoadersArgs) -> own_backup_common::Result<()> {
+        let efi = Efivarfs::default();
+        if !efi.is_uefi() {
+            return not_uefi();
+        }
+        let cfg = efi.read_config()?;
+        let esps = own_backup_backup::esp_scan_linux::scan(&cfg.entries)?;
+        let views: Vec<EspView> = esps
+            .into_iter()
+            .map(|e| EspView {
+                disk: serde_json::json!(e.disk),
+                partition: e.partition,
+                guid: e.partition_guid,
+                size_bytes: e.size_bytes,
+                unreadable: e.unreadable,
+                loaders: e
+                    .loaders
+                    .into_iter()
+                    .map(|l| LoaderView {
+                        path: l.found.path,
+                        size: l.found.size,
+                        kind: l.found.kind,
+                        fallback: l.found.fallback,
+                        role: l.found.role,
+                        named_by: l.named_by,
+                    })
+                    .collect(),
+            })
+            .collect();
+        print_loaders(&views, &args)
+    }
+
+    /// One change, with the safety copy and the guard of `apply_action`.
+    pub fn change(action: Action) -> own_backup_common::Result<()> {
+        let (dir, durable) = copy_dir();
+        let done = Efivarfs::default().apply_action(action, &dir, durable)?;
+        println!("Прежнее состояние сохранено: {}", done.safety_copy.path.display());
+        if !done.safety_copy.durable {
+            println!(
+                "ВНИМАНИЕ: это временный диск носителя — копия не переживёт перезагрузку. \
+                 Сохраните её сами, если она может понадобиться."
+            );
+        }
+        println!("{}", done.message);
+        Ok(())
+    }
+
+    pub fn move_entry(args: MoveArgs) -> own_backup_common::Result<()> {
+        let entry = parse_entry(&args.entry)?;
+        let to = if args.first {
+            0
+        } else if args.last {
+            Efivarfs::default().read_config()?.order.len()
+        } else if let Some(t) = args.to {
+            t.saturating_sub(1)
+        } else {
+            return Err(OwnBackupError::Config(
+                "скажите куда: --first, --last или --to МЕСТО".into(),
+            ));
+        };
+        change(Action::Move { entry, to })
+    }
+
+    pub fn create(args: CreateArgs) -> own_backup_common::Result<()> {
+        use own_backup_backup::efivars::HardDrive;
+        let disk = args.disk.trim();
+        let name = disk.strip_prefix("/dev/").unwrap_or_default();
+        let sys = std::path::Path::new("/sys/class/block");
+        if name.is_empty()
+            || name.contains('/')
+            || !sys.join(name).exists()
+            || own_backup_common::linux_block::is_partition(sys, name)
+        {
+            return Err(OwnBackupError::Config(format!(
+                "«{disk}» — не целый диск: нужно устройство диска, как его печатает \
+                 `boot loaders` (например /dev/nvme0n1)"
+            )));
+        }
+        let layout = own_backup_backup::esp_scan_linux::read_layout(disk)?;
+        let part = layout
+            .partitions
+            .iter()
+            .find(|p| p.index == args.partition)
+            .ok_or_else(|| {
+                OwnBackupError::Config(format!("на диске {disk} нет раздела {}", args.partition))
+            })?;
+        if !part
+            .type_guid
+            .eq_ignore_ascii_case(own_backup_common::linux_block::ESP_TYPE_GUID)
+        {
+            return Err(OwnBackupError::Config(format!(
+                "раздел {} диска {disk} — не раздел EFI; прошивка с него не загрузит",
+                args.partition
+            )));
+        }
+        let hd = HardDrive::from_gpt(part.index, part.first_lba, part.last_lba, &part.part_guid)
+            .ok_or_else(|| {
+                OwnBackupError::Config(format!("не разобрать GUID раздела: {}", part.part_guid))
+            })?;
+        println!("Новая запись «{}»", args.name);
+        println!("  диск {disk} раздел {} · {}", part.index, part.part_guid);
+        change(Action::Create {
+            name: args.name,
+            hd,
+            file: args.file,
+            position: args.position.map(|p| p.saturating_sub(1)),
+        })
+    }
+
+    pub fn export(args: FileArgs) -> own_backup_common::Result<()> {
+        let machine =
+            own_backup_common::media_mode::meaningful_machine_name().unwrap_or_default();
+        let backup = Efivarfs::default().export(&machine)?;
+        let path = std::path::PathBuf::from(&args.file);
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        std::fs::write(&path, backup.to_json()?)?;
+        println!("Копия записей загрузки: {}", path.display());
+        println!("  машина:     {}", backup.machine);
+        println!("  снято:      {}", backup.taken_at);
+        println!("  переменных: {}", backup.variables.len());
+        for (n, opt) in backup.entries() {
+            println!(
+                "    {n:04X}  {}{}",
+                opt.description,
+                opt.file_path()
+                    .map(|f| format!("  →  {f}"))
+                    .unwrap_or_default()
+            );
+        }
+        println!();
+        println!(
+            "Записи загрузки живут в памяти материнской платы, а не на диске, и копия разделов их не спасает."
+        );
+        Ok(())
+    }
+
+    pub fn import(args: ImportArgs) -> own_backup_common::Result<()> {
+        use own_backup_backup::efivars::BootBackup;
+        use own_backup_backup::efivars_linux::{partition_guids_here, Change};
+
+        let efi = Efivarfs::default();
+        let backup = BootBackup::load(&std::fs::read_to_string(&args.file)?)?;
+        let here = own_backup_common::media_mode::meaningful_machine_name().unwrap_or_default();
+        println!(
+            "Копия снята: {} на машине «{}»",
+            backup.taken_at, backup.machine
+        );
+        if !here.is_empty() && !backup.machine.eq_ignore_ascii_case(&here) {
+            println!(
+                "ВНИМАНИЕ: копия с другой машины («{}», а здесь «{here}»). Записи на разделы, \
+                 которых здесь нет, восстановлены не будут.",
+                backup.machine
+            );
+        }
+        let plan = efi.plan_import(&backup)?;
+        let differs = plan.iter().filter(|(_, c)| *c != Change::Same).count();
+        println!();
+        println!("Что сделает восстановление:");
+        for (name, change) in &plan {
+            let what = match change {
+                Change::Same => "уже такое же, трогать не будем",
+                Change::Differs => "БУДЕТ ПЕРЕЗАПИСАНО",
+                Change::Absent => "будет создано заново",
+            };
+            println!("  {name:<12} {what}");
+        }
+        if differs == 0 {
+            println!();
+            println!("Разницы нет — восстанавливать нечего.");
+            return Ok(());
+        }
+        if !args.apply {
+            println!();
+            println!("Это только показ. Чтобы записать, повторите с --apply.");
+            return Ok(());
+        }
+        if !args.no_safety_copy {
+            let (dir, durable) = copy_dir();
+            let copy = efi.safety_copy(&dir, durable).map_err(|e| {
+                OwnBackupError::Config(format!(
+                    "не удалось сохранить копию записей загрузки ({e}) — без неё менять их нельзя"
+                ))
+            })?;
+            println!();
+            println!("Прежнее состояние сохранено: {}", copy.path.display());
+        }
+        let parts = partition_guids_here(std::path::Path::new("/sys/class/block"));
+        let done = efi.apply_import(&backup, &parts, true)?;
+        println!("Записано переменных: {}", done.written);
+        if done.skipped_removable > 0 {
+            println!(
+                "Пропущено записей съёмных устройств: {}",
+                done.skipped_removable
+            );
+        }
+        for name in &done.skipped_orphaned {
+            println!("Пропущена {name}: её раздела на этой машине нет");
+        }
+        if let Some(n) = done.kept_current {
+            println!("Запись {n:04X}, с которой машина загружена сейчас, оставлена как есть.");
+        }
+        println!("Проверьте меню платы при следующей загрузке.");
+        Ok(())
+    }
+
+    /// Writes `Timeout` back with the value it has: nothing changes when the
+    /// firmware takes it.
+    pub fn probe() -> own_backup_common::Result<()> {
+        let efi = Efivarfs::default();
+        if !efi.is_uefi() {
+            return not_uefi();
+        }
+        let Some(secs) = efi.read_config()?.timeout else {
+            println!("Проверить не на чем: у прошивки нет переменной Timeout.");
+            return Ok(());
+        };
+        match efi.set_timeout(secs) {
+            Ok(()) if efi.read_config()?.timeout == Some(secs) => {
+                println!("Прошивка принимает запись — править записи загрузки можно.")
+            }
+            Ok(()) => println!(
+                "Прошивка приняла запись, но значение изменилось — так быть не должно."
+            ),
+            Err(e) => println!("Прошивка отказала в записи: {e}"),
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub async fn run(_args: BootArgs) -> own_backup_common::Result<()> {
     Err(own_backup_common::OwnBackupError::Config(
-        "Записи загрузки UEFI читаются только на Windows.".into(),
+        "Записи загрузки UEFI читаются только на Windows и в Linux.".into(),
     ))
 }

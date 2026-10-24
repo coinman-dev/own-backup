@@ -1,0 +1,66 @@
+#!/bin/sh
+# live-build configuration of the Own Backup boot medium (PLAN §6, stage 6,
+# decision 11): Debian 13 "trixie", amd64, a hybrid ISO that boots
+#   - UEFI with Secure Boot through Debian's signed shim, GRUB and kernel
+#     (--uefi-secure-boot enable puts shim-signed and grub-efi-amd64-signed
+#     on the EFI image; linux-image-amd64 is signed by Debian);
+#   - BIOS through ISOLINUX, and from a USB stick through the isohybrid MBR.
+# Every boot entry carries `own-backup.media`: that word on the kernel command
+# line is what puts the engine, the window and the CLI into media mode
+# (crates/common/src/media_mode.rs). Nothing else marks the medium.
+#
+# Run by `lb config` in a copy of this directory made by build-media.sh
+# (packaging/linux/media; installed as /usr/libexec/own-backup/build-linux-media),
+# which also sets the mirror and the package of ours (config/packages.chroot).
+# Not meant to be run in the repository.
+#
+# Why live-build and not mkosi: mkosi has no ISO output, and the medium has
+# to be an ISO that is also a bootable disk (CD, VM, `dd` to a stick, the
+# window's own stick writer) — exactly what live-build's iso-hybrid is.
+set -e
+
+mirror="${OBK_MEDIA_MIRROR:-http://deb.debian.org/debian/}"
+security="${OBK_MEDIA_SECURITY_MIRROR:-http://security.debian.org/debian-security/}"
+
+# Shared by every entry. `live-config.noautologin`: no autologin on the text
+# consoles — tty1 is the window's (own-backup-kiosk.service), the others give
+# a login prompt for repairs by hand. `quiet loglevel=3`: the kernel's chatter
+# stays in the journal, which goes onto the stick (own-backup-media-log).
+append="boot=live components quiet loglevel=3 own-backup.media \
+live-config.noautologin live-config.hostname=own-backup \
+live-config.locales=ru_RU.UTF-8,en_US.UTF-8 \
+live-config.keyboard-layouts=us,ru live-config.keyboard-options=grp:alt_shift_toggle"
+
+lb config noauto \
+    --mode debian \
+    --distribution trixie \
+    --architecture amd64 \
+    --archive-areas "main non-free-firmware" \
+    --parent-archive-areas "main non-free-firmware" \
+    --mirror-bootstrap "$mirror" \
+    --mirror-chroot "$mirror" \
+    --mirror-binary "$mirror" \
+    --mirror-chroot-security "$security" \
+    --mirror-binary-security "$security" \
+    --security true \
+    --updates true \
+    --apt-recommends false \
+    --apt-indices false \
+    --cache-packages true \
+    --debian-installer none \
+    --firmware-binary false \
+    --firmware-chroot false \
+    --linux-flavours amd64 \
+    --memtest none \
+    --binary-images iso-hybrid \
+    --bootloaders "grub-efi,syslinux" \
+    --uefi-secure-boot enable \
+    --iso-application "Own Backup" \
+    --iso-publisher "Own Backup" \
+    --iso-volume "OWNBACKUP" \
+    --image-name "own-backup-media" \
+    --checksums sha256 \
+    --zsync false \
+    --bootappend-live "$append" \
+    --bootappend-live-failsafe "$append nomodeset" \
+    "${@}"

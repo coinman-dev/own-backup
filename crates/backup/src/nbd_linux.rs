@@ -13,8 +13,11 @@
 //! request:  magic 0x25609513 | type u32 | handle u64 | from u64 | len u32
 //! reply:    magic 0x67446698 | error u32 | handle u64 [ + data for READ ]
 //! ```
-//! (all integers big-endian). Only READ/FLUSH/DISC are honoured — the device
-//! is attached with `NBD_FLAG_READ_ONLY`, writes are refused with EPERM.
+//! (all integers big-endian). A mount gets a read-only device: it is attached
+//! with `NBD_FLAG_READ_ONLY` and writes are refused with EPERM. The removal of
+//! excluded NTFS names (`ntfs_names_linux`) attaches a scratch overlay over a
+//! finished image instead ([`NbdAttachment::attach_rw`]): there WRITE lands in
+//! the overlay — never in the image — and FLUSH is answered.
 
 #![cfg(target_os = "linux")]
 
@@ -39,9 +42,12 @@ const NBD_CLEAR_SOCK: libc::c_ulong = 0xab04;
 const NBD_CLEAR_QUE: libc::c_ulong = 0xab05;
 const NBD_DISCONNECT: libc::c_ulong = 0xab08;
 const NBD_SET_FLAGS: libc::c_ulong = 0xab0a;
+// _IO(0x12, 97): write back and drop the block device's page cache.
+const BLKFLSBUF: libc::c_ulong = 0x1261;
 
 const NBD_FLAG_HAS_FLAGS: libc::c_ulong = 1 << 0;
 const NBD_FLAG_READ_ONLY: libc::c_ulong = 1 << 1;
+const NBD_FLAG_SEND_FLUSH: libc::c_ulong = 1 << 2;
 
 const NBD_REQUEST_MAGIC: u32 = 0x2560_9513;
 const NBD_REPLY_MAGIC: u32 = 0x6744_6698;
@@ -57,6 +63,53 @@ const MAX_REQUEST_LEN: u32 = 64 * 1024 * 1024;
 /// What the NBD server needs from an image — the shared [`BlockSource`]
 /// (same providers back the Windows iSCSI target).
 pub use crate::block_source::BlockSource as NbdSource;
+use crate::block_source::WritableBlockSource;
+
+/// What a device is served from: an image, read-only, or a scratch overlay a
+/// filesystem driver may write into.
+enum Served {
+    ReadOnly(Box<dyn NbdSource>),
+    Writable(Box<dyn WritableBlockSource>),
+}
+
+impl Served {
+    fn target(&mut self) -> Target<'_> {
+        match self {
+            Served::ReadOnly(s) => Target::ReadOnly(s.as_mut()),
+            Served::Writable(s) => Target::Writable(s.as_mut()),
+        }
+    }
+}
+
+/// [`Served`], borrowed by the request loop.
+enum Target<'a> {
+    ReadOnly(&'a mut dyn NbdSource),
+    Writable(&'a mut dyn WritableBlockSource),
+}
+
+impl Target<'_> {
+    fn size(&self) -> u64 {
+        match self {
+            Target::ReadOnly(s) => s.size(),
+            Target::Writable(s) => s.size(),
+        }
+    }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        match self {
+            Target::ReadOnly(s) => s.read_at(offset, buf),
+            Target::Writable(s) => s.read_at(offset, buf),
+        }
+    }
+
+    /// `None`: the device is read-only.
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> Option<Result<()>> {
+        match self {
+            Target::ReadOnly(_) => None,
+            Target::Writable(s) => Some(s.write_at(offset, data)),
+        }
+    }
+}
 
 fn ioctl(file: &File, cmd: libc::c_ulong, arg: libc::c_ulong, what: &str) -> Result<()> {
     // SAFETY: `file` is a valid open descriptor; NBD ioctls take a plain
@@ -79,14 +132,40 @@ pub struct NbdAttachment {
     nbd_file: File,
     doit_thread: Option<JoinHandle<()>>,
     serve_thread: Option<JoinHandle<()>>,
+    /// Keeps udisks, LVM, md and systemd off the device for as long as it is
+    /// served: a backup of this machine's own volumes carries their UUIDs
+    /// (`udev_hold_linux`). Released after the device is.
+    _hold: Option<crate::udev_hold_linux::UdevHold>,
 }
 
 impl NbdAttachment {
     /// Attach `source` read-only to the first free `/dev/nbdX`.
     pub fn attach(source: Box<dyn NbdSource>) -> Result<Self> {
+        Self::attach_served(Served::ReadOnly(source))
+    }
+
+    /// Attach `source` writable: the kernel's writes go to `source` (a scratch
+    /// overlay, never an image itself) and its flushes are answered.
+    pub fn attach_rw(source: Box<dyn WritableBlockSource>) -> Result<Self> {
+        Self::attach_served(Served::Writable(source))
+    }
+
+    fn attach_served(source: Served) -> Result<Self> {
         ensure_nbd_module()?;
+        let flags = match source {
+            Served::ReadOnly(_) => NBD_FLAG_HAS_FLAGS | NBD_FLAG_READ_ONLY,
+            Served::Writable(_) => NBD_FLAG_HAS_FLAGS | NBD_FLAG_SEND_FLUSH,
+        };
         let (device, nbd_file) = find_free_device()?;
-        let size = source.size();
+        let size = match &source {
+            Served::ReadOnly(s) => s.size(),
+            Served::Writable(s) => s.size(),
+        };
+        // Before the device has any content: udev probes it the moment the
+        // kernel sees the size.
+        let hold = udev_hold(&device, matches!(source, Served::Writable(_)), |name| {
+            crate::udev_hold_linux::UdevHold::install(&[name])
+        })?;
 
         let (kernel_side, user_side) =
             UnixStream::pair().map_err(|e| OwnBackupError::Device(format!("socketpair: {e}")))?;
@@ -98,24 +177,20 @@ impl NbdAttachment {
             size as libc::c_ulong,
             "NBD_SET_SIZE",
         )?;
-        ioctl(
-            &nbd_file,
-            NBD_SET_FLAGS,
-            NBD_FLAG_HAS_FLAGS | NBD_FLAG_READ_ONLY,
-            "NBD_SET_FLAGS",
-        )?;
+        ioctl(&nbd_file, NBD_SET_FLAGS, flags, "NBD_SET_FLAGS")?;
+        // NBD_DO_IT blocks for the whole lifetime of the attachment and
+        // returns on disconnect — it needs its own thread and its own handle.
+        let doit_file = nbd_file
+            .try_clone()
+            .map_err(|e| OwnBackupError::Device(format!("dup nbd fd: {e}")))?;
         ioctl(
             &nbd_file,
             NBD_SET_SOCK,
             kernel_side.as_raw_fd() as libc::c_ulong,
             "NBD_SET_SOCK",
         )?;
-
-        // NBD_DO_IT blocks for the whole lifetime of the attachment and
-        // returns on disconnect — it needs its own thread and its own handle.
-        let doit_file = nbd_file
-            .try_clone()
-            .map_err(|e| OwnBackupError::Device(format!("dup nbd fd: {e}")))?;
+        // From here the kernel holds the socket: a failure gives the device
+        // back before it is reported.
         let device_for_log = device.clone();
         let doit_thread = std::thread::Builder::new()
             .name("nbd-doit".into())
@@ -129,18 +204,32 @@ impl NbdAttachment {
                 let _ = unsafe { libc::ioctl(doit_file.as_raw_fd(), NBD_CLEAR_QUE as _, 0) };
                 let _ = unsafe { libc::ioctl(doit_file.as_raw_fd(), NBD_CLEAR_SOCK as _, 0) };
             })
-            .map_err(|e| OwnBackupError::Device(format!("spawn nbd-doit: {e}")))?;
+            .map_err(|e| {
+                // NBD_DO_IT never ran: nothing waits on the socket to end.
+                let _ = ioctl(&nbd_file, NBD_CLEAR_SOCK, 0, "NBD_CLEAR_SOCK");
+                OwnBackupError::Device(format!("spawn nbd-doit: {e}"))
+            })?;
 
-        let serve_thread = std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("nbd-serve".into())
             .spawn(move || {
                 let mut stream = user_side;
                 let mut source = source;
-                if let Err(e) = serve_requests(&mut stream, source.as_mut()) {
+                if let Err(e) = serve(&mut stream, source.target()) {
                     warn!(error = %e, "NBD serve loop ended with an error");
                 }
-            })
-            .map_err(|e| OwnBackupError::Device(format!("spawn nbd-serve: {e}")))?;
+            });
+        let serve_thread = match spawned {
+            Ok(t) => t,
+            Err(e) => {
+                // NBD_DO_IT is running with nobody to answer it (our side of
+                // the socket went with the closure): disconnect, and let its
+                // thread clear the socket on the way out.
+                let _ = ioctl(&nbd_file, NBD_DISCONNECT, 0, "NBD_DISCONNECT");
+                let _ = doit_thread.join();
+                return Err(OwnBackupError::Device(format!("spawn nbd-serve: {e}")));
+            }
+        };
 
         // The device is usable once the kernel reports the size we set.
         let sys_size = format!("/sys/block/{}/size", device.trim_start_matches("/dev/"));
@@ -166,7 +255,21 @@ impl NbdAttachment {
             nbd_file,
             doit_thread: Some(doit_thread),
             serve_thread: Some(serve_thread),
+            _hold: hold,
         })
+    }
+
+    /// Write back whatever the kernel still caches for the device and drop
+    /// the cache: before a writable device is let go, every write a driver
+    /// made through it must have reached the source. `fsync` on a block
+    /// device writes its dirty pages (and sends FLUSH); a read-only open keeps
+    /// udev's write-close watch quiet.
+    pub fn flush(&self) -> Result<()> {
+        let dev = File::open(&self.device)
+            .map_err(|e| OwnBackupError::Device(format!("open {}: {e}", self.device)))?;
+        dev.sync_all()
+            .map_err(|e| OwnBackupError::Device(format!("fsync {}: {e}", self.device)))?;
+        ioctl(&dev, BLKFLSBUF, 0, "BLKFLSBUF")
     }
 
     /// Disconnect the device and join the serving threads.
@@ -189,6 +292,27 @@ impl Drop for NbdAttachment {
         // through detach(). A second DISCONNECT on a dead device just errors.
         if self.doit_thread.is_some() {
             let _ = unsafe { libc::ioctl(self.nbd_file.as_raw_fd(), NBD_DISCONNECT as _, 0) };
+        }
+    }
+}
+
+/// The udev hold for `device` (`udev_hold_linux`), `install`ed. Without one
+/// a read-only device is still served — a warning; a writable one is not:
+/// what a probe or an auto-assembly writes would land in the overlay, so the
+/// attach fails before anything was written.
+fn udev_hold<H>(
+    device: &str,
+    writable: bool,
+    install: impl FnOnce(&str) -> Result<H>,
+) -> Result<Option<H>> {
+    match install(device.trim_start_matches("/dev/")) {
+        Ok(hold) => Ok(Some(hold)),
+        Err(e) if writable => Err(OwnBackupError::Device(format!(
+            "{device}: the udev hold a writable device needs could not be installed: {e}"
+        ))),
+        Err(e) => {
+            warn!(device = %device, error = %e, "udev hold not installed");
+            Ok(None)
         }
     }
 }
@@ -239,6 +363,18 @@ fn find_free_device() -> Result<(String, File)> {
 /// Answer kernel NBD requests until DISC/EOF. Generic over the stream so the
 /// protocol is unit-testable without a kernel device.
 pub fn serve_requests<S: Read + Write>(stream: &mut S, source: &mut dyn NbdSource) -> Result<()> {
+    serve(stream, Target::ReadOnly(source))
+}
+
+/// [`serve_requests`] for a writable device: WRITE goes to `source`.
+pub fn serve_requests_rw<S: Read + Write>(
+    stream: &mut S,
+    source: &mut dyn WritableBlockSource,
+) -> Result<()> {
+    serve(stream, Target::Writable(source))
+}
+
+fn serve<S: Read + Write>(stream: &mut S, mut source: Target<'_>) -> Result<()> {
     let size = source.size();
     let mut header = [0u8; 28];
     loop {
@@ -279,10 +415,27 @@ pub fn serve_requests<S: Read + Write>(stream: &mut S, source: &mut dyn NbdSourc
                 }
             }
             NBD_CMD_WRITE => {
-                // Read-only attach; still must drain the payload to stay in sync.
-                let mut sink = vec![0u8; len.min(MAX_REQUEST_LEN) as usize];
-                stream.read_exact(&mut sink)?;
-                reply(stream, libc::EPERM as u32, &handle, &[])?;
+                // The payload follows the header whatever the answer: a write
+                // that is refused is still read off the stream in full, or the
+                // next header would be read out of its data.
+                let valid = len <= MAX_REQUEST_LEN
+                    && from.checked_add(len as u64).is_some_and(|end| end <= size);
+                if !valid || matches!(source, Target::ReadOnly(_)) {
+                    drain(stream, len as u64)?;
+                    let error = if valid { libc::EPERM } else { libc::EINVAL };
+                    reply(stream, error as u32, &handle, &[])?;
+                    continue;
+                }
+                let mut data = vec![0u8; len as usize];
+                stream.read_exact(&mut data)?;
+                match source.write_at(from, &data) {
+                    Some(Ok(())) => reply(stream, 0, &handle, &[])?,
+                    Some(Err(e)) => {
+                        warn!(from, len, error = %e, "NBD write failed");
+                        reply(stream, libc::EIO as u32, &handle, &[])?;
+                    }
+                    None => reply(stream, libc::EPERM as u32, &handle, &[])?,
+                }
             }
             NBD_CMD_FLUSH => reply(stream, 0, &handle, &[])?,
             NBD_CMD_DISC => {
@@ -295,6 +448,17 @@ pub fn serve_requests<S: Read + Write>(stream: &mut S, source: &mut dyn NbdSourc
             }
         }
     }
+}
+
+/// Read and discard `len` bytes of a request's payload.
+fn drain<S: Read>(stream: &mut S, mut len: u64) -> Result<()> {
+    let mut sink = vec![0u8; 64 * 1024];
+    while len > 0 {
+        let take = len.min(sink.len() as u64) as usize;
+        stream.read_exact(&mut sink[..take])?;
+        len -= take as u64;
+    }
+    Ok(())
 }
 
 fn reply<S: Write>(stream: &mut S, error: u32, handle: &[u8; 8], data: &[u8]) -> Result<()> {
@@ -387,5 +551,75 @@ mod tests {
         assert_eq!(err, 0);
         client.write_all(&request(NBD_CMD_DISC, 11, 0, 0)).unwrap();
         handle.join().unwrap();
+    }
+
+    /// A writable device is not attached without its udev hold; a
+    /// read-only one is, with a warning.
+    #[test]
+    fn a_writable_device_needs_its_udev_hold() {
+        let fail = |_: &str| -> Result<()> { Err(OwnBackupError::Device("read-only /run".into())) };
+        let err = udev_hold("/dev/nbd3", true, fail).unwrap_err();
+        assert!(err.to_string().contains("/dev/nbd3"), "{err}");
+        assert!(udev_hold("/dev/nbd3", false, fail).unwrap().is_none());
+        let mut asked = String::new();
+        let held = udev_hold("/dev/nbd3", true, |name| {
+            asked = name.to_string();
+            Ok(7)
+        });
+        assert_eq!(held.unwrap(), Some(7));
+        assert_eq!(asked, "nbd3");
+    }
+
+    impl WritableBlockSource for MemSource {
+        fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
+            let off = offset as usize;
+            self.0[off..off + data.len()].copy_from_slice(data);
+            Ok(())
+        }
+    }
+
+    /// A writable device: writes land in the source and read back, flushes
+    /// are answered, and a write out of range is refused with its payload
+    /// drained — the stream stays in step after every answer.
+    #[test]
+    fn a_writable_device_takes_writes_and_stays_in_step() {
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let handle = std::thread::spawn(move || {
+            let mut source = MemSource(vec![0u8; 65536]);
+            serve_requests_rw(&mut server, &mut source).unwrap();
+            source.0
+        });
+
+        let mut wr = request(NBD_CMD_WRITE, 1, 1000, 3000);
+        wr.extend_from_slice(&[0xC3; 3000]);
+        client.write_all(&wr).unwrap();
+        assert_eq!(read_reply(&mut client, 0), (0, 1, Vec::new()));
+
+        client
+            .write_all(&request(NBD_CMD_READ, 2, 999, 3002))
+            .unwrap();
+        let (err, h, data) = read_reply(&mut client, 3002);
+        assert_eq!((err, h), (0, 2));
+        assert_eq!(data[0], 0);
+        assert!(data[1..3001].iter().all(|&b| b == 0xC3));
+        assert_eq!(data[3001], 0);
+
+        // Past the end: refused, and the 4 KiB behind the header is not taken
+        // for the next request.
+        let mut wr = request(NBD_CMD_WRITE, 3, 65000, 4096);
+        wr.extend_from_slice(&[0xEE; 4096]);
+        client.write_all(&wr).unwrap();
+        let (err, h, _) = read_reply(&mut client, 0);
+        assert_eq!((err as i32, h), (libc::EINVAL, 3));
+
+        client.write_all(&request(NBD_CMD_FLUSH, 4, 0, 0)).unwrap();
+        assert_eq!(read_reply(&mut client, 0).0, 0);
+        client.write_all(&request(NBD_CMD_DISC, 5, 0, 0)).unwrap();
+        let disk = handle.join().unwrap();
+        assert!(disk[1000..4000].iter().all(|&b| b == 0xC3));
+        assert!(
+            disk[65000..].iter().all(|&b| b == 0),
+            "the refused write left nothing"
+        );
     }
 }

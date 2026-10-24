@@ -148,6 +148,8 @@ mod probe {
                 target_disk,
                 verify_checksums: true,
                 encryption: Some(keys),
+                passphrases: Default::default(),
+                known_keys: Default::default(),
             },
             |_| Ok(()),
         )?;
@@ -201,6 +203,7 @@ mod probe {
             // The rule belongs to the job, so every run carries it — including
             // the increments, whose in-image deletion pass runs over a child.
             exclusion_patterns: vec![EXCLUDED.to_string()],
+            exclusion_patterns_linux: Vec::new(),
             job_id: Some(JOB.into()),
             passphrase: None,
             image_format: ImageFormat::Qcow2,
@@ -460,6 +463,7 @@ mod probe {
         let summary = backup_disk(
             &DiskBackupRequest {
                 disk_number: source_disk,
+                disk_device: None,
                 disk_model: "LAB VIRTUAL DISK".into(),
                 partitions,
                 image_path: image.clone(),
@@ -532,6 +536,8 @@ mod probe {
                 target_disk,
                 verify_checksums: true,
                 encryption: Some(portable),
+                passphrases: Default::default(),
+                known_keys: Default::default(),
             },
             |_| Ok(()),
         )?;

@@ -128,6 +128,14 @@
     "ru": ", занято %{size}",
     "en": ", %{size} used"
   },
+  "restore_check.existing_partition_lost": {
+    "ru": "Раздел %{part} есть на диске сейчас, но в копии его нет, и после восстановления его бы не стало. Восстановление его не трогает: поставьте разделы копии так, чтобы он остался на месте, или, если он правда не нужен, удалите его в конструкторе сами.",
+    "en": "Partition %{part} is on the disk now, but not in the backup, and after the restore it would be gone. The restore leaves it alone: place the backup's partitions so that it stays where it is, or, if it really is not needed, delete it in the designer yourself."
+  },
+  "restore_check.existing_partition_removed": {
+    "ru": "Раздел %{part} удалён в конструкторе: его данные пропадут.",
+    "en": "Partition %{part} was deleted in the designer: its data will be gone."
+  },
   "restore_check.destination_will_be_erased": {
     "ru": "На разделе %{part} сейчас %{fs}%{label}%{used}. Восстановление перезапишет его целиком — вернуть то, что там лежит, будет нельзя.",
     "en": "Currently on partition %{part}: %{fs}%{label}%{used}. The restore will overwrite it completely — what is there now cannot be brought back."
@@ -171,6 +179,18 @@
   "restore_check.extend_not_ntfs": {
     "ru": "Раздел %{part} размечен как %{fs} — автоматически расширить Windows умеет только NTFS. Свободный хвост останется неразмеченным внутри раздела; его придётся дорастить средствами самой системы.",
     "en": "Partition %{part} is formatted as %{fs} — Windows can only extend NTFS automatically. The free tail will stay unallocated inside the partition; it has to be grown with the system's own tools."
+  },
+  "restore_check.extend_unsupported_linux": {
+    "ru": "Раздел %{part} размечен как %{fs} — здесь автоматически расширяются только ext2/3/4, XFS, btrfs и NTFS. Свободный хвост останется неразмеченным внутри раздела; его придётся дорастить средствами самой системы.",
+    "en": "Partition %{part} is formatted as %{fs} — only ext2/3/4, XFS, btrfs and NTFS can be extended automatically here. The free tail will stay unallocated inside the partition; it has to be grown with the system's own tools."
+  },
+  "restore_check.format_linux_fs_on_windows": {
+    "ru": "Раздел %{part}: файловую систему %{fs} создаёт только Linux — Windows её не форматирует. Выберите NTFS, FAT32 или exFAT либо выполните восстановление из Linux.",
+    "en": "Partition %{part}: only Linux creates %{fs} — Windows cannot format it. Choose NTFS, FAT32 or exFAT, or run the restore from Linux."
+  },
+  "restore_check.change_identities_linux_only": {
+    "ru": "Смена идентификаторов восстановленной копии есть только в Linux.",
+    "en": "Changing the restored copy's identities exists on Linux only."
   },
   "restore_plan.title_write_table": {
     "ru": "Записать разметку %{scheme} (%{count} разд.)",
@@ -220,6 +240,14 @@
     "ru": "Вернуть записи загрузки UEFI из копии в память материнской платы",
     "en": "Write the UEFI boot entries from the backup back to the firmware"
   },
+  "restore_plan.title_change_identities": {
+    "ru": "Сменить повторяющиеся идентификаторы восстановленной копии",
+    "en": "Change the restored copy's duplicate identities"
+  },
+  "restore_plan.title_change_identities_and_fix": {
+    "ru": "Сменить повторяющиеся идентификаторы и исправить fstab, crypttab и загрузчик восстановленной системы",
+    "en": "Change the duplicate identities and fix the restored system's fstab, crypttab and boot loader"
+  },
   "restore_plan.title_refresh_disks": {
     "ru": "Обновить состояние дисков",
     "en": "Refresh the disk state"
@@ -251,5 +279,13 @@
   "units.pib": {
     "ru": "ПиБ",
     "en": "PiB"
+  },
+  "restore_check.live_system_partitions_linux": {
+    "ru": "Работающая система использует разделы этого диска, которые затрагивает план: %{list} (смонтированы, подкачка, открыты как LUKS/LVM/md или это ESP загрузки). Переписать их на ходу нельзя. Восстановите с загрузочного носителя, либо выберите другие разделы.",
+    "en": "The running system uses partitions of this disk that the plan touches: %{list} (mounted, swap, opened as LUKS/LVM/md, or the boot ESP). They cannot be rewritten on the fly. Restore from the bootable media, or choose other partitions."
+  },
+  "restore_check.live_system_disk_layout_linux": {
+    "ru": "Работающая система использует разделы этого диска, поэтому менять его разметку нельзя. Восстановите в существующий свободный раздел без изменения разметки или с загрузочного носителя.",
+    "en": "The running system uses partitions of this disk, so its partition table cannot be changed. Restore into an existing unused partition without changing the table, or from the bootable media."
   }
 }

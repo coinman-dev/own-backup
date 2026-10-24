@@ -7,9 +7,11 @@ pub mod file_name;
 pub mod gpt;
 pub mod image;
 pub mod lang;
+pub mod linux_block;
 pub mod log_files;
 pub mod log_level;
 pub mod log_mirror;
+pub mod lvm_pv;
 pub mod media_mode;
 pub mod media_paths;
 pub mod media_tools;
@@ -18,8 +20,12 @@ pub mod progress;
 pub mod restore_check;
 pub mod restore_plan;
 pub mod restore_state;
+#[cfg(target_os = "linux")]
+pub mod service_data_dir;
 pub mod types;
 pub mod units;
+#[cfg(windows)]
+pub mod win_acl;
 #[cfg(windows)]
 pub mod win_registry;
 
@@ -46,6 +52,12 @@ pub const LINUX_UNIT_NAME: &str = "own-backup";
 /// no listening TCP port a local process could reach. Foreground/dev runs still
 /// use loopback TCP.
 pub const WINDOWS_PIPE_NAME: &str = "OwnBackup";
+
+/// Largest RPC message either side accepts. gRPC's default is 4 MiB, and on
+/// the stand (2026-10-17) one job with thousands of long exclusion patterns
+/// made the job list 6 MB: every request that reads the jobs then failed, so
+/// the window could open none of them. Both ends set this.
+pub const MAX_RPC_MESSAGE: usize = 64 * 1024 * 1024;
 
 /// Full `\\.\pipe\OwnBackup` path built from [`WINDOWS_PIPE_NAME`].
 pub fn windows_pipe_path() -> String {

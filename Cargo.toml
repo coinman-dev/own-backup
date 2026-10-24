@@ -23,9 +23,13 @@ exclude = ["vendor/glib", "vendor/glib-macros", "vendor/gtk3-macros"]
 glib = { path = "vendor/glib" }
 glib-macros = { path = "vendor/glib-macros" }
 gtk3-macros = { path = "vendor/gtk3-macros" }
+# ntfs 0.4.0 (the latest) needs binrw 0.11, whose `default_reader` helper
+# trips a future-incompatibility lint; the one function is written out
+# without the attribute. Checked by scripts/check-vendor.py.
+binrw = { path = "vendor/binrw" }
 
 [workspace.package]
-version = "0.1.5-beta"
+version = "0.1.6-beta"
 edition = "2021"
 # Source-available, free for noncommercial use (PolyForm Noncommercial 1.0.0);
 # commercial use requires a separate license — see LICENSE / COMMERCIAL-LICENSE.md.
@@ -125,4 +129,28 @@ opt-level = 3
 [profile.test.package.argon2]
 opt-level = 3
 [profile.test.package.blake2]
+opt-level = 3
+# The same for LUKS: a key slot is PBKDF2-SHA256 (or Argon2) sized by
+# cryptsetup for ~2 s of OPTIMISED code — minutes in a debug build (stand,
+# 2026-10-23: a debug service spent two minutes on one wrong password) — and
+# AES-XTS decrypts every block read from a locked LUKS or BitLocker volume.
+[profile.dev.package.pbkdf2]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.hmac]
+opt-level = 3
+[profile.dev.package.aes]
+opt-level = 3
+[profile.dev.package.xts-mode]
+opt-level = 3
+[profile.test.package.pbkdf2]
+opt-level = 3
+[profile.test.package.sha2]
+opt-level = 3
+[profile.test.package.hmac]
+opt-level = 3
+[profile.test.package.aes]
+opt-level = 3
+[profile.test.package.xts-mode]
 opt-level = 3

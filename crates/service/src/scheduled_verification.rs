@@ -41,6 +41,9 @@ pub(crate) fn is_due(
     )
 }
 
+/// A check that made way for a person's operation runs again this much later.
+const RETRY_AFTER_MAKING_WAY: Duration = Duration::from_secs(10 * 60);
+
 pub fn spawn(
     store: Arc<JobStore>,
     busy: Arc<Busy>,
@@ -53,6 +56,9 @@ pub fn spawn(
             return;
         }
         let (tx, mut rx) = mpsc::unbounded_channel::<(String, BackgroundOperation)>();
+        // A check that made way for a person's operation runs again later.
+        let retry_tx = tx.clone();
+        let retry_queue = queue.clone();
         let pending = Arc::new(Mutex::new(HashSet::<String>::new()));
         let timer_store = store.clone();
         let timer_pending = pending.clone();
@@ -84,8 +90,22 @@ pub fn spawn(
             if *stop.borrow() {
                 break;
             }
+            // The job's folder is what it reads: other jobs' copies, a boot
+            // medium, may be worked on beside it. And it yields: an operation
+            // a person starts over the same folder cancels it, and it runs
+            // again ten minutes later.
+            let Some(folder) = store.get(&id).map(|j| {
+                own_backup_core::busy::chain_resource(std::path::Path::new(&j.dest_folder))
+            }) else {
+                pending.lock().unwrap().remove(&id);
+                continue;
+            };
             let slot = tokio::select! {
-                slot = busy.acquire(Doing::new(tr!("grpc_server.busy_validation"), id.clone())) => slot,
+                slot = busy.acquire(
+                    Doing::new(tr!("grpc_server.busy_validation"), id.clone())
+                        .shared([folder])
+                        .yielding(),
+                ) => slot,
                 _ = stop.changed() => break,
             };
             if *stop.borrow() {
@@ -99,6 +119,8 @@ pub fn spawn(
                 continue;
             };
             let cancel = slot.cancel();
+            let stepped_aside = slot.stepped_aside();
+            let made_way = stepped_aside.clone();
             let task_store = store.clone();
             let task_sink = sink.clone();
             let task_job = job.clone();
@@ -108,6 +130,8 @@ pub fn spawn(
                 let _slot = slot;
                 #[cfg(target_os = "windows")]
                 let _awake = own_backup_backup::power_win::KeepAwake::new(&task_job.name);
+                #[cfg(target_os = "linux")]
+                let _awake = own_backup_backup::power_linux::KeepAwake::new(&task_job.name);
                 task_sink.job_progress(JobProgress {
                     job_id: task_job.id.clone(), phase: "scheduled-verify".into(), percent: 0,
                     blocks_done: 0, blocks_total: 0, speed_mbps: 0.0,
@@ -124,6 +148,13 @@ pub fn spawn(
                     finished_at: chrono::Utc::now().to_rfc3339(), status: "error".into(),
                     error: tr!("scheduled_verification.panicked").into_owned(), ..Default::default()
                 });
+                // Made way for a person: not a result, and not this slot's
+                // run — nothing is recorded, and it runs again later.
+                if stepped_aside.load(std::sync::atomic::Ordering::SeqCst) {
+                    info!(job = %task_job.name, "Scheduled integrity check made way for an operation started by a person; again in 10 minutes");
+                    task_sink.job_finished(run.clone());
+                    return run;
+                }
                 // Persist while holding the reservation: the next backup must
                 // see failed-image state before it chooses a parent.
                 if let Err(e) = task_store.record_run(run.clone()) {
@@ -157,6 +188,19 @@ pub fn spawn(
             pending.lock().unwrap().remove(&id);
             if *stop.borrow() {
                 break;
+            }
+            if made_way.load(std::sync::atomic::Ordering::SeqCst)
+                && pending.lock().unwrap().insert(id.clone())
+            {
+                let (tx, queue, mut stop) = (retry_tx.clone(), retry_queue.clone(), stop.clone());
+                tokio::spawn(async move {
+                    tokio::select! {
+                        _ = tokio::time::sleep(RETRY_AFTER_MAKING_WAY) => {
+                            let _ = tx.send((id, queue.register_background_operation()));
+                        }
+                        _ = stop.changed() => {}
+                    }
+                });
             }
         }
         timer.abort();

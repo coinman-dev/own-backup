@@ -1,0 +1,19 @@
+#!/bin/sh
+# The strip (own-backup-shell) for as long as labwc runs: started by labwc's
+# autostart, brought back two seconds after it ends — ten when it keeps
+# failing at once, so a strip that cannot start does not fill the journal.
+# Its lines go to labwc's stderr, which is the kiosk unit's journal, which the
+# medium copies onto the stick.
+set -u
+shell=/usr/libexec/own-backup/own-backup-shell
+pause=2
+while :; do
+    # labwc gone (the session ends or falls back to cage): so is the strip.
+    [ -S "${XDG_RUNTIME_DIR:-/run/user/0}/${WAYLAND_DISPLAY:-wayland-0}" ] || exit 0
+    started=$(date +%s)
+    "$shell"
+    rc=$?
+    if [ $(($(date +%s) - started)) -lt 5 ]; then pause=10; else pause=2; fi
+    echo "shell-loop: own-backup-shell ended with $rc, again in ${pause} s" >&2
+    sleep "$pause"
+done

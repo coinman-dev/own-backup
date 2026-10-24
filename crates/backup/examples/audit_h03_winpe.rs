@@ -86,6 +86,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 target_disk: 0,
                 verify_checksums: true,
                 encryption: Some(keys),
+                passphrases: Default::default(),
+                known_keys: Default::default(),
             },
             |_| Ok(()),
         )?;

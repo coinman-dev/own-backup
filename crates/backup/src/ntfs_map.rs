@@ -690,7 +690,7 @@ fn assemble_bitmap(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     struct MemVolume(Vec<u8>);
@@ -807,6 +807,13 @@ mod tests {
         img[bm] = 0b0001_0001; // bits 0 and 4  → clusters 0, 4
         img[bm + 2] = 0b0011_0011; // bits 0,1,4,5 → clusters 16,17,20,21
         MemVolume(img)
+    }
+
+    /// The bytes of [`tiny_ntfs`], for tests that read it from a file (the
+    /// Linux platform's).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn tiny_ntfs_image() -> Vec<u8> {
+        tiny_ntfs().0
     }
 
     #[test]

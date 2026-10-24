@@ -29,10 +29,28 @@ use tracing::warn;
 #[cfg(target_os = "windows")]
 use tracing::{error, info};
 
+/// The Linux executor and its boot steps (PLAN §6, stage 3).
+#[cfg(target_os = "linux")]
+#[path = "restore_boot_linux.rs"]
+mod boot_linux;
+#[cfg(target_os = "linux")]
+#[path = "restore_fs_linux.rs"]
+mod fs_linux;
+#[cfg(target_os = "linux")]
+#[path = "restore_exec_linux.rs"]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::{execute_plan, linux_refusals};
+
+// The Linux executor has its own (`linux`), and the shared helpers here do
+// not need these there.
+#[cfg(not(target_os = "linux"))]
 use own_backup_common::cancel::CancelToken;
 use own_backup_common::restore_plan::{RestoreMode, RestoreOp, RestorePlan};
 use own_backup_common::restore_state::{OpRecord, OpStatus, RestoreRunState, RunStatus};
-use own_backup_common::{tr, OwnBackupError, Result};
+use own_backup_common::tr;
+#[cfg(not(target_os = "linux"))]
+use own_backup_common::{OwnBackupError, Result};
 
 /// Where finished restore runs are kept.
 ///
@@ -94,14 +112,9 @@ pub fn acknowledge_in_history(data_dir: &std::path::Path, plan_id: uuid::Uuid) -
 }
 
 fn write_history(path: &std::path::Path, history: &[RestoreRunState]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     // Written through a temporary file: a half-written history is worse than
     // none, because it looks readable and is not.
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(history)?)?;
-    std::fs::rename(&tmp, path)
+    crate::write_json(path, &history)
 }
 
 /// Build the initial state for `plan`, with every operation pending.
@@ -234,6 +247,8 @@ pub fn initial_state(plan: &RestorePlan) -> RestoreRunState {
         cancellable: true,
         follow_ups: Vec::new(),
         acknowledged: false,
+        identity_changes: Vec::new(),
+        edited_files: Vec::new(),
         image_file: plan
             .image_path
             .file_name()
@@ -1224,7 +1239,7 @@ pub fn luks_header_for(
 /// the backup holds is a plain filesystem where a LUKS container used to be. A
 /// Linux system on such a partition mounts fine from a Live CD and refuses to
 /// boot on its own, which is a confusing failure unless someone says why.
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn encryption_follow_up(
     sidecar: &own_backup_backup::sidecar::Sidecar,
     part_index: u32,
@@ -1726,6 +1741,12 @@ fn run_op(
             Ok(note)
         }
 
+        // Linux only: there the service adds it. A plan carrying it was not
+        // made for this machine.
+        RestoreOp::ChangeIdentities { .. } => Err(OwnBackupError::RestoreIncompatible(
+            tr!("restore_exec.change_identities_linux_only").into_owned(),
+        )),
+
         RestoreOp::RefreshDiskState => {
             use own_backup_backup::disk_session_win::DiskSession;
             // partmgr re-reads the table, so the disk stops presenting the
@@ -1802,7 +1823,7 @@ fn add_failure_follow_ups(state: &mut RestoreRunState) {
 
 /// Linux has no restore engine yet (D15). Refusing outright is the honest
 /// answer; a stub that returned success would be worse than useless.
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub fn execute_plan(
     plan: &RestorePlan,
     _passphrases: &std::collections::HashMap<u32, String>,
@@ -2156,6 +2177,7 @@ mod tests {
 
         let disk = own_backup_common::disk::DiskInfo {
             device_id: String::new(),
+            stable_device: String::new(),
             model: String::new(),
             serial: String::new(),
             size_bytes: 0,

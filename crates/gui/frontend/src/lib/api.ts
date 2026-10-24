@@ -23,6 +23,9 @@ import type {
   DryRunResult,
   RestoreRunState,
   ServiceHealth,
+  PlatformInfo,
+  BackupCapabilities,
+  DestinationCheck,
   KeyboardLayout,
   KeyboardState,
   DirEntry,
@@ -32,6 +35,14 @@ import type {
   MediaTool,
   MediaBuildOptions,
   MediaBuildReport,
+  MediaStick,
+  MediaStickReport,
+  MediaStickWrite,
+  LinuxMediaBuild,
+  LinuxMediaReport,
+  LinuxMediaStatus,
+  LinuxMediaRelease,
+  LinuxMediaDownload,
   ServiceStatus,
   MountBackendStatus,
   ArchiveImageInfo,
@@ -60,10 +71,26 @@ export const api = {
 
   // --- boot medium ---
   findBaseImages: () => invoke<BaseImage[]>('find_base_images'),
+  inspectBaseImage: (path: string) => invoke<BaseImage>('inspect_base_image', { path }),
   listDriverPackages: () => invoke<DriverPackage[]>('list_driver_packages'),
   listMediaTools: () => invoke<MediaTool[]>('list_media_tools'),
   buildBootMedia: (options: MediaBuildOptions) =>
     invoke<MediaBuildReport>('build_boot_media', { options }),
+  // Linux: writing the medium's ISO onto a stick (erases it).
+  listMediaSticks: () => invoke<MediaStick[]>('list_media_sticks'),
+  writeMediaStick: (options: MediaStickWrite) =>
+    invoke<MediaStickReport>('write_media_stick', { options }),
+  // Linux: the medium built by the service from the installed package.
+  linuxMediaStatus: () => invoke<LinuxMediaStatus>('linux_media_status'),
+  buildLinuxMedia: (options: LinuxMediaBuild) =>
+    invoke<LinuxMediaReport>('build_linux_media', { options }),
+  // Linux: the ready medium of the installed version from GitHub, downloaded
+  // by the window itself (no service, no password).
+  linuxMediaRelease: () => invoke<LinuxMediaRelease | null>('linux_media_release'),
+  downloadLinuxMedia: (outputDir: string) =>
+    invoke<LinuxMediaDownload>('download_linux_media', { outputDir }),
+  cancelLinuxMediaDownload: () => invoke<void>('cancel_linux_media_download'),
+  defaultMediaFolder: () => invoke<string>('default_media_folder'),
   driveSignature: () => invoke<number>('drive_signature'),
   // EFI, recovery and vendor partitions without a letter (the service decides
   // which), and giving one a letter or taking it away (`letter: null`).
@@ -77,6 +104,16 @@ export const api = {
   newJobTemplate: () => invoke<Job>('new_job_template'),
   defaultExclusionPatterns: () =>
     invoke<{ windows: string[]; linux: string[] }>('default_exclusion_patterns'),
+  /** What the service's engine carries out; the wizard offers only that. */
+  backupCapabilities: () => invoke<BackupCapabilities>('backup_capabilities'),
+  /** Where a destination folder sits relative to these sources — the check the
+   *  save makes, asked while the folder is being chosen. */
+  /** Linux: the mount point of the drive the folder is on, the one the
+   *  «destination connected» trigger waits for; null on the system disk, for
+   *  a drive not mounted now, and on Windows. */
+  destinationMount: (folder: string) => invoke<string | null>('destination_mount', { folder }),
+  checkDestination: (sources: string[], destFolder: string) =>
+    invoke<DestinationCheck>('check_destination', { sources, destFolder }),
   saveBackupJob: (job: Job) => invoke<Job>('save_backup_job', { job }),
   deleteBackupJob: (id: string, deleteFiles: boolean) =>
     invoke<JobFilesDeleted>('delete_backup_job', { id, deleteFiles }),
@@ -111,8 +148,20 @@ export const api = {
     invoke<RestoreSummary>('restore_now', { imagePath, target, ...secretArgs(secret) }),
   verifyNow: (imagePath: string, secret?: ArchiveSecret) =>
     invoke<VerifySummary>('verify_now', { imagePath, ...secretArgs(secret) }),
-  mountBackup: (imagePath: string, readWrite?: boolean, secret?: ArchiveSecret) =>
-    invoke<string>('mount_backup', { imagePath, readWrite, ...secretArgs(secret) }),
+  /** A refusal about duplicate identities (Linux) rejects with a JSON string
+   *  `{identity_clashes, message}`; `identityChoice: 'keep'` mounts anyway. */
+  mountBackup: (
+    imagePath: string,
+    readWrite?: boolean,
+    secret?: ArchiveSecret,
+    identityChoice?: 'keep',
+  ) =>
+    invoke<string>('mount_backup', {
+      imagePath,
+      readWrite,
+      ...secretArgs(secret),
+      identityChoice,
+    }),
   unmountBackup: (imagePath: string) => invoke<void>('unmount_backup', { imagePath }),
   readImageInfo: (imagePath: string, secret?: ArchiveSecret) =>
     invoke<ImageInfo>('read_image_info', { imagePath, ...secretArgs(secret) }),
@@ -183,11 +232,20 @@ export const api = {
     plan: RestorePlan,
     passphrases?: Record<number, string>,
     secret?: ArchiveSecret,
+    /** Linux: once the preview showed duplicate identities, what the person
+     *  chose with them in front of them — keep them, or change them on the
+     *  restored copy. */
+    identityChoice?: 'keep' | 'change',
+    /** With 'change': also fix the restored system's fstab, crypttab and
+     *  boot loader. */
+    fixReferences?: boolean,
   ) =>
     invoke<RestoreRunState>('apply_restore_plan', {
       plan,
       passphrases,
       ...secretArgs(secret),
+      identityChoice,
+      fixReferences,
     }),
   /** The restore in progress, or the last one that finished. Survives closing
    *  and reopening the window, and a service restart. */
@@ -204,6 +262,8 @@ export const api = {
   // Windows' own iSCSI initiator / the in-tree NBD module on Linux) ---
   // --- как загружается машина (переменные прошивки UEFI) ---
   // Живут в материнской плате, а не на диске: копия разделов их не сохраняет.
+  /** Rejects with a `CodedError`: `unimplemented` where the service does not
+   *  read boot entries on its platform (Linux, for now). */
   bootStatus: () => invoke<BootStatus>('boot_status'),
   bootAction: (action: Record<string, unknown>) =>
     invoke<BootActionResult>('boot_action', { action }),
@@ -218,6 +278,8 @@ export const api = {
    *  through the config, the service's. */
   setUiLanguage: (lang: string) => invoke<void>('set_ui_language', { lang }),
   serviceHealth: () => invoke<ServiceHealth>('service_health'),
+  /** Which system the window runs on, its service channel and log folders. */
+  platformInfo: () => invoke<PlatformInfo>('platform_info'),
   /** Active keyboard layout; null where it cannot be told (non-Windows). */
   keyboardLayout: () => invoke<KeyboardLayout | null>('keyboard_layout'),
   /** Layout and Caps Lock for a password field, taskbar or not. */
@@ -236,3 +298,20 @@ export const api = {
    */
   guiReady: () => invoke<void>('gui_ready'),
 };
+
+/** The kind of a failed command, when it says one (`CodedError`); `null` for a
+ *  plain-text failure. Screens branch on this, never on the words. */
+export function errorCode(e: unknown): string | null {
+  if (e && typeof e === 'object' && 'code' in e && typeof (e as { code: unknown }).code === 'string') {
+    return (e as { code: string }).code;
+  }
+  return null;
+}
+
+/** The words of a failed command, whichever shape it came in. */
+export function errorText(e: unknown): string {
+  if (e && typeof e === 'object' && 'message' in e) {
+    return String((e as { message: unknown }).message);
+  }
+  return String(e);
+}

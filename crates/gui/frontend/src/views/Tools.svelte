@@ -14,6 +14,8 @@
   } from '../lib/engineStore.svelte';
   import type { ActiveMount, ArchiveSecret } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
+  import { isWindows } from '../lib/platformStore.svelte';
+  import { examplePath } from '../lib/paths';
 
   // --- Opening an encrypted copy (§7.4) ---
   // A manual mount or check never borrows the service's key: whoever is at the
@@ -76,14 +78,30 @@
   // must follow a change of language. An error the service sent stays as it is.
   let mountMsg: (() => string) | null = $state(null);
   let mountErr: string | null = $state(null);
+  /** The service asked about identities the copy shares with this machine's
+   *  own devices (Linux): what it said, and the secret to retry with. */
+  let mountClash: { message: string; secret?: ArchiveSecret } | null = $state(null);
+
+  /** The structured refusal `mount_backup` returns for duplicate identities. */
+  function identityClashOf(e: unknown): string | null {
+    try {
+      const v = JSON.parse(String(e));
+      return Array.isArray(v?.identity_clashes) && v.identity_clashes.length > 0
+        ? String(v.message ?? '')
+        : null;
+    } catch {
+      return null;
+    }
+  }
   let mountBusy = $state(false);
 
   let activeMounts: ActiveMount[] = $state([]);
 
-  let verifyMsg: (() => string) | null = $state(null);
-  let verifyErr: (() => string) | null = $state(null);
-  let verifyBusy = $state(false);
+  // The check runs in the service and outlives this page; whether it is
+  // running and how it ended are the store's (engine.op, engine.verifyOutcome).
+  const verifyBusy = $derived(engine.op === 'verify');
   const verifyProgress = $derived(engine.verifyProgress);
+  const verifyOutcome = $derived(engine.verifyOutcome);
 
   let isRefreshingDisks = $state(false);
   let hasLoadedOnce = false;
@@ -106,8 +124,12 @@
         }
       }
       if (letters.length === 0) {
+        // Windows numbers the disk; Linux names it (`/dev/nbd0` → «Диск nbd0»).
         const mMatch = mnt.physical_path.match(/PhysicalDrive(\d+)/i);
-        letters.push(mMatch ? m.tools_disk_n({ n: mMatch[1] }) : m.tools_disk());
+        const linuxName = mnt.physical_path.startsWith('/') ? mnt.physical_path.split('/').pop() : '';
+        letters.push(
+          mMatch ? m.tools_disk_n({ n: mMatch[1] }) : linuxName ? m.tools_disk_n({ n: linuxName }) : m.tools_disk(),
+        );
       }
       const active = toolsState.mountPath.toLowerCase() === mnt.image_path.toLowerCase();
       return {
@@ -167,16 +189,17 @@
   }
 
   async function mount() {
-    await withArchiveKey(toolsState.mountPath, mountWith);
+    await withArchiveKey(toolsState.mountPath, (secret) => mountWith(secret));
   }
 
-  async function mountWith(secret?: ArchiveSecret) {
+  async function mountWith(secret?: ArchiveSecret, identityChoice?: 'keep') {
     mountBusy = true;
     mountMsg = null;
     mountErr = null;
+    mountClash = null;
     isRefreshingDisks = true;
     try {
-      await api.mountBackup(toolsState.mountPath, toolsState.rwMode, secret);
+      await api.mountBackup(toolsState.mountPath, toolsState.rwMode, secret, identityChoice);
       await Promise.all([loadData(), refreshVolumes()]);
       // The disk may need a moment for Windows to assign a letter; poll briefly.
       let letters = mountedLettersFor(toolsState.mountPath);
@@ -193,6 +216,12 @@
           where: found || m.tools_see_explorer(),
         });
     } catch (e) {
+      const clash = identityClashOf(e);
+      if (clash !== null) {
+        // Not a failure of the password: a question for the person.
+        mountClash = { message: clash, secret };
+        return;
+      }
       mountErr = String(e);
       // Rethrown so a wrong password keeps the unlock dialog open with the
       // reason in it, instead of closing as though the mount had worked.
@@ -201,6 +230,11 @@
       mountBusy = false;
       isRefreshingDisks = false;
     }
+  }
+
+  async function mountKeepingDuplicates() {
+    const secret = mountClash?.secret;
+    await mountWith(secret, 'keep').catch(() => {});
   }
 
   async function unmount() {
@@ -225,30 +259,9 @@
   }
 
   async function verifyWith(secret?: ArchiveSecret, accepted?: () => void) {
-    verifyBusy = true;
-    verifyMsg = null;
-    verifyErr = null;
-    try {
-      const v = await runVerify(toolsState.verifyPath, secret, accepted);
-      // A damaged copy is a failure, not a result: it goes in the red banner.
-      // It used to share the green one with «Целостность подтверждена».
-      const checked = v.blocks_checked;
-      if (v.valid) {
-        const secs = v.duration_secs.toFixed(1);
-        verifyMsg = () =>
-          m.tools_verify_ok({ blocks: m.tools_blocks({ count: checked }), secs });
-      } else {
-        const bad = v.mismatched_blocks.length;
-        verifyErr = () =>
-          m.tools_verify_bad({ bad, blocks: m.tools_blocks_of({ count: checked }) });
-      }
-    } catch (e) {
-      const text = String(e);
-      verifyErr = () => text;
-      throw e; // see mountWith
-    } finally {
-      verifyBusy = false;
-    }
+    // The outcome, a failure included, is put in the store by runVerify; the
+    // failure is thrown on for the password dialog (see mountWith).
+    await runVerify(toolsState.verifyPath, secret, accepted);
   }
 </script>
 
@@ -272,14 +285,14 @@
       </span>
       <div>
         <div class="tool-title">{m.tools_mount_title()}</div>
-        <div class="tool-desc">{m.tools_mount_desc()}</div>
+        <div class="tool-desc">{isWindows() ? m.tools_mount_desc() : m.tools_mount_desc_linux()}</div>
       </div>
     </div>
     <div class="row">
       <input
         type="text"
         bind:value={toolsState.mountPath}
-        placeholder="D:\OwnBackup\disk_C_20260702.vhdx"
+        placeholder={examplePath('image')}
         spellcheck="false"
         disabled={mountBusy}
       />
@@ -316,7 +329,7 @@
       <div class="actions-right">
         <label class="rw-checkbox">
           <input type="checkbox" bind:checked={toolsState.rwMode} disabled={mountBusy || isCurrentPathMounted} />
-          RW Mode
+          {m.tools_rw_mode()}
         </label>
         <button class="btn primary" onclick={mount} disabled={mountBusy || !toolsState.mountPath || isCurrentPathMounted}>
           {m.tools_mount_btn()}
@@ -330,6 +343,13 @@
     </div>
     {#if mountMsg}<div class="banner ok">{mountMsg()}</div>{/if}
     {#if mountErr}<div class="banner err">{mountErr}</div>{/if}
+    {#if mountClash}
+      <div class="banner err">
+        {mountClash.message}
+        <div><button class="btn" disabled={mountBusy} onclick={mountKeepingDuplicates}
+          >{m.tools_mount_keep_duplicates()}</button></div>
+      </div>
+    {/if}
   </div>
 
   <div class="tool-card">
@@ -346,7 +366,7 @@
       <input
         type="text"
         bind:value={toolsState.verifyPath}
-        placeholder="D:\OwnBackup\disk_C_20260702.vhdx"
+        placeholder={examplePath('image')}
         spellcheck="false"
         disabled={verifyBusy}
       />
@@ -360,11 +380,32 @@
     {#if verifyBusy && verifyProgress}
       <div class="bar"><div class="bar-fill" style="width:{verifyProgress.percent}%"></div></div>
     {/if}
-    {#if verifyMsg}<div class="banner ok">{verifyMsg()}</div>{/if}
-    {#if verifyErr}<div class="banner err">{verifyErr()}</div>{/if}
+    {#if verifyOutcome?.kind === 'ok'}
+      <div class="banner ok">
+        {m.tools_verify_ok({
+          blocks: m.tools_blocks({ count: verifyOutcome.checked }),
+          secs: verifyOutcome.secs.toFixed(1),
+        })}
+      </div>
+    {:else if verifyOutcome?.kind === 'bad'}
+      <!-- A damaged copy is a failure, not a result: the red banner. It used
+           to share the green one with «Целостность подтверждена». -->
+      <div class="banner err">
+        {m.tools_verify_bad({
+          bad: verifyOutcome.bad,
+          blocks: m.tools_blocks_of({ count: verifyOutcome.checked }),
+        })}
+      </div>
+    {:else if verifyOutcome?.kind === 'error'}
+      <div class="banner err">{verifyOutcome.text}</div>
+    {/if}
   </div>
 
-  <HiddenVolumesCard />
+  <!-- Drive letters are a Windows thing; elsewhere the service has no such
+       list and would only answer that it has not. -->
+  {#if isWindows()}
+    <HiddenVolumesCard />
+  {/if}
 
   <BootMediaCard />
 </div>

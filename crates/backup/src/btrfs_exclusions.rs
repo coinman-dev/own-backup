@@ -43,7 +43,9 @@ use crate::btrfs_map::{
     for_each_item, parse_chunk, read_node, walk_tree, ChunkMap, CHUNK_ITEM, HEADER, MAGIC,
     ROOT_ITEM, SUPER_OFFSET, SUPER_SIZE,
 };
-use crate::exclusions::{parse_patterns, ByteRanges, CategorySizes, ExclusionPattern};
+use crate::exclusions::{
+    parse_patterns, ByteRanges, CategorySizes, ExclusionPattern, LeftInCopy, LeftReason,
+};
 use crate::fat_map::RawVolume;
 
 // --- Additional key types (btrfs_map exports the tree-level ones) ---
@@ -69,10 +71,10 @@ const EXTENT_CSUM_OBJECTID: u64 = u64::MAX - 9;
 /// `EXTENT_ITEM.flags` bit: a data extent (vs tree block).
 const EXTENT_FLAG_DATA: u64 = 0x1;
 
-/// Test-only: make `EditSet::finalize` refuse, so the Stage-1 fallback can be
-/// exercised without hunting for a filesystem that triggers it naturally.
 #[cfg(test)]
 thread_local! {
+    /// Test-only: make `EditSet::finalize` refuse, so the Stage-1 fallback can be
+    /// exercised without hunting for a filesystem that triggers it naturally.
     static FAIL_FINALIZE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -166,12 +168,19 @@ pub struct BtrfsExclusionScan {
     /// Files matched but kept whole because their data is shared (snapshot /
     /// reflink) — the catalog entry survives as-is in Stage 1.
     pub files_kept_shared: u64,
+    /// Of [`Self::files_excluded`], those whose entries stay in the catalog
+    /// with their exclusively owned contents zeroed — the ones Stage 2 did not remove. The
+    /// result screen says how many (`engine.entries_kept_named`).
+    pub files_kept_named: u64,
     pub categories: CategorySizes,
     /// Metadata patches (PHYSICAL offset → bytes): checksum-tree rewrites for
     /// the zeroed ranges (Stage 1) — and, once Stage 2 lands, the full catalog
     /// removal. Non-overlapping; every touched tree block carries a recomputed
     /// node checksum, DUP metadata patched in both copies.
     pub patches: Vec<(u64, Vec<u8>)>,
+    /// Matched files whose content is still in the copy, and matched
+    /// subvolumes (`exclusions::key_store_left_behind`).
+    pub left: Vec<crate::exclusions::LeftInCopy>,
 }
 
 impl BtrfsExclusionScan {
@@ -183,8 +192,10 @@ impl BtrfsExclusionScan {
             entries_scanned: 0,
             bytes_excluded: 0,
             files_kept_shared: 0,
+            files_kept_named: 0,
             categories: CategorySizes::default(),
             patches: Vec::new(),
+            left: Vec::new(),
         }
     }
 }
@@ -887,6 +898,7 @@ fn match_subvol(
     d: &SubvolData,
     parsed: &[ExclusionPattern],
     scan: &mut BtrfsExclusionScan,
+    paths: &mut HashMap<u64, Vec<String>>,
 ) -> HashSet<u64> {
     // Children by parent for the BFS.
     let mut children: HashMap<u64, Vec<&DirEnt>> = HashMap::new();
@@ -922,6 +934,7 @@ fn match_subvol(
                             warn!(dir = %e.name, "exclusions: kept an essential mount point (contents still excluded)");
                         } else {
                             matched.insert(ino);
+                            paths.entry(ino).or_insert_with(|| crel.clone());
                         }
                         if is_dir {
                             stack.push((ino, crel, true));
@@ -935,6 +948,10 @@ fn match_subvol(
                 Err(()) => {
                     if hit {
                         warn!(name = %e.name, "btrfs exclusions: pattern matches a SUBVOLUME — kept (subvolumes are never removed)");
+                        // Walked as its own tree, where this name is not on
+                        // the path: nothing in it matches by it.
+                        scan.left
+                            .push(LeftInCopy::new(&crel, LeftReason::Subvolume));
                     }
                     // Never descend: the subvolume is walked as its own tree.
                 }
@@ -1312,14 +1329,32 @@ pub fn scan_btrfs_exclusions(
     let mut candidates: HashMap<u64, u64> = HashMap::new();
     let mut file_extents: HashMap<(u64, u64), Vec<DataRef>> = HashMap::new();
     let mut file_sizes: HashMap<(u64, u64), u64> = HashMap::new();
+    // (subvolume, inode) → the path it was matched under, for `scan.left`.
+    let mut matched_paths: HashMap<(u64, u64), Vec<String>> = HashMap::new();
     for (id, root) in fs.subvol_roots() {
         let data = collect_subvol(vol, &fs, root)?;
         tick(scan.entries_scanned)?;
-        let matched = match_subvol(&data, &parsed, &mut scan);
+        let mut paths = HashMap::new();
+        let matched = match_subvol(&data, &parsed, &mut scan, &mut paths);
+        for (ino, path) in paths {
+            matched_paths.insert((id, ino), path);
+        }
         for &ino in &matched {
-            if let Some(&(size, nlink, is_dir)) = data.inodes.get(&ino) {
+            let path = |p: &HashMap<(u64, u64), Vec<String>>| {
+                p.get(&(id, ino)).cloned().unwrap_or_default()
+            };
+            let Some(&(size, nlink, is_dir)) = data.inodes.get(&ino) else {
+                scan.left.push(LeftInCopy::new(
+                    &path(&matched_paths),
+                    LeftReason::Unreadable,
+                ));
+                continue;
+            };
+            {
                 // Hard-linked files kept whole (like ext4/NTFS).
                 if !is_dir && nlink > 1 {
+                    scan.left
+                        .push(LeftInCopy::new(&path(&matched_paths), LeftReason::HardLink));
                     continue;
                 }
                 matched_pairs.insert((id, ino));
@@ -1582,6 +1617,10 @@ pub fn scan_btrfs_exclusions(
         let excl: Vec<&DataRef> = exts.iter().filter(|e| freeable(e.disk_bytenr)).collect();
         if excl.len() != exts.len() {
             scan.files_kept_shared += 1;
+            scan.left.push(LeftInCopy::new(
+                matched_paths.get(&(sid, ino)).map_or(&[][..], |p| p),
+                LeftReason::Shared,
+            ));
         }
         let header = swap_keep.get(&(sid, ino)).copied();
         for e in excl {
@@ -1630,13 +1669,21 @@ pub fn scan_btrfs_exclusions(
                 // the leaf can hold it; otherwise the file keeps its data and
                 // is counted, because a silent leak is the one outcome an
                 // exclusion may not have.
+                let kept = || {
+                    LeftInCopy::new(
+                        matched_paths.get(&(sv.id, ino)).map_or(&[][..], |p| p),
+                        LeftReason::Inline,
+                    )
+                };
                 let Some(hdr) = it.header else {
                     inline_compressed += 1;
+                    scan.left.push(kept());
                     continue;
                 };
                 let ram = u64at(&hdr, 8) as usize;
                 if ram > MAX_INLINE_REWRITE {
                     inline_compressed += 1;
+                    scan.left.push(kept());
                     continue;
                 }
                 let mut data = hdr.to_vec();
@@ -1742,6 +1789,23 @@ pub fn scan_btrfs_exclusions(
             }
             scan.ranges.finalize();
             scan.bytes_excluded = only_zeroed.iter().map(|(s, e)| e - s).sum();
+            // The inline zeroing of step 5b went with the rejected edit set:
+            // every matched file with inline data keeps it.
+            for sv in &subvols {
+                for &ino in &sv.matched {
+                    let has_inline = sv.data.inline.get(&ino).is_some_and(|items| {
+                        items
+                            .iter()
+                            .any(|it| it.data_len > 0 || it.compression != 0)
+                    });
+                    if has_inline {
+                        scan.left.push(LeftInCopy::new(
+                            matched_paths.get(&(sv.id, ino)).map_or(&[][..], |p| p),
+                            LeftReason::Inline,
+                        ));
+                    }
+                }
+            }
             freed_bytes = 0;
             removable.clear();
             stage1.finalize(vol, &fs)?
@@ -1752,9 +1816,17 @@ pub fn scan_btrfs_exclusions(
     }
 
     scan.files_excluded = matched_pairs.len() as u64;
+    // What Stage 2 did not remove stays listed: the files spared to Stage 1
+    // (leaf guards, hard links, a swap file) and the ones kept whole for their
+    // shared data — those are counted apart, as kept shared.
+    scan.files_kept_named = scan
+        .files_excluded
+        .saturating_sub(removable.len() as u64)
+        .saturating_sub(scan.files_kept_shared);
     info!(
         files = scan.files_excluded,
         removed = removable.len(),
+        kept_named = scan.files_kept_named,
         kept_shared = scan.files_kept_shared,
         bytes = scan.bytes_excluded,
         freed_bytes,
@@ -2557,6 +2629,91 @@ mod btrfs_integration {
             return None;
         }
         Some((img, dir))
+    }
+
+    /// `mkfs.btrfs --rootdir` over a tree `build` makes, with `extra` mkfs
+    /// arguments (`--subvol …`). `None` when mkfs is missing or refuses.
+    fn make_btrfs_from(
+        build: impl FnOnce(&Path),
+        extra: &[&str],
+    ) -> Option<(PathBuf, tempfile::TempDir)> {
+        if !have("mkfs.btrfs") {
+            return None;
+        }
+        let dir = tempfile::tempdir().ok()?;
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).ok()?;
+        build(&src);
+        let img = dir.path().join("fs.img");
+        let f = std::fs::File::create(&img).ok()?;
+        f.set_len(128 * 1024 * 1024).ok()?;
+        drop(f);
+        let out = std::process::Command::new("mkfs.btrfs")
+            .args(["-q", "-r"])
+            .arg(&src)
+            .args(extra)
+            .arg(&img)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            eprintln!(
+                "mkfs.btrfs failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            return None;
+        }
+        Some((img, dir))
+    }
+
+    /// Decision 6/E4 proof on btrfs: a key file hard-linked from outside, a
+    /// key directory that is a subvolume (walked as its own tree, where the
+    /// name is not on the path) — both are reported, never passed as
+    /// excluded. Small key files are inline: zeroed in their leaf, nothing
+    /// left.
+    #[test]
+    fn key_directory_matches_btrfs_cannot_remove_are_reported() {
+        let key = crate::seal::local::KEY_DIRECTORY_NAME;
+        let Some((img, _keep)) = make_btrfs_from(
+            |src| {
+                std::fs::create_dir_all(src.join(key)).unwrap();
+                std::fs::write(src.join(key).join("a.key"), vec![0x5A; 65536]).unwrap();
+                std::fs::hard_link(src.join(key).join("a.key"), src.join("copy.bin")).unwrap();
+            },
+            &[],
+        ) else {
+            return;
+        };
+        let (scan, _) = run_scan(&img, &[]);
+        let left = crate::exclusions::key_store_left_behind(&scan.left).expect("reported");
+        assert_eq!(left.reason, LeftReason::HardLink);
+
+        let Some((img, _keep)) = make_btrfs_from(
+            |src| {
+                std::fs::create_dir_all(src.join(key)).unwrap();
+                std::fs::write(src.join(key).join("small.key"), vec![0x5A; 200]).unwrap();
+                std::fs::write(src.join(key).join("big.key"), vec![0x5B; 65536]).unwrap();
+            },
+            &[],
+        ) else {
+            return;
+        };
+        let (scan, _) = run_scan(&img, &[]);
+        assert!(scan.left.is_empty(), "{:?}", scan.left);
+        assert_eq!(scan.files_excluded, 3, "the directory and both files");
+
+        let Some((img, _keep)) = make_btrfs_from(
+            |src| {
+                std::fs::create_dir_all(src.join(key)).unwrap();
+                std::fs::write(src.join(key).join("a.key"), vec![0x5A; 65536]).unwrap();
+            },
+            &["--subvol", key],
+        ) else {
+            eprintln!("mkfs.btrfs without --subvol — subvolume case skipped");
+            return;
+        };
+        let (scan, _) = run_scan(&img, &[]);
+        let left = crate::exclusions::key_store_left_behind(&scan.left).expect("reported");
+        assert_eq!(left.reason, LeftReason::Subvolume);
     }
 
     fn run_scan(img: &Path, patterns: &[&str]) -> (BtrfsExclusionScan, FileVol) {
@@ -3686,6 +3843,7 @@ mod btrfs_integration {
         }
 
         let (scan, _) = run_scan(&img, &["swapfile"]);
+        assert_eq!(scan.files_kept_named, 1, "the swap file stays listed");
         let patched = dir.path().join("patched.img");
         apply(&img, &scan, &patched);
         let (ok, log) = btrfs_check(&patched, true);
@@ -3999,6 +4157,7 @@ mod btrfs_integration {
             "btrfs restore failed: {}",
             String::from_utf8_lossy(&r.stderr)
         );
+        let mut ghosts = 0u64;
         for i in 0..600u32 {
             let keep = i % 3 != 0;
             let name = format!("f{i:04}.{}", if keep { "keep" } else { "log" });
@@ -4013,8 +4172,11 @@ mod btrfs_integration {
                 // A spared file survives only as a zero-filled ghost.
                 let data = std::fs::read(&p).unwrap();
                 assert!(data.iter().all(|&b| b == 0), "{name} kept non-zero data");
+                ghosts += 1;
             }
         }
+        // The result screen's count is the names the filesystem still lists.
+        assert_eq!(scan.files_kept_named, ghosts);
     }
 
     /// A filesystem big enough for a MULTI-LEVEL checksum tree — the shape
@@ -4340,5 +4502,90 @@ mod btrfs_integration {
             "ядро ругалось на ФС:\n{}",
             complaints.join("\n")
         );
+    }
+
+    /// The leaf guards at work, and counted: a directory of thousands of small
+    /// excluded files between two kept ones empties whole FS-tree leaves, and
+    /// Stage 2 spares some files to keep those leaves (as on the owner's
+    /// Kubuntu root, 18.10: 17 of 24 475). The result screen's count must be
+    /// exactly the excluded names the filesystem still lists — each a ghost of
+    /// zeros — and the patched filesystem must stay clean.
+    #[test]
+    fn stage2_leaf_guards_count_the_names_they_keep() {
+        use std::io::Write;
+        if !have("mkfs.btrfs") {
+            eprintln!("mkfs.btrfs unavailable — skipping");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        for (name, n) in [("a-keep", 400u32), ("cache", 6000), ("z-keep", 400)] {
+            std::fs::create_dir_all(src.join(name)).unwrap();
+            for i in 0..n {
+                let len = 100 + (i as usize * 37) % 3000;
+                let mut f =
+                    std::fs::File::create(src.join(name).join(format!("f{i:05}.bin"))).unwrap();
+                f.write_all(&vec![(i % 251) as u8 + 1; len]).unwrap();
+            }
+        }
+        let img = dir.path().join("fs.img");
+        std::fs::File::create(&img)
+            .unwrap()
+            .set_len(512 * 1024 * 1024)
+            .unwrap();
+        let out = std::process::Command::new("mkfs.btrfs")
+            .args(["-q", "-r"])
+            .arg(&src)
+            .arg(&img)
+            .output()
+            .unwrap();
+        if !out.status.success() {
+            eprintln!("mkfs.btrfs failed — skipping");
+            return;
+        }
+
+        let (scan, _) = run_scan(&img, &["cache/**"]);
+        assert_eq!(scan.files_excluded, 6000);
+        assert!(
+            scan.files_kept_named > 0 && scan.files_kept_named < 6000,
+            "the guards spare some and remove the rest: {}",
+            scan.files_kept_named
+        );
+
+        let patched = dir.path().join("patched.img");
+        apply(&img, &scan, &patched);
+        let (ok, log) = btrfs_check(&patched, true);
+        assert!(ok, "btrfs check after the leaf guards:\n{log}");
+
+        let outdir = dir.path().join("restored");
+        std::fs::create_dir_all(&outdir).unwrap();
+        let r = std::process::Command::new("btrfs")
+            .arg("restore")
+            .arg(&patched)
+            .arg(&outdir)
+            .output()
+            .unwrap();
+        assert!(
+            r.status.success(),
+            "btrfs restore failed: {}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        let mut ghosts = 0u64;
+        for e in std::fs::read_dir(outdir.join("cache")).unwrap() {
+            let data = std::fs::read(e.unwrap().path()).unwrap();
+            assert!(data.iter().all(|&b| b == 0), "a spared file kept its data");
+            ghosts += 1;
+        }
+        assert_eq!(scan.files_kept_named, ghosts);
+        for name in ["a-keep", "z-keep"] {
+            for i in 0..400u32 {
+                let data = std::fs::read(outdir.join(name).join(format!("f{i:05}.bin"))).unwrap();
+                let len = 100 + (i as usize * 37) % 3000;
+                assert!(
+                    data.len() == len && data.iter().all(|&b| b == (i % 251) as u8 + 1),
+                    "{name}/f{i:05}.bin damaged"
+                );
+            }
+        }
     }
 }

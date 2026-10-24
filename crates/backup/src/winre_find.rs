@@ -166,7 +166,11 @@ pub fn inspect_candidate(
     origin: BaseOrigin,
     running_build: u32,
 ) -> std::result::Result<BaseImage, String> {
-    let info = read_wim_info(path).map_err(|e| e.to_string())?;
+    // Our own sentence, without the error kind's English prefix.
+    let info = read_wim_info(path).map_err(|e| match e {
+        own_backup_common::OwnBackupError::ImageFormat(why) => why,
+        e => e.to_string(),
+    })?;
 
     if !info.is_windows_pe() {
         let edition = if info.edition_id.is_empty() {
@@ -216,6 +220,15 @@ pub fn inspect_candidate(
         info,
         warnings,
     })
+}
+
+/// A file the user pointed at, judged exactly as the search judges its own finds.
+pub fn inspect_chosen(path: &Path) -> std::result::Result<BaseImage, String> {
+    #[cfg(target_os = "windows")]
+    let running_build = running_windows_build();
+    #[cfg(not(target_os = "windows"))]
+    let running_build = 0;
+    inspect_candidate(path, BaseOrigin::Manual, running_build)
 }
 
 /// Advice for when nothing was found. Deliberately instructions rather than an
@@ -478,6 +491,21 @@ mod tests {
         write_wim(&p, "WindowsPE", "9", 19041, 3);
         let e = inspect_candidate(&p, BaseOrigin::Manual, 19041).unwrap_err();
         assert!(e.contains(".swm"), "{e}");
+    }
+
+    /// A file chosen by hand that is not a WIM at all: the reason is the
+    /// sentence the window shows, without the error kind in English before it.
+    #[test]
+    fn a_chosen_file_that_is_no_image_says_so_plainly() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("Winre.wim");
+        std::fs::write(&p, vec![0u8; 4096]).unwrap();
+        let e = inspect_chosen(&p).unwrap_err();
+        assert!(!e.contains("Image format error"), "{e}");
+        assert!(e.contains("Winre.wim"), "{e}");
+        let pe = dir.path().join("pe.wim");
+        write_wim(&pe, "WindowsPE", "9", 19041, 1);
+        assert_eq!(inspect_chosen(&pe).unwrap().origin, BaseOrigin::Manual);
     }
 
     /// A different branch is a warning, not a refusal: the user may well have

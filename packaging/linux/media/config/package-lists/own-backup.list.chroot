@@ -1,0 +1,73 @@
+# What the medium carries besides Debian's minimal live system and our own
+# package (config/packages.chroot, put there by scripts/build-linux-media.sh;
+# its Depends bring WebKitGTK, GTK and the rest of the window's libraries).
+
+# The desktop: labwc (ordinary windows; layer-shell for our strip and the
+# foreign-toplevel list for its window buttons), cage as the fallback that
+# shows the window alone when labwc cannot start (kiosk-desktop), foot for the
+# strip's Terminal, gtk-layer-shell for the strip itself (also in our
+# package's Depends). DRM drivers and Mesa for the screen, fonts with Cyrillic
+# (DejaVu has the monospace the terminal needs), polkit's daemon for the
+# engine (root needs no question, but the engine asks polkit about callers and
+# must reach it).
+labwc
+cage
+foot
+libgtk-layer-shell0
+fonts-dejavu-core
+libgl1-mesa-dri
+libegl-mesa0
+fonts-noto-core
+dbus
+libpam-systemd
+polkitd
+
+# Locales and keyboard for the console and the window (ru and en).
+locales
+console-setup
+keyboard-configuration
+
+# What the engine runs or reads on the disks it rescues: Linux volumes, LVM,
+# LUKS, RAID, NTFS (Windows copies are restored by our own code; ntfs-3g is
+# for the NTFS names step and for repairs by hand), FAT, exFAT, btrfs, XFS.
+lvm2
+thin-provisioning-tools
+cryptsetup
+cryptsetup-bin
+mdadm
+e2fsprogs
+btrfs-progs
+xfsprogs
+dosfstools
+mtools
+exfatprogs
+ntfs-3g
+util-linux
+fdisk
+gdisk
+efibootmgr
+kmod
+udev
+
+# Network is optional: a wired DHCP link if there is one (systemd-networkd,
+# config/includes.chroot/etc/systemd/network), name resolution, and shares
+# for a destination on another machine. Nothing waits for it at boot.
+systemd-resolved
+cifs-utils
+nfs-common
+
+# Firmware for the hardware a rescue meets most: GPUs (a black screen is the
+# worst failure a medium can have), wired network, and the common CPUs.
+firmware-linux-free
+firmware-misc-nonfree
+firmware-amd-graphics
+firmware-realtek
+firmware-bnx2
+amd64-microcode
+intel-microcode
+
+# Repairs by hand on the other consoles.
+less
+nano
+pciutils
+usbutils

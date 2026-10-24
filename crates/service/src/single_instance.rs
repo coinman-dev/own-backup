@@ -23,7 +23,9 @@
 //!   Administrators have and which is exactly who may run the engine; if it is
 //!   refused anyway we fall back to `Local\` rather than failing to start, and
 //!   say so.
-//! * **Unix** — `flock(LOCK_EX | LOCK_NB)` on a file in the data directory.
+//! * **Unix** — `flock(LOCK_EX | LOCK_NB)` on a file in the data directory,
+//!   and the daemon claims the machine-wide runtime directory of the socket
+//!   and the token the same way (`claim_runtime_dir` in `main.rs`).
 //!   The lock is released by the kernel when the process dies, including when
 //!   it is killed, so a crash never leaves the engine locked out of itself.
 //!
@@ -115,16 +117,23 @@ pub fn claim(_data_dir: &Path) -> Result<Ownership, Taken> {
 
 #[cfg(unix)]
 pub fn claim(data_dir: &Path) -> Result<Ownership, Taken> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     use std::os::unix::io::AsRawFd;
 
     let path = data_dir.join("own-backup-service.lock");
+    // Owner-only: flock needs no more than a read-only descriptor, so a lock
+    // file anyone could open is one anyone could hold, and keep the engine
+    // from starting. One left by an older build is narrowed (best effort: a
+    // file that is not ours to change is reported by the lock itself).
     let file = std::fs::OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
         .truncate(false)
+        .mode(0o600)
         .open(&path)
         .map_err(|e| Taken::CouldNotAsk(format!("{}: {e}", path.display())))?;
+    let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
 
     // SAFETY: a valid descriptor from the File we still own.
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
@@ -154,6 +163,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let first = claim(dir.path()).expect("the first claim owns it");
         assert!(first.machine_wide);
+        use std::os::unix::fs::PermissionsExt;
+        let lock = std::fs::metadata(dir.path().join("own-backup-service.lock")).unwrap();
+        assert_eq!(
+            lock.permissions().mode() & 0o777,
+            0o600,
+            "nobody else may hold it"
+        );
 
         // flock is per open file DESCRIPTION, so a second open in the same
         // process behaves like another process's.

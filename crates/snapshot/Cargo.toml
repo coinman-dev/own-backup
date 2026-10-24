@@ -11,6 +11,13 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
+rust-i18n = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Device-mapper and loop ioctls, mlockall, flock, the keyring (dm_snapshot.rs).
+libc = "0.2"
+# Device-mapper tables of encrypted mappings carry their key.
+zeroize = "1"
 
 [dev-dependencies]
 tempfile = "3"

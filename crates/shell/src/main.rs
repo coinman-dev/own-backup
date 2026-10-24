@@ -32,6 +32,8 @@ rust_i18n::i18n!("locales", fallback = "ru");
 
 #[cfg_attr(not(windows), allow(dead_code))]
 mod layout;
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod log;
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -54,8 +56,22 @@ fn main() {
     }
 }
 
-#[cfg(not(windows))]
+/// The Linux medium's strip (labwc's autostart runs it in a loop). Off the
+/// medium it can be run on any layer-shell desktop to look at; it then offers
+/// a way out instead of a reboot, as on Windows.
+#[cfg(target_os = "linux")]
 fn main() {
-    eprintln!("own-backup-shell is the boot medium's desktop; it only runs on Windows.");
+    own_backup_common::lang::follow_config_or_system(
+        own_backup_common::config::AppConfig::default_path(),
+    );
+    if let Err(error) = linux::run() {
+        linux::log(&format!("the strip could not start: {error}"));
+        std::process::exit(1);
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn main() {
+    eprintln!("own-backup-shell is the boot medium's desktop; it runs on Windows and Linux.");
     std::process::exit(2);
 }

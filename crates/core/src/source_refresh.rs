@@ -380,12 +380,16 @@ mod tests {
             unlockable: true,
             gpt_attributes: 0,
             mbr_type: 0,
+            kernel_device: String::new(),
+            mapper_kind: String::new(),
+            container_password: false,
         }
     }
 
     fn disk(number: u32, parts: Vec<PartitionInfo>) -> DiskInfo {
         DiskInfo {
             device_id: format!(r"\\.\PhysicalDrive{number}"),
+            stable_device: String::new(),
             model: "Samsung SSD 970 PRO 1TB".into(),
             serial: "S".into(),
             size_bytes: 1_024_209_543_168,
@@ -453,6 +457,7 @@ mod tests {
             sources: sources.clone(),
             disk_source: Some(DiskSourceSpec {
                 disk_number: 4,
+                device: None,
                 disk_model: snapshot.model.clone(),
                 parts: vec![
                     DiskPartSpec {

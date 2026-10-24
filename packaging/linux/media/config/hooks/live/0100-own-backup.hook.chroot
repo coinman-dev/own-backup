@@ -1,0 +1,23 @@
+#!/bin/sh
+# Inside the medium's chroot, after the packages are in: what to start at
+# boot and what not to wait for.
+set -e
+
+# Boot into the window. The engine's own unit is enabled by its package.
+systemctl set-default graphical.target
+systemctl enable own-backup-kiosk.service own-backup-media-log.service \
+    own-backup-media-selftest.service systemd-networkd.service systemd-resolved.service
+
+# Network is optional: never hold the boot (or the engine, which is
+# After=network-online.target) for a cable that is not there.
+systemctl mask systemd-networkd-wait-online.service
+
+# Both languages of the window.
+sed -i -e 's/^# *\(ru_RU.UTF-8 UTF-8\)/\1/' -e 's/^# *\(en_US.UTF-8 UTF-8\)/\1/' /etc/locale.gen
+locale-gen
+
+chmod 0755 /usr/libexec/own-backup-media/kiosk-desktop \
+    /usr/libexec/own-backup-media/kiosk-session \
+    /usr/libexec/own-backup-media/shell-loop \
+    /usr/libexec/own-backup-media/media-log \
+    /usr/libexec/own-backup-media/selftest

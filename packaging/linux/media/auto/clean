@@ -1,0 +1,7 @@
+#!/bin/sh
+# `lb clean` keeps the package cache (cache/) between builds: a rebuild that
+# changed only our .deb does not download Debian again.
+set -e
+lb clean noauto "${@}"
+rm -f config/binary config/bootstrap config/chroot config/common config/source
+rm -f build.log

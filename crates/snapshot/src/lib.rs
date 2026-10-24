@@ -1,8 +1,22 @@
+// Messages in Russian and English (locales/*.json), through
+// own_backup_common::tr! — see common/src/lang.rs.
+rust_i18n::i18n!("locales", fallback = "ru");
+
 pub mod mock;
 pub mod traits;
 
 #[cfg(target_os = "linux")]
+pub mod dm_ioctl;
+#[cfg(target_os = "linux")]
+pub mod dm_snapshot;
+#[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(target_os = "linux")]
+mod loop_dev;
+#[cfg(target_os = "linux")]
+pub mod pv;
+#[cfg(target_os = "linux")]
+pub mod quiesce;
 
 #[cfg(target_os = "windows")]
 pub mod vss_raw;

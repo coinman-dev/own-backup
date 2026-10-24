@@ -47,6 +47,18 @@ pub fn resolve_parent(
     output: &Path,
     format: ImageFormat,
 ) -> Result<(BackupType, Option<PathBuf>)> {
+    resolve_parent_in(kind, explicit, auto, output, format.extension())
+}
+
+/// [`resolve_parent`] for chains of `container` (`vhdx`, `qcow2`, `obk`): an
+/// encrypted copy continues only an encrypted chain.
+pub fn resolve_parent_in(
+    kind: BackupType,
+    explicit: Option<&str>,
+    auto: bool,
+    output: &Path,
+    container: &str,
+) -> Result<(BackupType, Option<PathBuf>)> {
     if kind == BackupType::Full {
         return Ok((kind, None));
     }
@@ -72,13 +84,17 @@ pub fn resolve_parent(
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let chains = own_backup_backup::chains::list_chains(folder, None)?;
+    let chains = if container.eq_ignore_ascii_case(own_backup_backup::seal::obk::OBK_EXTENSION) {
+        cli_encrypted_chains(folder)?
+    } else {
+        own_backup_backup::chains::list_chains(folder, None)?
+    };
     let newest = chains
         .iter()
         .filter(|c| {
             c.images
                 .iter()
-                .all(|i| i.container.eq_ignore_ascii_case(format.extension()))
+                .all(|i| i.container.eq_ignore_ascii_case(container))
         })
         .max_by(|a, b| a.newest_created_at().cmp(b.newest_created_at()));
     let Some(chain) = newest else {
@@ -105,6 +121,34 @@ pub fn resolve_parent(
         chain.images.len()
     );
     Ok((kind, Some(image.image_path.clone())))
+}
+
+/// The encrypted chains made from the command line beside `output`: each
+/// carries its own key's id (`cli-…`, see `backup --encrypt`) where a job's
+/// carries the job's, so they are listed per id — read from the images' open
+/// headers, without a key.
+fn cli_encrypted_chains(folder: &Path) -> Result<Vec<own_backup_backup::chains::Chain>> {
+    let mut ids = std::collections::BTreeSet::new();
+    for entry in std::fs::read_dir(folder)?.flatten() {
+        let path = entry.path();
+        let sealed = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case(own_backup_backup::seal::obk::OBK_EXTENSION));
+        if !sealed {
+            continue;
+        }
+        if let Ok(listing) = own_backup_backup::seal::obk::read_listing(&path) {
+            if listing.job_id.starts_with("cli-") {
+                ids.insert(listing.job_id);
+            }
+        }
+    }
+    let mut chains = Vec::new();
+    for id in ids {
+        chains.extend(own_backup_backup::chains::list_chains(folder, Some(&id))?);
+    }
+    Ok(chains)
 }
 
 /// The check the job option «проверять после создания» runs: every block of

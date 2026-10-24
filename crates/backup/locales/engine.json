@@ -1,5 +1,9 @@
 {
   "_version": 2,
+  "engine_linux.whole_disk_as_volume": {
+    "ru": "%{image} — копия целого диска; её восстанавливают на диск целиком (own-backup-cli restore-disk, или «Восстановление» в окне), а не как том",
+    "en": "%{image} is a copy of a whole disk; it is restored onto a whole disk (own-backup-cli restore-disk, or Restore in the window), not as a volume"
+  },
   "engine_win.no_patterns": {
     "ru": "исключения не заданы — файлы не перечислялись",
     "en": "no exclusions are set — files were not listed"
@@ -71,6 +75,30 @@
   "engine_win.entries_kept": {
     "ru": "удалить их из файловой системы образа не удалось — содержимого этих файлов в копии нет, остались только записи в каталоге; следующая копия удалит их снова, подробности — в журнале службы",
     "en": "they could not be deleted from the image's file system — the files' contents are not in the backup, only their catalog entries remain; the next backup deletes them again, details are in the service log"
+  },
+  "engine.entries_kept_named": {
+    "ru": "%{kept} из %{total} исключённых файлов (%{fs}) остались в каталоге образа под своими именами — их содержимое в копии обнулено, а убрать сами записи безопасно не удалось; подробности — в журнале службы",
+    "en": "%{kept} of %{total} excluded files (%{fs}) are still listed in the image's catalog under their names — their contents in the backup are zeroed, but removing the entries themselves was not safe; details are in the service log"
+  },
+  "engine.entries_kept_linux": {
+    "ru": "удалить их из файловой системы образа не удалось (для этого нужны ntfs-3g и модуль ядра nbd; подробности — в журнале службы) — содержимого этих файлов в копии нет, остались только записи в каталоге",
+    "en": "they could not be deleted from the image's file system (this needs ntfs-3g and the nbd kernel module; details are in the service log) — the files' contents are not in the backup, only their catalog entries remain"
+  },
+  "engine.mft_records_unreachable": {
+    "ru": "исключения применены не ко всем файлам: $MFT тома настолько фрагментирована, что %{count} её записей прочитать не удалось — исключённые файлы среди них могли остаться в копии",
+    "en": "exclusions were not applied to every file: the volume's $MFT is so fragmented that %{count} of its records could not be read — excluded files among them may have stayed in the backup"
+  },
+  "engine.skip_no_walk": {
+    "ru": "файлы не перечислены: MFT не прочитана (%{error}), а обойти каталоги тома здесь нечем — правила исключений не применялись",
+    "en": "files were not listed: the MFT could not be read (%{error}), and there is no way to walk the volume's directories here — exclusion rules were not applied"
+  },
+  "engine.skip_not_frozen": {
+    "ru": "источник не был неподвижен, пока его читали, — файловая система не разбиралась, том скопирован посекторно, правила исключений не применялись",
+    "en": "the source was not held still while it was read — its file system was not parsed, the volume was copied sector by sector and exclusion rules were not applied"
+  },
+  "engine.source_became_busy": {
+    "ru": "%{volume}: пока готовилась копия, устройство занял кто-то другой (его смонтировали или открыли монопольно) — читать его без снимка нельзя",
+    "en": "%{volume}: while the backup was being prepared, something else took the device (it was mounted or opened exclusively) — it cannot be read without a snapshot"
   },
   "engine_win.skip_mft_failed": {
     "ru": "перечисление по MFT не удалось: %{error}",
@@ -378,6 +406,14 @@
     "ru": "LUKS2: %{requirement} — том в особом состоянии, скопировать его целиком нельзя",
     "en": "LUKS2: %{requirement} — the volume is in a special state and cannot be copied whole"
   },
+  "luks.luks2_integrity": {
+    "ru": "LUKS2: шифрование с проверкой целостности (%{integrity}) не поддерживается",
+    "en": "LUKS2: authenticated encryption (%{integrity}) is not supported"
+  },
+  "luks.luks2_segments": {
+    "ru": "LUKS2: сегментов данных — %{count}: контейнер перешифровывается",
+    "en": "LUKS2: %{count} data segments: the container is being reencrypted"
+  },
   "luks.luks2_no_password_slots": {
     "ru": "LUKS2: нет слотов, которые открываются паролем",
     "en": "LUKS2: no key slots open with a password"
@@ -414,6 +450,66 @@
   "restore_win.target_too_small_for_container": {
     "ru": "раздел-приёмник %{target} Б мал для контейнера: заголовок %{header} Б + данные %{payload} Б",
     "en": "the target partition (%{target} B) is too small for the container: header %{header} B + data %{payload} B"
+  },
+  "luks.torn_no_header": {
+    "ru": "в начале раздела нет заголовка LUKS",
+    "en": "there is no LUKS header at the start of the partition"
+  },
+  "luks.torn_size": {
+    "ru": "размер заголовка LUKS2 неправдоподобен (%{size} Б)",
+    "en": "the LUKS2 header size is implausible (%{size} B)"
+  },
+  "luks.torn_secondary_missing": {
+    "ru": "нет запасного заголовка LUKS2",
+    "en": "the secondary LUKS2 header is missing"
+  },
+  "luks.header_primary": {
+    "ru": "основной",
+    "en": "primary"
+  },
+  "luks.header_secondary": {
+    "ru": "запасной",
+    "en": "secondary"
+  },
+  "luks.torn_checksum_alg": {
+    "ru": "%{header} заголовок LUKS2: контрольная сумма %{alg} не поддерживается",
+    "en": "%{header} LUKS2 header: checksum %{alg} is not supported"
+  },
+  "luks.torn_checksum": {
+    "ru": "%{header} заголовок LUKS2 не сходится со своей контрольной суммой",
+    "en": "the %{header} LUKS2 header does not match its checksum"
+  },
+  "luks.torn_seqid": {
+    "ru": "номера версий двух заголовков LUKS2 разные (%{first} и %{second})",
+    "en": "the two LUKS2 headers carry different sequence ids (%{first} and %{second})"
+  },
+  "luks.torn_reads_differ": {
+    "ru": "два чтения заголовка подряд дали разное",
+    "en": "two reads of the header in a row differ"
+  },
+  "engine.luks_reencrypting": {
+    "ru": "Контейнер LUKS на разделе %{partition} перешифровывается (cryptsetup reencrypt): его данные сейчас частью под старым ключом, частью под новым. Копия не сохраняется; повторите её, когда перешифрование закончится.",
+    "en": "The LUKS container on partition %{partition} is being reencrypted (cryptsetup reencrypt): its data is partly under the old key and partly under the new one. The copy is not kept; run it again once the reencryption has finished."
+  },
+  "luks.header_too_large": {
+    "ru": "заголовок LUKS заявляет начало данных на %{offset} Б — больше любого правдоподобного заголовка (%{max} Б)",
+    "en": "the LUKS header puts the data at %{offset} B — beyond any plausible header (%{max} B)"
+  },
+  "engine.luks_header_torn": {
+    "ru": "Заголовок LUKS на разделе %{partition} не прочитался целым (%{why}) — вероятно, его как раз меняли (luksAddKey, luksChangeKey, токены). Повторите копию.",
+    "en": "The LUKS header on partition %{partition} did not read back whole (%{why}) — probably it was being changed just then (luksAddKey, luksChangeKey, tokens). Run the copy again."
+  },
+  "engine.luks_header_changed": {
+    "ru": "Заголовок LUKS на разделе %{partition} изменился во время копирования так, что сменился ключ данных или их расположение: копия не сохраняется. Повторите копию.",
+    "en": "The LUKS header on partition %{partition} changed during the copy in a way that changed the data key or its layout: the copy is not kept. Run the copy again."
+  },
+  "sector_restore.key_not_this_header": {
+    "ru": "Ключ, полученный при проверке пароля, не подходит к заголовку контейнера для %{target}: восстановление остановлено до записи.",
+    "en": "The key recovered when the passphrase was checked does not belong to the container header for %{target}: the restore stopped before writing."
+  },
+  "sector_restore.header_not_landed": {
+    "ru": "Заголовок LUKS, записанный на %{target}, читается обратно не таким, каким был записан: диск не сохранил запись.",
+    "en": "The LUKS header written to %{target} reads back differently from what was written: the disk did not keep the write."
   },
   "restore_win.header_offset_mismatch": {
     "ru": "восстановленный заголовок сообщает смещение данных %{actual}, ожидалось %{expected}",
@@ -472,6 +568,43 @@
   "disk_session_win.layout_refused": {
     "ru": "диспетчер разделов отклонил новую разметку диска %{disk}: %{error}. Обычно это значит, что один из затронутых томов занят — закройте открытые в нём файлы и повторите.",
     "en": "the partition manager refused the new layout of disk %{disk}: %{error}. Usually this means one of the affected volumes is in use — close the files open on it and try again."
+  },
+
+  "restore_win.sector_mismatch": {
+    "ru": "Копия диска рассчитана на сектор %{planned} Б, а у диска %{disk} сектор %{actual} Б: таблица разделов и данные легли бы не на свои места. Восстановите на диск с сектором %{planned} Б.",
+    "en": "The disk copy is laid out in %{planned}-byte sectors, but disk %{disk} has %{actual}-byte sectors: the partition table and data would land in the wrong places. Restore onto a disk with %{planned}-byte sectors."
+  },
+  "disk_session_linux.sector_mismatch": {
+    "ru": "план рассчитан на сектор %{planned} Б, а у диска %{disk} — %{actual} Б",
+    "en": "the plan assumes %{planned} B sectors, but disk %{disk} has %{actual} B"
+  },
+  "disk_session_linux.not_a_disk": {
+    "ru": "%{disk} — не целый диск: таблицу разделов можно записать только на диск, а не на раздел или файл",
+    "en": "%{disk} is not a whole disk: a partition table can only be written to a disk, not to a partition or a file"
+  },
+  "disk_session_linux.busy": {
+    "ru": "диск %{disk} занят — на нём что-то смонтировано, включено как swap или используется LVM, md или LUKS (%{error}). Отмонтируйте и закройте это и повторите.",
+    "en": "disk %{disk} is busy — something on it is mounted, used as swap or held by LVM, md or LUKS (%{error}). Unmount or close it and try again."
+  },
+  "disk_session_linux.lock_failed": {
+    "ru": "не удалось заблокировать диск %{disk} от udev: %{error}",
+    "en": "could not lock disk %{disk} against udev: %{error}"
+  },
+  "disk_session_linux.reread_failed": {
+    "ru": "ядро не приняло новую таблицу разделов диска %{disk}: %{error}",
+    "en": "the kernel did not accept the new partition table of disk %{disk}: %{error}"
+  },
+  "disk_session_linux.partition_busy": {
+    "ru": "ядро не обновило раздел %{number} диска %{disk}: %{error}. Раздел открыт другой программой — закройте её и повторите.",
+    "en": "the kernel did not update partition %{number} of disk %{disk}: %{error}. Another program has the partition open — close it and try again."
+  },
+  "disk_session_linux.kernel_mismatch": {
+    "ru": "ядро показывает разделы диска %{disk} не такими, как записано в таблице: %{shown} вместо %{expected}",
+    "en": "the kernel shows the partitions of disk %{disk} differently from the written table: %{shown} instead of %{expected}"
+  },
+  "disk_session_linux.udev_timeout": {
+    "ru": "разделы диска %{disk} не появились за %{seconds} с: %{pending}",
+    "en": "the partitions of disk %{disk} did not appear within %{seconds} s: %{pending}"
   },
 
   "windows_unlock_win.wrong_secret": {
@@ -557,5 +690,61 @@
   "windows_unlock_win.error": {
     "ru": "разблокировка средствами Windows: %{msg}",
     "en": "unlocking through Windows: %{msg}"
+  },
+  "engine.key_store_not_excluded": {
+    "ru": "Копия %{source} не сделана: на этом томе лежит каталог ключей службы, а его нельзя исключить из копии (%{reason}). Этот каталог исключается из любой копии всегда — копия, в которой он остался бы, не делается.",
+    "en": "%{source} was not copied: the service's key directory is on this volume and cannot be left out of the copy (%{reason}). That directory is always left out of every copy — a copy that would still hold it is not made."
+  },
+  "engine.key_store_after_copy_only": {
+    "ru": "исключения на этом томе применяются только внутри готового образа",
+    "en": "exclusions on this volume are applied only inside the finished image"
+  },
+  "engine.key_store_not_walked": {
+    "ru": "файлы тома не были просмотрены",
+    "en": "the volume's files were not walked"
+  },
+  "engine.key_store_left_behind": {
+    "ru": "разбор файлов оставил в копии содержимое: %{path}",
+    "en": "the file scan left content in the copy: %{path}"
+  },
+  "engine.key_store_pv_not_found": {
+    "ru": "каталог ключей лежит на этом физическом томе LVM, но ни на одном из его логических томов, удержанных снимками",
+    "en": "the key directory is on this LVM physical volume, but on none of its logical volumes held by snapshots"
+  },
+  "engine.skip_pv_volume_line": {
+    "ru": "раздел %{index}, логический том %{volume} (%{fs}): %{why}",
+    "en": "partition %{index}, logical volume %{volume} (%{fs}): %{why}"
+  },
+  "engine.pv_names_kept": {
+    "ru": "логический том %{volume} лежит на разделе не одним куском — имена его исключённых файлов NTFS (%{count}) остались в копии, их данных в ней нет",
+    "en": "the logical volume %{volume} is not one piece on the partition — the names of its excluded NTFS files (%{count}) stay in the copy, their data is not in it"
+  },
+  "engine.pv_label_gone": {
+    "ru": "На разделе %{volume} больше не читается метка физического тома LVM — он изменился после того, как были сняты снимки его логических томов. Копия не сделана.",
+    "en": "The LVM physical volume label of %{volume} can no longer be read — it changed after its logical volumes were snapshotted. No copy was made."
+  },
+  "engine.luks_no_header_on_partition": {
+    "ru": "На разделе %{partition} нет заголовка LUKS, хотя на нём открыт контейнер %{mapping}: контейнеры с вынесенным заголовком (--header) копией целого диска не поддерживаются.",
+    "en": "Partition %{partition} has no LUKS header although the container %{mapping} is open on it: containers with a detached header (--header) are not supported by a whole-disk copy."
+  },
+  "engine.luks_mapping_mismatch": {
+    "ru": "Контейнер %{mapping} на разделе %{partition} открыт не так, как велит его заголовок (данные с %{header} Б по заголовку, с %{table} Б по таблице dm): восстановить такой контейнер нельзя, копия не делается.",
+    "en": "The container %{mapping} on partition %{partition} is not opened the way its header says (data at %{header} B per the header, at %{table} B per the dm table): such a container cannot be restored, the copy is not made."
+  },
+  "engine.luks_not_rebuildable": {
+    "ru": "Раздел %{index}: контейнер LUKS скопирован расшифрованным, но восстановление целого диска не сможет вернуть ему шифрование (%{why}). Данные будут доступны подключением копии.",
+    "en": "Partition %{index}: the LUKS container is copied decrypted, but a whole-disk restore will not be able to put its encryption back (%{why}). The data will be reachable by mounting the copy."
+  },
+  "engine.pv_outside_copy": {
+    "ru": "Группа томов LVM %{vg} (раздел %{index}) лежит ещё на физических томах, которых нет в этой копии (%{count}). Восстановленная из неё одной, группа будет неполной, и её логические тома на тех дисках не откроются.",
+    "en": "The LVM volume group %{vg} (partition %{index}) also lies on physical volumes that are not in this copy (%{count}). Restored from it alone, the group is incomplete, and its logical volumes on those disks will not open."
+  },
+  "engine.pv_volume_copy": {
+    "ru": "%{volume} — физический том LVM в работе: он копируется только вместе с диском целиком.",
+    "en": "%{volume} is an LVM physical volume in use: it is copied only as part of its whole disk."
+  },
+  "engine.pv_layout_bad": {
+    "ru": "Части логических томов на разделе %{volume} пересекаются или выходят за его конец — копия не сделана.",
+    "en": "Parts of the logical volumes on %{volume} overlap or run past its end — no copy was made."
   }
 }

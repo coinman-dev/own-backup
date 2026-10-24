@@ -1,0 +1,203 @@
+#!/bin/sh
+# The stand's check of a booted medium (own-backup-media-selftest.service).
+# Asked for by the VM through QEMU's firmware config; prints `OBK-SELFTEST
+# key=value` lines on the first serial port, which
+# scripts/lab/linux-media-scenario.sh reads, and the screenshot is the host's
+# job. Every value is observed here, none assumed: a check that cannot be made
+# says so (`unknown`), it does not pass.
+set -u
+
+modprobe qemu_fw_cfg 2>/dev/null || true
+flag=/sys/firmware/qemu_fw_cfg/by_name/opt/own-backup/selftest/raw
+[ -r "$flag" ] || exit 0
+out=/dev/ttyS0
+
+report() {
+    echo "OBK-SELFTEST $*" >"$out"
+    echo "OBK-SELFTEST $*"
+}
+
+report "start version=$(dpkg-query -W -f='${Version}' own-backup 2>/dev/null || echo none)"
+
+if grep -qw own-backup.media /proc/cmdline; then
+    report "cmdline=1"
+else
+    report "cmdline=0"
+fi
+
+if [ -d /sys/firmware/efi ]; then
+    sb=/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c
+    if [ -r "$sb" ]; then
+        # Four bytes of attributes, then the value.
+        report "firmware=uefi secureboot=$(od -An -tu1 -j4 -N1 "$sb" | tr -d ' ')"
+    else
+        report "firmware=uefi secureboot=unknown"
+    fi
+else
+    report "firmware=bios secureboot=na"
+fi
+
+# The engine answers on its socket: a call that goes through the token, the
+# peer check and the service's own code (the stick list is read live).
+i=0
+until own-backup-cli media sticks >/run/own-backup-selftest.sticks 2>&1; do
+    i=$((i + 1))
+    if [ "$i" -ge 60 ]; then
+        report "service=fail $(tail -n1 /run/own-backup-selftest.sticks | tr '\n' ' ')"
+        break
+    fi
+    sleep 2
+done
+[ "$i" -lt 60 ] && report "service=ok"
+# Media mode: only an engine in media mode keeps its state on the RAM disk.
+if [ -d /run/own-backup-media ]; then
+    report "service_media=1"
+else
+    report "service_media=0"
+fi
+
+# The window: cage running as the kiosk session, the window's process in it,
+# and the page drawn — the window removes its start marker only when the page
+# says it has drawn (crates/gui/src/linux_display.rs).
+i=0
+state=unknown
+while [ "$i" -lt 90 ]; do
+    if systemctl is-active --quiet own-backup-kiosk.service && pgrep -x own-backup-gui >/dev/null; then
+        if [ ! -e /run/user/0/own-backup/gui-starting ]; then
+            state=drawn
+            break
+        fi
+        state=started
+    fi
+    i=$((i + 1))
+    sleep 2
+done
+report "kiosk=$(systemctl is-active own-backup-kiosk.service) window=$state"
+
+# The desktop: labwc with our strip, or cage alone (kiosk-desktop's fallback).
+# By its path: the kernel cuts a process name to 15 letters, and
+# "own-backup-shell" has 16.
+strip=/usr/libexec/own-backup/own-backup-shell
+desktop=$(cut -d' ' -f1 /run/own-backup-kiosk.desktop 2>/dev/null)
+shell=absent
+i=0
+while [ "$i" -lt 30 ]; do
+    if pgrep -xf "$strip" >/dev/null; then
+        shell=running
+        break
+    fi
+    i=$((i + 1))
+    sleep 1
+done
+report "desktop=${desktop:-unknown} shell=$shell"
+
+if [ "$shell" = running ]; then
+    # The strip's window buttons, as it wrote them: the window is listed.
+    list=/run/user/0/own-backup-shell.windows
+    i=0
+    while [ "$i" -lt 30 ] && ! [ -s "$list" ]; do
+        i=$((i + 1))
+        sleep 1
+    done
+    n=$(grep -c . "$list" 2>/dev/null)
+    report "shell_windows=${n:-0} front=$(awk -F'\t' '$1 == "front" {print $3; exit}' "$list" 2>/dev/null | tr ' ' '_')"
+
+    # A terminal opened on the desktop gets a button of its own, and goes
+    # again when it is closed.
+    sock=$(find /run/user/0 -maxdepth 1 -name 'wayland-*' -type s 2>/dev/null | grep -v lock | head -n1)
+    if [ -n "$sock" ] && command -v foot >/dev/null; then
+        XDG_RUNTIME_DIR=/run/user/0 WAYLAND_DISPLAY=$(basename "$sock") foot -T obk-selftest-terminal sleep 60 &
+        term=$!
+        listed=no
+        i=0
+        while [ "$i" -lt 20 ]; do
+            if grep -q 'obk-selftest-terminal' "$list" 2>/dev/null; then
+                listed=yes
+                break
+            fi
+            i=$((i + 1))
+            sleep 1
+        done
+        kill "$term" 2>/dev/null
+        gone=no
+        i=0
+        while [ "$i" -lt 20 ]; do
+            if ! grep -q 'obk-selftest-terminal' "$list" 2>/dev/null; then
+                gone=yes
+                break
+            fi
+            i=$((i + 1))
+            sleep 1
+        done
+        report "terminal_listed=$listed terminal_gone=$gone"
+    else
+        report "terminal_listed=unknown terminal_gone=unknown"
+    fi
+
+    # A strip that dies comes back (shell-loop).
+    old=$(pgrep -xf "$strip")
+    pkill -xf "$strip"
+    back=no
+    i=0
+    while [ "$i" -lt 20 ]; do
+        new=$(pgrep -xf "$strip")
+        if [ -n "$new" ] && [ "$new" != "$old" ]; then
+            back=yes
+            break
+        fi
+        i=$((i + 1))
+        sleep 1
+    done
+    report "shell_restart=$back"
+
+    # The fallback: a labwc that cannot start must leave the window on the
+    # screen through cage, not a black one. labwc is swapped for one that
+    # fails at once, the session restarted, and labwc put back afterwards.
+    kiosk_state() { # what the session is now: marker, unit, cage, window
+        echo "$(cut -d' ' -f1 /run/own-backup-kiosk.desktop 2>/dev/null) $(systemctl is-active own-backup-kiosk.service) cage=$(pgrep -x cage >/dev/null && echo 1 || echo 0) window=$(pgrep -x own-backup-gui >/dev/null && echo 1 || echo 0)"
+    }
+    labwc_bin=$(command -v labwc)
+    mv "$labwc_bin" "$labwc_bin.selftest"
+    printf '#!/bin/sh\nexit 1\n' >"$labwc_bin"
+    chmod 0755 "$labwc_bin"
+    systemctl restart own-backup-kiosk.service
+    state=
+    i=0
+    while [ "$i" -lt 40 ]; do
+        state=$(kiosk_state)
+        [ "$state" = "cage active cage=1 window=1" ] && break
+        i=$((i + 1))
+        sleep 1
+    done
+    # Still so a few seconds later: not a cage on its way out again.
+    sleep 5
+    state=$(kiosk_state)
+    report "fallback=$(echo "$state" | tr ' ' ',')"
+    if [ "$state" != "cage active cage=1 window=1" ]; then
+        journalctl -b -u own-backup-kiosk.service -n 40 -o cat --no-pager 2>&1 |
+            while IFS= read -r line; do report "journal $line"; done
+    fi
+    mv "$labwc_bin.selftest" "$labwc_bin"
+    systemctl reset-failed own-backup-kiosk.service 2>/dev/null
+    systemctl restart own-backup-kiosk.service
+    i=0
+    while [ "$i" -lt 40 ]; do
+        state=$(kiosk_state)
+        if [ "$state" = "labwc active cage=0 window=1" ] && pgrep -xf "$strip" >/dev/null; then
+            break
+        fi
+        i=$((i + 1))
+        sleep 1
+    done
+    report "fallback_back=$(echo "$state" | tr ' ' ',') shell=$(pgrep -xf "$strip" >/dev/null && echo running || echo absent)"
+    # The desktop drawn again before the host's screenshot.
+    sleep 8
+fi
+
+if [ -r /run/own-backup-media-log.dir ]; then
+    report "logs=$(cat /run/own-backup-media-log.dir)"
+else
+    report "logs=memory"
+fi
+report "failed_units=$(systemctl --failed --no-legend --plain 2>/dev/null | awk '{print $1}' | tr '\n' ',')"
+report "done"

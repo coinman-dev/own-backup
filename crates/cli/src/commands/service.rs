@@ -30,7 +30,9 @@ pub async fn run(args: ServiceArgs) -> own_backup_common::Result<()> {
             println!(
                 "  own-backup-service.exe /install   (Windows — запросит права администратора)"
             );
-            println!("  own-backup-service --install       (Linux — от root)");
+            println!(
+                "  sudo apt install ./own-backup_*.deb  (Linux — пакет ставит и запускает службу)"
+            );
         }
         ServiceCommand::Uninstall => {
             println!("own-backup-service.exe /uninstall");

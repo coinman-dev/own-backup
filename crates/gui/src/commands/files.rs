@@ -255,3 +255,25 @@ pub async fn open_folder(path: String) -> Result<(), String> {
     .await
     .map_err(|e| e.to_string())?
 }
+
+/// Linux: the mount point of the drive `folder` is on, when it is on a drive
+/// of its own — the very rule the service's «destination connected» trigger
+/// fires by (`source_identity::linux::destination_mount`), read from this
+/// machine's mount table without touching the folder. `None` on the system
+/// disk, under a placeholder, for a drive that is not mounted now, and on
+/// Windows, where the trigger watches the drive letter.
+#[tauri::command]
+pub fn destination_mount(folder: String) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        use own_backup_backup::source_identity::linux::{destination_mount, parse_mountinfo};
+        let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+        destination_mount(&folder, &parse_mountinfo(&mountinfo))
+            .map(|mount| mount.to_string_lossy().into_owned())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = folder;
+        None
+    }
+}

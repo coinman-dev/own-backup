@@ -10,6 +10,7 @@
   import { choiceLabel, newestFirst, severalSources, type VersionChoice } from '../lib/jobVersions';
   import type { Job } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
+  import { isWindows } from '../lib/platformStore.svelte';
 
   interface Props {
     job: Job;
@@ -61,7 +62,7 @@
   {:else if choices.length === 0}
     <p class="plain">{m.jv_none()}</p>
   {:else}
-    <p class="plain">{m.jmt_intro()}</p>
+    <p class="plain">{isWindows() ? m.jmt_intro() : m.jmt_intro_linux()}</p>
     <label class="fld">
       <span>{m.jv_version()}</span>
       <select class="form-select" bind:value={imagePath}>

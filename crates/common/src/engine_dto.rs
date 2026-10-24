@@ -302,3 +302,255 @@ pub struct MediaProgressDto {
 pub struct MediaCleanupDto {
     pub bytes_freed: u64,
 }
+
+// --- writing the Linux medium onto a USB stick ------------------------------
+
+/// A disk the medium may be written onto: USB or removable, whole, writable.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MediaStickDto {
+    /// `/dev/sdb` — what the write is asked for.
+    pub device: String,
+    /// Vendor and model as the device reports them; may be empty.
+    pub model: String,
+    pub size_bytes: u64,
+    /// `usb`, `mmc` (a card reader) or `removable` (another bus).
+    pub transport: String,
+    /// Mount points of its partitions now. A stick in use is not written:
+    /// the window says to eject it in the file manager first.
+    #[serde(default)]
+    pub mounted: Vec<String>,
+    /// Serial number as sysfs gives it (the USB device's, the card's); may be
+    /// empty.
+    #[serde(default)]
+    pub serial: String,
+    /// Device number `major:minor` — a name like `/dev/sdb` passes to
+    /// another disk when one is unplugged and another plugged in.
+    #[serde(default)]
+    pub dev: String,
+}
+
+impl MediaStickDto {
+    /// What a write request carries to say which stick it means.
+    pub fn identity(&self) -> MediaStickIdentityDto {
+        MediaStickIdentityDto {
+            model: self.model.clone(),
+            serial: self.serial.clone(),
+            size_bytes: self.size_bytes,
+            dev: self.dev.clone(),
+        }
+    }
+}
+
+/// Which stick a write means, as it was listed: the device opened for the
+/// write must still be this one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MediaStickIdentityDto {
+    pub model: String,
+    pub serial: String,
+    pub size_bytes: u64,
+    pub dev: String,
+}
+
+/// What to write where.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MediaStickWriteDto {
+    pub iso_path: String,
+    pub device: String,
+    /// The stick as the list showed it. Required by the service: a request
+    /// without it (an older window or CLI) is refused with "list the sticks
+    /// again" rather than erasing whatever the name means now.
+    #[serde(default)]
+    pub expect: Option<MediaStickIdentityDto>,
+}
+
+/// What the write did. Progress arrives as `media` engine events, as for a
+/// build ([`MediaProgressDto`]).
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct MediaStickReportDto {
+    pub device: String,
+    pub iso_bytes: u64,
+    pub volume_id: String,
+    /// The log partition's device (`/dev/sdb3`) when one was made.
+    #[serde(default)]
+    pub log_partition: Option<String>,
+    /// Why there is none, when there is none: the stick boots regardless,
+    /// and the medium's log then stays in memory.
+    #[serde(default)]
+    pub log_skipped: Option<String>,
+}
+
+// --- building the Linux medium in the service --------------------------------
+
+/// Build the Linux boot medium: the ISO into the caller's own folder and,
+/// optionally, onto a stick. Progress arrives as `media` engine events
+/// ([`MediaProgressDto`]); CancelEngineOp stops it.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct LinuxMediaBuildDto {
+    /// An existing folder owned by the caller; the ISO gets a name of its
+    /// own there and never replaces a file.
+    pub output_dir: String,
+    /// Also write the medium onto this stick (`/dev/sdb`); empty for none.
+    #[serde(default)]
+    pub stick_device: String,
+    /// The stick as the list showed it; required with `stick_device`.
+    #[serde(default)]
+    pub stick_expect: Option<MediaStickIdentityDto>,
+    /// Development: this .deb (the caller's own file) instead of the
+    /// installed package. Empty — the installed package, as the window sends.
+    #[serde(default)]
+    pub deb_path: String,
+}
+
+/// What the build did.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct LinuxMediaReportDto {
+    pub iso_path: String,
+    pub iso_bytes: u64,
+    /// The package version the medium carries.
+    pub version: String,
+    /// Made from the installed package (not from a given .deb).
+    pub from_installed: bool,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub stick: Option<MediaStickReportDto>,
+    /// The builder and package cache kept for the next build.
+    pub cache_dir: String,
+    pub cache_bytes: u64,
+}
+
+/// What the window shows before a Linux build: whether one can start, and
+/// the cache an earlier build left.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct LinuxMediaStatusDto {
+    /// The installed package's version; empty when it is not installed.
+    pub installed_version: String,
+    pub cache_dir: String,
+    pub cache_bytes: u64,
+    pub free_bytes: u64,
+    pub need_bytes: u64,
+    /// What stops a build now, in the person's words; empty when it can start.
+    #[serde(default)]
+    pub problems: Vec<String>,
+}
+
+/// The cache removed.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct LinuxMediaCacheClearedDto {
+    pub freed_bytes: u64,
+}
+
+// --- duplicate identities (Linux restore and mount) ------------------------
+
+/// An identity the restored or mounted copy carries that a device of this
+/// machine already has (`backup::identity_clash`): a filesystem, LUKS, LVM or
+/// md UUID, an LVM volume group name, a GPT partition GUID, a filesystem
+/// label.
+///
+/// Every field is structured: the window decides from `severity` and `kind`,
+/// never from translated text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentityClashDto {
+    /// `ext`, `xfs`, `btrfs`, `luks`, `lvm_pv`, `lvm_vg`, `lvm_vg_name`, `md`,
+    /// `partuuid`, `vfat` (a FAT serial), `label` (a filesystem label of any
+    /// type: `LABEL=` and `/dev/disk/by-label` resolve across types).
+    pub kind: String,
+    /// The value as the subsystem's own tools print it.
+    pub value: String,
+    /// Which source partition of the copy carries it (`None` for a volume copy).
+    #[serde(default)]
+    pub part_index: Option<u32>,
+    /// Kernel names of the devices that already carry it.
+    pub already_on: Vec<String>,
+    /// `ambiguous` (names may resolve to either), `mount` (the second mount is
+    /// refused as is), `critical` (a volume manager or the kernel may merge or
+    /// confuse the two).
+    pub severity: String,
+    /// The command that gives the restored copy a new identity, with `<device>`
+    /// for the restored device; empty when none is offered (a PARTUUID).
+    #[serde(default)]
+    pub change_command: String,
+    /// Mount option that lets the copy be mounted beside the original
+    /// (`nouuid` for XFS), empty when none is needed.
+    #[serde(default)]
+    pub mount_hint: String,
+}
+
+/// What to do about duplicate identities, said explicitly by the person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityChoice {
+    /// Restore or mount the copy as it is; the duplicates stay.
+    Keep,
+    /// Give the restored copy new identities. Editing its fstab, crypttab
+    /// and boot configuration to match is a separate choice
+    /// (`fix_references` in the request). Restores only: a mounted copy is
+    /// read, not changed.
+    Change,
+}
+
+/// The person's decision about duplicate identities, as a restore request
+/// carries it: the choice, and — with [`IdentityChoice::Change`] — whether the
+/// restored system's fstab, crypttab and boot configuration are edited too.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IdentityDecision {
+    pub choice: Option<IdentityChoice>,
+    pub fix_references: bool,
+}
+
+impl From<Option<IdentityChoice>> for IdentityDecision {
+    fn from(choice: Option<IdentityChoice>) -> Self {
+        Self {
+            choice,
+            fix_references: false,
+        }
+    }
+}
+
+impl IdentityDecision {
+    /// Change the duplicates; `fix_references` edits the restored system too.
+    pub fn change(fix_references: bool) -> Self {
+        Self {
+            choice: Some(IdentityChoice::Change),
+            fix_references,
+        }
+    }
+}
+
+/// One identity a restore changed on the restored copy (Linux,
+/// [`IdentityChoice::Change`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentityChangeDto {
+    /// Same slugs as [`IdentityClashDto::kind`].
+    pub kind: String,
+    pub old: String,
+    pub new: String,
+    /// The device it was changed on (a partition, or a device the restore
+    /// opened on it: `/dev/mapper/…`, `/dev/md…`).
+    pub device: String,
+    /// The partition number on the target, when it is one.
+    #[serde(default)]
+    pub part_index: Option<u32>,
+}
+
+/// Key of the JSON object carried in the details of the `FAILED_PRECONDITION`
+/// status that asks for an [`IdentityChoice`]: `{"identity_clashes": [...]}`.
+pub const IDENTITY_CLASHES_DETAIL: &str = "identity_clashes";
+
+/// Key of the JSON object carried in the details of the `FAILED_PRECONDITION`
+/// status a whole-disk restore answers with when a LUKS container the copy
+/// holds decrypted needs its passphrase to be put back:
+/// `{"luks_passphrases": [...]}` ([`LuksPassphraseNeedDto`]).
+pub const LUKS_PASSPHRASES_DETAIL: &str = "luks_passphrases";
+
+/// A LUKS container of a whole-disk copy whose passphrase the restore needs —
+/// the container's own one, which opens the restored system at boot; never
+/// the copy's archive password.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LuksPassphraseNeedDto {
+    /// The source partition: the key of the request's `passphrases`.
+    pub part_index: u32,
+    pub kind: crate::image::VolumeEncryptionKind,
+    /// One was given, and no keyslot of the container accepted it.
+    pub wrong: bool,
+}

@@ -24,6 +24,8 @@ use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 
 use own_backup_common::{OwnBackupError, Result};
 
+/// `IVssAsync::QueryStatus` value: operation still running.
+pub const VSS_S_ASYNC_PENDING: HRESULT = HRESULT(0x00042309u32 as i32);
 /// `IVssAsync::QueryStatus` value: operation finished successfully.
 pub const VSS_S_ASYNC_FINISHED: HRESULT = HRESULT(0x0004230Au32 as i32);
 

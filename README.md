@@ -5,11 +5,12 @@
 </p>
 
 <h1 align="center">Own Backup</h1>
-<p align="center">Block-level backup of Windows disks and volumes, with a boot medium to restore from.</p>
+<p align="center">Block-level backup of Windows and Linux disks and volumes, with boot media to restore from.</p>
 
-[![Release](https://img.shields.io/badge/release-0.1.5--beta-orange)](https://github.com/coinman-dev/own-backup/releases/tag/v0.1.5-beta)
+[![Release](https://img.shields.io/badge/release-0.1.6--beta-orange)](https://github.com/coinman-dev/own-backup/releases/tag/v0.1.6-beta)
 [![Build](https://github.com/coinman-dev/own-backup/actions/workflows/release.yml/badge.svg)](https://github.com/coinman-dev/own-backup/actions/workflows/release.yml)
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-blue)](#download)
+[![Linux](https://img.shields.io/badge/Linux-Ubuntu%2024.04%2B%20%2F%20Debian%2013%2B-blue)](#download)
 [![Rust](https://img.shields.io/badge/Rust-1.98-orange)](#building)
 [![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue)](LICENSE)
 
@@ -19,19 +20,23 @@ be encrypted with a password. From a backup you can restore a partition, a disk
 or individual files — and, from the boot medium, the disk Windows itself boots
 from.
 
-> **0.1.5-beta is a Windows prerelease.** Check an important backup by
-> restoring it to a spare disk or a virtual machine before you rely on it.
-> Linux code exists for development and tests; there is no Linux version yet.
+> **0.1.6-beta is a prerelease, and the first with a Linux version.** Check
+> an important backup by restoring it to a spare disk or a virtual machine
+> before you rely on it — on Linux especially: that version is new.
 
 ## Download
 
 | Edition | Download | Usage |
 |---|---|---|
-| Installer | [own-backup-install.exe](https://github.com/coinman-dev/own-backup/releases/download/v0.1.5-beta/own-backup-install.exe) | Installs the program for all users of the computer and starts its backup service. Needs administrator rights. |
+| Windows installer | [own-backup-install.exe](https://github.com/coinman-dev/own-backup/releases/download/v0.1.6-beta/own-backup-install.exe) | Installs the program for all users of the computer and starts its backup service. Needs administrator rights. |
+| Linux package | [own-backup_0.1.6.beta-1_amd64.deb](https://github.com/coinman-dev/own-backup/releases/download/v0.1.6-beta/own-backup_0.1.6.beta-1_amd64.deb) | `sudo apt install ./own-backup_0.1.6.beta-1_amd64.deb` installs the program, starts its service and adds you to the `own-backup` group (sign in again to open the window). |
+| Linux boot medium | [OwnBackup-Linux-0.1.6.beta-1_amd64.iso](https://github.com/coinman-dev/own-backup/releases/download/v0.1.6-beta/OwnBackup-Linux-0.1.6.beta-1_amd64.iso) | Boots a computer from a CD or a USB stick (UEFI with Secure Boot, or BIOS) to back up or restore its disks, Windows ones included. The window writes it onto a stick. |
 
 Windows 10/11, x64. The window needs the Microsoft Edge WebView2 Runtime — part
-of Windows 11, and the installer says so if a Windows 10 does not have it. No
-advertising, no telemetry, no update checks.
+of Windows 11, and the installer says so if a Windows 10 does not have it.
+Linux: Ubuntu 24.04 or newer, Debian 13 or newer, amd64; the package brings
+WebKitGTK and the rest of what the window needs. No advertising, no
+telemetry, no update checks.
 [All releases](https://github.com/coinman-dev/own-backup/releases) ·
 [Changelog](CHANGELOG.md).
 
@@ -77,8 +82,12 @@ The interface is in English and Russian, with light, dark and system themes.
 
 - NTFS/ReFS and FAT32/exFAT exclusions have live acceptance runs. ext2/3/4
   and btrfs metadata removal have filesystem checks and mount/write tests.
-- XFS removal is incomplete for some directory shapes; some excluded names can
-  remain as zero-filled entries.
+- On ext4, XFS and btrfs a file that cannot be removed safely stays as a
+  zero-filled entry; the result of the run says how many.
+- Linux: a running volume is copied from an LVM or device-mapper snapshot. A
+  busy plain partition (an ext4 root without LVM or LUKS) cannot be held
+  still while it runs — copy it from the boot medium. A volume group spread
+  over several disks is copied only with a warning.
 - Exclusions inside an encrypted ReFS source may be skipped, with an explicit
   warning in the result.
 - New `.obk` images use two header generations. A boot medium built by an
@@ -96,6 +105,10 @@ The interface is in English and Russian, with light, dark and system themes.
 | Service log, one file a day, thirty days kept | `Logs\own-backup-service-<date>.log` in the program folder |
 | What the window remembers: theme, language | `%LOCALAPPDATA%\com.ownbackup.gui` |
 | Backups | wherever each job says; the program keeps none of its own |
+
+On Linux the program is in `/usr/bin` and `/usr/libexec/own-backup`, settings,
+jobs and keys in `/var/lib/own-backup`, and the service log in journald
+(`journalctl -u own-backup`) and `/var/log/own-backup`.
 
 Running the installer again updates the program where it is. The uninstaller
 keeps the settings unless you tell it otherwise, a silent removal always keeps
@@ -127,7 +140,13 @@ cargo xwin check --workspace --locked --target x86_64-pc-windows-msvc
 
 sudo apt install nsis           # once, for makensis
 scripts/build-installer.sh      # target/dist/own-backup-install.exe
+scripts/build-deb.sh            # target/dist/own-backup_<version>_amd64.deb
+scripts/build-linux-media.sh    # target/dist/own-backup-media_<version>_amd64.iso
 ```
+
+Build the `.deb` on Ubuntu 24.04, the oldest supported system: the package
+requires the glibc and WebKitGTK it was linked against. The boot medium needs
+root, `debootstrap` and the Debian mirror.
 
 The last script builds the frontend and the four release executables with
 `cargo xwin` and packs them with NSIS
@@ -141,13 +160,14 @@ WinPE machine.
 
 ## Automated releases
 
-Pushing a version tag such as `v0.1.5-beta` starts the
+Pushing a version tag such as `v0.1.6-beta` starts the
 [release workflow](.github/workflows/release.yml). The tag must match the
 version in `Cargo.toml`. GitHub builds the Windows x64 executables, packs the
 installer, installs and removes it on the runner, computes SHA-256 checksums
 and publishes the release only after the files are ready. A version with a
 suffix is marked as a prerelease. The workflow can also be run by hand for an
-existing tag, or as a dry run that publishes nothing.
+existing tag, or as a dry run that publishes nothing. The Linux package and
+boot medium are built locally and added to the release.
 
 ## License
 

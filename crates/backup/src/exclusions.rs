@@ -318,6 +318,127 @@ pub fn recreated_by_windows(rel: &str) -> bool {
         .eq_ignore_ascii_case("System Volume Information")
 }
 
+/// The longest value that may be resident — kept inside an NTFS file record
+/// rather than in clusters: no longer than the record itself (1 KiB, or 4 KiB
+/// on a volume of 4K-sector disks). The deletion passes overwrite a wholly
+/// excluded file's content and named streams up to this length before the
+/// file goes: deleting frees the record but leaves its bytes, here and on
+/// Windows. Anything longer is in clusters, which the `$MFT` scan already
+/// left out of the copy.
+pub const NTFS_RESIDENT_MAX: u64 = 4096;
+
+/// One directory entry, as a Windows directory listing gives it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirEntryInfo {
+    pub name: String,
+    pub size: u64,
+    pub attributes: u32,
+    /// The file reference (on NTFS: MFT record number in the low 48 bits,
+    /// sequence number above) — only from a listing that asks for it.
+    pub file_id: Option<u64>,
+}
+
+/// The entries of a `FILE_FULL_DIR_INFO` chain (`with_ids == false`) or a
+/// `FILE_ID_BOTH_DIR_INFO` chain (`with_ids`) — what
+/// `GetFileInformationByHandleEx` fills in for `FileFullDirectoryInfo` and
+/// `FileIdBothDirectoryInfo`, without `.` and `..`. A truncated entry ends
+/// the list.
+///
+/// Layouts (x64): `NextEntryOffset`@0, `EndOfFile`@40, `FileAttributes`@56,
+/// `FileNameLength`@60 (bytes); the name at 68 — or, with ids, the short name
+/// in between, `FileId`@96 and the name at 104.
+pub fn parse_dir_info(buf: &[u8], with_ids: bool) -> Vec<DirEntryInfo> {
+    let name_at = if with_ids { 104 } else { 68 };
+    let mut out = Vec::new();
+    let mut off = 0usize;
+    while let Some(rec) = buf.get(off..).filter(|r| r.len() >= name_at) {
+        let next = u32::from_le_bytes(rec[0..4].try_into().unwrap()) as usize;
+        let size = i64::from_le_bytes(rec[40..48].try_into().unwrap()).max(0) as u64;
+        let attributes = u32::from_le_bytes(rec[56..60].try_into().unwrap());
+        let name_len = u32::from_le_bytes(rec[60..64].try_into().unwrap()) as usize;
+        let file_id = with_ids.then(|| u64::from_le_bytes(rec[96..104].try_into().unwrap()));
+        let Some(raw) = rec.get(name_at..name_at + name_len) else {
+            break;
+        };
+        let units: Vec<u16> = raw
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
+            .collect();
+        let name = String::from_utf16_lossy(&units);
+        if name != "." && name != ".." {
+            out.push(DirEntryInfo {
+                name,
+                size,
+                attributes,
+                file_id,
+            });
+        }
+        if next == 0 {
+            break;
+        }
+        off += next;
+    }
+    out
+}
+
+/// Whether every one of a file's `names` — volume-relative, `\`-separated,
+/// as `FindFirstFileNameW` lists the hard links of a file — falls under the
+/// rules: by its own path, or by a directory above it. A file with a name
+/// outside them is data a kept name still needs.
+pub fn every_name_excluded(names: &[String], parsed: &[ExclusionPattern]) -> bool {
+    !names.is_empty()
+        && names.iter().all(|name| {
+            let comps: Vec<String> = name
+                .split(['\\', '/'])
+                .filter(|c| !c.is_empty())
+                .map(str::to_lowercase)
+                .collect();
+            (1..=comps.len()).any(|k| {
+                let prefix = &comps[..k];
+                parsed.iter().any(|p| p.matches(&prefix[k - 1], prefix))
+            })
+        })
+}
+
+/// The named data streams in a `FILE_STREAM_INFO` chain (what
+/// `GetFileInformationByHandleEx(FileStreamInfo)` fills in): their full names
+/// as a path suffix (`:Zone.Identifier:$DATA`) and sizes. The unnamed stream
+/// (`::$DATA`) and anything that is not a data stream are left out; a
+/// truncated or malformed entry ends the list.
+///
+/// Layout: `NextEntryOffset` u32, `StreamNameLength` u32 (bytes),
+/// `StreamSize` i64, `StreamAllocationSize` i64, then the UTF-16 name.
+pub fn named_streams_from_info(buf: &[u8]) -> Vec<(String, u64)> {
+    const NAME_AT: usize = 24;
+    let mut out = Vec::new();
+    let mut off = 0usize;
+    while let Some(rec) = buf.get(off..).filter(|r| r.len() >= NAME_AT) {
+        let next = u32::from_le_bytes(rec[0..4].try_into().unwrap()) as usize;
+        let name_len = u32::from_le_bytes(rec[4..8].try_into().unwrap()) as usize;
+        let size = i64::from_le_bytes(rec[8..16].try_into().unwrap()).max(0) as u64;
+        let Some(raw) = rec.get(NAME_AT..NAME_AT + name_len) else {
+            break;
+        };
+        let units: Vec<u16> = raw
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
+            .collect();
+        let name = String::from_utf16_lossy(&units);
+        if name != "::$DATA" && name.starts_with(':') && name.ends_with(":$DATA") {
+            out.push((name, size));
+        }
+        if next == 0 {
+            break;
+        }
+        off += next;
+    }
+    out
+}
+
 /// Match pattern components against path components. A `**` component matches
 /// zero or more whole path components; any other component is a single-component
 /// glob (`*` / `?`). Root-anchored, must consume the entire path. Iterative
@@ -550,6 +671,125 @@ impl<R: BlockReader> BlockReader for ZeroingBlockReader<R> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// What a scan found
+// ---------------------------------------------------------------------------
+
+/// A matched entry, recorded at its highest match point (a matched directory
+/// is one record — its contents are implied). Fed to the mount-&-delete pass
+/// ([`crate::true_removal_win`]) that truly removes NTFS/ReFS exclusions from
+/// the finished image.
+#[derive(Debug, Clone, Default)]
+pub struct ExcludedPath {
+    /// Path relative to the volume root, original case, `\`-separated.
+    pub rel: String,
+    pub is_dir: bool,
+    /// Junction/symlink: delete the reparse entry itself, never its target.
+    pub is_reparse: bool,
+    /// From the `$MFT` scan, sorted: the MFT records at or under this path
+    /// every name of which is excluded, so the deletion takes the whole file,
+    /// and which hold content inside the record
+    /// (`ntfs_scan::MatchedPath::whole_records`). The deletion passes — ntfs-3g
+    /// on Linux, the Windows driver in `true_removal_win` — clear the resident
+    /// content and named streams of these only; empty where no scan said so.
+    pub whole_records: Vec<u64>,
+}
+
+/// Why something a scan matched (or could not look at) is still in the copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeftReason {
+    /// A hard link whose other name is not excluded: emptying it would empty
+    /// that file too.
+    HardLink,
+    /// Its data is shared with a file that stays (a reflink, a snapshot).
+    Shared,
+    /// Its data lives inside metadata the scan does not rewrite (an inline or
+    /// compressed inline extent, resident data).
+    Inline,
+    /// Its inode or extent map could not be read.
+    Unreadable,
+    /// A directory whose entries could not be read: nothing under it was
+    /// matched at all, so it may hold anything.
+    SubtreeNotWalked,
+    /// A btrfs subvolume: walked as its own tree, never removed by name.
+    Subvolume,
+}
+
+impl LeftReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LeftReason::HardLink => "hard link",
+            LeftReason::Shared => "shared data",
+            LeftReason::Inline => "inline data",
+            LeftReason::Unreadable => "unreadable",
+            LeftReason::SubtreeNotWalked => "directory not walked",
+            LeftReason::Subvolume => "subvolume",
+        }
+    }
+}
+
+/// A matched file whose content is still in the copy, or a directory the
+/// scan could not walk. `path` is relative to the root the scan walked from,
+/// lowercased components.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeftInCopy {
+    pub path: Vec<String>,
+    pub reason: LeftReason,
+}
+
+impl LeftInCopy {
+    pub fn new(path: &[String], reason: LeftReason) -> Self {
+        Self {
+            path: path.to_vec(),
+            reason,
+        }
+    }
+
+    /// `path (reason)`, for the log and the refusal.
+    pub fn shown(&self) -> String {
+        format!("/{} ({})", self.path.join("/"), self.reason.as_str())
+    }
+}
+
+/// The proof decision 6/E4 asks of a scan: did every match of the service's
+/// key directory leave the copy? The first entry of `left` that says it may
+/// not have — a file under a directory of that name whose content stayed, or
+/// any directory the scan could not walk (the key directory may be under it,
+/// unseen) — or `None` when the scan accounts for all of it.
+pub fn key_store_left_behind(left: &[LeftInCopy]) -> Option<&LeftInCopy> {
+    let key = crate::seal::local::KEY_DIRECTORY_NAME;
+    left.iter().find(|l| {
+        l.reason == LeftReason::SubtreeNotWalked
+            || l.path.iter().any(|c| c.eq_ignore_ascii_case(key))
+    })
+}
+
+/// Outcome of an exclusion scan over a volume.
+pub struct ExclusionScan {
+    /// Merged excluded byte ranges (volume offsets), finalized.
+    pub ranges: ByteRanges,
+    pub files_excluded: u64,
+    pub entries_scanned: u64,
+    /// Total bytes of excluded extents (before merging).
+    pub bytes_excluded: u64,
+    /// Byte totals per file category for the files that STAY in the backup
+    /// (excluded files are not part of the archive). Powers the dashboard
+    /// breakdown — the walk visits every file anyway, so this is free.
+    pub categories: CategorySizes,
+    /// Matched entries at their highest match point, for the true-removal
+    /// (mount-&-delete) pass over the finished image. Includes entries the
+    /// zeroing step cannot handle (resident files, reparse points, files
+    /// whose extents failed to resolve) — the driver deletes them all the
+    /// same.
+    pub paths: Vec<ExcludedPath>,
+    /// Per-file resolved extent bytes, filled only when the caller asks for it
+    /// (`scan-exclusions --list`). Diagnostics for the B0 comparison against
+    /// `scripts/ntfs-mft-probe.py`: the two methods agreed on the file set to
+    /// 0.26% and disagreed on the byte total by a third, and a per-file diff is
+    /// the only thing that says which one is lying.
+    pub file_bytes: Vec<(String, u64)>,
+}
+
 #[cfg(test)]
 mod mandatory_tests {
     use super::*;
@@ -582,6 +822,154 @@ mod mandatory_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stream_info(entries: &[(&str, i64)]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        for (i, (name, size)) in entries.iter().enumerate() {
+            let name: Vec<u8> = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
+            // Entries are 8-byte aligned, as Windows lays them out.
+            let len = (24 + name.len()).div_ceil(8) * 8;
+            let next = if i + 1 == entries.len() {
+                0
+            } else {
+                len as u32
+            };
+            buf.extend_from_slice(&next.to_le_bytes());
+            buf.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&size.to_le_bytes());
+            buf.extend_from_slice(&((size + 4095) / 4096 * 4096).to_le_bytes());
+            buf.extend_from_slice(&name);
+            buf.resize(buf.len().div_ceil(8) * 8, 0);
+        }
+        buf
+    }
+
+    fn dir_info(entries: &[(&str, i64, u32, u64)], with_ids: bool) -> Vec<u8> {
+        let name_at = if with_ids { 104 } else { 68 };
+        let mut buf = Vec::new();
+        for (i, (name, size, attrs, id)) in entries.iter().enumerate() {
+            let name: Vec<u8> = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
+            let len = (name_at + name.len()).div_ceil(8) * 8;
+            let mut rec = vec![0u8; len];
+            let next = if i + 1 == entries.len() {
+                0
+            } else {
+                len as u32
+            };
+            rec[0..4].copy_from_slice(&next.to_le_bytes());
+            rec[40..48].copy_from_slice(&size.to_le_bytes());
+            rec[56..60].copy_from_slice(&attrs.to_le_bytes());
+            rec[60..64].copy_from_slice(&(name.len() as u32).to_le_bytes());
+            if with_ids {
+                // A short name in between, which must not be read as the name.
+                rec[68] = 24;
+                rec[70..94].copy_from_slice(&[0x41; 24]);
+                rec[96..104].copy_from_slice(&id.to_le_bytes());
+            }
+            rec[name_at..name_at + name.len()].copy_from_slice(&name);
+            buf.extend_from_slice(&rec);
+        }
+        buf
+    }
+
+    /// Both listing layouts: the plain one the walks use, and the one with
+    /// file ids the deletion pass reads record numbers from.
+    #[test]
+    fn directory_listings_are_parsed_with_and_without_ids() {
+        let entries = [
+            (".", 0, 0x10, 5),
+            ("Длинное имя.tmp", 300, 0x20, (7u64 << 48) | 42),
+            ("sub", 0, 0x10, 77),
+        ];
+        for with_ids in [false, true] {
+            let got = parse_dir_info(&dir_info(&entries, with_ids), with_ids);
+            let want: Vec<DirEntryInfo> = entries[1..]
+                .iter()
+                .map(|(n, s, a, id)| DirEntryInfo {
+                    name: n.to_string(),
+                    size: *s as u64,
+                    attributes: *a,
+                    file_id: with_ids.then_some(*id),
+                })
+                .collect();
+            assert_eq!(got, want, "with ids: {with_ids}");
+        }
+        let buf = dir_info(&entries, true);
+        assert_eq!(parse_dir_info(&buf[..buf.len() - 4], true).len(), 1);
+    }
+
+    /// A hard link keeps the data when one of its names stays: the walk sees
+    /// the names Windows lists for the file, each judged by its own path or a
+    /// directory above it.
+    #[test]
+    fn every_name_of_a_hard_link_must_be_excluded() {
+        let parsed = parse_patterns(&["Temp".to_string(), "*.tmp".to_string()]);
+        let names = |n: &[&str]| n.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(every_name_excluded(
+            &names(&["\\Temp\\a.bin", "\\Users\\u\\b.tmp"]),
+            &parsed
+        ));
+        assert!(!every_name_excluded(
+            &names(&["\\Temp\\a.tmp", "\\Users\\u\\keep.bin"]),
+            &parsed
+        ));
+        assert!(every_name_excluded(
+            &names(&["\\x\\Temp\\deep\\c.bin"]),
+            &parsed
+        ));
+        assert!(!every_name_excluded(&[], &parsed), "no names known");
+    }
+
+    /// What `FileStreamInfo` reports, named data streams only: the unnamed
+    /// one is the file's own data, and a cut-off entry ends the list.
+    #[test]
+    fn named_streams_are_read_from_a_stream_info_chain() {
+        let buf = stream_info(&[
+            ("::$DATA", 9000),
+            (":Zone.Identifier:$DATA", 26),
+            (":Поток:$DATA", 70_000),
+        ]);
+        assert_eq!(
+            named_streams_from_info(&buf),
+            vec![
+                (":Zone.Identifier:$DATA".to_string(), 26),
+                (":Поток:$DATA".to_string(), 70_000)
+            ]
+        );
+        assert!(named_streams_from_info(&[]).is_empty());
+        let cut = &buf[..buf.len() - 4];
+        assert_eq!(
+            named_streams_from_info(cut).len(),
+            1,
+            "the cut-off entry is dropped"
+        );
+    }
+
+    /// Decision 6/E4: content left under any directory of the key store's
+    /// name, in any letter case, or a directory nobody walked, stands in the
+    /// way; content left elsewhere does not.
+    #[test]
+    fn the_key_store_proof_looks_under_its_name_and_at_unwalked_directories() {
+        let key = crate::seal::local::KEY_DIRECTORY_NAME;
+        let p = |parts: &[&str]| parts.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let elsewhere = LeftInCopy::new(&p(&["home", "a.bin"]), LeftReason::HardLink);
+        assert_eq!(
+            key_store_left_behind(std::slice::from_ref(&elsewhere)),
+            None
+        );
+        let upper = key.to_uppercase();
+        let under = LeftInCopy::new(&p(&["@", &upper, "x.key"]), LeftReason::Shared);
+        assert_eq!(
+            key_store_left_behind(&[elsewhere.clone(), under.clone()]),
+            Some(&under)
+        );
+        let unwalked = LeftInCopy::new(&p(&["var", "lib"]), LeftReason::SubtreeNotWalked);
+        assert_eq!(
+            key_store_left_behind(&[elsewhere, unwalked.clone()]),
+            Some(&unwalked)
+        );
+        assert_eq!(unwalked.shown(), "/var/lib (directory not walked)");
+    }
 
     /// Only the folder Windows recreates is beyond the delete pass — what lies
     /// inside it is deleted like anything else.

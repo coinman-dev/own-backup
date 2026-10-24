@@ -6,11 +6,21 @@
 rust_i18n::i18n!("locales", fallback = "ru");
 
 mod commands;
+#[cfg(target_os = "linux")]
+mod device_watch;
+#[cfg(target_os = "linux")]
+mod instance_linux;
 mod jobs;
+#[cfg(target_os = "linux")]
+mod linux_display;
 mod service_link;
 mod state;
 #[cfg(target_os = "windows")]
 mod tray;
+#[cfg(target_os = "linux")]
+mod tray_linux;
+#[cfg(unix)]
+mod unix_group;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,12 +39,21 @@ use state::GuiState;
 /// build date sent a diagnosis down the wrong path (2026-08-07).
 const BUILD_TAG: &str = "boot-parts-and-scheme-reset";
 
+/// The folder this window's log went to, once [`open_log`] found one — for
+/// the help page, which names it.
+static UI_LOG_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+pub(crate) fn ui_log_dir() -> Option<&'static PathBuf> {
+    UI_LOG_DIR.get()
+}
+
 /// Today's interface log, in the shared `Logs` folder beside the exe — or the
 /// first fallback, because that folder can be read-only (a network / WSL /
 /// Program Files path). Sweeping old ones is the service's job.
 fn open_log() -> Option<(own_backup_common::log_files::DailyLog, PathBuf)> {
     let data_dir = own_backup_common::config::AppConfig::default().data_dir;
     let dir = own_backup_common::log_files::log_dir(&data_dir)?;
+    let _ = UI_LOG_DIR.set(dir.clone());
     let log = own_backup_common::log_files::DailyLog::new(dir, "own-backup-gui");
     let path = log.path();
     Some((log, path))
@@ -79,7 +98,9 @@ fn init_logging() {
 
     let config_path = own_backup_common::config::AppConfig::default_path();
     // The boot medium starts with no config, and its log has to explain itself.
-    let fallback = if own_backup_common::media_mode::is_windows_pe() {
+    let fallback = if own_backup_common::media_mode::is_windows_pe()
+        || own_backup_common::media_mode::is_linux_medium()
+    {
         "debug"
     } else {
         "info"
@@ -220,6 +241,31 @@ fn enforce_single_instance() {
     std::mem::forget(handle);
 }
 
+/// Linux: the window's name in the person's runtime directory
+/// (`instance_linux`). A second window hands the first a «show» and leaves; if
+/// the first does not answer — still starting — it says so on its terminal
+/// and leaves all the same. A name that cannot be checked at all (no private
+/// runtime folder) lets the window run: refusing to start is worse.
+#[cfg(target_os = "linux")]
+fn enforce_single_instance() -> Option<instance_linux::Instance> {
+    match instance_linux::claim("gui") {
+        Ok(instance_linux::Claim::Ours(instance)) => Some(instance),
+        Ok(instance_linux::Claim::Taken) => {
+            if !instance_linux::tell("gui", "show") {
+                own_backup_common::lang::set(&own_backup_common::lang::configured(
+                    &AppConfig::default_path(),
+                ));
+                eprintln!("{}", own_backup_common::tr!("main.already_running"));
+            }
+            std::process::exit(0);
+        }
+        Err(error) => {
+            eprintln!("Own Backup: single-instance check failed: {error}");
+            None
+        }
+    }
+}
+
 /// A WebView failure occurs before the frontend exists, so it needs a native
 /// dialog. In particular, a machine without WebView2 must see the preflight
 /// explanation instead of Tauri's bare "Error" window or a panic.
@@ -317,6 +363,17 @@ fn webview2_registered() -> bool {
     })
 }
 
+/// The screen the window opens on: the primary one, or — where there is no
+/// such thing, as under Wayland, whose GTK names no primary monitor — the
+/// first one. Without it the window opened at its full wanted size whatever
+/// the screen.
+fn screen(app: &tauri::App) -> Option<tauri::Monitor> {
+    if let Ok(Some(primary)) = app.primary_monitor() {
+        return Some(primary);
+    }
+    app.available_monitors().ok()?.into_iter().next()
+}
+
 /// The window the interface opens in, in LOGICAL pixels, never larger than the
 /// screen it has to open on.
 ///
@@ -339,7 +396,7 @@ fn window_size(app: &tauri::App) -> (f64, f64, f64, f64) {
     // Room for the frame and for not sitting flush against the edges.
     const MARGIN: f64 = 40.0;
 
-    let Ok(Some(monitor)) = app.primary_monitor() else {
+    let Some(monitor) = screen(app) else {
         return (WANT.0, WANT.1, LEAST.0, LEAST.1);
     };
     let scale = monitor.scale_factor().max(0.5);
@@ -378,7 +435,13 @@ const COMFORTABLE_SCALE: f64 = 1.5;
 /// 150 % — the same place the cap was aiming for, for our own window at least.
 /// Everything else on the medium stays as Windows drew it.
 fn shrink_if_the_screen_is_scaled_hard(app: &tauri::App, window: &tauri::WebviewWindow) {
-    let Ok(Some(monitor)) = app.primary_monitor() else {
+    // On a Linux desktop the scale is the person's own choice in the
+    // system's settings (a HiDPI screen at 200 % is meant to be drawn so);
+    // the cap is for Windows and for the boot medium.
+    if !cfg!(target_os = "windows") && !own_backup_common::media_mode::is_media_mode() {
+        return;
+    }
+    let Some(monitor) = screen(app) else {
         return;
     };
     let scale = monitor.scale_factor();
@@ -401,28 +464,60 @@ fn main() {
         tray::run();
         return;
     }
+    // The package's autostart entry (/etc/xdg/autostart) starts it at every
+    // login.
+    #[cfg(target_os = "linux")]
+    if std::env::args().any(|arg| arg == "--tray") {
+        tray_linux::run();
+        return;
+    }
 
-    // Only one GUI at a time (Windows).
+    // How WebKitGTK draws, while this is still one thread (`set_var`).
+    #[cfg(target_os = "linux")]
+    let render = linux_display::prepare();
+    // The desktop finds the window's name and icon by the .desktop file named
+    // like its app id (Wayland) or class (X11) — both the program name, which
+    // would be the binary's, `own-backup-gui`, not the package's
+    // `own-backup.desktop` (KDE showed a generic icon, 20.10).
+    #[cfg(target_os = "linux")]
+    glib::set_prgname(Some("own-backup"));
+
+    // Only one GUI at a time.
     #[cfg(target_os = "windows")]
     enforce_single_instance();
+    #[cfg(target_os = "linux")]
+    let instance = enforce_single_instance();
+    #[cfg(target_os = "linux")]
+    linux_display::starting();
 
     // No UAC elevation at startup: backups, disk enumeration and passwords all
     // run in the privileged service (LocalSystem), which the GUI reaches over
     // gRPC. The GUI itself runs as the normal user. (In-process restore/verify
     // still need the service — see plan stage 2e.)
     init_logging();
+    #[cfg(target_os = "linux")]
+    tracing::info!(
+        ?render,
+        wayland = std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        "how the page is drawn"
+    );
 
     // Read config.toml. This used to be `AppConfig::default()` with a comment
     // claiming otherwise: settings were written to a file nothing ever opened,
     // so nothing the user changed survived a restart.
-    let config_path = AppConfig::default_path();
     let config = AppConfig::load_or_default();
     // This process's own messages, until the window says which language it
-    // resolved (`set_ui_language`, sent as soon as it starts).
-    own_backup_common::lang::set(&config.ui_language);
+    // resolved (`set_ui_language`, sent as soon as it starts). Never chosen
+    // yet: the system's, as the window's «Как в системе» will decide.
+    own_backup_common::lang::set(if config.ui_language.trim().is_empty() {
+        own_backup_common::lang::system()
+    } else {
+        &config.ui_language
+    });
 
-    // Ensure data directory exists (config.toml is written here).
-    let _ = std::fs::create_dir_all(&config.data_dir);
+    // The data directory is not made here: it is the service's, which also
+    // writes the config (`commands::settings`). A folder the window made
+    // would be the user's, with everything the service later keeps in it.
 
     // The icon beside the clock and its logon entry. Not on the medium: there
     // is no notification area there and no logon to come back to.
@@ -430,12 +525,16 @@ fn main() {
     if !own_backup_common::media_mode::is_media_mode() {
         tray::apply();
     }
+    #[cfg(target_os = "linux")]
+    if !own_backup_common::media_mode::is_media_mode() {
+        tray_linux::apply();
+    }
 
     // The orchestrator (job store, queue, scheduler, backup worker) lives in the
     // service; connect to it, spawning a private foreground instance if none is
     // installed/running so the GUI still works standalone.
     let link = Arc::new(ServiceLink::new(&config.grpc_address, config.token_path()));
-    let gui_state = GuiState::new(config, config_path, link.clone());
+    let gui_state = GuiState::new(config, link.clone());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -454,6 +553,7 @@ fn main() {
             // msSmartScreenProtection) are replaced, not extended — whoever sets
             // the variable must include everything wanted.
             let (width, height, min_width, min_height) = window_size(app);
+            #[cfg_attr(not(windows), allow(unused_mut))]
             let mut window =
                 tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
                     .title("Own Backup")
@@ -481,7 +581,10 @@ fn main() {
             // Same checks the medium's launcher runs, for the same reason and
             // with the same words: a missing WebView2 must read as «WebView2 не
             // найден, искал там-то», not as a bare wry HRESULT. On an ordinary
-            // Windows this is the only place they run at all.
+            // Windows this is the only place they run at all. Windows only:
+            // elsewhere the page is drawn by WebKitGTK, and the WebView2
+            // search only filled the log with an ERROR at every start.
+            #[cfg(target_os = "windows")]
             let checks = {
                 use own_backup_backup::media_preflight_win as pf;
                 let dir = std::env::current_exe()
@@ -519,20 +622,44 @@ fn main() {
             let built = match window.build() {
                 Ok(built) => built,
                 Err(error) => {
-                    tracing::error!(%error, checks = ?checks, "GUI window could not be created");
                     #[cfg(target_os = "windows")]
-                    show_window_start_error(&error, &checks);
+                    {
+                        tracing::error!(%error, checks = ?checks, "GUI window could not be created");
+                        show_window_start_error(&error, &checks);
+                    }
                     #[cfg(not(target_os = "windows"))]
-                    eprintln!("Own Backup: {error}");
+                    {
+                        tracing::error!(%error, "GUI window could not be created");
+                        eprintln!("Own Backup: {error}");
+                    }
                     std::process::exit(1);
                 }
             };
             shrink_if_the_screen_is_scaled_hard(app, &built);
 
+            // A second start (the menu, the icon) asks this window to come
+            // forward. On Wayland the compositor may only flash it in the
+            // task bar: taking the focus is its decision there.
+            #[cfg(target_os = "linux")]
+            if let Some(instance) = instance {
+                let handle = app.handle().clone();
+                instance.listen(move |message| {
+                    use tauri::Manager;
+                    if message != "show" {
+                        return;
+                    }
+                    if let Some(window) = handle.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.unminimize();
+                        let _ = window.set_focus();
+                    }
+                });
+            }
+
             // A stale marker from an earlier run of this session would answer
             // for a window that is not this one. Take it away before the new
             // window has a chance to earn it.
-            {
+            if gui_up_marker_wanted() {
                 let marker = own_backup_backup::media_preflight_win::gui_up_marker();
                 if marker.exists() {
                     match std::fs::remove_file(&marker) {
@@ -566,6 +693,8 @@ fn main() {
             commands::backup_jobs::get_backup_job,
             commands::backup_jobs::new_job_template,
             commands::backup_jobs::default_exclusion_patterns,
+            commands::backup_jobs::backup_capabilities,
+            commands::backup_jobs::check_destination,
             commands::backup_jobs::save_backup_job,
             commands::backup_jobs::delete_backup_job,
             commands::backup_jobs::list_job_versions,
@@ -589,9 +718,19 @@ fn main() {
             commands::engine::mount_backup,
             commands::engine::unmount_backup,
             commands::engine::find_base_images,
+            commands::engine::inspect_base_image,
             commands::engine::list_driver_packages,
             commands::engine::list_media_tools,
             commands::engine::build_boot_media,
+            commands::engine::list_media_sticks,
+            commands::engine::write_media_stick,
+            commands::engine::linux_media_status,
+            commands::engine::build_linux_media,
+            commands::engine::clear_linux_media_cache,
+            commands::engine::default_media_folder,
+            commands::linux_media_download::linux_media_release,
+            commands::linux_media_download::download_linux_media,
+            commands::linux_media_download::cancel_linux_media_download,
             commands::engine::boot_status,
             commands::engine::boot_action,
             commands::engine::mount_backend_status,
@@ -617,6 +756,7 @@ fn main() {
             commands::settings::service_health,
             commands::settings::tray_icon_enabled,
             commands::settings::set_tray_icon_enabled,
+            commands::settings::platform_info,
             // The boot medium has no taskbar to say which layout is active.
             commands::keyboard::keyboard_layout,
             // …and every password field says it too, beside its eye.
@@ -627,6 +767,7 @@ fn main() {
             commands::files::list_dir,
             commands::files::create_dir,
             commands::files::open_folder,
+            commands::files::destination_mount,
             // Единственный свидетель того, что интерфейс жив, — он сам.
             gui_ready,
         ])
@@ -646,32 +787,78 @@ fn main() {
 /// доживает до своего срока и объясняет человеку, что произошло.
 #[tauri::command]
 fn gui_ready() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    linux_display::drawn();
+    if !gui_up_marker_wanted() {
+        return Ok(());
+    }
     let marker = own_backup_backup::media_preflight_win::gui_up_marker();
     std::fs::write(&marker, std::process::id().to_string()).map_err(|e| e.to_string())?;
     tracing::info!(marker = %marker.display(), "gui is up: the frontend has drawn");
     Ok(())
 }
 
+/// Whether anything waits for the «interface is up» marker. On Windows it is
+/// written as it always was. On Linux only the boot medium's launcher waits
+/// for it; anywhere else it was a stray `/tmp/own-backup-gui-up` in a folder
+/// every user shares.
+fn gui_up_marker_wanted() -> bool {
+    cfg!(target_os = "windows") || own_backup_common::media_mode::is_media_mode()
+}
+
 /// Long-lived task: subscribe to the service's orchestration event stream and
 /// re-emit each event as the Tauri window event the frontend listens for
 /// (`job-progress` / `queue-changed` / `job-finished`). Reconnects if the stream
 /// ends (e.g. the service restarts).
+///
+/// A failure is logged when it CHANGES — the first «unreachable», the first
+/// refusal — and at debug level while it lasts: a window the service refused
+/// put the same WARN into its log every two seconds, and the service one in
+/// its own. A refusal is also waited out longer (doubling up to 30 s): it
+/// lasts until the person sits down at the session, not for a restart.
 async fn bridge_service_events(app: tauri::AppHandle, link: Arc<ServiceLink>) {
     use own_backup_client::ClientEvent;
+    use std::time::Duration;
     use tauri::Emitter;
     use tokio_stream::StreamExt;
+
+    /// What the last attempt ran into; a WARN is written when it changes.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Trouble {
+        Unreachable,
+        Refused,
+        StreamFailed,
+    }
+    const REFUSED_FIRST: Duration = Duration::from_secs(2);
+    const REFUSED_MOST: Duration = Duration::from_secs(30);
+
+    fn note(last: &mut Option<Trouble>, now: Trouble, error: &str) {
+        if *last == Some(now) {
+            tracing::debug!(?now, error, "event bridge: still failing");
+        } else {
+            tracing::warn!(?now, error, "event bridge: cannot subscribe, retrying");
+            *last = Some(now);
+        }
+    }
+
+    let mut last: Option<Trouble> = None;
+    let mut refused_wait = REFUSED_FIRST;
 
     loop {
         let mut client = match link.client().await {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!(error = %e, "event bridge: service unreachable, retrying");
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                note(&mut last, Trouble::Unreachable, &e);
+                tokio::time::sleep(Duration::from_secs(3)).await;
                 continue;
             }
         };
-        match client.stream_events().await {
+        let wait = match client.stream_events_with_status().await {
             Ok(stream) => {
+                if last.take().is_some() {
+                    tracing::info!("event bridge: subscribed again");
+                }
+                refused_wait = REFUSED_FIRST;
                 let mut stream = Box::pin(stream);
                 while let Some(ev) = stream.next().await {
                     match ev {
@@ -704,11 +891,21 @@ async fn bridge_service_events(app: tauri::AppHandle, link: Arc<ServiceLink>) {
                     }
                 }
                 tracing::info!("service event stream ended; reconnecting");
+                Duration::from_secs(2)
             }
-            Err(e) => tracing::warn!(error = %e, "stream_events failed"),
-        }
+            Err(status) if status.code() == tonic::Code::PermissionDenied => {
+                note(&mut last, Trouble::Refused, status.message());
+                let wait = refused_wait;
+                refused_wait = (refused_wait * 2).min(REFUSED_MOST);
+                wait
+            }
+            Err(status) => {
+                note(&mut last, Trouble::StreamFailed, status.message());
+                Duration::from_secs(2)
+            }
+        };
         // Stream closed — the cached channel may be dead; drop it and retry.
         link.invalidate().await;
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        tokio::time::sleep(wait).await;
     }
 }

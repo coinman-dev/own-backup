@@ -124,9 +124,12 @@ pub struct PartitionTableSpec {
 
 /// Filesystems we can actually create. Deliberately narrower than
 /// [`crate::types::FileSystem`]: "no format" is the absence of a
-/// [`RestoreOp::Format`] operation, not a variant here, and Linux filesystems
-/// are missing because Windows has no `mkfs` (D4 — a Linux partition is
-/// restored sector-by-sector, which brings its filesystem along).
+/// [`RestoreOp::Format`] operation, not a variant here.
+///
+/// Which of them a machine can create depends on where the plan runs: Windows
+/// has no `mkfs` for the Linux ones (D4 — there a Linux partition is restored
+/// sector-by-sector, which brings its filesystem along), and Linux has no ReFS
+/// formatter. The checks say so before anything is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FormatFs {
@@ -138,6 +141,12 @@ pub enum FormatFs {
     ExFat,
     #[serde(rename = "refs")]
     ReFs,
+    /// Linux only (`mkfs.ext4`).
+    Ext4,
+    /// Linux only (`mkfs.xfs`).
+    Xfs,
+    /// Linux only (`mkfs.btrfs`).
+    Btrfs,
 }
 
 impl FormatFs {
@@ -154,16 +163,28 @@ impl FormatFs {
                 | (FormatFs::Fat32, FileSystem::Fat32)
                 | (FormatFs::ExFat, FileSystem::ExFat)
                 | (FormatFs::ReFs, FileSystem::ReFs)
+                | (FormatFs::Ext4, FileSystem::Ext4)
+                | (FormatFs::Xfs, FileSystem::Xfs)
+                | (FormatFs::Btrfs, FileSystem::Btrfs)
         )
     }
 
-    /// Name as `FormatEx` / `format.com` expect it.
+    /// The filesystems only Linux can create.
+    pub fn is_linux_family(self) -> bool {
+        matches!(self, FormatFs::Ext4 | FormatFs::Xfs | FormatFs::Btrfs)
+    }
+
+    /// Name as `FormatEx` / `format.com` expect it; the Linux ones as
+    /// [`crate::types::FileSystem::label`] spells them.
     pub fn as_str(self) -> &'static str {
         match self {
             FormatFs::Ntfs => "NTFS",
             FormatFs::Fat32 => "FAT32",
             FormatFs::ExFat => "exFAT",
             FormatFs::ReFs => "ReFS",
+            FormatFs::Ext4 => "ext4",
+            FormatFs::Xfs => "XFS",
+            FormatFs::Btrfs => "Btrfs",
         }
     }
 }
@@ -235,8 +256,9 @@ pub enum RestoreOp {
         #[serde(default)]
         reencrypt: bool,
     },
-    /// Grow an NTFS filesystem to fill its partition, after a sector restore
-    /// into a larger target (D2).
+    /// Grow the filesystem to fill its partition, after a sector restore into
+    /// a larger target (D2). NTFS on Windows; on Linux also ext2/3/4, XFS and
+    /// btrfs.
     ExtendFilesystem { part: PartRef },
     /// Mount the volume under a drive letter.
     AssignLetter { part: PartRef, letter: char },
@@ -279,6 +301,21 @@ pub enum RestoreOp {
     /// menu back on a machine whose disks have moved and it boots to nothing.
     RestoreBootEntries,
 
+    /// Give the restored copy identities of its own (Linux): every
+    /// filesystem, LUKS, LVM or md identity on `parts` that another device of
+    /// this machine already carries is replaced, and with `fix_references`
+    /// the restored system's fstab, crypttab and boot configuration are
+    /// edited to match. Never in a plan the window builds: the service adds
+    /// it when the person chose to change the duplicates the preview showed.
+    /// Runs right after the sectors are checked, while the restore still
+    /// holds the target away from udev, so the machine never acts on the
+    /// clone under the source's names.
+    ChangeIdentities {
+        parts: Vec<PartRef>,
+        #[serde(default)]
+        fix_references: bool,
+    },
+
     /// Re-read the disk, so Windows and the app stop describing the disk that
     /// used to be there.
     ///
@@ -299,14 +336,15 @@ pub enum RestoreOp {
 impl RestoreOp {
     const ORDER_TABLE: u8 = 0;
     const ORDER_RAW: u8 = 1;
-    const ORDER_FORMAT: u8 = 2;
-    const ORDER_FILES: u8 = 3;
-    const ORDER_EXTEND: u8 = 4;
-    const ORDER_LETTER: u8 = 5;
-    const ORDER_BOOT: u8 = 6;
-    const ORDER_FALLBACK: u8 = 7;
-    const ORDER_FIRMWARE: u8 = 8;
-    const ORDER_REFRESH: u8 = 9;
+    const ORDER_IDENTITY: u8 = 2;
+    const ORDER_FORMAT: u8 = 3;
+    const ORDER_FILES: u8 = 4;
+    const ORDER_EXTEND: u8 = 5;
+    const ORDER_LETTER: u8 = 6;
+    const ORDER_BOOT: u8 = 7;
+    const ORDER_FALLBACK: u8 = 8;
+    const ORDER_FIRMWARE: u8 = 9;
+    const ORDER_REFRESH: u8 = 10;
 
     pub fn order_key(&self) -> u8 {
         match self {
@@ -315,6 +353,11 @@ impl RestoreOp {
                 mode: RestoreMode::Sectors,
                 ..
             } => Self::ORDER_RAW,
+            // First after the sectors: what follows (growing, the boot
+            // steps, the fallback loader that reads the restored UUIDs) then
+            // works with the new identities, and mounts no clone of a mounted
+            // filesystem.
+            RestoreOp::ChangeIdentities { .. } => Self::ORDER_IDENTITY,
             RestoreOp::Format { .. } => Self::ORDER_FORMAT,
             RestoreOp::RestorePartition {
                 mode: RestoreMode::Files,
@@ -348,6 +391,7 @@ impl RestoreOp {
             RestoreOp::FinalizeBoot { windows_part, .. } => Some(*windows_part),
             RestoreOp::EnsureFallbackBootloader { esp } => Some(*esp),
             RestoreOp::RestoreBootEntries => None,
+            RestoreOp::ChangeIdentities { .. } => None,
             RestoreOp::RefreshDiskState => None,
         }
     }
@@ -371,6 +415,7 @@ impl RestoreOp {
             RestoreOp::FinalizeBoot { .. } => "finalize_boot",
             RestoreOp::EnsureFallbackBootloader { .. } => "ensure_fallback_bootloader",
             RestoreOp::RestoreBootEntries => "restore_boot_entries",
+            RestoreOp::ChangeIdentities { .. } => "change_identities",
             RestoreOp::RefreshDiskState => "refresh_disk_state",
         }
     }
@@ -452,6 +497,13 @@ impl RestoreOp {
                 crate::tr!("restore_plan.title_fallback_bootloader")
             }
             RestoreOp::RestoreBootEntries => crate::tr!("restore_plan.title_restore_boot_entries"),
+            RestoreOp::ChangeIdentities { fix_references, .. } => {
+                if *fix_references {
+                    crate::tr!("restore_plan.title_change_identities_and_fix")
+                } else {
+                    crate::tr!("restore_plan.title_change_identities")
+                }
+            }
             RestoreOp::RefreshDiskState => crate::tr!("restore_plan.title_refresh_disks"),
         };
         title.into_owned()
@@ -475,6 +527,7 @@ impl RestoreOp {
                 | RestoreOp::AssignLetter { .. }
                 | RestoreOp::FinalizeBoot { .. }
                 | RestoreOp::EnsureFallbackBootloader { .. }
+                | RestoreOp::ChangeIdentities { .. }
                 | RestoreOp::RefreshDiskState
         )
     }
@@ -555,7 +608,29 @@ pub struct RestorePlan {
     /// compare against and the mismatch cannot be detected, only said.
     #[serde(default)]
     pub target_disk_id: Option<TargetDiskId>,
+    /// Linux: the target disk's device (`/dev/disk/by-id/…`, `/dev/sdb`).
+    /// Linux disks have no stable number, so there `target_disk` names
+    /// nothing and this is the target; Windows ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_device: Option<String>,
     pub ops: Vec<RestoreOp>,
+    /// Partitions of the target disk, as it is now, that the person deleted
+    /// in the designer — by where they start and how big they are (an index
+    /// can be reused by the new table). A partition the new table drops or
+    /// covers without being listed here is refused
+    /// ([`crate::restore_check::CheckCode::ExistingPartitionLost`]): a restore
+    /// puts back what the copy holds, and loses nothing it does not hold by
+    /// accident (owner, 24.10: a 347 GB BitLocker partition beside the copied
+    /// ones on the same disk).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_parts: Vec<RemovedPart>,
+}
+
+/// A partition the person deleted in the designer, as it was on the disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemovedPart {
+    pub offset_bytes: u64,
+    pub size_bytes: u64,
 }
 
 /// Enough of a disk's identity to notice that it is a different disk.
@@ -611,6 +686,8 @@ impl RestorePlan {
             image_path,
             verify_after: false,
             target_disk_id: None,
+            target_device: None,
+            removed_parts: Vec::new(),
             ops,
         }
     }
@@ -644,6 +721,11 @@ impl RestorePlan {
     /// are absent from the new layout, which is a deletion and just as
     /// destructive.
     ///
+    /// On Linux the partitions the boot steps write into count too
+    /// ([`Self::boot_step_partitions`]): there they are mounted read-write
+    /// through their own nodes after the disk is let go, so a step aimed at
+    /// the running system's ESP would change it under the system's feet.
+    ///
     /// `current` is the target disk's partition indices as they are now; pass an
     /// empty slice when they are not known and only the written ones count.
     pub fn touched_partitions_with(&self, current: &[u32]) -> Vec<u32> {
@@ -656,6 +738,9 @@ impl RestorePlan {
                 _ => None,
             })
             .collect();
+        if cfg!(target_os = "linux") {
+            out.extend(self.boot_step_partitions());
+        }
         if let Some(t) = self.table() {
             for &i in current {
                 if !t.entries.iter().any(|e| e.index == i) {
@@ -663,6 +748,28 @@ impl RestorePlan {
                 }
             }
         }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// Partitions the plan's boot steps write into after the data is copied:
+    /// the ESP that receives the fallback loader, and the Windows partition and
+    /// ESP that finishing Windows' boot changes.
+    pub fn boot_step_partitions(&self) -> Vec<u32> {
+        let mut out: Vec<u32> = self
+            .ops
+            .iter()
+            .flat_map(|op| match op {
+                RestoreOp::EnsureFallbackBootloader { esp } => vec![esp.index],
+                RestoreOp::FinalizeBoot {
+                    windows_part, esp, ..
+                } => std::iter::once(windows_part.index)
+                    .chain(esp.map(|e| e.index))
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect();
         out.sort_unstable();
         out.dedup();
         out
@@ -767,7 +874,29 @@ mod tests {
         );
 
         let keys: Vec<u8> = plan.ordered().iter().map(|op| op.order_key()).collect();
-        assert_eq!(keys, vec![0, 1, 2, 3, 5, 6]);
+        assert_eq!(keys, vec![0, 1, 3, 4, 6, 7]);
+    }
+
+    #[test]
+    fn identities_change_right_after_the_sectors_and_before_anything_mounts_them() {
+        let change = RestoreOp::ChangeIdentities {
+            parts: vec![part(1, 0)],
+            fix_references: false,
+        };
+        let raw = RestoreOp::RestorePartition {
+            src_index: 1,
+            dst: part(1, 0),
+            mode: RestoreMode::Sectors,
+            wipe_free_space: false,
+            reencrypt: false,
+        };
+        let grow = RestoreOp::ExtendFilesystem { part: part(1, 0) };
+        let fallback = RestoreOp::EnsureFallbackBootloader { esp: part(2, 0) };
+        assert!(raw.order_key() < change.order_key());
+        assert!(change.order_key() < grow.order_key());
+        assert!(change.order_key() < fallback.order_key());
+        assert!(change.needs_disk_online() && !change.cancellable() && !change.destroys_data());
+        assert_eq!(change.kind(), "change_identities");
     }
 
     #[test]
@@ -1023,6 +1152,8 @@ mod tests {
             image_path: "x.vhdx".into(),
             verify_after: false,
             target_disk_id: None,
+            target_device: None,
+            removed_parts: Vec::new(),
             ops: vec![
                 RestoreOp::RestoreBootEntries,
                 RestoreOp::RefreshDiskState,
@@ -1061,5 +1192,35 @@ mod tests {
     fn the_boot_menu_step_is_not_hidden_as_housekeeping() {
         assert!(!RestoreOp::RestoreBootEntries.is_housekeeping());
         assert!(!RestoreOp::RestoreBootEntries.title().is_empty());
+    }
+
+    #[test]
+    fn boot_steps_count_as_touching_their_partitions_on_linux_only() {
+        let plan = RestorePlan::new(
+            0,
+            PathBuf::from("/x.qcow2"),
+            vec![
+                RestoreOp::RestorePartition {
+                    src_index: 1,
+                    dst: part(3, 300),
+                    mode: RestoreMode::Sectors,
+                    wipe_free_space: false,
+                    reencrypt: false,
+                },
+                RestoreOp::EnsureFallbackBootloader { esp: part(1, 100) },
+                RestoreOp::FinalizeBoot {
+                    windows_part: part(4, 400),
+                    esp: Some(part(1, 100)),
+                    uefi: true,
+                },
+                RestoreOp::RestoreBootEntries,
+            ],
+        );
+        assert_eq!(plan.boot_step_partitions(), vec![1, 4]);
+        if cfg!(target_os = "linux") {
+            assert_eq!(plan.touched_partitions(), vec![1, 3, 4]);
+        } else {
+            assert_eq!(plan.touched_partitions(), vec![3]);
+        }
     }
 }

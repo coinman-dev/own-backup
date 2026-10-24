@@ -19,6 +19,8 @@
   import { appVersion, ensureAppVersion } from '../lib/appVersion.svelte';
   import type { ServiceStatus, ServiceHealth } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
+  import { esc } from '../lib/i18n.svelte';
+  import { platform, isWindows, ensurePlatform } from '../lib/platformStore.svelte';
 
   let status: ServiceStatus | null = $state(null);
   let health: ServiceHealth | null = $state(null);
@@ -27,6 +29,7 @@
 
   onMount(async () => {
     ensureAppVersion();
+    void ensurePlatform();
     await ensureMediaMode();
     const [st, he, cfg] = await Promise.allSettled([
       api.getServiceStatus(),
@@ -43,13 +46,31 @@
 
   // Как интерфейс разговаривает со службой. На Windows это именованный канал с
   // ограниченным доступом, и порт при этом не слушается — сказать «gRPC на
-  // localhost:50051» было бы неправдой о том, что открыто в системе.
+  // localhost:50051» было бы неправдой о том, что открыто в системе. В Linux —
+  // Unix-сокет; его путь называет сам бэкенд (`platform_info`).
   const PIPE = '\\\\.\\pipe\\OwnBackup';
-  const link = $derived(
-    media.active ? m.about_link_media({ pipe: PIPE }) : m.about_link_service({ pipe: PIPE }),
+  const SOCKET = '/run/own-backup/service.sock';
+  const link = $derived.by(() => {
+    if (isWindows()) {
+      return media.active ? m.about_link_media({ pipe: PIPE }) : m.about_link_service({ pipe: PIPE });
+    }
+    const path = platform.channel || SOCKET;
+    return media.active ? m.about_link_socket_media({ path }) : m.about_link_socket({ path });
+  });
+  // Where the logs are. Windows keeps both beside the program; on Linux the
+  // service (root) writes to /var/log and the window and the command line to
+  // the person's own state folder.
+  const logsHint = $derived(
+    isWindows()
+      ? m.about_hint_logs()
+      : m.about_hint_logs_linux({
+          service: esc(platform.serviceLogDir ?? '/var/log/own-backup'),
+          ui: esc(platform.uiLogDir ?? '~/.local/state/own-backup/Logs'),
+        }),
   );
   const serviceState = $derived.by(() => {
     if (!health) return m.about_svc_asking();
+    if (health.access_denied) return m.about_svc_refused();
     if (media.active) return m.about_svc_media();
     if (health.reachable)
       return status?.version
@@ -108,7 +129,7 @@
     <p class="licence">
       <b>PolyForm Noncommercial 1.0.0.</b> {m.about_licence_terms()}
     </p>
-    <p class="licence">{@html m.about_licence_commercial()}</p>
+    <p class="licence">{@html isWindows() ? m.about_licence_commercial() : m.about_licence_commercial_linux()}</p>
     <p class="licence muted">
       {m.about_licence_osi()}
       <code>THIRD-PARTY-NOTICES.txt</code>.
@@ -119,7 +140,7 @@
     <h3 class="section-heading">{m.about_trouble()}</h3>
     <ul class="hints">
       <li>{@html m.about_hint_activity()}</li>
-      <li>{@html m.about_hint_logs()}</li>
+      <li>{@html logsHint}</li>
       <li>{m.about_hint_mirror()}</li>
       {#if !media.active}
         <li>{m.about_hint_media()}</li>

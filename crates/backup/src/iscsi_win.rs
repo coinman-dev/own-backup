@@ -28,7 +28,7 @@ use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
 use own_backup_common::{tr, OwnBackupError, Result};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use windows::core::PCWSTR;
 use windows::Win32::Storage::IscsiDisc::{
     AddIScsiSendTargetPortalW, AddIScsiStaticTargetW, GetDevicesForIScsiSessionW,
@@ -532,9 +532,31 @@ pub fn login(
     chap_secret: &[u8; 16],
     image_size: u64,
 ) -> Result<AttachedTarget> {
+    // Each call below can block inside Windows for as long as its device
+    // stack does (PnP held by a hung device, 2026-10-24), and none of them
+    // sees a deadline. So each is named before it starts and timed after it
+    // returns: when one never does, the last line of the log says which.
+    let step = |name: &str| {
+        info!(target, step = name, "iSCSI: step starting");
+        Instant::now()
+    };
+    let done = |name: &str, t: Instant| {
+        debug!(
+            target,
+            step = name,
+            ms = t.elapsed().as_millis() as u64,
+            "iSCSI: step done"
+        );
+    };
+    let t = step("initiator service");
     ensure_initiator_service()?;
+    done("initiator service", t);
+    let t = step("clear stale sessions");
     clear_stale_sessions(target, (address, port), image_size)?;
+    done("clear stale sessions", t);
+    let t = step("clear dead portals");
     clear_dead_portals();
+    done("clear dead portals", t);
 
     let iqn = to_wide(target);
     let mut portal = portal_for(address, port);
@@ -543,6 +565,7 @@ pub fn login(
     // is also the proof that it can reach us at all — everything after it
     // assumes the address works.
     let mut portal_added = false;
+    let t = step("discovery portal");
     // SAFETY: the portal outlives the call; no login options, no security.
     let code = unsafe {
         AddIScsiSendTargetPortalW(
@@ -553,6 +576,7 @@ pub fn login(
             &mut portal,
         )
     };
+    done("discovery portal", t);
     if code == 0 {
         portal_added = true;
         info!(%address, port, "iSCSI: discovery portal added — the initiator reached our target");
@@ -600,6 +624,7 @@ pub fn login(
     };
     // Not informational, not persistent: the session lasts as long as the work
     // does, and nothing of ours survives a reboot in the initiator's database.
+    let t = step("login");
     // SAFETY: every pointer either outlives the call or is null by design.
     let mut code = unsafe {
         LoginIScsiTargetW(
@@ -641,6 +666,7 @@ pub fn login(
             )
         };
     }
+    done("login", t);
     let mut attached = AttachedTarget {
         session,
         target: target.to_string(),
@@ -659,7 +685,10 @@ pub fn login(
         .tap(target));
     }
 
-    match wait_for_disk(&mut attached.session, target, image_size) {
+    let t = step("wait for the disk");
+    let disk = wait_for_disk(&mut attached.session, target, image_size);
+    done("wait for the disk", t);
+    match disk {
         Ok(disk) => {
             attached.disk_number = disk;
             info!(target, %address, port, disk, "iSCSI target attached");

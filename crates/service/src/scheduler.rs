@@ -24,7 +24,8 @@ use chrono::Duration as ChronoDuration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{debug, info, warn};
 
-use own_backup_core::{Job, JobStore, PasswordStore, RunQueue};
+use own_backup_common::tr;
+use own_backup_core::{Job, JobRun, JobStore, PasswordStore, RunQueue};
 
 use crate::shutdown::ShutdownSignal;
 
@@ -118,7 +119,7 @@ fn tick(
     for job in store.list() {
         // Event-triggered jobs take a separate path (not cron/time based).
         if job.schedule.kind == "event" {
-            handle_event(&job, uptime, fired_startup, queue, job_tx, passwords);
+            handle_event(&job, store, uptime, fired_startup, queue, job_tx, passwords);
             continue;
         }
 
@@ -128,10 +129,7 @@ fn tick(
         let Some(sched) = own_backup_scheduler::config_schedule::parse(&cron) else {
             continue;
         };
-        let last_fired = job
-            .last_run
-            .as_ref()
-            .and_then(|r| chrono::DateTime::parse_from_rfc3339(&r.started_at).ok());
+        let last_fired = last_fired(&job, store);
 
         // Catching up missed runs waits `missed_delay_min` after startup so the
         // machine can settle after boot; on-time slots still fire immediately.
@@ -152,12 +150,27 @@ fn tick(
             "scheduler evaluated job"
         );
         if due {
-            if !has_passwords(&job, passwords) {
+            if !ready_to_run(&job, store, passwords) {
                 continue;
             }
             enqueue(queue, job_tx, &job.id, &job.name);
         }
     }
+}
+
+/// When the job's schedule was last served. A run the service's own stop cut
+/// off did not serve its slot: the schedule counts from the run before it, so
+/// a missed copy is made after the next start (2026-10-21, a weekly copy lost
+/// to a restart a second after it began).
+fn last_fired(job: &Job, store: &JobStore) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    let started = match job.last_run.as_ref() {
+        Some(r) if r.interrupted || r.skipped => store.last_scheduled_start(&job.id),
+        Some(r) => Some(r.started_at.clone()),
+        None => None,
+    };
+    started
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
 }
 
 /// Handle a `kind = event` job on the minute tick — the `startup` trigger: N
@@ -166,6 +179,7 @@ fn tick(
 /// triggers have their own paths ([`handle_os_event`], [`watch_destinations`]).
 fn handle_event(
     job: &own_backup_core::Job,
+    store: &JobStore,
     uptime: std::time::Duration,
     fired_startup: &mut HashSet<String>,
     queue: &RunQueue,
@@ -184,7 +198,7 @@ fn handle_event(
         fired_startup.insert(job.id.clone());
         return;
     }
-    if !has_passwords(job, passwords) {
+    if !ready_to_run(job, store, passwords) {
         return;
     }
     fired_startup.insert(job.id.clone());
@@ -215,7 +229,7 @@ fn handle_os_event(
         if job.schedule.event_once_per_day && ran_today(&job) {
             continue;
         }
-        if !has_passwords(&job, passwords) {
+        if !ready_to_run(&job, store, passwords) {
             continue;
         }
         info!(job = %job.name, trigger, "Scheduler: OS event fired");
@@ -302,17 +316,45 @@ async fn watch_destinations(
         if job.schedule.event_once_per_day && ran_today(&job) {
             continue;
         }
-        if !has_passwords(&job, passwords) {
+        if !ready_to_run(&job, store, passwords) {
             continue;
         }
         enqueue(queue, job_tx, &job.id, &job.name);
     }
 }
 
-/// The root that says whether a destination is reachable at all: `E:\` for
-/// `E:\Backup\Job`, `\\server\share\` for a share. The folder itself may not
-/// exist yet — a first copy creates it — so the drive is what is asked about.
+/// The root that says whether a destination is reachable at all. The folder
+/// itself may not exist yet — a first copy creates it — so the drive is what
+/// is asked about; `None` reads as "not there".
+#[cfg(not(target_os = "linux"))]
 fn dest_root(dest: &str) -> Option<std::path::PathBuf> {
+    drive_root(dest)
+}
+
+/// On Linux the drive is the mount the destination is under, and it is there
+/// only while it is mounted: an unplugged drive leaves its folder under `/run/
+/// media` gone (the tmpfs below answers instead) or its fixed mount point an
+/// empty folder of the system disk. Either way there is no mount of its own,
+/// and `None` — a mount point asked with `metadata` would always be found.
+/// Read from `/proc/self/mountinfo`, which touches no filesystem: this runs on
+/// the scheduler's thread, and a dead network mount must not hang it.
+#[cfg(target_os = "linux")]
+fn dest_root(dest: &str) -> Option<std::path::PathBuf> {
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    dest_root_in(dest, &mountinfo)
+}
+
+/// [`dest_root`] against a given mount table.
+#[cfg(target_os = "linux")]
+fn dest_root_in(dest: &str, mountinfo: &str) -> Option<std::path::PathBuf> {
+    use own_backup_backup::source_identity::linux::{destination_mount, parse_mountinfo};
+    destination_mount(dest, &parse_mountinfo(mountinfo))
+}
+
+/// The drive of a Windows destination: `E:\` for `E:\Backup\Job`,
+/// `\\server\share\` for a share.
+#[cfg_attr(target_os = "linux", allow(dead_code))] // tested everywhere, used off Linux
+fn drive_root(dest: &str) -> Option<std::path::PathBuf> {
     let d = dest.trim();
     if let Some(rest) = d.strip_prefix(r"\\") {
         let mut parts = rest.split(['\\', '/']).filter(|p| !p.is_empty());
@@ -343,11 +385,14 @@ fn next_wake(
         .map(|slot| slot - ChronoDuration::seconds(WAKE_EARLY_SECS))
 }
 
-/// The wake timer, kept pointed at [`next_wake`]. Windows only, and never on
-/// the boot medium (nothing there outlives the session).
+/// The wake timer, kept pointed at [`next_wake`]: a waitable timer on
+/// Windows, a `CLOCK_REALTIME_ALARM` timer on Linux; never on the boot medium
+/// (nothing there outlives the session).
 struct WakeArming {
     #[cfg(target_os = "windows")]
     timer: Option<Arc<own_backup_backup::power_win::WakeTimer>>,
+    #[cfg(target_os = "linux")]
+    timer: Option<Arc<own_backup_backup::power_linux::WakeTimer>>,
     armed: std::sync::Mutex<Option<chrono::DateTime<chrono::FixedOffset>>>,
 }
 
@@ -361,8 +406,14 @@ impl WakeArming {
             // copy comes within one, and the copy then holds it itself.
             own_backup_backup::power_win::WakeTimer::start(std::time::Duration::from_secs(300))
         };
+        #[cfg(target_os = "linux")]
+        let timer = if own_backup_common::media_mode::is_media_mode() {
+            None
+        } else {
+            own_backup_backup::power_linux::WakeTimer::start(std::time::Duration::from_secs(300))
+        };
         Self {
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             timer,
             armed: std::sync::Mutex::new(None),
         }
@@ -377,14 +428,26 @@ impl WakeArming {
         if *armed == want {
             return;
         }
+        // Only a timer that exists is "armed": there is none on the boot
+        // medium, and none where the alarm clock is refused (no RTC alarm,
+        // no CAP_WAKE_ALARM).
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        let can_wake = self.timer.is_some();
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        let can_wake = false;
         match want {
-            Some(at) => info!(at = %at, "wake timer armed for a scheduled copy"),
+            Some(at) if can_wake => info!(at = %at, "wake timer armed for a scheduled copy"),
+            Some(at) => warn!(
+                at = %at,
+                "a scheduled copy asks to wake the machine, but there is no wake timer here — \
+                 a sleeping machine will miss it"
+            ),
             None if armed.is_some() => {
                 info!("wake timer disarmed — no copy asks to wake the machine")
             }
             None => {}
         }
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         if let Some(timer) = &self.timer {
             match want {
                 Some(at) => timer.arm(at.with_timezone(&chrono::Utc)),
@@ -412,27 +475,110 @@ fn ran_today(job: &Job) -> bool {
 /// the calendar day is taken. Which zone that is does not matter; that it is
 /// one zone does.
 fn started_on_the_same_day<Tz: chrono::TimeZone>(job: &Job, now: chrono::DateTime<Tz>) -> bool {
+    // A run cut off by the service stopping, or never started, is not
+    // today's run.
     job.last_run
         .as_ref()
+        .filter(|r| !r.interrupted && !r.skipped)
         .and_then(|r| chrono::DateTime::parse_from_rfc3339(&r.started_at).ok())
         .is_some_and(|started| {
             started.with_timezone(&now.timezone()).date_naive() == now.date_naive()
         })
 }
 
-/// True unless an encrypted source is missing its saved password (an unattended
-/// run cannot then decrypt the volume, so it must be skipped).
-fn has_passwords(job: &own_backup_core::Job, passwords: &PasswordStore) -> bool {
-    if job.requires_password
-        && job
-            .source_list()
-            .iter()
-            .any(|s| !passwords.has(&own_backup_core::source_token(s)))
-    {
-        warn!(job = %job.name, "Scheduler: skipping — encrypted source has no saved password");
-        return false;
+/// The encrypted sources without a saved password: an unattended run cannot
+/// decrypt them, so it must be skipped.
+fn missing_passwords(job: &own_backup_core::Job, passwords: &PasswordStore) -> Vec<String> {
+    sources_needing_password(job)
+        .into_iter()
+        .filter(|s| !passwords.has(&own_backup_core::source_token(s)))
+        .collect()
+}
+
+/// Jobs whose skipped run is already in the history: one record for as long
+/// as the cause lasts, not one a minute. Forgotten when the job can run
+/// again, and with the process — after a restart the skip is said once more.
+static SKIP_RECORDED: std::sync::Mutex<Option<HashSet<String>>> = std::sync::Mutex::new(None);
+
+/// May the scheduler start `job` now? When a saved password is missing it may
+/// not, and the person is told in the history (once, see [`SKIP_RECORDED`]):
+/// before, the only trace was a line a minute in the service log, and a copy
+/// due at 14:00 simply did not happen (owner, 24.10).
+fn ready_to_run(job: &own_backup_core::Job, store: &JobStore, passwords: &PasswordStore) -> bool {
+    let missing = missing_passwords(job, passwords);
+    let mut recorded = SKIP_RECORDED.lock().unwrap_or_else(|e| e.into_inner());
+    let recorded = recorded.get_or_insert_with(HashSet::new);
+    if missing.is_empty() {
+        recorded.remove(&job.id);
+        return true;
     }
-    true
+    warn!(
+        job = %job.name,
+        sources = ?missing,
+        "Scheduler: skipping — encrypted source has no saved password"
+    );
+    if recorded.insert(job.id.clone()) {
+        record_skip(store, job, &missing);
+    }
+    false
+}
+
+/// The skipped run as the history shows it: an error that says which volumes
+/// and what to do. It does not serve the slot ([`JobRun::skipped`]).
+fn record_skip(store: &JobStore, job: &own_backup_core::Job, missing: &[String]) {
+    let volumes = missing
+        .iter()
+        .map(|s| format!("«{}»", job.label_for(s)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut error = tr!("scheduler.skipped_no_password", volumes = volumes).into_owned();
+    if job.schedule.run_missed {
+        error.push(' ');
+        error.push_str(&tr!("scheduler.skipped_catch_up"));
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let run = JobRun {
+        id: uuid::Uuid::new_v4().to_string(),
+        job_id: job.id.clone(),
+        job_name: job.name.clone(),
+        started_at: now.clone(),
+        finished_at: now,
+        status: "error".into(),
+        skipped: true,
+        error,
+        error_kind: "volume_password_missing".into(),
+        ..Default::default()
+    };
+    match store.record_run(run) {
+        Ok(()) => info!(job = %job.name, "Scheduler: the skipped run is in the history"),
+        Err(e) => warn!(job = %job.name, error = %e, "the skipped run could not be recorded"),
+    }
+}
+
+/// The sources an unattended run has to decrypt.
+///
+/// `requires_password` is one flag for the whole job, and a whole-disk copy
+/// has unencrypted partitions beside the encrypted one: an ESP and a `/boot`
+/// never get a password, so asking it of every source skipped such a job at
+/// every scheduled time (owner's Kubuntu disk, 23–24.10), while the window
+/// had called its passwords saved — it asks only the encrypted ones. The
+/// partition snapshot the window saved with the job says which those are; a
+/// source it does not describe (a job saved before snapshots) is taken as
+/// encrypted, as before.
+fn sources_needing_password(job: &own_backup_core::Job) -> Vec<String> {
+    if !job.requires_password {
+        return Vec::new();
+    }
+    job.source_list()
+        .into_iter()
+        .filter(|s| {
+            job.source_disks
+                .iter()
+                .flat_map(|d| d.partitions.iter())
+                .find(|p| p.volume_device == *s)
+                .is_none_or(|p| p.is_encrypted)
+        })
+        .collect()
 }
 
 /// Enqueue a job unless it is already pending or running (mirrors `RunJob`).
@@ -504,6 +650,129 @@ mod tests {
         handle.await.unwrap();
     }
 
+    /// The owner's disk: ESP and `/boot` in the clear, the root in LUKS. The
+    /// snapshot as the window saves it, so through its JSON.
+    fn disk_job() -> Job {
+        let part = |index: u32, dev: &str, encrypted: bool| {
+            serde_json::json!({
+                "index": index, "offset_bytes": 0, "size_bytes": 0, "used_bytes": 0,
+                "gpt_type_guid": "", "gpt_partition_guid": "", "filesystem": "unknown",
+                "volume_letter": null, "volume_device": dev, "volume_label": "",
+                "fs_uuid": "", "is_system": false, "is_boot": false, "has_os": false,
+                "is_encrypted": encrypted, "gpt_attributes": 0, "mbr_type": 0
+            })
+        };
+        let job = serde_json::json!({
+            "name": "disk",
+            "dest_folder": "/mnt/backup",
+            "requires_password": true,
+            "sources": ["/dev/esp", "/dev/boot", "/dev/root"],
+            "source_disks": [{
+                "device_id": "/dev/nvme0n1", "model": "", "serial": "", "size_bytes": 0,
+                "sector_size_logical": 512, "sector_size_physical": 512, "media_type": "",
+                "partition_table": "gpt", "disk_guid": "",
+                "partitions": [
+                    part(1, "/dev/esp", false),
+                    part(2, "/dev/boot", false),
+                    part(3, "/dev/root", true),
+                    // Not in the copy: says nothing about it.
+                    part(4, "/dev/data", true),
+                ]
+            }]
+        });
+        serde_json::from_value(job).expect("a job from its JSON")
+    }
+
+    #[test]
+    fn a_whole_disk_job_needs_only_its_encrypted_partitions_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let passwords = PasswordStore::new(dir.path().join("metadata.db"));
+        let job = disk_job();
+        assert_eq!(
+            sources_needing_password(&job),
+            vec!["/dev/root".to_string()]
+        );
+        assert_eq!(
+            missing_passwords(&job, &passwords),
+            vec!["/dev/root".to_string()]
+        );
+        passwords
+            .remember(
+                &own_backup_core::source_token("/dev/root"),
+                "secret".into(),
+                false,
+            )
+            .unwrap();
+        assert!(
+            missing_passwords(&job, &passwords).is_empty(),
+            "the ESP and /boot need none"
+        );
+    }
+
+    /// A skipped scheduled run is in the history once, says what to do, and
+    /// does not count as the slot's run: when the password is saved, the
+    /// missed copy is still made.
+    #[test]
+    fn a_skipped_run_is_recorded_once_and_does_not_serve_its_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::load(dir.path());
+        let passwords = PasswordStore::new(dir.path().join("metadata.db"));
+        let mut job = disk_job();
+        job.schedule.run_missed = true;
+        let job = store.upsert(job).unwrap();
+
+        for _ in 0..3 {
+            assert!(!ready_to_run(&job, &store, &passwords));
+        }
+        let runs: Vec<JobRun> = store
+            .activity()
+            .into_iter()
+            .filter(|r| r.job_id == job.id)
+            .collect();
+        assert_eq!(runs.len(), 1, "one record, not one a minute");
+        let run = &runs[0];
+        assert!(run.skipped && run.status == "error");
+        assert_eq!(run.error_kind, "volume_password_missing");
+        assert!(run.error.contains("/dev/root"), "{}", run.error);
+        assert!(run.error.contains(&*tr!("scheduler.skipped_catch_up")));
+
+        let job = store.get(&job.id).unwrap();
+        assert!(job.last_run.as_ref().unwrap().skipped);
+        assert_eq!(last_fired(&job, &store), None, "the slot is still unserved");
+        assert!(!started_on_the_same_day(&job, chrono::Local::now()));
+
+        passwords
+            .remember(
+                &own_backup_core::source_token("/dev/root"),
+                "secret".into(),
+                false,
+            )
+            .unwrap();
+        assert!(ready_to_run(&job, &store, &passwords));
+        // Forgotten again: the next time a password goes missing is said anew.
+        passwords
+            .forget(&own_backup_core::source_token("/dev/root"))
+            .unwrap();
+        assert!(!ready_to_run(&job, &store, &passwords));
+        assert_eq!(
+            store
+                .activity()
+                .iter()
+                .filter(|r| r.job_id == job.id)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_source_the_snapshot_does_not_describe_still_needs_a_password() {
+        let mut job = disk_job();
+        job.source_disks.clear();
+        assert_eq!(sources_needing_password(&job).len(), 3, "the old rule");
+        job.requires_password = false;
+        assert!(sources_needing_password(&job).is_empty());
+    }
+
     fn job_started_at(utc: &str) -> Job {
         Job {
             last_run: Some(own_backup_core::JobRun {
@@ -550,6 +819,77 @@ mod tests {
         assert!(started_on_the_same_day(&job, now));
     }
 
+    /// 2026-10-21: the weekly 15:00 copy, missed while the machine was off,
+    /// started at 16:17 and was cut off by a restart a second later. After the
+    /// next start the slot is still due — counted from the week before.
+    #[test]
+    fn a_weekly_copy_cut_off_by_a_restart_is_still_due() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::load(dir.path());
+        let mut job = Job {
+            id: "c".into(),
+            name: "Disk_C_Win11".into(),
+            ..Default::default()
+        };
+        job.schedule.kind = "weekly".into();
+        job.schedule.time = "15:00".into();
+        job.schedule.days = vec!["wed".into()];
+        job.schedule.run_missed = true;
+        store.upsert(job).unwrap();
+        for (id, started, interrupted) in [
+            ("week-before", "2026-10-14T12:00:05Z", false),
+            ("cut-off", "2026-10-21T13:17:08Z", true),
+        ] {
+            store
+                .record_run(own_backup_core::JobRun {
+                    id: id.into(),
+                    job_id: "c".into(),
+                    job_name: "Disk_C_Win11".into(),
+                    started_at: started.into(),
+                    status: if interrupted { "cancelled" } else { "success" }.into(),
+                    interrupted,
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        let job = store.get("c").unwrap();
+        let fired = last_fired(&job, &store).unwrap();
+        assert_eq!(fired.to_rfc3339(), "2026-10-14T12:00:05+00:00");
+
+        let cron = own_backup_scheduler::schedule_to_cron(&job.schedule).unwrap();
+        let sched = own_backup_scheduler::config_schedule::parse(&cron).unwrap();
+        let moscow = FixedOffset::east_opt(3 * 3600).unwrap();
+        let after_restart = moscow.with_ymd_and_hms(2026, 10, 21, 16, 47, 0).unwrap();
+        let fresh = ChronoDuration::seconds(120);
+        assert!(own_backup_scheduler::is_due(
+            &sched,
+            after_restart,
+            Some(fired),
+            true,
+            fresh
+        ));
+        // Counted from the cut-off run instead, as before: nothing due.
+        let cut = chrono::DateTime::parse_from_rfc3339("2026-10-21T13:17:08Z").unwrap();
+        assert!(!own_backup_scheduler::is_due(
+            &sched,
+            after_restart,
+            Some(cut),
+            true,
+            fresh
+        ));
+    }
+
+    /// A run the service's stop cut off is not today's run: the copy is made
+    /// at the next trigger.
+    #[test]
+    fn an_interrupted_run_is_not_todays_run() {
+        let moscow = FixedOffset::east_opt(3 * 3600).unwrap();
+        let mut job = job_started_at("2026-10-21T13:17:08Z");
+        job.last_run.as_mut().unwrap().interrupted = true;
+        let now = moscow.with_ymd_and_hms(2026, 10, 21, 17, 0, 0).unwrap();
+        assert!(!started_on_the_same_day(&job, now));
+    }
+
     #[test]
     fn a_job_that_never_ran_has_not_run_today() {
         assert!(!started_on_the_same_day(
@@ -570,21 +910,55 @@ mod tests {
     fn a_destination_is_asked_about_by_its_drive() {
         use std::path::PathBuf;
         assert_eq!(
-            dest_root(r"F:\Backup\Disk_D (Work)"),
+            drive_root(r"F:\Backup\Disk_D (Work)"),
             Some(PathBuf::from(r"F:\"))
         );
-        assert_eq!(dest_root("e:"), Some(PathBuf::from(r"E:\")));
+        assert_eq!(drive_root("e:"), Some(PathBuf::from(r"E:\")));
         assert_eq!(
-            dest_root(r"\\nas\backups\pc1"),
+            drive_root(r"\\nas\backups\pc1"),
             Some(PathBuf::from(r"\\nas\backups\"))
         );
         assert_eq!(
-            dest_root(r"\\nas"),
+            drive_root(r"\\nas"),
             None,
             "a server with no share names no drive"
         );
-        assert_eq!(dest_root("relative\\path"), None);
-        assert_eq!(dest_root(""), None);
+        assert_eq!(drive_root("relative\\path"), None);
+        assert_eq!(drive_root(""), None);
+    }
+
+    /// On Linux the drive is the mount the destination is under: there while
+    /// the disk is plugged in, `None` once it is not, so the probe sees the
+    /// "destination connected" edge. Before, only `X:` and `\\server` were
+    /// understood and a Linux destination was `None` forever — the event never
+    /// fired.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_linux_destination_is_asked_about_by_its_mount() {
+        use std::path::PathBuf;
+        const BASE: &str = "\
+1 0 0:29 /@ / rw - btrfs /dev/mapper/root rw\n\
+2 1 0:28 / /run rw - tmpfs tmpfs rw\n\
+3 1 0:30 / /mnt/nas rw - nfs4 nas:/export rw\n";
+        let plugged =
+            format!("{BASE}4 2 8:17 / /run/media/u/Backup rw - ntfs3 /dev/sdb1 rw\n5 1 8:33 / /media/usb rw - vfat /dev/sdc1 rw\n");
+        // Removable drives under /run/media and at a fixed /media mount point.
+        for dest in ["/run/media/u/Backup/Jobs/PC", "/media/usb/Jobs"] {
+            assert!(dest_root_in(dest, &plugged).is_some(), "{dest}");
+            assert_eq!(dest_root_in(dest, BASE), None, "{dest} unplugged");
+        }
+        assert_eq!(
+            dest_root_in("/run/media/u/Backup/Jobs/PC", &plugged),
+            Some(PathBuf::from("/run/media/u/Backup"))
+        );
+        assert_eq!(
+            dest_root_in("/mnt/nas/pc1", BASE),
+            Some(PathBuf::from("/mnt/nas"))
+        );
+        // Windows forms mean nothing here.
+        assert_eq!(dest_root_in(r"E:\Backup", &plugged), None);
+        assert_eq!(dest_root_in(r"\\nas\backups", &plugged), None);
+        assert_eq!(dest_root(r"E:\Backup"), None);
     }
 
     #[test]

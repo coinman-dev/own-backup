@@ -1,0 +1,68 @@
+#!/bin/sh
+# Own Backup: after the files are in place (install and upgrade).
+set -e
+
+if [ "$1" = "configure" ]; then
+    # The access group and the directories. sysusers/tmpfiles are part of
+    # systemd, which the package depends on.
+    systemd-sysusers own-backup.conf
+    systemd-tmpfiles --create own-backup.conf || true
+
+    # First installation from a terminal: the person who ran `sudo apt
+    # install` is the one who will open the window. Under PackageKit, a
+    # software centre or unattended upgrades there is no SUDO_USER; then
+    # access is granted with `own-backup-service --grant-access` (or pkexec
+    # from the window).
+    if [ -z "$2" ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ] \
+        && getent passwd "$SUDO_USER" >/dev/null; then
+        if usermod -aG own-backup "$SUDO_USER"; then
+            echo "own-backup: $SUDO_USER added to the group own-backup; sign in again to use the window."
+        fi
+    fi
+fi
+
+if [ "$1" = "configure" ]; then
+    # A unit an older `own-backup-service --install` wrote into /etc shadows
+    # the packaged one and runs whatever binary that build was started from.
+    # Recognised the way `--install` recognises it (install.rs): its exact
+    # description and Type=simple. An administrator's own unit stays. Removed
+    # BEFORE the packaged unit is enabled — deb-systemd-helper would otherwise
+    # enable the /etc one — together with the .wants links its `enable` made,
+    # which would be left dangling.
+    legacy=/etc/systemd/system/own-backup.service
+    if [ -f "$legacy" ] \
+        && grep -qx 'Description=Block-level backup engine for Own Backup: runs scheduled backups and serves the GUI/CLI.' "$legacy" \
+        && grep -qx 'Type=simple' "$legacy"; then
+        for link in /etc/systemd/system/*.wants/own-backup.service; do
+            if [ -L "$link" ] && [ "$(readlink "$link")" = "$legacy" ]; then
+                rm -f "$link"
+            fi
+        done
+        rm -f "$legacy"
+        echo "own-backup: removed $legacy left by an earlier --install"
+    fi
+fi
+
+if [ "$1" = "configure" ] || [ "$1" = "abort-upgrade" ] || [ "$1" = "abort-deconfigure" ] || [ "$1" = "abort-remove" ]; then
+    # Enable at boot (also without a running systemd: a chroot, an image build).
+    if deb-systemd-helper debian-installed own-backup.service; then
+        deb-systemd-helper unmask own-backup.service >/dev/null || true
+        if deb-systemd-helper --quiet was-enabled own-backup.service; then
+            deb-systemd-helper enable own-backup.service >/dev/null || true
+        else
+            deb-systemd-helper update-state own-backup.service >/dev/null || true
+        fi
+    else
+        deb-systemd-helper unmask own-backup.service >/dev/null || true
+        deb-systemd-helper enable own-backup.service >/dev/null || true
+    fi
+    if [ -d /run/systemd/system ]; then
+        systemctl --system daemon-reload >/dev/null || true
+        # prerm stopped the engine before an upgrade. Not started when the
+        # administrator disabled it (deb-systemd-invoke respects that).
+        deb-systemd-invoke start own-backup.service >/dev/null \
+            || echo "own-backup: the service did not start; see: systemctl status own-backup" >&2
+    fi
+fi
+
+exit 0

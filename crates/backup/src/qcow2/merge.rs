@@ -12,17 +12,29 @@
 //! rewrite happens — the file grows only by the touched clusters plus fresh
 //! metadata.
 //!
+//! Dead space still holds what it held. For a removal pass that is the very
+//! content being removed (an old MFT cluster keeps the resident data of the
+//! excluded files), so a removal asks for [`Qcow2InPlaceMerge::erase_replaced_on_commit`]:
+//! once the new header is durable, the old host bytes of every replaced
+//! cluster are overwritten with zeros — exactly those bytes, never one a live
+//! cluster still uses (compressed streams of other clusters are packed into
+//! the same host clusters and sectors).
+//!
 //! Transactional like the VHDX merge: every new cluster and the fresh
 //! L2/L1/refcount metadata are appended and `fsync`'d **before** the header is
 //! repointed (also `fsync`'d). A crash before the header write leaves the
 //! original image fully readable (a valid backup whose excluded files are still
 //! zero-filled ghosts); a crash after leaves the merged image. There is never an
-//! in-between state that reads wrong data.
+//! in-between state that reads wrong data. The erasure runs after the header
+//! commit: a crash between the two leaves a valid merged image whose replaced
+//! bytes are still in the file (logged before the erasure starts).
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
+
+use tracing::info;
 
 use own_backup_common::Result;
 
@@ -50,6 +62,14 @@ pub struct Qcow2InPlaceMerge {
     /// Next append point (kept cluster-aligned by `pad`).
     append_offset: u64,
     written: bool,
+    /// End of the file as opened: everything a replaced cluster used to
+    /// occupy lies below it, everything this merge appends at or above it.
+    original_end: u64,
+    /// Zero the old host bytes of replaced clusters after the commit.
+    erase_replaced: bool,
+    /// guest cluster → its L2 entry as opened, for every cluster this merge
+    /// replaced (kept only when `erase_replaced` is set).
+    replaced: BTreeMap<u64, u64>,
 }
 
 impl Qcow2InPlaceMerge {
@@ -151,7 +171,28 @@ impl Qcow2InPlaceMerge {
             l2,
             append_offset,
             written: false,
+            original_end: end,
+            erase_replaced: false,
+            replaced: BTreeMap::new(),
         })
+    }
+
+    /// After [`Self::commit`] has made the new header durable, overwrite with
+    /// zeros the old host bytes of every cluster this merge replaced (written,
+    /// zeroed or grafted over), then `fsync`. A removal pass needs it: the
+    /// replaced clusters are what held the removed content. Nothing a live
+    /// cluster still reads is touched — see the module documentation.
+    pub fn erase_replaced_on_commit(&mut self) {
+        self.erase_replaced = true;
+    }
+
+    /// Remember what guest cluster `index` pointed at when the image was
+    /// opened, before this merge changes it for the first time.
+    fn note_replaced(&mut self, index: u64) {
+        if self.erase_replaced && !self.replaced.contains_key(&index) {
+            let old = self.l2.get(&index).copied().unwrap_or(0);
+            self.replaced.insert(index, old);
+        }
     }
 
     pub fn cluster_size(&self) -> u64 {
@@ -211,6 +252,7 @@ impl Qcow2InPlaceMerge {
             )));
         }
         self.written = true;
+        self.note_replaced(index);
 
         if data.iter().all(|&b| b == 0) {
             if self.has_backing {
@@ -271,6 +313,7 @@ impl Qcow2InPlaceMerge {
             return Err(bad(format!("cluster {index} beyond virtual disk")));
         }
         self.written = true;
+        self.note_replaced(index);
         Ok(())
     }
 
@@ -475,8 +518,180 @@ impl Qcow2InPlaceMerge {
         self.file.write_all(&header)?;
         self.file.flush()?;
         self.file.sync_all()?;
+
+        if self.erase_replaced && !self.replaced.is_empty() {
+            info!(
+                clusters = self.replaced.len(),
+                "qcow2 merge committed; erasing the old bytes of the replaced clusters \
+                 (if this is interrupted, the image stays valid but keeps them)"
+            );
+            let erased = self.erase_replaced_clusters().map_err(|e| {
+                bad(format!(
+                    "the merge is committed, but erasing the replaced clusters failed — \
+                     their old bytes remain in the file: {e}"
+                ))
+            })?;
+            info!(bytes = erased, "qcow2 merge: replaced clusters erased");
+        }
         Ok(())
     }
+
+    /// Zero the old host bytes of the replaced clusters, minus every byte a
+    /// live cluster (or the header cluster, or the backing file name) still
+    /// uses; `fsync`. Returns how many bytes were zeroed.
+    fn erase_replaced_clusters(&mut self) -> Result<u64> {
+        let cs = self.cluster_size;
+        let limit = self.original_end;
+
+        // What the replaced clusters occupied. A compressed stream is erased
+        // to the end of its zstd frame, not to the end of the sector its
+        // descriptor rounds up to: the rest of that sector may be the start
+        // of the next packed stream (still subtracted below if it is live).
+        let mut dead: Vec<(u64, u64)> = Vec::new();
+        let replaced: Vec<u64> = self.replaced.values().copied().collect();
+        for old in replaced {
+            match decode_l2_entry(old, self.cluster_bits)? {
+                ClusterDescriptor::Standard { host_offset } => {
+                    dead.push((host_offset, host_offset.saturating_add(cs)))
+                }
+                ClusterDescriptor::Compressed {
+                    host_offset,
+                    length,
+                } => {
+                    let len = self
+                        .zstd_frame(host_offset, length)?
+                        .map(|(len, _)| len)
+                        .unwrap_or(length);
+                    dead.push((host_offset, host_offset.saturating_add(len)));
+                }
+                ClusterDescriptor::Zero | ClusterDescriptor::Unallocated => {}
+            }
+        }
+        let dead = merge_ranges(
+            dead.into_iter()
+                .map(|(s, e)| (s, e.min(limit)))
+                .filter(|(s, e)| s < e)
+                .collect(),
+        );
+        if dead.is_empty() {
+            return Ok(0);
+        }
+
+        // What must survive among them: the header cluster, the backing file
+        // name, and every live cluster that reaches into a dead range. A live
+        // compressed stream counts to the end of its frame only when that
+        // frame provably is the whole cluster; otherwise to the end of its
+        // descriptor — more than it needs, never less.
+        let mut live: Vec<(u64, u64)> = vec![(0, cs)];
+        let backing_offset = u64::from_be_bytes(self.header_cluster[8..16].try_into().unwrap());
+        let backing_len = u32::from_be_bytes(self.header_cluster[16..20].try_into().unwrap());
+        if backing_offset != 0 {
+            live.push((backing_offset, backing_offset + backing_len as u64));
+        }
+        let entries: Vec<u64> = self.l2.values().copied().collect();
+        for entry in entries {
+            let (start, end, compressed) = match decode_l2_entry(entry, self.cluster_bits)? {
+                ClusterDescriptor::Standard { host_offset } => {
+                    (host_offset, host_offset.saturating_add(cs), None)
+                }
+                ClusterDescriptor::Compressed {
+                    host_offset,
+                    length,
+                } => (
+                    host_offset,
+                    host_offset.saturating_add(length),
+                    Some(length),
+                ),
+                ClusterDescriptor::Zero | ClusterDescriptor::Unallocated => continue,
+            };
+            if !touches(&dead, start, end) {
+                continue;
+            }
+            let end = match compressed {
+                Some(length) => match self.zstd_frame(start, length)? {
+                    Some((len, Some(content))) if content == cs => start + len,
+                    _ => end,
+                },
+                None => end,
+            };
+            live.push((start, end));
+        }
+        let live = merge_ranges(live);
+
+        let mut zeroed = 0u64;
+        for &(start, end) in &dead {
+            let mut at = start;
+            let first = live.partition_point(|&(_, e)| e <= start);
+            for &(ls, le) in &live[first..] {
+                if ls >= end {
+                    break;
+                }
+                if ls > at {
+                    zeroed += self.zero_range(at, ls)?;
+                }
+                at = at.max(le);
+            }
+            if at < end {
+                zeroed += self.zero_range(at, end)?;
+            }
+        }
+        self.file.flush()?;
+        self.file.sync_all()?;
+        Ok(zeroed)
+    }
+
+    /// The zstd frame at `host_offset` within the `max_len` bytes its
+    /// descriptor allows (and the file holds): its length, and the content
+    /// size its header declares. `None` when there is no well-formed frame.
+    fn zstd_frame(&mut self, host_offset: u64, max_len: u64) -> Result<Option<(u64, Option<u64>)>> {
+        let readable = max_len.min(self.original_end.saturating_sub(host_offset));
+        if readable == 0 {
+            return Ok(None);
+        }
+        let mut buf = vec![0u8; readable as usize];
+        self.file.seek(SeekFrom::Start(host_offset))?;
+        self.file.read_exact(&mut buf)?;
+        let Ok(len) = zstd::zstd_safe::find_frame_compressed_size(&buf) else {
+            return Ok(None);
+        };
+        if len == 0 || len > buf.len() {
+            return Ok(None);
+        }
+        let content = zstd::zstd_safe::get_frame_content_size(&buf).ok().flatten();
+        Ok(Some((len as u64, content)))
+    }
+
+    fn zero_range(&mut self, start: u64, end: u64) -> Result<u64> {
+        const CHUNK: u64 = 1 << 20;
+        let zeros = vec![0u8; CHUNK.min(end - start) as usize];
+        self.file.seek(SeekFrom::Start(start))?;
+        let mut at = start;
+        while at < end {
+            let n = CHUNK.min(end - at) as usize;
+            self.file.write_all(&zeros[..n])?;
+            at += n as u64;
+        }
+        Ok(end - start)
+    }
+}
+
+/// Sort and coalesce half-open byte ranges.
+fn merge_ranges(mut ranges: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
+    ranges.sort_unstable();
+    let mut out: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
+    for (s, e) in ranges {
+        match out.last_mut() {
+            Some(last) if s <= last.1 => last.1 = last.1.max(e),
+            _ => out.push((s, e)),
+        }
+    }
+    out
+}
+
+/// Does `[start, end)` share a byte with any of the sorted, disjoint `ranges`?
+fn touches(ranges: &[(u64, u64)], start: u64, end: u64) -> bool {
+    let i = ranges.partition_point(|&(_, e)| e <= start);
+    i < ranges.len() && ranges[i].0 < end
 }
 
 /// Write a blob to a qcow2 guest offset in-place, appending new clusters as
@@ -645,5 +860,192 @@ mod guest_blob_tests {
         // Untouched clusters still fall through to the parent.
         r.read_at(0, &mut edge).unwrap();
         assert_eq!(edge, [1u8; 16]);
+    }
+}
+
+#[cfg(test)]
+mod erase_tests {
+    use super::{decode_l2_entry, ClusterDescriptor, Qcow2InPlaceMerge};
+    use crate::qcow2::{Qcow2RandomReader, Qcow2Writer, Qcow2WriterOptions};
+
+    const CS: usize = 65536;
+
+    /// A compressible cluster that still carries `marker` literally: a
+    /// stretch of noise (zstd keeps such literals raw) with the marker in
+    /// it, then a repeated pattern.
+    fn marked_cluster(seed: u32, marker: &[u8]) -> Vec<u8> {
+        let mut c = vec![0u8; CS];
+        let mut x = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
+        for b in c[..3000].iter_mut() {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            *b = x as u8;
+        }
+        c[1000..1000 + marker.len()].copy_from_slice(marker);
+        for (i, b) in c[3000..].iter_mut().enumerate() {
+            *b = (i % 7) as u8 + seed as u8;
+        }
+        c
+    }
+
+    fn noise_cluster(seed: u32, marker: &[u8]) -> Vec<u8> {
+        let mut c = vec![0u8; CS];
+        let mut x = seed.wrapping_mul(2_246_822_519).wrapping_add(7);
+        for b in c.iter_mut() {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            *b = x as u8;
+        }
+        c[500..500 + marker.len()].copy_from_slice(marker);
+        c
+    }
+
+    fn marker(i: u64) -> Vec<u8> {
+        format!("EXCLUDED-CONTENT-MARKER-{i:02}").into_bytes()
+    }
+
+    fn count(hay: &[u8], needle: &[u8]) -> usize {
+        hay.windows(needle.len()).filter(|w| *w == needle).count()
+    }
+
+    fn descriptors(path: &std::path::Path) -> Vec<(u64, ClusterDescriptor)> {
+        let m = Qcow2InPlaceMerge::open(path, None).unwrap();
+        let bits = m.cluster_bits;
+        m.l2.iter()
+            .map(|(&g, &e)| (g, decode_l2_entry(e, bits).unwrap()))
+            .collect()
+    }
+
+    /// Fold a change into an image whose compressed clusters are packed
+    /// byte-to-byte: the old bytes of exactly the replaced clusters are gone
+    /// from the file (their markers too), every other byte of the original
+    /// file below the header cluster is as it was, and every cluster still
+    /// reads back — packed neighbours sharing a sector with an erased stream
+    /// included.
+    #[test]
+    fn replaced_clusters_are_erased_and_packed_neighbours_survive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("img.qcow2");
+        let mut w = Qcow2Writer::new(
+            std::io::Cursor::new(Vec::new()),
+            Qcow2WriterOptions {
+                virtual_size: 16 * CS as u64,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // 0–5 compressed (packed), 6–7 raw (incompressible).
+        let mut original: Vec<Vec<u8>> = Vec::new();
+        for i in 0..8u64 {
+            let c = if i < 6 {
+                marked_cluster(i as u32 + 1, &marker(i))
+            } else {
+                noise_cluster(i as u32 + 1, &marker(i))
+            };
+            w.write_cluster(i, &c).unwrap();
+            original.push(c);
+        }
+        std::fs::write(&path, w.finish().unwrap().into_inner()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        for i in 0..8 {
+            assert_eq!(count(&before, &marker(i)), 1, "marker {i} is in the file");
+        }
+        let old = descriptors(&path);
+        assert!(
+            old.iter()
+                .filter(|(_, d)| matches!(d, ClusterDescriptor::Compressed { .. }))
+                .count()
+                == 6,
+            "{old:?}"
+        );
+
+        // Replace 2 and 3 (packed between live 1 and 4), drop 4 (deleted →
+        // zeros), replace raw 6. Keep 0, 1, 5, 7.
+        let replaced = [2u64, 3, 4, 6];
+        let mut want = original.clone();
+        want[2] = vec![0x5A; CS];
+        want[3] = marked_cluster(99, b"new content three");
+        want[4] = vec![0u8; CS];
+        want[6] = noise_cluster(77, b"new raw content");
+        let mut merge = Qcow2InPlaceMerge::open(&path, None).unwrap();
+        merge.erase_replaced_on_commit();
+        for &i in &replaced {
+            merge.write_cluster(i, &want[i as usize]).unwrap();
+        }
+        merge.commit().unwrap();
+        let after = std::fs::read(&path).unwrap();
+
+        // The exact old bytes of the replaced clusters are zero.
+        let mut dead: Vec<(usize, usize)> = Vec::new();
+        for (g, d) in &old {
+            if !replaced.contains(g) {
+                continue;
+            }
+            let (s, e) = match *d {
+                ClusterDescriptor::Standard { host_offset } => {
+                    (host_offset as usize, host_offset as usize + CS)
+                }
+                ClusterDescriptor::Compressed {
+                    host_offset,
+                    length,
+                } => {
+                    let s = host_offset as usize;
+                    let n = zstd::zstd_safe::find_frame_compressed_size(
+                        &before[s..s + length as usize],
+                    )
+                    .unwrap();
+                    (s, s + n)
+                }
+                other => panic!("{other:?}"),
+            };
+            assert!(after[s..e].iter().all(|&b| b == 0), "cluster {g} erased");
+            dead.push((s, e));
+        }
+        for &i in &replaced {
+            assert_eq!(count(&after, &marker(i)), 0, "marker {i} is gone");
+        }
+        for i in [0u64, 1, 5, 7] {
+            assert_eq!(count(&after, &marker(i)), 1, "marker {i} is kept");
+        }
+        // Nothing else of the original file changed (the header cluster is
+        // repointed; everything this merge appended lies beyond it).
+        for (at, (&b, &a)) in before.iter().zip(&after).enumerate().skip(CS) {
+            if dead.iter().any(|&(s, e)| (s..e).contains(&at)) {
+                continue;
+            }
+            assert_eq!(a, b, "byte {at} outside the replaced clusters changed");
+        }
+
+        // Every cluster reads back, through our own reader.
+        let mut r = Qcow2RandomReader::open(&path).unwrap();
+        for (i, c) in want.iter().enumerate() {
+            let mut got = vec![0xEEu8; CS];
+            r.read_at(i as u64 * CS as u64, &mut got).unwrap();
+            assert!(got == *c, "cluster {i} reads back");
+        }
+    }
+
+    /// Without the request the merge leaves dead space as it was (what
+    /// consolidation and the sidecar blob writer rely on).
+    #[test]
+    fn without_the_request_old_bytes_stay() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("img.qcow2");
+        let mut w = Qcow2Writer::new(
+            std::io::Cursor::new(Vec::new()),
+            Qcow2WriterOptions {
+                virtual_size: 4 * CS as u64,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        w.write_cluster(0, &marked_cluster(1, &marker(0))).unwrap();
+        std::fs::write(&path, w.finish().unwrap().into_inner()).unwrap();
+        let mut merge = Qcow2InPlaceMerge::open(&path, None).unwrap();
+        merge.write_cluster(0, &vec![1u8; CS]).unwrap();
+        merge.commit().unwrap();
+        assert_eq!(count(&std::fs::read(&path).unwrap(), &marker(0)), 1);
     }
 }

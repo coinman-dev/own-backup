@@ -1,5 +1,11 @@
 use thiserror::Error;
 
+/// Variants that carry a complete sentence for a person (`Config`, `Device`,
+/// `PreflightBlocker`, `ChainBroken`, `RestoreIncompatible`, `NotImplemented`,
+/// `KeyProtection`) display just that sentence: their text is in the user's
+/// language and reaches the window as it is, where an English label in front
+/// of a Russian sentence ("Device I/O error: запись 0002 …") said nothing a
+/// person could use. Technical wrappers keep their label for the log.
 #[derive(Debug, Error)]
 pub enum OwnBackupError {
     #[error("I/O error: {0}")]
@@ -30,25 +36,25 @@ pub enum OwnBackupError {
     #[error("Database error: {0}")]
     Database(String),
 
-    #[error("Configuration error: {0}")]
+    #[error("{0}")]
     Config(String),
 
-    #[error("Preflight blocker: {0}")]
+    #[error("{0}")]
     PreflightBlocker(String),
 
     #[error("No snapshot provider available for device: {0}")]
     NoSnapshotProvider(String),
 
-    #[error("Backup chain broken: {0}")]
+    #[error("{0}")]
     ChainBroken(String),
 
-    #[error("Restore incompatible: {0}")]
+    #[error("{0}")]
     RestoreIncompatible(String),
 
     #[error("Serialization error: {0}")]
     Serialization(String),
 
-    #[error("Device I/O error: {0}")]
+    #[error("{0}")]
     Device(String),
 
     #[error("Virtual disk (VHDX) error: {0}")]
@@ -61,8 +67,15 @@ pub enum OwnBackupError {
     /// the request was valid, the code simply does not exist. Returning success
     /// here is how a partition silently ends up empty after a "successful"
     /// restore.
-    #[error("Not implemented: {0}")]
+    #[error("{0}")]
     NotImplemented(String),
+
+    /// What protects the service's keys on this machine failed — the TPM or
+    /// `systemd-creds` on Linux. Not a lost authorization: authorizing the
+    /// job again needs the same protection and fails the same way, so the
+    /// remedy is the machine's, not the job's.
+    #[error("{0}")]
+    KeyProtection(String),
 }
 
 pub type Result<T> = std::result::Result<T, OwnBackupError>;

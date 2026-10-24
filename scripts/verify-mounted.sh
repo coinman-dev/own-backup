@@ -16,7 +16,9 @@
 #   bash scripts/verify-mounted.sh --all      # плюс все прочие #[ignore]
 #
 # Нужны: root через sudo, loop-устройства, mkfs.ext4/e2fsck, mkfs.btrfs/btrfs,
-# mkfs.xfs/xfs_repair и btrfs в ядре (модуль подгружается ниже).
+# mkfs.xfs/xfs_repair и btrfs в ядре (модуль подгружается ниже); для NTFS —
+# ntfs-3g (mkntfs, ntfsfix) и /dev/fuse: имена удаляет ntfs-3g, том подаётся
+# ему файлом (путь через NBD — сценарий scripts/lab/linux-ntfs-names-scenario.sh).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -30,6 +32,9 @@ TESTS=(
     ext_exclusions::ext_integration::ext_survives_mount_and_write
     xfs_exclusions::xfs_integration::xfs_survives_mount_and_write
     btrfs_exclusions::btrfs_integration::stage2_survives_mount_and_write
+    ntfs_names_linux::acceptance::excluded_ntfs_names_leave_every_container_and_chain
+    ntfs_names_linux::acceptance::excluded_ntfs_names_leave_a_whole_disk_image
+    ntfs_names_linux::acceptance::names_that_cannot_be_deleted_are_reported_kept
 )
 EXTRA=()
 if [ "${1:-}" = "--all" ]; then
@@ -39,7 +44,7 @@ if [ "${1:-}" = "--all" ]; then
 fi
 
 missing=()
-for t in mkfs.ext4 e2fsck debugfs mkfs.btrfs btrfs mkfs.xfs xfs_repair; do
+for t in mkfs.ext4 e2fsck debugfs mkfs.btrfs btrfs mkfs.xfs xfs_repair mkntfs ntfs-3g ntfsfix; do
     command -v "$t" >/dev/null || missing+=("$t")
 done
 if [ ${#missing[@]} -gt 0 ]; then
@@ -73,7 +78,9 @@ else
         echo
         echo "== $t"
         # --exact: имена тестов пересекаются как подстроки (…survives_mount_and_write).
-        sudo "$BIN" --ignored --exact "$t" --nocapture --test-threads=1 || rc=1
+        # --include-ignored: тесты NTFS не помечены #[ignore] (без root они
+        # пропускаются сами), остальные помечены.
+        sudo "$BIN" --include-ignored --exact "$t" --nocapture --test-threads=1 || rc=1
     done
 fi
 

@@ -42,6 +42,11 @@ tempfile = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
+# Reading back a rebuilt initramfs (initramfs_image_linux): gzip images.
+flate2 = "1"
+# systemd-logind over D-Bus (power_linux): sleep inhibitors, suspend, the
+# scheduled poweroff after a copy, shutdown and session signals.
+zbus = "6"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [
@@ -78,3 +83,7 @@ windows = { version = "0.58", features = [
 ] }
 [dev-dependencies]
 gpt = { workspace = true }
+
+# power_linux's tests talk to a stand-in logind over a private connection.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+zbus = { version = "6", features = ["p2p"] }

@@ -5,6 +5,8 @@
   import { theme, setTheme, type ThemeMode } from '../lib/themeStore.svelte';
   import { lang, setLanguage, type LangMode } from '../lib/i18n.svelte';
   import { m } from '../lib/paraglide/messages';
+  import { examplePath } from '../lib/paths';
+  import { isWindows } from '../lib/platformStore.svelte';
 
   /** The config as it was loaded, kept whole. Saving edits a copy of it rather
    *  than building a fresh object out of the fields this page shows — which is
@@ -232,6 +234,7 @@
             min={MIN_LEVEL}
             max={MAX_LEVEL}
             class="form-range"
+            style:--fill="{((compressionLevel - MIN_LEVEL) / (MAX_LEVEL - MIN_LEVEL)) * 100}%"
             bind:value={compressionLevel}
           />
           <div class="range-labels">
@@ -257,7 +260,7 @@
               id="log-mirror"
               type="text"
               class="form-input"
-              placeholder={m.set_log_mirror_placeholder()}
+              placeholder={m.set_log_mirror_placeholder({ example: examplePath('drive') })}
               bind:value={logMirrorDir}
             />
             <button class="btn btn-secondary" onclick={pickMirrorDir}>{m.common_browse()}</button>
@@ -351,7 +354,9 @@
           {:else}
             <div class="status-offline">
               <span class="status-dot offline"></span>
-              <span>{m.set_service_offline()}</span>
+              <span>
+                {serviceStatus?.access_denied ? m.set_service_refused() : m.set_service_offline()}
+              </span>
             </div>
           {/if}
 
@@ -364,7 +369,7 @@
               />
               {m.set_tray()}
             </label>
-            <p class="help-text">{m.set_tray_help()}</p>
+            <p class="help-text">{isWindows() ? m.set_tray_help() : m.set_tray_help_linux()}</p>
           {/if}
         </div>
       </div>
@@ -576,9 +581,10 @@
     color: var(--text);
     font-size: 13px;
     font-weight: 600;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    /* Wrapped, not cut: «Как в системе» in a wider font did not fit its
+       third of the control and read «Как в систе…». */
+    line-height: 1.25;
+    overflow-wrap: anywhere;
   }
   .lang-option:last-child {
     border-right: none;
@@ -603,9 +609,30 @@
     min-width: 0;
   }
 
+  /* Drawn by hand: the WebView's own track left its empty part a light grey
+     strip on the dark theme. Filled to the thumb with the accent, the rest
+     the theme's --track, as the progress bars are. */
   .form-range {
     width: 100%;
-    accent-color: var(--primary);
+    height: 6px;
+    margin: 8px 0;
+    appearance: none;
+    border-radius: 3px;
+    background: linear-gradient(to right, var(--primary) var(--fill), var(--track) var(--fill));
+    cursor: pointer;
+  }
+  .form-range::-webkit-slider-thumb {
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--primary);
+    border: 2px solid var(--card-bg);
+    box-shadow: 0 0 0 1px var(--primary);
+  }
+  .form-range:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 4px;
   }
 
   .range-labels {

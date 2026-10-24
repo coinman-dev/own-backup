@@ -1,0 +1,144 @@
+#!/bin/sh
+# Logs onto the boot medium (own-backup-media-log.service and
+# own-backup-media-journal.service).
+#
+#   media-log start          find the OBK-LOGS partition, mount it, make this
+#                            session's folder and name it to the engine and
+#                            the window (/run/own-backup-media-log.env)
+#   media-log save-journal   write the session's journal into that folder
+#
+# The partition is the one the window's stick writer adds behind the image
+# (crates/backup/src/media_stick.rs, LOG_LABEL): a FAT partition labelled
+# OBK-LOGS on the disk the medium itself booted from (live-boot mounts it at
+# /run/live/medium). A partition of any other disk is never repaired or
+# mounted read-write, whatever its label: the disks here are the machines
+# being rescued, and a label is something anyone can give a partition. A
+# medium written with `dd` has none, a CD has none, `toram` leaves no medium
+# mounted — then the logs stay in memory, which the journal says, and the
+# settings can still name a folder on any disk.
+set -u
+
+label=OBK-LOGS
+mnt=/run/own-backup-media-log
+env_file=/run/own-backup-media-log.env
+dir_file=/run/own-backup-media-log.dir
+
+say() {
+    echo "own-backup-media-log: $*"
+}
+
+# The whole disk the live medium was booted from (`sdb`), or nothing: a CD
+# (`sr0` has no partitions to offer), a medium copied to memory (`toram`),
+# a medium not found.
+medium_disk() {
+    src="$(findmnt -n -o SOURCE --mountpoint /run/live/medium 2>/dev/null || true)"
+    case "$src" in
+        /dev/*) ;;
+        *) return 0 ;;
+    esac
+    # live-boot mounts an isohybrid stick's whole disk or its first
+    # partition, whichever it found the image on.
+    case "$(lsblk -dn -o TYPE "$src" 2>/dev/null)" in
+        disk) lsblk -dn -o NAME "$src" 2>/dev/null ;;
+        part) lsblk -dn -o PKNAME "$src" 2>/dev/null ;;
+    esac
+}
+
+# Partitions labelled OBK-LOGS on any disk that is not `$1`, for the journal:
+# a second stick with that label used to be taken; now it is said why not.
+foreign_log_partitions() {
+    for p in $(blkid -o device -t LABEL="$label" 2>/dev/null); do
+        [ "$(lsblk -dn -o PKNAME "$p" 2>/dev/null)" = "$1" ] || echo "$p"
+    done
+}
+
+start() {
+    # The stick was found by the initramfs already; udev may still be
+    # announcing its partitions.
+    udevadm settle --timeout=15 || true
+    disk="$(medium_disk)"
+    if [ -z "$disk" ]; then
+        say "the boot medium's disk is not known (a CD, toram, or not found); logs stay in memory"
+        exit 0
+    fi
+    dev=""
+    tries=0
+    while [ -z "$dev" ] && [ "$tries" -lt 5 ]; do
+        # Only partitions of the medium's own disk, by what blkid reads on
+        # them now (not a cached label).
+        for p in $(lsblk -ln -o PATH,TYPE "/dev/$disk" 2>/dev/null | awk '$2 == "part" { print $1 }'); do
+            if [ "$(blkid -p -o value -s LABEL "$p" 2>/dev/null)" = "$label" ]; then
+                dev="$p"
+                break
+            fi
+        done
+        [ -n "$dev" ] || { sleep 1; tries=$((tries + 1)); }
+    done
+    if [ -z "$dev" ]; then
+        others="$(foreign_log_partitions "$disk" | tr '\n' ' ')"
+        others="${others% }"
+        if [ -n "$others" ]; then
+            say "no partition labelled $label on the boot medium (/dev/$disk); not used, being on another disk: $others; logs stay in memory"
+        else
+            say "no partition labelled $label on the boot medium (/dev/$disk); logs stay in memory"
+        fi
+        exit 0
+    fi
+    fstype="$(blkid -p -o value -s TYPE "$dev" 2>/dev/null || true)"
+    if [ "$fstype" != vfat ]; then
+        say "$dev ($label) is ${fstype:-unknown}, not FAT; logs stay in memory"
+        exit 0
+    fi
+    mkdir -p "$mnt"
+    chmod 0700 "$mnt"
+    # flush: written out without waiting for the cache — the stick may be
+    # pulled the moment the screen goes dark.
+    opts="rw,noatime,nodev,nosuid,noexec,uid=0,gid=0,umask=0077,flush"
+    # A file system the last session left dirty (the power went) is repaired
+    # first: a log written into a damaged FAT can take the rest with it. Only
+    # this partition of the medium's own disk ever gets here.
+    fsck.fat -a "$dev" >/dev/null 2>&1 || true
+    if ! mount -t vfat -o "$opts" "$dev" "$mnt"; then
+        say "could not mount $dev; logs stay in memory"
+        exit 0
+    fi
+    # One folder per session. The clock of a machine being rescued is often
+    # wrong, so the boot id goes into the name too: two sessions never share
+    # a folder even when their times say they should.
+    boot="$(cut -c1-8 /proc/sys/kernel/random/boot_id)"
+    dir="$mnt/own-backup-logs/$(date +%Y-%m-%d_%H-%M-%S)_$boot"
+    if ! mkdir -p "$dir"; then
+        say "could not create a folder on $dev; logs stay in memory"
+        exit 0
+    fi
+    umask 077
+    printf 'OWN_BACKUP_LOG_MIRROR=%s\n' "$dir" >"$env_file"
+    printf '%s\n' "$dir" >"$dir_file"
+    {
+        echo "Own Backup boot medium session"
+        echo "boot id: $(cat /proc/sys/kernel/random/boot_id)"
+        echo "kernel: $(uname -r)"
+        echo "command line: $(cat /proc/cmdline)"
+    } >"$dir/session.txt"
+    sync
+    say "logs go to $dir ($dev)"
+    # The journal goes there too, at power-off.
+    systemctl start --no-block own-backup-media-journal.service || true
+}
+
+save_journal() {
+    [ -r "$dir_file" ] || exit 0
+    dir="$(cat "$dir_file")"
+    [ -d "$dir" ] || exit 0
+    journalctl -b --no-pager -o short-iso >"$dir/journal.txt" 2>&1 || true
+    sync
+}
+
+case "${1:-}" in
+    start) start ;;
+    save-journal) save_journal ;;
+    *)
+        echo "usage: $0 start|save-journal" >&2
+        exit 2
+        ;;
+esac

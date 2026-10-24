@@ -1,11 +1,12 @@
 //! The language of every message a person reads: Russian or English.
 //!
-//! Chosen in the window («Параметры → Оформление → Язык»); «Как в Windows» is
+//! Chosen in the window («Параметры → Оформление → Язык»); «Как в системе» is
 //! resolved there, and the result — `ru` or `en` — is written to
-//! `config.toml` as `ui_language` and handed to the GUI process directly. The
-//! service follows the file while running, the same way it follows the log
-//! level ([`crate::log_level`]), so a job that runs at night reports in the
-//! language the window last spoke.
+//! `config.toml` as `ui_language` (by the window on Windows, by the service
+//! on its behalf on Linux, where the file is root's) and handed to the GUI
+//! process directly. The service follows the file while running, the same way
+//! it follows the log level ([`crate::log_level`]), so a job that runs at
+//! night reports in the language the window last spoke.
 //!
 //! Russian until told otherwise: the CLI, every test, and a config written
 //! before the setting existed. That is also why messages go through
@@ -63,8 +64,10 @@ pub fn configured(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// The language of the Windows interface, decided the way the window decides
-/// «Как в Windows»: Russian for a Russian interface, English for any other.
+/// The language of the system's interface, decided the way the window decides
+/// «Как в системе»: Russian for a Russian interface, English for any other.
+/// Windows: the user's UI language. Elsewhere: the session's locale, read
+/// the way GLib (and so the window's WebKitGTK) reads it.
 pub fn system() -> &'static str {
     #[cfg(windows)]
     {
@@ -73,11 +76,39 @@ pub fn system() -> &'static str {
     }
     #[cfg(not(windows))]
     {
+        let var = |name: &str| std::env::var(name).ok();
+        from_posix_locale([
+            var("LANGUAGE"),
+            var("LC_ALL"),
+            var("LC_MESSAGES"),
+            var("LANG"),
+        ])
+    }
+}
+
+/// The first of `LANGUAGE`, `LC_ALL`, `LC_MESSAGES`, `LANG` that is set, as
+/// GLib's `g_get_language_names` takes it: a `:`-separated list of tags
+/// (`ru_RU.UTF-8`, `en_US:ru`). Russian when any of them is, as the window's
+/// `navigator.languages` check is; English for `C`, `POSIX` and nothing.
+#[cfg_attr(windows, allow(dead_code))]
+fn from_posix_locale(values: [Option<String>; 4]) -> &'static str {
+    let first = values
+        .into_iter()
+        .flatten()
+        .find(|v| !v.trim().is_empty())
+        .unwrap_or_default();
+    let russian = first
+        .split(':')
+        .any(|tag| tag.trim().to_ascii_lowercase().starts_with("ru"));
+    if russian {
         "ru"
+    } else {
+        "en"
     }
 }
 
 /// `ru` for any Russian locale id (primary language 0x19), `en` otherwise.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn from_langid(id: u16) -> &'static str {
     if id & 0x3FF == 0x19 {
         "ru"
@@ -87,7 +118,7 @@ fn from_langid(id: u16) -> &'static str {
 }
 
 /// The config's language, or the Windows interface's when the config has
-/// none yet — what the window would choose with its default «Как в Windows».
+/// none yet — what the window would choose with its default «Как в системе».
 fn configured_or_system(path: &Path) -> String {
     let configured = configured(path);
     if configured.trim().is_empty() {
@@ -102,7 +133,7 @@ fn configured_or_system(path: &Path) -> String {
 ///
 /// The medium boots with no config at all, so the taskbar used to come up in
 /// Russian and turn English a few seconds later, once the window had resolved
-/// «Как в Windows» on an English recovery environment and written it down
+/// «Как в системе» on an English recovery environment and written it down
 /// (2026-10-15). Deciding the same way from the start leaves nothing to switch.
 pub fn follow_config_or_system(path: PathBuf) {
     set(&configured_or_system(&path));
@@ -153,6 +184,34 @@ mod tests {
 
     // The global itself is never switched in a test: tests run in parallel,
     // and every other one expects the Russian texts.
+    #[test]
+    fn the_session_locale_decides_like_glib() {
+        let some = |v: &str| Some(v.to_string());
+        assert_eq!(
+            from_posix_locale([None, None, None, some("ru_RU.UTF-8")]),
+            "ru"
+        );
+        assert_eq!(
+            from_posix_locale([None, None, None, some("en_US.UTF-8")]),
+            "en"
+        );
+        // LANGUAGE first, and any Russian tag in it.
+        assert_eq!(
+            from_posix_locale([some("en_US:ru"), None, None, some("C.UTF-8")]),
+            "ru"
+        );
+        // LC_ALL over LANG; an empty variable is not set.
+        assert_eq!(
+            from_posix_locale([some(""), some("C"), None, some("ru_RU.UTF-8")]),
+            "en"
+        );
+        assert_eq!(
+            from_posix_locale([None, None, some("ru_UA.UTF-8"), some("en_GB.UTF-8")]),
+            "ru"
+        );
+        assert_eq!(from_posix_locale([None, None, None, None]), "en");
+    }
+
     #[test]
     fn russian_unless_told_english() {
         assert_eq!(code(), "ru");

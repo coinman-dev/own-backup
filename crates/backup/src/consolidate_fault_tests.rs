@@ -175,6 +175,78 @@ fn every_coordinator_checkpoint_resumes_without_counting_the_fold_twice() {
     }
 }
 
+/// The same checkpoints on a VHDX chain folded and repointed in userspace
+/// (`vhdx_chain`, the arm used off Windows): every interruption resumes to a
+/// base that reads as the folded increment did and a leaf that reads as it
+/// always did, with the fold counted once.
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn every_coordinator_checkpoint_resumes_a_vhdx_chain() {
+    use super::tests::{read_vhdx_disk, three_image_vhdx_chain};
+
+    for point in [
+        Point::FoldedBeforeMarker,
+        Point::RepointedBeforeDelete,
+        Point::VictimDeletedBeforeMarker,
+        Point::MarkerDeletedAfterCommit,
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let (base, victim, leaf, victim_id) = three_image_vhdx_chain(root.path());
+        let (victim_before, leaf_before) = (read_vhdx_disk(&victim), read_vhdx_disk(&leaf));
+        let guard = observe(move |at, _| {
+            if at == point {
+                Err(OwnBackupError::Cancelled)
+            } else {
+                Ok(())
+            }
+        });
+        assert!(matches!(
+            execute(&base, &victim, Some(&leaf), None),
+            Err(OwnBackupError::Cancelled)
+        ));
+        drop(guard);
+        assert_eq!(
+            marker_path(&base).exists(),
+            point != Point::MarkerDeletedAfterCommit
+        );
+        let report = resume_pending(root.path()).unwrap();
+        assert!(report.all_finished(), "{point:?}: {report:?}");
+        assert_eq!(
+            report.finished.len(),
+            if point == Point::MarkerDeletedAfterCommit {
+                0
+            } else {
+                1
+            }
+        );
+
+        assert!(
+            !victim.exists() && !marker_path(&base).exists(),
+            "{point:?}"
+        );
+        assert_eq!(read_vhdx_disk(&base), victim_before, "{point:?}");
+        assert_eq!(read_vhdx_disk(&leaf), leaf_before, "{point:?}");
+        assert!(
+            crate::vhdx_bat::vhdx_parent_linkage_matches(&leaf, &base).unwrap(),
+            "{point:?}"
+        );
+        let base_sidecar = read_image_sidecar(&base).unwrap();
+        assert_eq!(base_sidecar.info.consolidated_increments, 1, "{point:?}");
+        assert_eq!(base_sidecar.info.chain_role, ChainRole::Full, "{point:?}");
+        assert_eq!(base_sidecar.manifest.backup_id, victim_id, "{point:?}");
+        assert_eq!(
+            read_image_sidecar(&leaf)
+                .unwrap()
+                .info
+                .parent_image_file_name
+                .as_deref(),
+            Some("v_C_full_1.vhdx"),
+            "{point:?}"
+        );
+        assert!(resume_pending(root.path()).unwrap().finished.is_empty());
+    }
+}
+
 #[cfg(windows)]
 fn say(value: &str) {
     use std::io::Write;

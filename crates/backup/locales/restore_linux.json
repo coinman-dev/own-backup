@@ -1,0 +1,207 @@
+{
+  "_version": 2,
+  "restore_disk_linux.past_partition_end": {
+    "ru": "Запись за конец раздела: смещение %{offset}, длина %{len}, размер раздела %{size} байт.",
+    "en": "Write past the end of the partition: offset %{offset}, length %{len}, partition size %{size} bytes."
+  },
+  "restore_disk_linux.legacy_manifest": {
+    "ru": "Это набор старого формата (.obdm с отдельными образами томов); в Linux восстанавливается только копия диска одним образом (.vhdx, .qcow2, .obk).",
+    "en": "This is an old-format set (.obdm with separate volume images); on Linux only a single-image disk copy (.vhdx, .qcow2, .obk) can be restored."
+  },
+  "restore_disk_linux.not_a_disk_image": {
+    "ru": "В образе нет описания целого диска — это копия тома, а не загрузочная копия диска.",
+    "en": "The image has no whole-disk manifest — it is a volume copy, not a bootable disk copy."
+  },
+  "restore_disk_linux.block_past_disk": {
+    "ru": "Блок копии по смещению %{offset} не помещается на диск назначения (%{size} байт).",
+    "en": "The copy's block at offset %{offset} does not fit the target disk (%{size} bytes)."
+  },
+  "restore_disk_linux.luks_no_header": {
+    "ru": "Раздел %{index} был контейнером LUKS и сохранён в копии расшифрованным, но заголовка контейнера в копии нет — вернуть шифрование нельзя, а писать открытые данные туда, где система ждёт контейнер, восстановление не станет. Данные раздела доступны: подключите копию или восстановите этот раздел отдельно.",
+    "en": "Partition %{index} was a LUKS container and the copy holds it decrypted, but without the container's header — the encryption cannot be put back, and the restore will not write plaintext where the system expects a container. The partition's data is still available: mount the copy or restore that partition on its own."
+  },
+  "restore_disk_linux.luks_cannot_rebuild": {
+    "ru": "Контейнер LUKS раздела %{index} не восстановить с шифрованием: %{why}. Данные раздела доступны: подключите копию или восстановите этот раздел отдельно.",
+    "en": "The LUKS container of partition %{index} cannot be restored with its encryption: %{why}. The partition's data is still available: mount the copy or restore that partition on its own."
+  },
+  "restore_disk_linux.luks_sector_misaligned": {
+    "ru": "Контейнер LUKS раздела %{index} шифрует секторами по %{sector} Б, а раздел начинается на %{offset} Б при блоке копии %{block} Б: границы блоков не совпадают с секторами контейнера, вернуть шифрование нельзя. Данные раздела доступны подключением копии.",
+    "en": "The LUKS container of partition %{index} encrypts in %{sector}-byte sectors, but the partition starts at %{offset} B with a copy block of %{block} B: block boundaries do not fall on the container's sectors, so the encryption cannot be put back. The partition's data is reachable by mounting the copy."
+  },
+  "restore_disk_linux.luks_passphrases_needed": {
+    "ru": "Чтобы вернуть шифрование LUKS, нужны пароли контейнеров — те, что действовали на момент копии (их спрашивала система при загрузке), а не пароль копии: %{list}.",
+    "en": "Putting the LUKS encryption back needs the containers' passphrases — the ones valid when the copy was made (the system asked for them at boot), not the copy's password: %{list}."
+  },
+  "restore_disk_linux.luks_passphrase_missing": {
+    "ru": "раздел %{index} — пароль не указан",
+    "en": "partition %{index} — no passphrase given"
+  },
+  "restore_disk_linux.luks_passphrase_wrong": {
+    "ru": "раздел %{index} — пароль не подходит",
+    "en": "partition %{index} — the passphrase does not match"
+  },
+  "restore_disk_linux.label_container": {
+    "ru": "Раздел %{index}: контейнер LUKS",
+    "en": "Partition %{index}: LUKS container"
+  },
+  "restore_disk_linux.others_kept": {
+    "ru": "Разделы, которых нет в копии, оставлены как были: %{parts}.",
+    "en": "Partitions the backup does not hold were left as they were: %{parts}."
+  },
+  "restore_disk_linux.others_overwritten": {
+    "ru": "Разделы, которые были на месте разделов копии, перезаписаны: %{parts}.",
+    "en": "Partitions that stood where the backup's partitions go were overwritten: %{parts}."
+  },
+  "restore_disk_linux.bitlocker_decrypted": {
+    "ru": "Раздел %{index} был зашифрован BitLocker и восстановлен расшифрованным: включите BitLocker в Windows заново.",
+    "en": "Partition %{index} was encrypted with BitLocker and is restored decrypted: turn BitLocker on again in Windows."
+  },
+  "restore_disk_linux.udev_not_settled": {
+    "ru": "Диск записан, но система не успела показать его разделы (%{error}). Если их не видно, переподключите диск или перезагрузитесь.",
+    "en": "The disk is written, but the system did not finish showing its partitions (%{error}). If they are not visible, reconnect the disk or restart."
+  },
+  "linux_tools.missing": {
+    "ru": "Не найдена программа %{tool}: установите пакет %{package}.",
+    "en": "The program %{tool} was not found: install the %{package} package."
+  },
+  "linux_tools.failed": {
+    "ru": "%{tool} завершилась с ошибкой (код %{code}): %{text}",
+    "en": "%{tool} failed (code %{code}): %{text}"
+  },
+  "linux_tools.mount_failed": {
+    "ru": "Не удалось смонтировать %{node}: %{tried}.",
+    "en": "Could not mount %{node}: %{tried}."
+  },
+  "linux_tools.umount_failed": {
+    "ru": "Не удалось отмонтировать %{dir}: изменения могли не попасть на диск.",
+    "en": "Could not unmount %{dir}: the changes may not have reached the disk."
+  },
+  "identity_change_linux.luks_inside_unchecked": {
+    "ru": "У контейнера LUKS на %{node} новый UUID, но то, что внутри, не проверено: пароль к нему восстановлению не давали. Если внутри файловая система этой машины, у неё прежний UUID.",
+    "en": "The LUKS container on %{node} has a new UUID, but what is inside was not checked: the restore was given no passphrase for it. If it holds one of this machine's filesystems, that one keeps its old UUID."
+  },
+  "identity_change_linux.btrfs_multi_device": {
+    "ru": "btrfs на %{node} занимает несколько устройств — его UUID оставлен прежним (менять можно только всем устройствам сразу: btrfstune -u, когда подключены все).",
+    "en": "The btrfs on %{node} spans several devices — its UUID was kept (it can only change on all of them at once: btrfstune -u with every device present)."
+  },
+  "identity_change_linux.btrfs_multi_device_label": {
+    "ru": "btrfs на %{node} занимает несколько устройств — его метка «%{label}» оставлена прежней (менять её можно, только когда подключены все устройства: btrfs filesystem label).",
+    "en": "The btrfs on %{node} spans several devices — its label «%{label}» was kept (it can only change with every device present: btrfs filesystem label)."
+  },
+  "identity_change_linux.label_not_utf8": {
+    "ru": "Метка «%{label}» на %{node} не в UTF-8 (символы прочитаны с заменой) — оставлена прежней: записанная обратно, она отличалась бы от той, которую называет система. Смените её вручную, если она совпадает с меткой этой машины.",
+    "en": "The label «%{label}» on %{node} is not UTF-8 (its characters were read with replacements) — it was kept: written back, it would differ from the one the system names. Change it by hand if it matches a label of this machine."
+  },
+  "identity_change_linux.duplicate_label": {
+    "ru": "Одна и та же метка «%{label}» у нескольких восстановленных файловых систем (%{nodes}): LABEL=%{label} может указать на любую из них.",
+    "en": "Several restored filesystems carry the same label «%{label}» (%{nodes}): LABEL=%{label} may resolve to any of them."
+  },
+  "identity_change_linux.duplicate_label_changed": {
+    "ru": "Одна и та же метка «%{label}» была у нескольких восстановленных файловых систем (%{nodes}); они получили метки %{labels}. Ссылки LABEL=%{label} в восстановленной системе, если их исправляли, ведут теперь на «%{first}» — проверьте, та ли это файловая система.",
+    "en": "Several restored filesystems carried the same label «%{label}» (%{nodes}); they got the labels %{labels}. References to LABEL=%{label} in the restored system, if they were fixed, now name «%{first}» — check that it is the right filesystem."
+  },
+  "identity_change_linux.vg_not_activated": {
+    "ru": "Группа томов %{vg} получила новое имя, но её новый UUID не прочитан — тома внутри не проверены.",
+    "en": "Volume group %{vg} got a new name, but its new UUID could not be read — the volumes inside were not checked."
+  },
+  "identity_change_linux.vg_name_unknown": {
+    "ru": "Имя прежней группы томов прочитать не удалось; она переименована в %{vg}, но ссылки на её имя в восстановленной системе (/dev/mapper/…, rd.lvm.vg=) не исправлены — исправьте их вручную.",
+    "en": "The volume group's old name could not be read; it was renamed to %{vg}, but references to its name in the restored system (/dev/mapper/…, rd.lvm.vg=) were not fixed — fix them by hand."
+  },
+  "identity_change_linux.btrfs_not_edited": {
+    "ru": "btrfs на %{node} не смонтирован для правки: у него идентификатор файловой системы этой машины, а ядро приняло бы его за оригинал (ядро старше 6.7 — любой такой btrfs, любое ядро — btrfs из нескольких устройств). Файлы, ссылающиеся на прежние идентификаторы, в нём не исправлены.",
+    "en": "The btrfs on %{node} was not mounted for editing: it carries a filesystem identity of this machine, and the kernel would take it for the original (a kernel older than 6.7 any such btrfs, every kernel a btrfs spanning several devices). The files in it that name the old identities were not fixed."
+  },
+  "identity_change_linux.edit_failed": {
+    "ru": "Не удалось исправить файлы восстановленной системы на %{node}: %{error}",
+    "en": "Could not fix the restored system's files on %{node}: %{error}"
+  },
+  "identity_change_linux.autorelabel": {
+    "ru": "Исправленные файлы на %{node} не сохранили метку SELinux; создан %{file}, и восстановленная система переразметит файлы при следующей загрузке (это займёт время).",
+    "en": "The fixed files on %{node} did not keep their SELinux label; %{file} was created, and the restored system relabels its files at its next start (this takes a while)."
+  },
+  "identity_change_linux.xattrs_lost": {
+    "ru": "Исправленные файлы на %{node} не сохранили расширенные атрибуты: %{files}. Если восстановленная система использует SELinux, переразметьте её (restorecon или touch /.autorelabel).",
+    "en": "The fixed files on %{node} did not keep their extended attributes: %{files}. If the restored system uses SELinux, relabel it (restorecon, or touch /.autorelabel)."
+  },
+  "identity_change_linux.initramfs_rebuilt": {
+    "ru": "initramfs восстановленной системы пересобран (%{tool}).",
+    "en": "The restored system's initramfs was rebuilt (%{tool})."
+  },
+  "identity_change_linux.initramfs_failed": {
+    "ru": "Не удалось пересобрать initramfs восстановленной системы (%{tool}): %{error}. Данные восстановлены, но её initramfs может искать прежние UUID: загрузите её с живого носителя и выполните в chroot «%{command}». Последний вывод: %{output}",
+    "en": "Could not rebuild the restored system's initramfs (%{tool}): %{error}. The data is restored, but its initramfs may look for the old UUIDs: start it from a live medium and run «%{command}» in a chroot. Last output: %{output}"
+  },
+  "identity_change_linux.initramfs_crypt_warning": {
+    "ru": "cryptsetup предупредил, что не связал зашифрованный контейнер корня с crypttab, — новый образ может его не открыть",
+    "en": "cryptsetup warned that it did not tie the root's encrypted container to crypttab — the new image may not unlock it"
+  },
+  "identity_change_linux.initramfs_root_unreachable": {
+    "ru": "Корень восстановленной системы недоступен (например, он внутри LUKS, пароль которого восстановлению не передан), поэтому её initramfs не пересобран и может искать прежние UUID. Загрузите её с живого носителя и пересоберите initramfs в chroot (update-initramfs -u -k all, dracut --regenerate-all --force или mkinitcpio -P).",
+    "en": "The restored system's root could not be reached (for instance, it is inside LUKS whose passphrase the restore was not given), so its initramfs was not rebuilt and may look for the old UUIDs. Start it from a live medium and rebuild the initramfs in a chroot (update-initramfs -u -k all, dracut --regenerate-all --force or mkinitcpio -P)."
+  },
+  "identity_change_linux.initramfs_unknown_system": {
+    "ru": "Средство сборки initramfs восстановленной системы (%{system}) не распознано, поэтому initramfs не пересобран и может искать прежние UUID. Загрузите её с живого носителя и пересоберите initramfs её средством в chroot.",
+    "en": "The initramfs tool of the restored system (%{system}) was not recognised, so its initramfs was not rebuilt and may look for the old UUIDs. Start it from a live medium and rebuild the initramfs with its own tool in a chroot."
+  },
+  "identity_change_linux.initramfs_luks_name_taken": {
+    "ru": "Корень восстановленной системы внутри LUKS, который её crypttab называет «%{name}», но на этом компьютере это имя занято (или недопустимо), а без него средство сборки не свяжет контейнер с crypttab. initramfs не пересобран; загрузите систему с живого носителя и выполните в chroot «%{command}».",
+    "en": "The restored system's root is inside LUKS that its crypttab calls «%{name}», but this computer already uses that name (or it is not usable), and without it the tool cannot tie the container to crypttab. The initramfs was not rebuilt; start the system from a live medium and run «%{command}» in a chroot."
+  },
+  "identity_change_linux.initramfs_boot_not_restored": {
+    "ru": "/boot восстановленной системы (%{system}) — «%{source}» в её fstab — не среди восстановленных разделов, поэтому initramfs не пересобран. Загрузите её с живого носителя и выполните в chroot «%{command}».",
+    "en": "The restored system's /boot (%{system}) — «%{source}» in its fstab — is not among the restored partitions, so the initramfs was not rebuilt. Start it from a live medium and run «%{command}» in a chroot."
+  },
+  "initramfs_linux.umount_failed": {
+    "ru": "не отмонтировались (отсоединены отложенно): %{dirs}",
+    "en": "did not unmount (detached lazily): %{dirs}"
+  },
+  "initramfs_linux.not_a_directory": {
+    "ru": "в восстановленной системе %{dir} — не каталог (или символическая ссылка)",
+    "en": "%{dir} in the restored system is not a directory (or is a symbolic link)"
+  },
+  "initramfs_linux.timeout": {
+    "ru": "средство не завершилось за %{minutes} мин. и остановлено",
+    "en": "the tool did not finish within %{minutes} min and was stopped"
+  },
+  "initramfs_linux.exit_code": {
+    "ru": "код завершения %{code}",
+    "en": "exit code %{code}"
+  },
+  "initramfs_linux.no_image_rewritten": {
+    "ru": "средство завершилось успешно, но ни один образ initramfs в /boot не изменился",
+    "en": "the tool reported success, but no initramfs image in /boot changed"
+  },
+  "initramfs_linux.backup_failed": {
+    "ru": "не удалось сохранить копии текущих образов (%{error}), средство не запускалось",
+    "en": "could not keep copies of the current images (%{error}); the tool was not run"
+  },
+  "initramfs_linux.unverifiable": {
+    "ru": "новый образ %{image} не удалось проверить: %{error}",
+    "en": "the new image %{image} could not be checked: %{error}"
+  },
+  "initramfs_linux.device_names": {
+    "ru": "новый образ называет устройства именами этого компьютера (%{names}), которых у восстановленной системы при загрузке не будет",
+    "en": "the new image names devices by this computer's names (%{names}), which the restored system will not have at boot"
+  },
+  "initramfs_linux.previous_restored": {
+    "ru": "%{error}; прежние образы возвращены",
+    "en": "%{error}; the previous images were put back"
+  },
+  "initramfs_linux.previous_not_restored": {
+    "ru": "%{error}; прежние образы вернуть не удалось (%{restore_error}), их копии остались рядом с ними в /boot как *.obk-prev",
+    "en": "%{error}; the previous images could not be put back (%{restore_error}); their copies are kept beside them in /boot as *.obk-prev"
+  },
+  "identity_change_linux.reinstall_bios_grub": {
+    "ru": "В восстановленной системе есть GRUB для BIOS: его загрузочный образ может содержать прежний UUID /boot. Если она не загрузится, выполните grub-install на её диск из неё самой или с живого носителя.",
+    "en": "The restored system has a BIOS GRUB: its core image may embed the old /boot UUID. If it does not start, run grub-install for its disk from the system itself or from a live medium."
+  },
+  "identity_change_linux.nothing_to_edit": {
+    "ru": "Файлов, ссылающихся на прежние идентификаторы (fstab, crypttab, GRUB), в восстановленных файловых системах не найдено.",
+    "en": "No files naming the old identities (fstab, crypttab, GRUB) were found in the restored filesystems."
+  },
+  "identity_change_linux.not_closed": {
+    "ru": "Временное устройство %{device} не закрылось (%{error}); закройте его вручную или перезагрузитесь.",
+    "en": "The temporary device %{device} did not close (%{error}); close it by hand or restart."
+  }
+}

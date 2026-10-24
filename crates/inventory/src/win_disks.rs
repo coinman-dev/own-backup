@@ -715,6 +715,9 @@ impl super::traits::DiskInventory for WindowsInventory {
                     unlockable: true,
                     gpt_attributes: raw.attributes,
                     mbr_type: raw.mbr_type,
+                    kernel_device: String::new(),
+                    mapper_kind: String::new(),
+                    container_password: false,
                 });
             }
             partitions.sort_by_key(|p| p.index);
@@ -728,6 +731,7 @@ impl super::traits::DiskInventory for WindowsInventory {
             );
             disks.push(DiskInfo {
                 device_id,
+                stable_device: String::new(),
                 model: facts.model,
                 serial: facts.serial,
                 size_bytes: facts.size_bytes,

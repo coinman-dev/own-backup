@@ -3,6 +3,8 @@
 //! restore. Implements the subset of MS-VHDX we need: one header, the region
 //! table (BAT + metadata), the five required metadata items, and a dynamic BAT
 //! whose payload blocks are all fully-present (free space simply has no block).
+//! A differencing child ([`VhdxWriter::create_differencing`]) adds the
+//! HasParent flag and a parent locator; it still only ever writes whole blocks.
 //!
 //! Self-consistency (write → read → identical, absent blocks read as zero) is
 //! unit-tested here; native Windows mounting is validated on a Windows host.
@@ -42,8 +44,23 @@ const MI_VDISK_SIZE: &str = "2fa54224-cd1b-4876-b211-5dbed83bf4b8";
 const MI_VDISK_ID: &str = "beca12ab-b2e6-4523-93ef-c309e000c746";
 const MI_LOG_SECTOR: &str = "8141bf1d-a96f-4709-ba47-f233a8faab5f";
 const MI_PHYS_SECTOR: &str = "cda348c7-445d-4471-9cc9-e9885251c556";
+const MI_PARENT_LOCATOR: &str = "a8d35f2d-b30b-454d-abf7-d3d84834ab0c";
+/// LocatorType of the VHDX parent locator (MS-VHDX §2.6.2.6) — the only type
+/// defined, and the one Windows looks for.
+const PARENT_LOCATOR_TYPE_VHDX: &str = "b04aefb7-d19e-4a81-b789-25b8e9445913";
+/// Metadata table entry flags (MS-VHDX §2.6.1.2): bit 1 IsVirtualDisk, bit 2
+/// IsRequired.
+const META_REQUIRED: u32 = 0x4;
+const META_VIRTUAL_DISK_REQUIRED: u32 = 0x6;
+
+/// Payload block size of a differencing child — the 1 MiB that
+/// `create_differencing_vhdx` asks Windows for (vhdx.rs), so a chain grown on
+/// either system allocates the same way per touched block.
+pub const CHILD_BLOCK_SIZE: u64 = MB;
 
 const PAYLOAD_BLOCK_FULLY_PRESENT: u64 = 6;
+/// The file-offset half of a BAT entry (bits 20..64, i.e. MiB-aligned bytes).
+const BAT_OFFSET_MASK: u64 = 0xFFFF_FFFF_FFF0_0000;
 
 fn bad(msg: impl std::fmt::Display) -> OwnBackupError {
     OwnBackupError::Vhdx(format!("vhdx: {msg}"))
@@ -55,21 +72,9 @@ fn guid_le(s: &str) -> [u8; 16] {
         .to_bytes_le()
 }
 
-// --- CRC-32C (Castagnoli), reflected, init/xorout 0xFFFFFFFF ---
-fn crc32c(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for &b in data {
-        crc ^= b as u32;
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ 0x82F6_3B78
-            } else {
-                crc >> 1
-            };
-        }
-    }
-    !crc
-}
+// CRC-32C (Castagnoli), reflected, init/xorout 0xFFFFFFFF — shared with the
+// readers, which check it on every region table.
+use crate::vhdx_bat::crc32c;
 
 /// Number of payload blocks per sector-bitmap block.
 fn chunk_ratio(block_size: u64, sector_size: u32) -> u64 {
@@ -89,6 +94,14 @@ fn total_bat_entries(data_blocks: u64, chunk_ratio: u64) -> u64 {
     } else {
         data_blocks + (data_blocks - 1) / chunk_ratio
     }
+}
+
+/// Total BAT entries for a differencing disk (MS-VHDX §2.5): every chunk,
+/// the last one included, carries its sector-bitmap entry, because a child may
+/// hold any block partially. Sizing a child's BAT like a dynamic disk's comes
+/// up one entry per chunk short.
+fn total_bat_entries_differencing(data_blocks: u64, chunk_ratio: u64) -> u64 {
+    data_blocks.div_ceil(chunk_ratio) * (chunk_ratio + 1)
 }
 
 // ---------------------------------------------------------------------------
@@ -133,22 +146,68 @@ impl VhdxWriter {
         block_size: u64,
         sector_size: u32,
     ) -> Result<Self> {
+        let physical = std::cmp::max(sector_size, 4096);
+        Self::create_inner(path, virtual_size, block_size, sector_size, physical, None)
+    }
+
+    /// Create a **differencing** VHDX at `path` over `parent`, in userspace —
+    /// what `vhdx::create_differencing_vhdx` gets from `CreateVirtualDisk` on
+    /// Windows, without the Windows API. The file must not exist yet (the
+    /// engine creates children under a private name and publishes them without
+    /// replacing anything; `CreateVirtualDisk` refuses an existing file too).
+    ///
+    /// The child copies the parent's virtual size and logical/physical sector
+    /// sizes, uses [`CHILD_BLOCK_SIZE`] blocks, sets FileParameters.HasParent
+    /// and carries a parent locator (see `parent_locator_for` for what it
+    /// holds and what Windows needs from it). The returned writer knows the
+    /// image has a parent, so zero writes are never skipped and a partially
+    /// written block is seeded from the parent chain.
+    pub fn create_differencing(path: &Path, parent: &Path) -> Result<Self> {
+        let geometry = crate::vhdx_bat::vhdx_geometry(parent)?;
+        let locator = parent_locator_for(path, parent)?;
+        Self::create_inner(
+            path,
+            geometry.virtual_size,
+            CHILD_BLOCK_SIZE,
+            geometry.logical_sector_size,
+            geometry.physical_sector_size,
+            Some(&locator),
+        )
+    }
+
+    fn create_inner(
+        path: &Path,
+        virtual_size: u64,
+        block_size: u64,
+        sector_size: u32,
+        physical_sector_size: u32,
+        parent_locator: Option<&[u8]>,
+    ) -> Result<Self> {
         if block_size < MB || block_size % MB != 0 || !block_size.is_power_of_two() {
             return Err(bad(format!(
                 "block size {block_size} must be a power-of-two ≥ 1 MiB"
             )));
         }
+        let has_parent = parent_locator.is_some();
         let chunk_ratio = chunk_ratio(block_size, sector_size);
         let data_blocks = virtual_size.div_ceil(block_size);
-        let bat_entries = total_bat_entries(data_blocks, chunk_ratio);
+        let bat_entries = if has_parent {
+            total_bat_entries_differencing(data_blocks, chunk_ratio)
+        } else {
+            total_bat_entries(data_blocks, chunk_ratio)
+        };
         let bat_len = (bat_entries * 8).max(MB).div_ceil(MB) * MB;
         let data_start = BAT_OFF + bat_len;
 
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
+        let mut options = OpenOptions::new();
+        options.read(true).write(true);
+        if has_parent {
+            // A child is always a new file: never overwrite whatever has the name.
+            options.create_new(true);
+        } else {
+            options.create(true).truncate(true);
+        }
+        let file = options
             .open(path)
             .map_err(|e| bad(format!("create {}: {e}", path.display())))?;
         file.set_len(data_start).map_err(bad)?;
@@ -162,15 +221,16 @@ impl VhdxWriter {
             bat: vec![0u64; bat_entries as usize],
             next_data_off: data_start,
             bat_off: BAT_OFF,
-            // A freshly created image has no parent: absent blocks read as zeros.
-            has_parent: false,
+            // Without a parent, absent blocks read as zeros; with one, they
+            // read as the parent's data.
+            has_parent,
             seed: None,
             path: path.to_path_buf(),
         };
         w.write_file_id()?;
         w.write_header()?;
         w.write_region_table(bat_len)?;
-        w.write_metadata()?;
+        w.write_metadata(physical_sector_size, parent_locator)?;
         Ok(w)
     }
 
@@ -185,12 +245,7 @@ impl VhdxWriter {
             .map_err(|e| bad(format!("open {}: {e}", path.display())))?;
 
         // Region table: locate BAT and metadata offsets.
-        let mut region = vec![0u8; 64 * 1024];
-        file.seek(SeekFrom::Start(REGION1_OFF)).map_err(bad)?;
-        file.read_exact(&mut region).map_err(bad)?;
-        if &region[0..4] != b"regi" {
-            return Err(bad("no region table signature"));
-        }
+        let region = crate::vhdx_bat::read_region_table(&mut file)?;
         let entry_count = u32::from_le_bytes(region[8..12].try_into().unwrap()) as usize;
         let (mut bat_off, mut bat_len, mut meta_off) = (0u64, 0u64, 0u64);
         for slot in 0..entry_count.min(2047) {
@@ -260,7 +315,10 @@ impl VhdxWriter {
             }
         }
         let file_len = file.metadata().map_err(bad)?.len();
-        let next_data_off = max_off.max(file_len);
+        // Payload blocks live at whole-MiB offsets (a BAT entry cannot say
+        // anything else), so a file whose length is not a MiB multiple gets
+        // its next block at the following MiB, not at its last byte.
+        let next_data_off = max_off.max(file_len).div_ceil(MB) * MB;
 
         Ok(Self {
             file,
@@ -335,11 +393,16 @@ impl VhdxWriter {
         self.at(REGION2_OFF, &r)
     }
 
-    fn write_metadata(&mut self) -> Result<()> {
+    fn write_metadata(
+        &mut self,
+        physical_sector_size: u32,
+        parent_locator: Option<&[u8]>,
+    ) -> Result<()> {
         let mut m = vec![0u8; META_LEN as usize];
         // Metadata table header.
         m[0..8].copy_from_slice(b"metadata");
-        m[10..12].copy_from_slice(&5u16.to_le_bytes()); // EntryCount
+        let count: u16 = if parent_locator.is_some() { 6 } else { 5 };
+        m[10..12].copy_from_slice(&count.to_le_bytes()); // EntryCount
 
         // Item payloads, placed 64 KiB in.
         let items_off = META_ITEMS_OFF as usize;
@@ -355,16 +418,19 @@ impl VhdxWriter {
                 *cur += payload.len();
             };
 
-        // File Parameters: BlockSize + flags(0 = not leave-allocated, no parent).
+        // File Parameters: BlockSize + flags (bit 0 leave-blocks-allocated, never
+        // set here; bit 1 has-parent, set for a differencing child).
         let mut fp = [0u8; 8];
         fp[0..4].copy_from_slice(&(self.block_size as u32).to_le_bytes());
-        push_item(&mut m, 0, MI_FILE_PARAMS, 0x4, &fp, &mut cur); // IsRequired
-                                                                  // Virtual Disk Size.
+        let fp_flags: u32 = if parent_locator.is_some() { 2 } else { 0 };
+        fp[4..8].copy_from_slice(&fp_flags.to_le_bytes());
+        push_item(&mut m, 0, MI_FILE_PARAMS, META_REQUIRED, &fp, &mut cur);
+        // Virtual Disk Size.
         push_item(
             &mut m,
             1,
             MI_VDISK_SIZE,
-            0x6,
+            META_VIRTUAL_DISK_REQUIRED,
             &self.virtual_size.to_le_bytes(),
             &mut cur,
         );
@@ -373,7 +439,7 @@ impl VhdxWriter {
             &mut m,
             2,
             MI_VDISK_ID,
-            0x6,
+            META_VIRTUAL_DISK_REQUIRED,
             &Uuid::new_v4().to_bytes_le(),
             &mut cur,
         );
@@ -382,19 +448,32 @@ impl VhdxWriter {
             &mut m,
             3,
             MI_LOG_SECTOR,
-            0x6,
+            META_VIRTUAL_DISK_REQUIRED,
             &self.sector_size.to_le_bytes(),
             &mut cur,
         );
-        let phys = std::cmp::max(self.sector_size, 4096);
         push_item(
             &mut m,
             4,
             MI_PHYS_SECTOR,
-            0x6,
-            &phys.to_le_bytes(),
+            META_VIRTUAL_DISK_REQUIRED,
+            &physical_sector_size.to_le_bytes(),
             &mut cur,
         );
+        if let Some(locator) = parent_locator {
+            if cur + locator.len() > m.len() {
+                return Err(bad("parent locator does not fit the metadata region"));
+            }
+            // Parent Locator: IsRequired, not a property of the virtual disk.
+            push_item(
+                &mut m,
+                5,
+                MI_PARENT_LOCATOR,
+                META_REQUIRED,
+                locator,
+                &mut cur,
+            );
+        }
 
         self.at(META_OFF, &m)
     }
@@ -412,9 +491,14 @@ impl VhdxWriter {
             if bi >= self.bat.len() {
                 self.bat.resize(bi + 1, 0);
             }
+            // `bat` holds on-disk BAT entries: what was read, plus blocks this
+            // writer allocated (stored FULLY_PRESENT). Only a fully present
+            // block can be written in place; every other state — absent, zero,
+            // unmapped, or PARTIALLY present (state 7, whose sector bitmap says
+            // some sectors still belong to the parent) — gets a new whole block
+            // seeded with what the image reads there now.
             let entry = self.bat[bi];
-            let is_allocated =
-                (entry & 7) == PAYLOAD_BLOCK_FULLY_PRESENT || (entry != 0 && (entry & 7) == 0);
+            let is_allocated = (entry & 7) == PAYLOAD_BLOCK_FULLY_PRESENT;
 
             // Zeros into a block nobody has touched cost a megabyte of file for
             // nothing: an unallocated block already reads as zeros. This is what
@@ -433,13 +517,10 @@ impl VhdxWriter {
             }
 
             let file_off = if is_allocated {
-                if (entry & 7) == PAYLOAD_BLOCK_FULLY_PRESENT {
-                    (entry >> 20) * MB
-                } else {
-                    entry
-                }
+                entry & BAT_OFFSET_MASK
             } else {
                 let alloc_off = self.next_data_off;
+                debug_assert_eq!(alloc_off % MB, 0, "payload blocks sit at whole MiB");
                 self.next_data_off += self.block_size;
                 self.file.set_len(self.next_data_off).map_err(bad)?;
                 // A newly allocated block is written whole (FULLY_PRESENT), so
@@ -465,7 +546,7 @@ impl VhdxWriter {
                     }
                     self.at(alloc_off, &seed)?;
                 }
-                self.bat[bi] = alloc_off;
+                self.bat[bi] = alloc_off | PAYLOAD_BLOCK_FULLY_PRESENT;
                 alloc_off
             };
 
@@ -476,23 +557,165 @@ impl VhdxWriter {
         Ok(())
     }
 
+    /// Flush the payload written so far, before [`Self::finish`] writes the
+    /// BAT that points at it. A caller that must survive a crash between the
+    /// two (the userspace fold, `vhdx_chain`) needs the order; a backup does
+    /// not — its unfinished image is never published.
+    pub fn flush_payload(&mut self) -> Result<()> {
+        self.file.sync_data().map_err(bad)
+    }
+
     /// Write the BAT and flush. Consumes the writer.
+    ///
+    /// Entries this writer did not allocate go back exactly as they were read.
+    /// (They used to be re-encoded as "fully present at offset/1 MiB", which
+    /// turned an untouched PARTIALLY_PRESENT block into a whole block of the
+    /// child — the parent's sectors in it then read as whatever the child file
+    /// held there — and a ZERO/UNMAPPED entry into a block at file offset 0.)
     pub fn finish(mut self) -> Result<()> {
         let mut bat = vec![0u8; self.bat.len() * 8];
         for (i, &entry) in self.bat.iter().enumerate() {
-            let encoded = if (entry & 7) == PAYLOAD_BLOCK_FULLY_PRESENT {
-                entry
-            } else if entry != 0 {
-                ((entry / MB) << 20) | PAYLOAD_BLOCK_FULLY_PRESENT
-            } else {
-                0
-            };
-            bat[i * 8..i * 8 + 8].copy_from_slice(&encoded.to_le_bytes());
+            bat[i * 8..i * 8 + 8].copy_from_slice(&entry.to_le_bytes());
         }
         self.at(self.bat_off, &bat)?;
         self.file.sync_all().map_err(bad)?;
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Parent locator
+// ---------------------------------------------------------------------------
+
+/// The parent locator item a differencing `child` carries to name `parent`
+/// (MS-VHDX §2.6.2.6): LocatorType `{B04AEFB7-D19E-4A81-B789-25B8E9445913}`
+/// followed by UTF-16LE key/value pairs.
+///
+/// What Windows needs to open the child as a chain:
+/// - `parent_linkage` (required): the parent's current **DataWriteGuid**,
+///   braced. The VHD stack compares it with the parent it finds and refuses
+///   the chain on a mismatch (`parent_linkage2` is an optional second accepted
+///   GUID; a fresh child has none).
+/// - at least one path that leads to that parent: `relative_path` (relative
+///   to the child's folder), `volume_path` or `absolute_win32_path`; a path
+///   that does not resolve, or resolves to a file with another DataWriteGuid,
+///   does not count. Our own readers prefer `relative_path` (see
+///   `vhdx_bat::parse_parent_locator`). We always write `relative_path` in Windows
+///   form — `.\name` for a parent in the same folder, which is how every
+///   chain the engine makes is laid out (the child's private name and its
+///   public one sit beside the parent), otherwise `..\`-style — and add
+///   `absolute_win32_path` (`\\?\C:\…`) only where one can be formed, i.e. on
+///   Windows. A Linux absolute path is meaningless to Windows, so it is never
+///   written; a folder moved between systems keeps working through the
+///   relative path alone. `volume_path` (`\\?\Volume{GUID}\…`) is not
+///   written: only Windows knows volume GUIDs.
+pub(crate) fn parent_locator_for(child: &Path, parent: &Path) -> Result<Vec<u8>> {
+    let linkage = crate::vhdx_bat::vhdx_data_write_guid(parent)?;
+    let parent_abs = parent
+        .canonicalize()
+        .map_err(|e| bad(format!("parent {}: {e}", parent.display())))?;
+    let child_dir = match child.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    let child_dir = child_dir
+        .canonicalize()
+        .map_err(|e| bad(format!("folder of {}: {e}", child.display())))?;
+
+    let relative = relative_windows_path(&child_dir, &parent_abs);
+    #[cfg(target_os = "windows")]
+    let absolute = parent_abs.to_str().map(str::to_string);
+    #[cfg(not(target_os = "windows"))]
+    let absolute: Option<String> = None;
+    if relative.is_none() && absolute.is_none() {
+        return Err(bad(format!(
+            "cannot express the path of {} from {} in a VHDX parent locator",
+            parent.display(),
+            child.display()
+        )));
+    }
+
+    let mut pairs: Vec<(&str, String)> = vec![("parent_linkage", format!("{{{linkage}}}"))];
+    if let Some(relative) = relative {
+        pairs.push(("relative_path", relative));
+    }
+    if let Some(absolute) = absolute {
+        pairs.push(("absolute_win32_path", absolute));
+    }
+    encode_parent_locator(&pairs)
+}
+
+/// `to` relative to the directory `from_dir`, both canonical, in Windows form
+/// (`.\a\b`, `..\a\b`). `None` when there is no relative way (another drive)
+/// or a name cannot be written in a Windows path.
+fn relative_windows_path(from_dir: &Path, to: &Path) -> Option<String> {
+    use std::path::Component;
+    let from: Vec<Component> = from_dir.components().collect();
+    let to: Vec<Component> = to.components().collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    // The anchor (drive prefix, root) must be shared.
+    let anchor = |c: &[Component]| {
+        c.iter()
+            .take_while(|c| !matches!(c, Component::Normal(_)))
+            .count()
+    };
+    if common == 0 || common < anchor(&from) || common < anchor(&to) {
+        return None;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    for c in &from[common..] {
+        match c {
+            Component::Normal(_) => parts.push("..".into()),
+            _ => return None,
+        }
+    }
+    for c in &to[common..] {
+        match c {
+            Component::Normal(name) => {
+                let name = name.to_str()?;
+                if name.contains('\\') {
+                    return None;
+                }
+                parts.push(name.to_string());
+            }
+            _ => return None,
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let joined = parts.join("\\");
+    Some(if parts[0] == ".." {
+        joined
+    } else {
+        format!(".\\{joined}")
+    })
+}
+
+/// Serialize a parent locator: 20-byte header, 12-byte entries, then the
+/// UTF-16LE strings; offsets are relative to the locator's start.
+fn encode_parent_locator(pairs: &[(&str, String)]) -> Result<Vec<u8>> {
+    let mut out = vec![0u8; 20 + 12 * pairs.len()];
+    out[0..16].copy_from_slice(&guid_le(PARENT_LOCATOR_TYPE_VHDX));
+    // 16..18 reserved.
+    out[18..20].copy_from_slice(&(pairs.len() as u16).to_le_bytes());
+    for (i, (key, value)) in pairs.iter().enumerate() {
+        let k: Vec<u8> = key.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let v: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let (Ok(k_len), Ok(v_len)) = (u16::try_from(k.len()), u16::try_from(v.len())) else {
+            return Err(bad(format!("parent locator entry {key} is too long")));
+        };
+        let k_off = out.len() as u32;
+        out.extend_from_slice(&k);
+        let v_off = out.len() as u32;
+        out.extend_from_slice(&v);
+        let e = 20 + i * 12;
+        out[e..e + 4].copy_from_slice(&k_off.to_le_bytes());
+        out[e + 4..e + 8].copy_from_slice(&v_off.to_le_bytes());
+        out[e + 8..e + 10].copy_from_slice(&k_len.to_le_bytes());
+        out[e + 10..e + 12].copy_from_slice(&v_len.to_le_bytes());
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -515,12 +738,7 @@ impl VhdxReader {
             File::open(path).map_err(|e| bad(format!("open {}: {e}", path.display())))?;
 
         // Region table: find BAT + metadata offsets.
-        let mut region = vec![0u8; 64 * 1024];
-        file.seek(SeekFrom::Start(REGION1_OFF)).map_err(bad)?;
-        file.read_exact(&mut region).map_err(bad)?;
-        if &region[0..4] != b"regi" {
-            return Err(bad("no region table signature"));
-        }
+        let region = crate::vhdx_bat::read_region_table(&mut file)?;
         let entry_count = u32::from_le_bytes(region[8..12].try_into().unwrap()) as usize;
         let (mut bat_off, mut bat_len, mut meta_off) = (0u64, 0u64, 0u64);
         for slot in 0..entry_count.min(2047) {
@@ -702,5 +920,265 @@ mod tests {
         let mut buf2 = vec![0u8; 4096];
         r.read_at(block, &mut buf2).unwrap();
         assert_eq!(buf2, data2);
+    }
+
+    // --- Differencing children made in userspace -------------------------
+
+    use crate::vhdx_bat::{
+        allocated_payload_blocks, vhdx_geometry, vhdx_parent_linkage_matches, vhdx_parent_path,
+        VhdxGuestReader,
+    };
+
+    /// A parent the way the Linux engine makes one: 2 MiB blocks, a recognisable
+    /// byte pattern in blocks 0 and 2 (of four), the rest never written.
+    fn pattern_parent(path: &Path, sector: u32) -> u64 {
+        let vsize = 8 * MB;
+        let mut w = VhdxWriter::create(path, vsize, 2 * MB, sector).unwrap();
+        let fill: Vec<u8> = (0..2 * MB).map(|i| (i % 251) as u8 + 1).collect();
+        w.write_at(0, &fill).unwrap();
+        w.write_at(4 * MB, &fill).unwrap();
+        w.finish().unwrap();
+        vsize
+    }
+
+    fn read_all(path: &Path) -> Vec<u8> {
+        let mut r = VhdxGuestReader::open(path).unwrap();
+        let mut buf = vec![0u8; r.virtual_size() as usize];
+        r.read_at(0, &mut buf).unwrap();
+        buf
+    }
+
+    /// The BAT of a file we created, raw.
+    fn raw_bat(path: &Path) -> Vec<u64> {
+        let mut f = File::open(path).unwrap();
+        let mut raw = vec![0u8; MB as usize];
+        f.seek(SeekFrom::Start(BAT_OFF)).unwrap();
+        f.read_exact(&mut raw).unwrap();
+        raw.chunks_exact(8)
+            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn a_new_child_reads_exactly_as_its_parent() {
+        for sector in [512u32, 4096] {
+            let dir = tempfile::tempdir().unwrap();
+            let parent = dir.path().join("p.vhdx");
+            let child = dir.path().join("c.avhdx");
+            let vsize = pattern_parent(&parent, sector);
+
+            let w = VhdxWriter::create_differencing(&child, &parent).unwrap();
+            // Readable before the writer is even finished...
+            assert_eq!(read_all(&child), read_all(&parent));
+            w.finish().unwrap();
+            // ...and after.
+            assert_eq!(read_all(&child), read_all(&parent));
+
+            let g = vhdx_geometry(&child).unwrap();
+            let pg = vhdx_geometry(&parent).unwrap();
+            assert!(g.has_parent && !pg.has_parent);
+            assert_eq!(g.virtual_size, vsize);
+            assert_eq!(g.block_size, CHILD_BLOCK_SIZE);
+            assert_eq!(g.logical_sector_size, pg.logical_sector_size);
+            assert_eq!(g.physical_sector_size, pg.physical_sector_size);
+            assert!(allocated_payload_blocks(&child).unwrap().blocks.is_empty());
+        }
+    }
+
+    /// Zeros written into a child must be ALLOCATED: skipping them would let the
+    /// parent's bytes show through — a region emptied since the last backup
+    /// would come back on restore.
+    #[test]
+    fn a_zero_write_to_a_child_is_allocated_not_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("p.vhdx");
+        let child = dir.path().join("c.avhdx");
+        pattern_parent(&parent, 512);
+
+        let mut w = VhdxWriter::create_differencing(&child, &parent).unwrap();
+        w.write_at(MB, &vec![0u8; MB as usize]).unwrap();
+        w.finish().unwrap();
+
+        assert_eq!(allocated_payload_blocks(&child).unwrap().blocks, vec![1]);
+        let all = read_all(&child);
+        assert!(all[MB as usize..2 * MB as usize].iter().all(|&b| b == 0));
+        // The rest still comes from the parent.
+        let parent_all = read_all(&parent);
+        assert_eq!(all[..MB as usize], parent_all[..MB as usize]);
+        assert_eq!(all[2 * MB as usize..], parent_all[2 * MB as usize..]);
+    }
+
+    /// A partial write fills the rest of its block from the parent, and the
+    /// block is written whole: we never leave a PARTIALLY_PRESENT entry behind.
+    #[test]
+    fn a_partial_write_to_a_child_is_seeded_from_the_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("p.vhdx");
+        let child = dir.path().join("c.avhdx");
+        pattern_parent(&parent, 512);
+
+        let mut w = VhdxWriter::create_differencing(&child, &parent).unwrap();
+        w.write_at(4 * MB + 1000, &[0xEEu8; 3000]).unwrap();
+        w.write_at(7 * MB - 10, &[0xDDu8; 10]).unwrap(); // over an unwritten parent block
+        w.finish().unwrap();
+
+        let mut expected = read_all(&parent);
+        expected[(4 * MB + 1000) as usize..(4 * MB + 4000) as usize].fill(0xEE);
+        expected[(7 * MB - 10) as usize..(7 * MB) as usize].fill(0xDD);
+        assert_eq!(read_all(&child), expected);
+
+        assert_eq!(allocated_payload_blocks(&child).unwrap().blocks, vec![4, 6]);
+        for entry in raw_bat(&child) {
+            let state = entry & 7;
+            assert!(
+                state == 0 || state == 6,
+                "entry {entry:#x} has state {state}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_child_is_linked_to_its_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("p.vhdx");
+        let child = dir.path().join("c.avhdx");
+        pattern_parent(&parent, 512);
+        VhdxWriter::create_differencing(&child, &parent)
+            .unwrap()
+            .finish()
+            .unwrap();
+
+        assert!(vhdx_parent_linkage_matches(&child, &parent).unwrap());
+        let found = vhdx_parent_path(&child).unwrap().expect("a parent");
+        assert_eq!(
+            found.canonicalize().unwrap(),
+            parent.canonicalize().unwrap()
+        );
+        // A grandchild links to the child, not to the base.
+        let grandchild = dir.path().join("g.avhdx");
+        VhdxWriter::create_differencing(&grandchild, &child)
+            .unwrap()
+            .finish()
+            .unwrap();
+        assert!(vhdx_parent_linkage_matches(&grandchild, &child).unwrap());
+        assert_eq!(read_all(&grandchild), read_all(&parent));
+    }
+
+    /// The parent in another folder: the locator carries a `..\` path that
+    /// still resolves on this system.
+    #[test]
+    fn a_parent_in_another_folder_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("full")).unwrap();
+        std::fs::create_dir_all(dir.path().join("inc/deeper")).unwrap();
+        let parent = dir.path().join("full/p.vhdx");
+        let child = dir.path().join("inc/deeper/c.avhdx");
+        pattern_parent(&parent, 512);
+        VhdxWriter::create_differencing(&child, &parent)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let found = vhdx_parent_path(&child).unwrap().expect("a parent");
+        assert_eq!(
+            found.canonicalize().unwrap(),
+            parent.canonicalize().unwrap()
+        );
+        assert_eq!(read_all(&child), read_all(&parent));
+    }
+
+    #[test]
+    fn relative_windows_paths() {
+        let p = |s: &str| std::path::PathBuf::from(s);
+        assert_eq!(
+            relative_windows_path(&p("/b/x"), &p("/b/x/p.vhdx")).as_deref(),
+            Some(r".\p.vhdx")
+        );
+        assert_eq!(
+            relative_windows_path(&p("/b/x/y"), &p("/b/z/p.vhdx")).as_deref(),
+            Some(r"..\..\z\p.vhdx")
+        );
+        assert_eq!(
+            relative_windows_path(&p("/b"), &p("/b/z/p.vhdx")).as_deref(),
+            Some(r".\z\p.vhdx")
+        );
+        #[cfg(unix)]
+        assert_eq!(relative_windows_path(&p("/b"), &p(r"/b/a\b.vhdx")), None);
+    }
+
+    /// A child is a new file, as `CreateVirtualDisk` makes it: an existing one
+    /// is never truncated.
+    #[test]
+    fn create_differencing_refuses_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("p.vhdx");
+        let child = dir.path().join("c.avhdx");
+        pattern_parent(&parent, 512);
+        std::fs::write(&child, b"somebody else's").unwrap();
+        assert!(VhdxWriter::create_differencing(&child, &parent).is_err());
+        assert_eq!(std::fs::read(&child).unwrap(), b"somebody else's");
+    }
+
+    /// A differencing BAT has a sector-bitmap entry for every chunk, the last
+    /// one included (MS-VHDX §2.5) — sized like a dynamic BAT it is one entry
+    /// per chunk short.
+    #[test]
+    fn a_child_bat_has_a_bitmap_entry_per_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("p.vhdx");
+        let child = dir.path().join("c.avhdx");
+        // 4096 one-MiB blocks = exactly one chunk at 512-byte sectors.
+        let w = VhdxWriter::create(&parent, 4096 * MB, 2 * MB, 512).unwrap();
+        w.finish().unwrap();
+        let w = VhdxWriter::create_differencing(&child, &parent).unwrap();
+        assert_eq!(w.bat.len(), 4097);
+        w.finish().unwrap();
+    }
+
+    /// Entries the writer did not allocate are written back as they were read.
+    /// A PARTIALLY_PRESENT block (state 7, written by Windows) used to come
+    /// back from `finish` as FULLY_PRESENT — the parent's sectors in it then
+    /// read as whatever the child file held — and a ZERO entry as a block at
+    /// file offset 0.
+    #[test]
+    fn finish_keeps_entries_it_did_not_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("p.vhdx");
+        let child = dir.path().join("c.avhdx");
+        pattern_parent(&parent, 512);
+        VhdxWriter::create_differencing(&child, &parent)
+            .unwrap()
+            .finish()
+            .unwrap();
+
+        // Hand-made state: block 0 partially present (sectors 3..5 ours), its
+        // chunk's bitmap present, block 2 ZERO.
+        let len = std::fs::metadata(&child).unwrap().len();
+        let (data_off, bitmap_off) = (len, len + MB);
+        let mut f = OpenOptions::new().write(true).open(&child).unwrap();
+        f.set_len(len + 2 * MB).unwrap();
+        f.seek(SeekFrom::Start(data_off + 3 * 512)).unwrap();
+        f.write_all(&[0x77u8; 3 * 512]).unwrap();
+        f.seek(SeekFrom::Start(bitmap_off)).unwrap();
+        f.write_all(&[0b0011_1000u8]).unwrap();
+        let chunk = chunk_ratio(MB, 512);
+        for (index, entry) in [(0u64, data_off | 7), (chunk, bitmap_off | 6), (2, 2)] {
+            f.seek(SeekFrom::Start(BAT_OFF + index * 8)).unwrap();
+            f.write_all(&entry.to_le_bytes()).unwrap();
+        }
+        drop(f);
+        let before = raw_bat(&child);
+        let reads_before = read_all(&child);
+
+        let mut w = VhdxWriter::open_existing(&child).unwrap();
+        w.write_at(5 * MB, &[0x55u8; 4096]).unwrap();
+        w.finish().unwrap();
+
+        let after = raw_bat(&child);
+        for index in [0usize, 2, chunk as usize] {
+            assert_eq!(after[index], before[index], "BAT entry {index} changed");
+        }
+        let mut expected = reads_before;
+        expected[5 * MB as usize..5 * MB as usize + 4096].fill(0x55);
+        assert_eq!(read_all(&child), expected);
     }
 }

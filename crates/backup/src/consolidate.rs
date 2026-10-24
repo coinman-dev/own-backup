@@ -12,7 +12,8 @@
 //!
 //! | | fold the increment in | repoint the next one |
 //! |---|---|---|
-//! | VHDX | `MergeVirtualDisk` (Windows) | `SetVirtualDiskInformation` |
+//! | VHDX, Windows | `MergeVirtualDisk` | `SetVirtualDiskInformation` |
+//! | VHDX, elsewhere | [`crate::vhdx_chain::fold`] | [`crate::vhdx_chain::repoint`] |
 //! | qcow2 | [`crate::qcow2::merge_child_into_parent`] | rewrite `backing_file` |
 //! | `.obk` | [`crate::seal::obk::fold_child_into_base`] | [`crate::seal::obk::set_backing_file`] |
 //!
@@ -40,8 +41,9 @@
 //! Step 3 is the one that needs care, and the two containers differ:
 //!
 //! - **qcow2** grafts clusters and swings the header last, so re-running it is
-//!   always safe (it costs some dead space, nothing else).
-//! - **VHDX** is documented as re-runnable while a merge is *unfinished* ("if a
+//!   always safe (it costs some dead space, nothing else). So does the
+//!   userspace **VHDX** fold used off Windows ([`crate::vhdx_chain`]).
+//! - **VHDX on Windows** is documented as re-runnable while a merge is *unfinished* ("if a
 //!   merge operation is interrupted, the child disk is still usable. The
 //!   MergeVirtualDisk function can be rerun to finish the merge"), but a merge
 //!   that already **succeeded** leaves the child invalid, and re-running would
@@ -334,7 +336,21 @@ pub(crate) fn ensure_idle(images: &[&Path]) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
+/// Refuse to touch images a mount of this service reads — the image itself
+/// or a child whose chain goes through it (the NBD server reads parents as
+/// it goes, so folding one into its base would change what it serves).
+#[cfg(target_os = "linux")]
+pub(crate) fn ensure_idle(images: &[&Path]) -> Result<()> {
+    match crate::engine_linux::mounted_reading(images) {
+        Some(mounted) => Err(OwnBackupError::Config(format!(
+            "{} is mounted and reads this chain — not consolidating while it is in use",
+            mounted.display()
+        ))),
+        None => Ok(()),
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub(crate) fn ensure_idle(_images: &[&Path]) -> Result<()> {
     Ok(())
 }
@@ -394,6 +410,7 @@ fn fold_vhdx(base: &Path, victim: &Path) -> Result<()> {
 /// is still openable through the Windows API after a successful merge.
 /// A victim whose blocks already match the base answers `true`, which is the
 /// right answer either way: folding them in would change nothing.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn merge_already_applied(base: &Path, victim: &Path) -> Result<bool> {
     let carried = crate::vhdx_bat::allocated_payload_blocks(victim)?;
     let mut vic = crate::vhdx_bat::VhdxGuestReader::open(victim)?;
@@ -412,11 +429,13 @@ fn merge_already_applied(base: &Path, victim: &Path) -> Result<bool> {
     Ok(true)
 }
 
+/// Fold `victim` into `base` (VHDX arm, without the Windows API): a userspace
+/// copy of the blocks the victim carries, read through its chain. Re-running
+/// it after any interruption lands in the same state, so unlike
+/// `MergeVirtualDisk` it needs no "did it already happen?" cross-check.
 #[cfg(not(target_os = "windows"))]
-fn fold_vhdx(_base: &Path, _victim: &Path) -> Result<()> {
-    Err(OwnBackupError::NotImplemented(
-        "folding a differencing VHDX needs MergeVirtualDisk, which is Windows-only".into(),
-    ))
+fn fold_vhdx(base: &Path, victim: &Path) -> Result<()> {
+    crate::vhdx_chain::fold(base, victim).map(|_| ())
 }
 
 /// Point `next` at `base` (VHDX arm).
@@ -425,12 +444,11 @@ fn repoint_vhdx(next: &Path, base: &Path) -> Result<()> {
     crate::vhdx::set_parent_path(next, base)
 }
 
+/// Point `next` at `base` (VHDX arm, without the Windows API): a new parent
+/// locator in a new metadata region, switched in through the region tables.
 #[cfg(not(target_os = "windows"))]
-fn repoint_vhdx(_next: &Path, _base: &Path) -> Result<()> {
-    Err(OwnBackupError::NotImplemented(
-        "repointing a differencing VHDX needs SetVirtualDiskInformation, which is Windows-only"
-            .into(),
-    ))
+fn repoint_vhdx(next: &Path, base: &Path) -> Result<()> {
+    crate::vhdx_chain::repoint(next, base)
 }
 
 /// Write a sidecar back into an image: embedded when the image carries one,
@@ -966,6 +984,7 @@ mod tests {
             source_os: "windows".into(),
             source_disk: DiskInfo {
                 device_id: r"\\.\E:".into(),
+                stable_device: String::new(),
                 model: String::new(),
                 serial: String::new(),
                 // The volume this fixture actually builds. It used to say 4096
@@ -1072,6 +1091,202 @@ mod tests {
         };
         write_embedded_sidecar(&path, "qcow2", &sidecar).unwrap();
         (path, backup_id)
+    }
+
+    /// A VHDX image with a real GPT holding the OwnBackupMeta partition, its
+    /// embedded sidecar, and `fill` written into `data_clusters` — a full
+    /// image (2 MiB blocks, as the Linux engine makes them), or a differencing
+    /// child made in userspace over the image named `parent`.
+    #[cfg(not(target_os = "windows"))]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn put_vhdx_image(
+        dir: &Path,
+        name: &str,
+        parent: Option<&str>,
+        role: ChainRole,
+        created_at: &str,
+        kind: BackupType,
+        parent_id: Option<Uuid>,
+        data_clusters: &[(u64, u8)],
+        checksums: &[BlockChecksum],
+    ) -> (PathBuf, Uuid) {
+        let path = dir.join(name);
+        let mut writer = match parent {
+            None => VhdxWriter::create(&path, VSIZE, 2 * 1024 * 1024, 512).unwrap(),
+            Some(parent) => VhdxWriter::create_differencing(&path, &dir.join(parent)).unwrap(),
+        };
+        // Only the root of a chain lays down the GPT; children inherit it.
+        if parent.is_none() {
+            let ops = gpt_write_ops(&GptLayout {
+                disk_size: VSIZE,
+                sector_size: 512,
+                partition_offset: DEFAULT_PARTITION_OFFSET,
+                partition_size: VOLUME_LEN,
+                disk_guid: Uuid::new_v4(),
+                partition_guid: Uuid::new_v4(),
+                partition_name: "OwnBackupData".into(),
+                meta_partition_size: Some(META_SIZE),
+                meta_partition_guid: Some(Uuid::new_v4()),
+            })
+            .unwrap();
+            for op in ops {
+                writer.write_at(op.offset, &op.bytes).unwrap();
+            }
+        }
+        for &(index, fill) in data_clusters {
+            writer
+                .write_at(
+                    DEFAULT_PARTITION_OFFSET + index * CS,
+                    &vec![fill; CS as usize],
+                )
+                .unwrap();
+        }
+        // Every image carries its own meta partition, as the engine writes it.
+        writer
+            .write_at(META_OFFSET, &vec![0xEEu8; META_SIZE as usize])
+            .unwrap();
+        writer.finish().unwrap();
+
+        let mut info = match parent {
+            None => SidecarInfo::new_full(name, DEFAULT_PARTITION_OFFSET),
+            Some(parent) => SidecarInfo::new_child(name, role, parent, DEFAULT_PARTITION_OFFSET),
+        };
+        info.container = "vhdx".into();
+        info.job_id = Some("j1".into());
+        let manifest = manifest(created_at, kind, parent_id);
+        let backup_id = manifest.backup_id;
+        let sidecar = Sidecar {
+            info,
+            manifest,
+            checksums: checksums.to_vec(),
+            disk_manifest: None,
+        };
+        let ext = if parent.is_some() { "avhdx" } else { "vhdx" };
+        write_embedded_sidecar(&path, ext, &sidecar).unwrap();
+        (path, backup_id)
+    }
+
+    /// Everything a VHDX image reads except its meta partition (which a step
+    /// rewrites on purpose): the GPT and the volume.
+    #[cfg(not(target_os = "windows"))]
+    pub(super) fn read_vhdx_disk(path: &Path) -> Vec<u8> {
+        let mut r = crate::vhdx_bat::VhdxGuestReader::open(path).unwrap();
+        let mut buf = vec![0u8; VSIZE as usize];
+        r.read_at(0, &mut buf).unwrap();
+        buf.drain(META_OFFSET as usize..(META_OFFSET + META_SIZE) as usize);
+        buf
+    }
+
+    /// base ← inc1 ← inc2 as VHDX, children made in userspace. inc1 zeroes a
+    /// cluster the base filled — a zero write that must survive the fold.
+    #[cfg(not(target_os = "windows"))]
+    pub(super) fn three_image_vhdx_chain(dir: &Path) -> (PathBuf, PathBuf, PathBuf, Uuid) {
+        let (base, base_id) = put_vhdx_image(
+            dir,
+            "v_C_full_1.vhdx",
+            None,
+            ChainRole::Full,
+            "2026-01-01T00:00:00Z",
+            BackupType::Full,
+            None,
+            &[(1, 0x11), (2, 0x11), (5, 0x55)],
+            &sums(&[(0, 100), (1, 101)]),
+        );
+        let (inc1, inc1_id) = put_vhdx_image(
+            dir,
+            "v_C_inc_2.avhdx",
+            Some("v_C_full_1.vhdx"),
+            ChainRole::Incremental,
+            "2026-01-02T00:00:00Z",
+            BackupType::Incremental,
+            Some(base_id),
+            &[(1, 0), (2, 0x22), (3, 0x22)],
+            &sums(&[(0, 100), (1, 201), (2, 202)]),
+        );
+        let (inc2, _) = put_vhdx_image(
+            dir,
+            "v_C_inc_3.avhdx",
+            Some("v_C_inc_2.avhdx"),
+            ChainRole::Incremental,
+            "2026-01-03T00:00:00Z",
+            BackupType::Incremental,
+            Some(inc1_id),
+            &[(3, 0x33), (4, 0x33)],
+            &sums(&[(0, 100), (1, 201), (3, 303)]),
+        );
+        (base, inc1, inc2, inc1_id)
+    }
+
+    /// The whole window step on a VHDX chain without the Windows API: the base
+    /// becomes the folded increment's restore point byte for byte, the leaf
+    /// reads exactly as before over its new parent, and the chain is one image
+    /// shorter.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn one_window_step_end_to_end_on_a_vhdx_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, inc1, inc2, inc1_id) = three_image_vhdx_chain(dir.path());
+        let (inc1_before, leaf_before) = (read_vhdx_disk(&inc1), read_vhdx_disk(&inc2));
+
+        let chain = list_job_chains(dir.path(), "j1").unwrap().remove(0);
+        assert_eq!(chain.images.len(), 3);
+        let step = plan_consolidation(&chain, 1).expect("2 increments, limit 1");
+        let outcome = consolidate_step(&step).unwrap();
+
+        assert_eq!(outcome.folded, inc1);
+        assert_eq!(outcome.repointed.as_deref(), Some(inc2.as_path()));
+        assert!(!inc1.exists(), "the folded increment is deleted");
+        assert!(!marker_path(&base).exists(), "the marker is cleared");
+        assert_eq!(
+            read_vhdx_disk(&base),
+            inc1_before,
+            "the base reads as the folded increment did"
+        );
+        assert_eq!(
+            read_vhdx_disk(&inc2),
+            leaf_before,
+            "the leaf reads unchanged"
+        );
+
+        // The container link and the sidecar agree on the new parent.
+        assert_eq!(
+            crate::vhdx_bat::vhdx_parent_path(&inc2)
+                .unwrap()
+                .unwrap()
+                .canonicalize()
+                .unwrap(),
+            base.canonicalize().unwrap()
+        );
+        assert!(crate::vhdx_bat::vhdx_parent_linkage_matches(&inc2, &base).unwrap());
+        let leaf = read_image_sidecar(&inc2).unwrap();
+        assert_eq!(
+            leaf.info.parent_image_file_name.as_deref(),
+            Some("v_C_full_1.vhdx")
+        );
+        assert_eq!(leaf.manifest.parent_backup_id, Some(inc1_id));
+
+        let promoted = read_image_sidecar(&base).unwrap();
+        assert_eq!(promoted.info.chain_role, ChainRole::Full);
+        assert_eq!(promoted.info.consolidated_increments, 1);
+        assert_eq!(promoted.manifest.backup_id, inc1_id);
+        assert_eq!(promoted.checksums, sums(&[(0, 100), (1, 201), (2, 202)]));
+
+        let chain = list_job_chains(dir.path(), "j1").unwrap().remove(0);
+        assert_eq!(chain.images.len(), 2);
+        assert!(plan_consolidation(&chain, 1).is_none());
+
+        // The next step folds the leaf itself into the base.
+        let step = plan_consolidation(&chain, 0).unwrap();
+        consolidate_step(&step).unwrap();
+        assert!(!inc2.exists());
+        assert_eq!(read_vhdx_disk(&base), leaf_before);
+        assert_eq!(
+            read_image_sidecar(&base)
+                .unwrap()
+                .info
+                .consolidated_increments,
+            2
+        );
     }
 
     /// The backed-up volume's bytes — the data partition only.

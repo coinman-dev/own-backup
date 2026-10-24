@@ -562,8 +562,10 @@
 <style>
   .layout { display: flex; height: 100%; }
   .jobs-col { width: 240px; flex-shrink: 0; background: var(--column-bg); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
-  .col-title { font-size: 24px; font-weight: 300; color: var(--head); padding: 22px 18px 12px; }
-  .this-pc { display: flex; align-items: center; gap: 8px; padding: 6px 18px; font-size: 13px; font-weight: 600; color: var(--text-secondary); }
+  /* 22px, not 24: «Резервные копии» in DejaVu Sans (Linux) did not fit the
+     240px column and ended in «…». */
+  .col-title { font-size: 22px; font-weight: 300; color: var(--head); padding: 22px 8px 12px 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .this-pc { display: flex; align-items: center; gap: 8px; padding: 6px 18px 6px 12px; font-size: 13px; font-weight: 600; color: var(--text-secondary); }
   .sort { margin-left: auto; position: relative; display: flex; }
   .sort-btn { background: none; border: none; padding: 3px 5px; cursor: pointer; color: var(--text-muted); display: flex; border-radius: 4px; }
   .sort-btn:hover { color: var(--head); background: var(--track); }

@@ -18,6 +18,7 @@ use own_backup_common::restore_plan::{PartitionKind, PartitionScheme, PartitionT
 use own_backup_common::{OwnBackupError, Result};
 use uuid::Uuid;
 
+use crate::boot_code::{carry_boot_code, BootCodeOutcome};
 use crate::gpt_writer::{disk_gpt_write_ops, WriteOp};
 use crate::mbr_writer::mbr_write_ops;
 
@@ -35,6 +36,40 @@ pub fn partition_table_write_ops(spec: &PartitionTableSpec) -> Result<Vec<WriteO
             Ok(ops)
         }
     }
+}
+
+/// [`partition_table_write_ops`], with the BIOS boot code of `current_lba0`
+/// (the sector at LBA 0 before the write) carried into the new LBA 0 — see
+/// [`crate::boot_code`] for when it is and is not carried.
+///
+/// `current_lba1` is the sector after it. An MBR written over an MBR disk
+/// leaves the sectors behind LBA 0 alone: on a BIOS disk with GRUB its
+/// core.img lives right there, in the gap before the first partition, and
+/// zeroing them as "a stale GPT" leaves a disk that stops at «Booting from
+/// Hard Disk». They are cleared only when a GPT really was there (its header
+/// at LBA 1, or a protective MBR at LBA 0).
+pub fn partition_table_write_ops_keeping_boot_code(
+    spec: &PartitionTableSpec,
+    current_lba0: &[u8],
+    current_lba1: &[u8],
+) -> Result<(Vec<WriteOp>, BootCodeOutcome)> {
+    let mut ops = match spec.scheme {
+        PartitionScheme::Mbr if !had_gpt(current_lba0, current_lba1) => mbr_write_ops(spec)?,
+        _ => partition_table_write_ops(spec)?,
+    };
+    let outcome = carry_boot_code(&mut ops, spec.scheme, current_lba0);
+    Ok((ops, outcome))
+}
+
+/// Whether the disk holds a GPT now: its header signature at LBA 1, or a
+/// protective (0xEE) entry in a signed MBR at LBA 0.
+fn had_gpt(lba0: &[u8], lba1: &[u8]) -> bool {
+    if lba1.starts_with(b"EFI PART") {
+        return true;
+    }
+    lba0.len() >= 512
+        && lba0[510..512] == [0x55, 0xAA]
+        && (0..4).any(|i| lba0[0x1BE + i * 16 + 4] == 0xEE)
 }
 
 /// Convert the scheme-neutral spec into the [`DiskLayout`] the GPT writer
@@ -262,6 +297,138 @@ mod tests {
                 "a write at LBA {start}..{end} landed inside the partition {first}..{last}"
             );
         }
+    }
+
+    fn apply(disk: &mut [u8], ops: &[WriteOp]) {
+        for op in ops {
+            disk[op.offset as usize..][..op.bytes.len()].copy_from_slice(&op.bytes);
+        }
+    }
+
+    #[test]
+    fn rewriting_a_gpt_keeps_the_bios_boot_code_on_the_disk() {
+        let disk_size = 512 * MIB;
+        let mut disk = vec![0u8; disk_size as usize];
+        apply(
+            &mut disk,
+            &partition_table_write_ops(&gpt_spec(disk_size)).unwrap(),
+        );
+        // GRUB's boot.img in the protective MBR.
+        disk[..440].fill(0xEB);
+        let lba0 = disk[..512].to_vec();
+
+        let (ops, outcome) = partition_table_write_ops_keeping_boot_code(
+            &gpt_spec(disk_size),
+            &lba0,
+            &disk[512..1024],
+        )
+        .unwrap();
+        assert_eq!(outcome, BootCodeOutcome::Kept);
+        apply(&mut disk, &ops);
+        assert!(disk[..440].iter().all(|&b| b == 0xEB));
+        assert!(crate::gpt_reader::parse_disk_layout(&disk, 512, disk_size).is_ok());
+
+        // The plain writer still zeroes it: callers that never asked keep the
+        // old behaviour.
+        apply(
+            &mut disk,
+            &partition_table_write_ops(&gpt_spec(disk_size)).unwrap(),
+        );
+        assert!(disk[..440].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn rewriting_an_mbr_keeps_the_boot_code_but_not_the_old_table() {
+        let disk_size = 512 * MIB;
+        let mut disk = vec![0u8; disk_size as usize];
+        apply(
+            &mut disk,
+            &partition_table_write_ops(&mbr_spec(disk_size, 100_000)).unwrap(),
+        );
+        disk[..440].fill(0x33);
+        let lba0 = disk[..512].to_vec();
+
+        let (ops, outcome) = partition_table_write_ops_keeping_boot_code(
+            &mbr_spec(disk_size, 200_000),
+            &lba0,
+            &disk[512..1024],
+        )
+        .unwrap();
+        assert_eq!(outcome, BootCodeOutcome::Kept);
+        apply(&mut disk, &ops);
+        assert!(disk[..440].iter().all(|&b| b == 0x33));
+        let count = u32::from_le_bytes(disk[0x1BE + 12..0x1BE + 16].try_into().unwrap());
+        assert_eq!(count as u64, 200_000 - 2048 + 1);
+        assert_eq!(&disk[0x1B8..0x1BC], &0x1A2B_3C4Du32.to_le_bytes());
+    }
+
+    /// GRUB on a BIOS/MBR disk keeps core.img in the sectors right after LBA 0
+    /// (stand, 20.10: the restored disk stopped at «Booting from Hard Disk»).
+    #[test]
+    fn rewriting_an_mbr_leaves_grubs_core_in_the_gap() {
+        let disk_size = 512 * MIB;
+        let mut disk = vec![0u8; disk_size as usize];
+        apply(
+            &mut disk,
+            &partition_table_write_ops(&mbr_spec(disk_size, 100_000)).unwrap(),
+        );
+        disk[..440].fill(0x33);
+        disk[512..2048 * 512].fill(0xC0);
+        let lba0 = disk[..512].to_vec();
+        let lba1 = disk[512..1024].to_vec();
+        let (ops, _) = partition_table_write_ops_keeping_boot_code(
+            &mbr_spec(disk_size, 100_000),
+            &lba0,
+            &lba1,
+        )
+        .unwrap();
+        apply(&mut disk, &ops);
+        assert!(disk[512..2048 * 512].iter().all(|&b| b == 0xC0));
+        assert!(disk[..440].iter().all(|&b| b == 0x33));
+    }
+
+    /// The same MBR over a disk that was GPT still clears the old GPT.
+    #[test]
+    fn an_mbr_over_a_gpt_still_erases_the_gpt() {
+        let disk_size = 512 * MIB;
+        let mut disk = vec![0u8; disk_size as usize];
+        apply(
+            &mut disk,
+            &partition_table_write_ops(&gpt_spec(disk_size)).unwrap(),
+        );
+        assert_eq!(&disk[512..520], b"EFI PART");
+        let lba0 = disk[..512].to_vec();
+        let lba1 = disk[512..1024].to_vec();
+        let (ops, _) = partition_table_write_ops_keeping_boot_code(
+            &mbr_spec(disk_size, 100_000),
+            &lba0,
+            &lba1,
+        )
+        .unwrap();
+        apply(&mut disk, &ops);
+        assert!(disk[512..34 * 512].iter().all(|&b| b == 0));
+        let tail = (disk_size - 33 * 512) as usize;
+        assert!(disk[tail..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn converting_mbr_to_gpt_drops_the_old_boot_code() {
+        let disk_size = 512 * MIB;
+        let mut disk = vec![0u8; disk_size as usize];
+        apply(
+            &mut disk,
+            &partition_table_write_ops(&mbr_spec(disk_size, 100_000)).unwrap(),
+        );
+        disk[..440].fill(0x33);
+        let (ops, outcome) = partition_table_write_ops_keeping_boot_code(
+            &gpt_spec(disk_size),
+            &disk[..512],
+            &disk[512..1024],
+        )
+        .unwrap();
+        assert_eq!(outcome, BootCodeOutcome::SchemeChanged);
+        apply(&mut disk, &ops);
+        assert!(disk[..440].iter().all(|&b| b == 0));
     }
 
     #[test]

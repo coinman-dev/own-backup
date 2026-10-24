@@ -19,8 +19,10 @@ use uuid::Uuid;
 
 use own_backup_common::{OwnBackupError, Result};
 
-/// Region table 1 lives at a spec-fixed offset.
-const REGION1_OFF: u64 = 192 * 1024;
+/// The two copies of the region table live at spec-fixed offsets.
+pub(crate) const REGION1_OFF: u64 = 192 * 1024;
+pub(crate) const REGION2_OFF: u64 = 256 * 1024;
+const REGION_LEN: usize = 64 * 1024;
 
 // Region / metadata-item GUIDs (same literals as vhdx_format.rs).
 const BAT_GUID: &str = "2dc27766-f623-4200-9d64-115e9bfd4a08";
@@ -28,6 +30,7 @@ const META_GUID: &str = "8b7ca206-4790-4b9a-b8fe-575f050f886e";
 const MI_FILE_PARAMS: &str = "caa16737-fa36-4d43-b3b6-33f0aa44e76b";
 const MI_VDISK_SIZE: &str = "2fa54224-cd1b-4876-b211-5dbed83bf4b8";
 const MI_LOG_SECTOR: &str = "8141bf1d-a96f-4709-ba47-f233a8faab5f";
+const MI_PHYS_SECTOR: &str = "cda348c7-445d-4471-9cc9-e9885251c556";
 const MI_PARENT_LOCATOR: &str = "a8d35f2d-b30b-454d-abf7-d3d84834ab0c";
 
 /// BAT payload-block state `SB_BLOCK_NOT_PRESENT` — the only state that means
@@ -58,6 +61,84 @@ fn read_exact_at(file: &mut File, off: u64, buf: &mut [u8]) -> Result<()> {
     file.read_exact(buf).map_err(bad)
 }
 
+/// CRC-32C (Castagnoli) lookup table, reflected polynomial 0x82F63B78.
+const CRC32C_TABLE: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut i = 0;
+    while i < 256 {
+        let mut c = i as u32;
+        let mut k = 0;
+        while k < 8 {
+            c = if c & 1 != 0 {
+                (c >> 1) ^ 0x82F6_3B78
+            } else {
+                c >> 1
+            };
+            k += 1;
+        }
+        table[i] = c;
+        i += 1;
+    }
+    table
+};
+
+/// CRC-32C as VHDX uses it for headers and region tables (init and final xor
+/// 0xFFFFFFFF). Table-driven: every region-table read checksums 64 KiB.
+pub(crate) fn crc32c(data: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in data {
+        crc = CRC32C_TABLE[((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8);
+    }
+    !crc
+}
+
+/// A region table copy whose signature and checksum both hold.
+fn region_table_is_valid(table: &[u8]) -> bool {
+    if table.len() != REGION_LEN || &table[0..4] != b"regi" {
+        return false;
+    }
+    let stored = u32::from_le_bytes(table[4..8].try_into().unwrap());
+    let mut copy = table.to_vec();
+    copy[4..8].fill(0);
+    crc32c(&copy) == stored
+}
+
+/// The region table copy to believe, when one has a valid checksum: the
+/// primary (192 KiB) if it checks out, else the backup (256 KiB).
+///
+/// The order matters to a repoint ([`crate::vhdx_chain::repoint`]): it moves
+/// the metadata region by rewriting the backup copy first and the primary
+/// last, so a primary torn by a crash fails its checksum and the backup —
+/// already complete — is read. Every reader takes the same copy, so none of
+/// them can see the new parent locator while another sees the old one.
+pub(crate) fn read_valid_region_table(file: &mut File) -> Result<Option<Vec<u8>>> {
+    for off in [REGION1_OFF, REGION2_OFF] {
+        let mut table = vec![0u8; REGION_LEN];
+        if read_exact_at(file, off, &mut table).is_ok() && region_table_is_valid(&table) {
+            return Ok(Some(table));
+        }
+    }
+    Ok(None)
+}
+
+/// The region table to parse: [`read_valid_region_table`], and only when
+/// neither copy has a valid checksum, the primary as it lies (what every
+/// reader here did before checksums were checked; hand-built test fixtures
+/// carry no checksum). Neither Windows nor our writers produce such a file,
+/// and a repoint never leaves one behind: when it writes the primary, the
+/// backup is already valid.
+pub(crate) fn read_region_table(file: &mut File) -> Result<Vec<u8>> {
+    if let Some(table) = read_valid_region_table(file)? {
+        return Ok(table);
+    }
+    let mut table = vec![0u8; REGION_LEN];
+    read_exact_at(file, REGION1_OFF, &mut table)?;
+    if &table[0..4] != b"regi" {
+        return Err(bad("no region table signature"));
+    }
+    Ok(table)
+}
+
 /// Refuse a VHDX whose log still holds entries to replay.
 ///
 /// Reading a VHDX in userspace means reading the file as it lies. A non-zero
@@ -66,7 +147,7 @@ fn read_exact_at(file: &mut File, off: u64, buf: &mut [u8]) -> Result<()> {
 /// Windows VHD driver can replay them, and reading past that would hand back a
 /// stale image while claiming it is the current one. Every image we close
 /// normally has `LogGuid = 0` (verified on real backups, 2026-08-21).
-fn ensure_log_is_empty(file: &mut File, path: &Path) -> Result<()> {
+pub(crate) fn ensure_log_is_empty(file: &mut File, path: &Path) -> Result<()> {
     // Headers 1 and 2 at their spec-fixed offsets; the one with the higher
     // sequence number is the active one.
     let mut active: Option<(u64, [u8; 16])> = None;
@@ -124,11 +205,7 @@ pub fn allocated_payload_blocks(path: &Path) -> Result<VhdxAllocation> {
     }
 
     // Region table: locate the BAT and metadata regions.
-    let mut region = vec![0u8; 64 * 1024];
-    read_exact_at(&mut file, REGION1_OFF, &mut region)?;
-    if &region[0..4] != b"regi" {
-        return Err(bad("no region table signature"));
-    }
+    let region = read_region_table(&mut file)?;
     let entry_count = u32::from_le_bytes(region[8..12].try_into().unwrap()) as usize;
     let (mut bat_off, mut bat_len, mut meta_off, mut meta_len) = (0u64, 0u64, 0u64, 0u64);
     for slot in 0..entry_count.min(2047) {
@@ -237,11 +314,7 @@ fn guest_to_file_offset_in_file(file: &mut File, guest_offset: u64) -> Result<Gu
     }
 
     // 2. Region table.
-    let mut region = vec![0u8; 64 * 1024];
-    read_exact_at(file, REGION1_OFF, &mut region)?;
-    if &region[0..4] != b"regi" {
-        return Err(bad("no region table signature"));
-    }
+    let region = read_region_table(file)?;
     let entry_count = u32::from_le_bytes(region[8..12].try_into().unwrap()) as usize;
     let (mut bat_off, mut bat_len, mut meta_off, mut meta_len) = (0u64, 0u64, 0u64, 0u64);
     for slot in 0..entry_count.min(2047) {
@@ -426,11 +499,7 @@ fn read_metadata_region(file: &mut File) -> Result<Vec<u8>> {
     if &id != b"vhdxfile" {
         return Err(bad("not a VHDX file (no signature)"));
     }
-    let mut region = vec![0u8; 64 * 1024];
-    read_exact_at(file, REGION1_OFF, &mut region)?;
-    if &region[0..4] != b"regi" {
-        return Err(bad("no region table signature"));
-    }
+    let region = read_region_table(file)?;
     let entry_count = u32::from_le_bytes(region[8..12].try_into().unwrap()) as usize;
     for slot in 0..entry_count.min(2047) {
         let base = 16 + slot * 32;
@@ -661,6 +730,70 @@ pub fn vhdx_parent_path(path: &Path) -> Result<Option<std::path::PathBuf>> {
     Ok(parse_parent_locator(&meta).map(|raw| resolve_parent(path, &raw)))
 }
 
+/// The shape of a VHDX image as its metadata region states it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VhdxGeometry {
+    pub virtual_size: u64,
+    /// Payload block size in bytes.
+    pub block_size: u64,
+    pub logical_sector_size: u32,
+    pub physical_sector_size: u32,
+    /// FileParameters.HasParent: a differencing image.
+    pub has_parent: bool,
+}
+
+/// Read the geometry of `path` (MS-VHDX §2.6.2). Refuses an image whose log
+/// still holds entries — its metadata on disk may not be the current one.
+pub fn vhdx_geometry(path: &Path) -> Result<VhdxGeometry> {
+    let mut file = File::open(path).map_err(|e| bad(format!("open {}: {e}", path.display())))?;
+    ensure_log_is_empty(&mut file, path)?;
+    let meta = read_metadata_region(&mut file)?;
+    let mcount = u16::from_le_bytes(meta[10..12].try_into().unwrap()) as usize;
+    let mut g = VhdxGeometry {
+        virtual_size: 0,
+        block_size: 0,
+        logical_sector_size: 0,
+        physical_sector_size: 0,
+        has_parent: false,
+    };
+    let u32_at = |o: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(meta.get(o..o + 4)?.try_into().ok()?))
+    };
+    for slot in 0..mcount.min(2046) {
+        let e = 32 + slot * 32;
+        let Some(guid) = meta.get(e..e + 16) else {
+            break;
+        };
+        let Some(ioff) = u32_at(e + 16).map(|o| o as usize) else {
+            break;
+        };
+        if guid == guid_le(MI_VDISK_SIZE) {
+            if let Some(b) = meta.get(ioff..ioff + 8) {
+                g.virtual_size = u64::from_le_bytes(b.try_into().unwrap());
+            }
+        } else if guid == guid_le(MI_FILE_PARAMS) {
+            g.block_size = u32_at(ioff).unwrap_or(0) as u64;
+            // Bit 0 LeaveBlocksAllocated, bit 1 HasParent.
+            g.has_parent = u32_at(ioff + 4).unwrap_or(0) & 2 != 0;
+        } else if guid == guid_le(MI_LOG_SECTOR) {
+            g.logical_sector_size = u32_at(ioff).unwrap_or(0);
+        } else if guid == guid_le(MI_PHYS_SECTOR) {
+            g.physical_sector_size = u32_at(ioff).unwrap_or(0);
+        }
+    }
+    if g.virtual_size == 0
+        || g.block_size == 0
+        || g.logical_sector_size == 0
+        || g.physical_sector_size == 0
+    {
+        return Err(bad(format!(
+            "{}: metadata is missing the virtual size, block size or a sector size",
+            path.display()
+        )));
+    }
+    Ok(g)
+}
+
 /// Longest accepted parent chain (a loop is corruption, real chains are short).
 const MAX_CHAIN_DEPTH: usize = 64;
 
@@ -724,11 +857,7 @@ impl VhdxGuestReader {
         if &id != b"vhdxfile" {
             return Err(bad("not a VHDX file (no signature)"));
         }
-        let mut region = vec![0u8; 64 * 1024];
-        read_exact_at(&mut file, REGION1_OFF, &mut region)?;
-        if &region[0..4] != b"regi" {
-            return Err(bad("no region table signature"));
-        }
+        let region = read_region_table(&mut file)?;
         let entry_count = u32::from_le_bytes(region[8..12].try_into().unwrap()) as usize;
         let (mut bat_off, mut bat_len) = (0u64, 0u64);
         for slot in 0..entry_count.min(2047) {
@@ -842,6 +971,11 @@ impl VhdxGuestReader {
             ));
         }
         Ok((Placement::Here(file_offset + within), run))
+    }
+
+    /// Size of the virtual disk in bytes.
+    pub fn virtual_size(&self) -> u64 {
+        self.virtual_size
     }
 
     /// Read `buf` from `guest_offset`, following the parent chain for absent

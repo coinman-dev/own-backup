@@ -139,6 +139,14 @@
     "ru": "Отменено пользователем",
     "en": "Cancelled by the user"
   },
+  "lib.interrupted_by_kill": {
+    "ru": "Прервано: служба завершилась аварийно (была убита или пропало питание) посреди копии. Недописанный образ удалён при следующем запуске службы; если в задании включён запуск пропущенных копий, копия будет сделана заново",
+    "en": "Interrupted: the service ended abnormally (it was killed or the power went) in the middle of the copy. The unfinished image was deleted at the next start of the service; if the job runs missed backups, the copy is made again"
+  },
+  "lib.interrupted_by_stop": {
+    "ru": "Прервано: служба остановилась — компьютер выключался или перезагружался, либо обновлялась программа. Если в задании включён запуск пропущенных копий, копия будет сделана после следующего запуска",
+    "en": "Interrupted: the service stopped — the computer was shutting down or restarting, or the program was being updated. If the job runs missed backups, the copy is made after the next start"
+  },
   "lib.cancelled_left_behind": {
     "ru": "Отменено. Запись на диск копий не отвечала; незаконченный файл будет удалён, когда диск ответит",
     "en": "Cancelled. The backup disk stopped answering writes; the unfinished file will be removed once it answers"
@@ -410,5 +418,17 @@
   "source_refresh.layout_changed": {
     "ru": "Разметка диска «%{disk}» изменилась после прошлой копии (так делает обновление Windows): %{parts}. Задание обновлено, эта копия — полная",
     "en": "The layout of the disk “%{disk}” changed since the previous backup (Windows Update does this): %{parts}. The job was updated, and this backup is a full one"
-  }
+  },
+  "lib.linux_unsupported": {"ru": "В Linux копирование пока умеет не всё, что умеет в Windows, а в задании включено: %{options}. Копия не сделана, чтобы не выдать за выполненное то, что не сделано. Отключите эти настройки в задании или дождитесь их поддержки в Linux.", "en": "On Linux, backup cannot yet do everything it does on Windows, and the job asks for: %{options}. No copy was made, so as not to report as done what was not done. Turn these settings off in the job or wait for their Linux support."},
+  "lib.linux_unsupported_scheme": {"ru": "инкрементные или дифференциальные копии в формате %{format} (здесь цепочки пишутся в: %{chains})", "en": "incremental or differential copies in %{format} format (chains are written here as: %{chains})"},
+  "lib.linux_unsupported_exclusions": {"ru": "исключения файлов", "en": "file exclusions"},
+  "lib.linux_unsupported_disk": {"ru": "копия всего диска одним образом", "en": "a copy of a whole disk as one image"},
+  "lib.linux_unsupported_after_backup": {"ru": "сон или выключение после копии", "en": "sleep or power off after the copy"},
+  "lib.linux_unsupported_encryption": {"ru": "шифрование копии (в Linux пока нет хранилища ключей)", "en": "encrypted copies (Linux has no key store yet)"},
+  "lib.linux_unsupported_whole_disk": {"ru": "копия всего диска, названного только номером (в Linux диск называется устройством /dev/disk/by-id)", "en": "a copy of a whole disk named only by its number (on Linux a disk is named by its /dev/disk/by-id device)"},
+  "lib.linux_unsupported_speed_limit": {"ru": "ограничение скорости", "en": "a speed limit"},
+  "lib.linux_unsupported_low_priority": {"ru": "низкий приоритет", "en": "low priority"},
+  "lib.linux_dest_on_source": {"ru": "Папка назначения находится на копируемом томе %{source}. Копия этого тома росла бы во время копирования — выберите папку на другом томе.", "en": "The destination folder is on the volume being copied, %{source}. A copy of that volume would grow while it is made — choose a folder on another volume."},
+  "lib.snapshot_store_dense": {"ru": "Снимок тома %{volume}: в папке назначения «%{folder}» нет разреженных файлов (FAT, exFAT или NTFS через ntfs3), поэтому хранилище изменений снимка выделено целиком и ограничено %{size}. Если во время копии на том запишут больше, снимок переполнится и копия будет отклонена.", "en": "Snapshot of %{volume}: the destination folder “%{folder}” has no sparse files (FAT, exFAT or NTFS through ntfs3), so the snapshot's change store was allocated in full and is limited to %{size}. If more than that is written to the volume during the copy, the snapshot overflows and the copy is refused."},
+  "lib.resident_in_journal": {"ru": "Мелкие исключённые файлы и короткие потоки (их содержимое хранится прямо в записи MFT) стёрты из каталога копии, но журнал NTFS копии ($LogFile) Windows не очищает: прежнее содержимое части таких файлов может остаться в нём, пока журнал не перезапишется.", "en": "Small excluded files and short streams (whose content is kept inside the MFT record itself) were erased from the copy's catalog, but Windows does not clear the copy's NTFS journal ($LogFile): the former content of some of these files may remain in it until the journal is overwritten."}
 }

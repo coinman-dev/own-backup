@@ -89,6 +89,13 @@ impl ServiceLink {
             self.store(c.clone()).await;
             return Ok(c);
         }
+        // Kept out by the access group: starting the service and waiting for
+        // it would only end in "installed but not running" about a service
+        // that is running.
+        #[cfg(unix)]
+        if let Some(why) = self.group_message() {
+            return Err(why);
+        }
         // Not reachable — try to start the installed service, then wait (~5s).
         // `sc`/`net` block, so run them off the async runtime.
         tracing::info!("service not reachable; attempting to start the installed service");
@@ -103,6 +110,19 @@ impl ServiceLink {
         Err(tokio::task::spawn_blocking(unreachable_message)
             .await
             .unwrap_or_else(|_| tr!("service_link.unavailable").into_owned()))
+    }
+
+    /// A client if the service answers right now — the cached one or one
+    /// fresh attempt — without starting it and waiting the way
+    /// [`client`](Self::client) does. For reads that have an answer of their
+    /// own to fall back on, where five seconds of «Загрузка…» buy nothing.
+    pub async fn connected(&self) -> Option<BackupClient> {
+        if let Some(c) = self.cached().await {
+            return Some(c);
+        }
+        let c = self.connect().await.ok()?;
+        self.store(c.clone()).await;
+        Some(c)
     }
 
     /// The cached client, if it is still holding the token the service is
@@ -134,6 +154,43 @@ impl ServiceLink {
         *self.client.lock().await = None;
     }
 
+    /// Whether the service, reachable, turns this caller away: the Unix
+    /// socket's peer check answers `PermissionDenied` to anyone outside an
+    /// active local session (an SSH login, a session switched away from).
+    /// The connection itself succeeds then — the check is made per call — so
+    /// only a call can tell; the queue is the cheapest one to ask.
+    #[cfg(unix)]
+    pub async fn access_refused(&self) -> bool {
+        let Some(mut client) = self.cached().await else {
+            return false;
+        };
+        matches!(
+            client.get_queue_with_status().await,
+            Err(status) if status.code() == tonic::Code::PermissionDenied
+        )
+    }
+
+    /// Whether the access group keeps this user from the socket and token.
+    #[cfg(unix)]
+    pub fn group_access(&self) -> crate::unix_group::GroupAccess {
+        crate::unix_group::group_access(&self.token_path)
+    }
+
+    /// What to tell a user the group keeps out, or `None`.
+    #[cfg(unix)]
+    fn group_message(&self) -> Option<String> {
+        let group = own_backup_common::UNIX_ACCESS_GROUP;
+        match self.group_access() {
+            crate::unix_group::GroupAccess::Ok => None,
+            crate::unix_group::GroupAccess::NotMember => {
+                Some(tr!("service_link.not_in_group", group = group).into_owned())
+            }
+            crate::unix_group::GroupAccess::Relogin => {
+                Some(tr!("service_link.relogin_for_group", group = group).into_owned())
+            }
+        }
+    }
+
     /// Quick probe: can we reach the service right now? Always does a fresh
     /// connect (never trusts a stale cached client) and updates the cache to
     /// match, so the startup health check reflects reality. Does not try to
@@ -158,7 +215,10 @@ fn unreachable_message() -> String {
     let name = own_backup_common::WINDOWS_SERVICE_DISPLAY_NAME;
     // On the medium "install it" is not advice anyone can follow.
     if own_backup_common::media_mode::is_media_mode() {
+        #[cfg(target_os = "windows")]
         return tr!("service_link.media_engine_silent", name = name).into_owned();
+        #[cfg(not(target_os = "windows"))]
+        return tr!("service_link.media_engine_silent_linux", name = name).into_owned();
     }
     #[cfg(target_os = "windows")]
     let (start_hint, install_hint) = (
@@ -201,7 +261,16 @@ pub fn service_installed() -> bool {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        std::path::Path::new("/etc/systemd/system/own-backup.service").exists()
+        // The package puts the unit in /usr/lib; an administrator's copy in
+        // /etc overrides it.
+        let name = own_backup_common::LINUX_UNIT_NAME;
+        [
+            format!("/etc/systemd/system/{name}.service"),
+            format!("/usr/lib/systemd/system/{name}.service"),
+            format!("/lib/systemd/system/{name}.service"),
+        ]
+        .iter()
+        .any(|p| std::path::Path::new(p).exists())
     }
 }
 
@@ -212,8 +281,11 @@ fn start_installed_service() {
     // On the boot medium there is no installed service to start — asking the
     // SCM would just fail. Re-launch the engine as a process instead, the same
     // way the medium's launcher does, so losing it (a crash, a stray Ctrl+C in
-    // the console it shares) is recoverable from the interface.
-    if own_backup_common::media_mode::is_media_mode() {
+    // the console it shares) is recoverable from the interface. The Linux
+    // medium is a systemd system with the packaged unit: starting it is
+    // the same `systemctl start` as below, which the window — root there —
+    // is allowed, and a second engine beside systemd's would fight it.
+    if cfg!(target_os = "windows") && own_backup_common::media_mode::is_media_mode() {
         start_media_engine();
         return;
     }
@@ -245,6 +317,7 @@ fn start_installed_service() {
 /// Start the engine as a plain process from next to this exe — the boot
 /// medium's equivalent of "start the service". Nothing is installed and nothing
 /// is elevated: on the medium everything already runs as SYSTEM.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn start_media_engine() {
     let Some(dir) = std::env::current_exe()
         .ok()

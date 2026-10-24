@@ -12,6 +12,10 @@
     "ru": "Движок «%{name}» не отвечает. Запустите его из консоли носителя:\n  own-backup-service.exe --run --media",
     "en": "The engine “%{name}” is not responding. Start it from the media console:\n  own-backup-service.exe --run --media"
   },
+  "service_link.media_engine_silent_linux": {
+    "ru": "Движок «%{name}» не отвечает. Запустите его из консоли носителя:\n  own-backup-service --run --media",
+    "en": "The engine “%{name}” is not responding. Start it from the media console:\n  own-backup-service --run --media"
+  },
   "service_link.win_start_hint": {
     "ru": "Запустите её (нужны права администратора) или перезагрузите компьютер.",
     "en": "Start it (administrator rights are needed) or restart the computer."
@@ -25,8 +29,8 @@
     "en": "Start it:  sudo systemctl start own-backup"
   },
   "service_link.linux_install_hint": {
-    "ru": "установите её:  sudo ./own-backup-service --install\n(после установки войдите в систему заново — вы будете добавлены в группу «%{group}»).",
-    "en": "install it:  sudo ./own-backup-service --install\n(sign in again after installing — you will be added to the group “%{group}”)."
+    "ru": "установите пакет:  sudo apt install ./own-backup_*.deb\nДоступ из окна:  sudo /usr/libexec/own-backup/own-backup-service --grant-access $USER\n(затем войдите в систему заново — вы будете в группе «%{group}»).",
+    "en": "install the package:  sudo apt install ./own-backup_*.deb\nAccess from the window:  sudo /usr/libexec/own-backup/own-backup-service --grant-access $USER\n(then sign in again — you will be in the group “%{group}”)."
   },
   "service_link.installed_not_running": {
     "ru": "Служба «%{name}» установлена, но не запущена. %{hint}",
@@ -75,5 +79,73 @@
   "files.folder_not_opened": {
     "ru": "Не удалось открыть папку %{path}: %{error}",
     "en": "The folder %{path} could not be opened: %{error}"
+  },
+  "service_link.not_in_group": {
+    "ru": "Ваш пользователь не входит в группу «%{group}», поэтому окно не может подключиться к службе. Добавьте его:  sudo usermod -aG %{group} $USER  — и войдите в систему заново.",
+    "en": "Your user is not in the group “%{group}”, so the window cannot connect to the service. Add it:  sudo usermod -aG %{group} $USER  — and sign in again."
+  },
+  "service_link.relogin_for_group": {
+    "ru": "Ваш пользователь уже добавлен в группу «%{group}», но этот сеанс начат раньше и её не видит. Выйдите из системы и войдите снова.",
+    "en": "Your user has been added to the group “%{group}”, but this session started earlier and does not have it yet. Sign out and sign in again."
+  },
+  "linux_media_dl.linux_only": {
+    "ru": "Готовый носитель Linux скачивается только в Linux.",
+    "en": "The ready Linux medium is downloaded on Linux only."
+  },
+  "linux_media_dl.not_installed": {
+    "ru": "Программа установлена не из пакета own-backup — неизвестно, какой готовый ISO ей подходит. Соберите носитель на этом компьютере.",
+    "en": "The program was not installed from the own-backup package, so it is not known which ready ISO matches it. Build the medium on this computer."
+  },
+  "linux_media_dl.no_curl": {
+    "ru": "Для загрузки нужна программа curl: sudo apt install curl",
+    "en": "Downloading needs curl: sudo apt install curl"
+  },
+  "linux_media_dl.no_curl_start": {
+    "ru": "curl не запустился: %{error}",
+    "en": "curl did not start: %{error}"
+  },
+  "linux_media_dl.no_network": {
+    "ru": "Нет связи с GitHub. Проверьте подключение к интернету и повторите.",
+    "en": "GitHub cannot be reached. Check the internet connection and try again."
+  },
+  "linux_media_dl.rate_limited": {
+    "ru": "GitHub временно ограничил запросы с этого адреса. Повторите через несколько минут или соберите носитель на этом компьютере.",
+    "en": "GitHub is limiting requests from this address for now. Try again in a few minutes or build the medium on this computer."
+  },
+  "linux_media_dl.failed": {
+    "ru": "Загрузка не удалась: %{error}",
+    "en": "The download failed: %{error}"
+  },
+  "linux_media_dl.bad_answer": {
+    "ru": "GitHub ответил непонятно. Повторите позже или соберите носитель на этом компьютере.",
+    "en": "GitHub's answer could not be read. Try again later or build the medium on this computer."
+  },
+  "linux_media_dl.none": {
+    "ru": "Для установленной версии готового ISO на GitHub нет. Соберите носитель на этом компьютере.",
+    "en": "There is no ready ISO for the installed version on GitHub. Build the medium on this computer."
+  },
+  "linux_media_dl.no_folder": {
+    "ru": "Папка «%{path}» не найдена.",
+    "en": "The folder “%{path}” was not found."
+  },
+  "linux_media_dl.no_sums": {
+    "ru": "В релизе %{tag} нет контрольной суммы ISO — скачанный файл не проверить. Соберите носитель на этом компьютере.",
+    "en": "The release %{tag} has no checksum for the ISO, so the download cannot be checked. Build the medium on this computer."
+  },
+  "linux_media_dl.write_failed": {
+    "ru": "Не удалось записать ISO в %{path}: %{error}",
+    "en": "Could not write the ISO into %{path}: %{error}"
+  },
+  "linux_media_dl.cancelled": {
+    "ru": "Загрузка отменена.",
+    "en": "The download was cancelled."
+  },
+  "linux_media_dl.wrong_size": {
+    "ru": "Скачанный файл не совпал по размеру с тем, что указан на GitHub; он удалён. Повторите загрузку.",
+    "en": "The downloaded file's size differs from the one GitHub lists; it was removed. Try the download again."
+  },
+  "linux_media_dl.bad_checksum": {
+    "ru": "Контрольная сумма скачанного ISO не совпала; файл удалён. Повторите загрузку.",
+    "en": "The downloaded ISO's checksum does not match; the file was removed. Try the download again."
   }
 }

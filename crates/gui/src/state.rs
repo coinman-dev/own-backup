@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use own_backup_common::config::AppConfig;
@@ -13,24 +12,19 @@ use crate::service_link::ServiceLink;
 /// link.
 pub struct GuiState {
     /// The live config. Behind a lock because `save_config` has to update it as
-    /// well as the file: it used to write only the file, so the next
+    /// well as the service's file: it used to write only the file, so the next
     /// `get_config` handed back the copy loaded at startup and every change
-    /// looked lost the moment the user left the page.
+    /// looked lost the moment the user left the page. The file itself is the
+    /// service's to write (see `commands::settings`).
     pub config: std::sync::Mutex<AppConfig>,
-    pub config_path: PathBuf,
     /// Connection to the backup service.
     pub link: Arc<ServiceLink>,
 }
 
 impl GuiState {
-    /// `config_path` is passed in rather than derived from `config.data_dir`:
-    /// the file is what *says* where the data directory is, so deriving the
-    /// path from a value inside it means saving to a different place than the
-    /// one it was read from as soon as a user edits that setting.
-    pub fn new(config: AppConfig, config_path: PathBuf, link: Arc<ServiceLink>) -> Self {
+    pub fn new(config: AppConfig, link: Arc<ServiceLink>) -> Self {
         Self {
             config: std::sync::Mutex::new(config),
-            config_path,
             link,
         }
     }

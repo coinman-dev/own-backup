@@ -13,8 +13,9 @@
 #     лежит вне репозитория, и архив для них единственная копия.
 #
 # УДАЛЯЕТСЯ по --force (пересоберётся само):
-#   - target/ (обычно десятки гигабайт), frontend/node_modules, frontend/dist,
-#     кэши .svelte-kit / .vite;
+#   - target/ (обычно десятки гигабайт) — КРОМЕ target/dist/: там готовые
+#     пакеты (.deb, установщик, ISO), которые держат для проверки;
+#   - frontend/node_modules, frontend/dist, кэши .svelte-kit / .vite;
 #   - собранные exe и pdb в win/ и linux-files/ (сами каталоги остаются);
 #   - мусор ОС и редактора (*Zone.Identifier, .DS_Store, *.swp, *.orig, *.rs.bk).
 #
@@ -22,13 +23,28 @@
 #   - win/ и linux-files/ целиком: там точки монтирования дисков Windows
 #     с многогигабайтными образами — rm -rf по ним стёр бы данные на
 #     смонтированном диске, а tar утащил бы их в архив;
-#   - tmp/ — локальные репро;
+#   - tmp/ — локальные репро и корни систем для сборки (tmp/deb-noble): не
+#     осматривается вовсе;
 #   - образы и артефакты тестов где угодно в дереве (*.vhdx, *.avhdx, *.obkm,
 #     *.obk, *.vmdk, *.wim, *.iso).
+#
+# ДОПОЛНИТЕЛЬНО, только по своим ключам (вместе с --force; без него — показ):
+#   --stand  стенд Linux: прогон ~/lab/linux/run (диски ВМ, гигабайты) —
+#            через `linux-vm.py clean`, который сначала сохраняет улики в
+#            ~/lab/linux/evidence/<прогон>; ВМ должна быть выключена.
+#            Базовый образ (~/lab/linux/base) не трогается.
+#   --agents рабочие копии и ветки агентов: .claude/worktrees/* без
+#            незакоммиченных правок и ветки worktree-agent-*, все правки
+#            которых уже есть в dev (по содержимому, `git cherry`); перед
+#            удалением ветки сохраняются в backup/agent-branches-<время>.bundle.
+#            Ветка с правками, которых в dev нет, остаётся — решать человеку.
+#   --all    = --stand --agents
 #
 # Использование:
 #   scripts/clean-artifacts.sh                  # ПРОБНЫЙ ПРОГОН — что уйдёт и сколько это
 #   scripts/clean-artifacts.sh --force          # собственно удалить артефакты
+#   scripts/clean-artifacts.sh --all            # показать и стенд, и агентов
+#   scripts/clean-artifacts.sh --force --all    # удалить всё перечисленное
 #   scripts/clean-artifacts.sh --archive [OUT]  # собрать лёгкий .tar.gz (ничего не удаляя)
 #                                               # по умолчанию — в ТЕКУЩИЙ каталог
 #   scripts/clean-artifacts.sh --archive --with-git [OUT]   # ...вместе с историей .git
@@ -81,24 +97,35 @@ human() { du -sh "$1" 2>/dev/null | cut -f1; }
 
 usage() { sed -n '2,/^set -euo/p' "$SELF" | grep '^#' | sed 's/^# \{0,1\}//'; exit 0; }
 
-# find по дереву без target/.git/node_modules — иначе обход 16 ГБ ради пары
-# файлов мусора. win/ и linux-files/ тоже мимо: там точки монтирования, и
+# find по дереву без target/.git/node_modules/vendor — иначе обход 16 ГБ ради пары
+# файлов мусора, а в vendor/ лежат Cargo.toml.orig, проверяемые check-vendor.py.
+# win/ и linux-files/ тоже мимо: там точки монтирования, и
 # обход смонтированного диска на 2 ТБ через drvfs занял бы минуты, а удаление
-# по итогам писало бы на чужой раздел.
+# по итогам писало бы на чужой раздел. И tmp/: его скрипт не чистит и в архив
+# не берёт, а лежат там корни чужих систем (tmp/deb-noble — Ubuntu 24.04 для
+# сборки выпуска): их «мусор» — файлы той системы, и часть каталогов — root's.
+# Каталог, куда find не пустили, — не повод обрывать весь прогон (pipefail
+# раньше молча кончал скрипт на этом месте).
 prune_find() {
   find . -path ./.git -prune -o -path ./target -prune -o -name node_modules -prune \
-       -o -path ./win -prune -o -path ./linux-files -prune -o "$@"
+       -o -path ./win -prune -o -path ./linux-files -prune -o -path ./vendor -prune \
+       -o -path ./tmp -prune -o "$@" || true
 }
 
-# ── разбор аргументов ────────────────────────────────────────────────────────
+# ── разбор аргументов ──────────────────────────────────────────────────────
 MODE="dry"          # dry | force | archive
 WITH_GIT=0
+DO_STAND=0
+DO_AGENTS=0
 OUT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --force|-f)   MODE="force" ;;
     --archive|-a) MODE="archive" ;;
     --with-git)   WITH_GIT=1 ;;
+    --stand)      DO_STAND=1 ;;
+    --agents)     DO_AGENTS=1 ;;
+    --all)        DO_STAND=1; DO_AGENTS=1 ;;
     -h|--help)    usage ;;
     -*)           echo "неизвестный ключ: $1" >&2; exit 2 ;;
     *)            OUT="$1" ;;   # позиционный → путь архива
@@ -106,7 +133,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-# ── режим архива ─────────────────────────────────────────────────────────────
+# ── режим архива ───────────────────────────────────────────────────────────
 if [ "$MODE" = "archive" ]; then
   ts="$(date +%Y%m%d-%H%M%S)"
   if [ -z "$OUT" ]; then
@@ -142,7 +169,7 @@ if [ "$MODE" = "archive" ]; then
   exit 0
 fi
 
-# ── чистка / пробный прогон ──────────────────────────────────────────────────
+# ── чистка / пробный прогон ────────────────────────────────────────────────
 total_kb=0
 found=0
 note() { printf '  %-9s %s\n' "$1" "$2"; }
@@ -151,6 +178,16 @@ echo "Артефакты под $ROOT:"
 for d in "${ARTIFACT_DIRS[@]}"; do
   if [ -d "$d" ]; then
     found=1
+    if [ "$d" = "target" ] && [ -d target/dist ]; then
+      # Готовые пакеты остаются: их собирали, чтобы проверить.
+      kb=$(( $(du -sk target | cut -f1) - $(du -sk target/dist | cut -f1) ))
+      note "$(( kb / 1024 ))M" "target/ (кроме target/dist/ — $(human target/dist) пакетов остаются)"
+      total_kb=$(( total_kb + kb ))
+      if [ "$MODE" = "force" ]; then
+        find target -mindepth 1 -maxdepth 1 ! -name dist -exec rm -rf -- {} +
+      fi
+      continue
+    fi
     note "$(human "$d")" "$d/"
     total_kb=$(( total_kb + $(du -sk "$d" | cut -f1) ))
     [ "$MODE" = "force" ] && rm -rf -- "$d"
@@ -210,6 +247,59 @@ if [ -d win ] || [ -d linux-files ]; then
   echo "  смонтированные диски Windows; трогаются только собранные exe/pdb в их корне."
 fi
 
+# ── стенд Linux ────────────────────────────────────────────────────────────
+if [ "$DO_STAND" -eq 1 ]; then
+  echo
+  echo "Стенд Linux (~/lab/linux):"
+  run="$HOME/lab/linux/run"
+  if [ -d "$run" ]; then
+    note "$(human "$run")" "~/lab/linux/run (прогон: диски ВМ; улики сохраняются в evidence/)"
+    if [ "$MODE" = "force" ]; then
+      python3 -I scripts/lab/linux-vm.py clean || echo "  стенд не очищен (ВМ работает? — linux-vm.py down)"
+    fi
+  else
+    echo "  прогона нет"
+  fi
+  [ -d "$HOME/lab/linux/base" ] && note "$(human "$HOME/lab/linux/base")" "~/lab/linux/base — базовый образ, остаётся"
+  [ -d "$HOME/lab/linux/evidence" ] && note "$(human "$HOME/lab/linux/evidence")" "~/lab/linux/evidence — улики прогонов, остаются"
+fi
+
+# ── рабочие копии и ветки агентов ──────────────────────────────────────────
+if [ "$DO_AGENTS" -eq 1 ]; then
+  echo
+  echo "Агенты (рабочие копии .claude/worktrees и ветки worktree-agent-*):"
+  if [ -d .claude/worktrees ]; then
+    for wt in .claude/worktrees/*/; do
+      [ -d "$wt" ] || continue
+      wt="${wt%/}"
+      if [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]; then
+        note "$(human "$wt")" "$wt — есть незакоммиченные правки, остаётся"
+        continue
+      fi
+      note "$(human "$wt")" "$wt (рабочая копия)"
+      [ "$MODE" = "force" ] && git worktree remove --force "$wt"
+    done
+  fi
+  [ "$MODE" = "force" ] && git worktree prune
+  gone=()
+  for b in $(git branch --format='%(refname:short)' | grep '^worktree-agent-' || true); do
+    if git worktree list --porcelain | grep -qx "branch refs/heads/$b"; then
+      note "" "$b — занята рабочей копией, остаётся"
+    elif git cherry dev "$b" | grep -q '^+'; then
+      note "" "$b — есть правки не из dev ($(git log -1 --format=%cs "$b")), остаётся: $(git log -1 --format=%s "$b" | cut -c1-60)"
+    else
+      note "" "$b (всё уже в dev)"
+      gone+=("$b")
+    fi
+  done
+  if [ "$MODE" = "force" ] && [ ${#gone[@]} -gt 0 ]; then
+    mkdir -p backup
+    bundle="backup/agent-branches-$(date +%Y%m%d-%H%M%S).bundle"
+    git bundle create "$bundle" "${gone[@]}" >/dev/null 2>&1 && echo "  ветки сохранены: $bundle"
+    git branch -D "${gone[@]}" >/dev/null
+  fi
+fi
+
 if [ "$MODE" = "force" ]; then
   echo
   echo "Удалено. ✓  (код, .cargo/config.toml, .ai, design/, image/ на месте)"
@@ -217,6 +307,6 @@ if [ "$MODE" = "force" ]; then
 elif [ "$found" -ne 0 ]; then
   echo
   echo "Это был ПРОБНЫЙ ПРОГОН — ничего не удалено."
-  echo "  удалить:        scripts/clean-artifacts.sh --force"
+  echo "  удалить:        scripts/clean-artifacts.sh --force [--stand] [--agents | --all]"
   echo "  вместо этого архив: scripts/clean-artifacts.sh --archive"
 fi

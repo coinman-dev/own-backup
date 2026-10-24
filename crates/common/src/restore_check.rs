@@ -125,6 +125,18 @@ pub enum CheckCode {
     FormatChoiceIgnored,
     /// The plan puts the machine's UEFI boot entries back from the copy.
     BootEntriesWillBeWritten,
+    /// An operation this system's restore engine does not do (Linux: format,
+    /// extend, drive letters, file-by-file restore).
+    OpUnsupportedHere,
+    /// The restored data carries an identity a device of this machine already
+    /// has (a filesystem, LUKS, LVM or md UUID, a PARTUUID).
+    IdentityClash,
+    /// A partition the target disk has now would be gone after the restore —
+    /// dropped from the new table or covered by it — and the person did not
+    /// delete it: refused.
+    ExistingPartitionLost,
+    /// A partition the person deleted in the designer goes for good.
+    ExistingPartitionRemoved,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -231,6 +243,12 @@ pub struct CheckContext {
     /// checks can say when one of them will not be created after all.
     #[serde(default)]
     pub requested_formats: Vec<RequestedFormat>,
+    /// The plan runs on Linux. Decides which filesystems can be created and
+    /// grown: Windows formats and extends what `FormatEx` and
+    /// `FSCTL_EXTEND_VOLUME` know, Linux what its `mkfs`/grow tools know. Set
+    /// by the service from where it runs, never by the window.
+    #[serde(default)]
+    pub linux_host: bool,
 }
 
 impl CheckContext {
@@ -383,8 +401,69 @@ pub fn check_plan(plan: &RestorePlan, ctx: &CheckContext) -> Vec<CheckResult> {
         check_sector_size(t, ctx, &mut out);
     }
     check_ops(plan, table, ctx, &mut out);
+    if let Some(t) = table {
+        check_existing_partitions(plan, t, ctx, &mut out);
+    }
 
     out
+}
+
+/// What becomes of each partition the target disk has now, under the new
+/// table: kept where it is, deleted by the person, or lost.
+///
+/// A restore writes what the copy holds. A partition that is not in the copy
+/// — another system, a data volume, a BitLocker drive next to the copied ones
+/// (owner, 24.10) — must come through untouched, or be deleted by the person
+/// on purpose. Kept means an entry of the new table starts and ends exactly
+/// where it does: then no operation can reach it except a restore aimed at
+/// it, which the destination checks already speak about — as they do for a
+/// restore into it that grows or shrinks it. Everything else
+/// that is not in [`RestorePlan::removed_parts`] is refused. On Linux how
+/// full a partition is stays unknown without mounting it, so every existing
+/// partition counts as holding data.
+fn check_existing_partitions(
+    plan: &RestorePlan,
+    t: &PartitionTableSpec,
+    ctx: &CheckContext,
+    out: &mut Vec<CheckResult>,
+) {
+    for cur in &ctx.targets {
+        if cur.size_bytes == 0 || cur.offset_bytes == 0 {
+            continue;
+        }
+        let kept = t.entries.iter().any(|e| {
+            e.offset_bytes(t.sector_size) == cur.offset_bytes
+                && e.size_bytes(t.sector_size) == cur.size_bytes
+        });
+        // A restore aimed at it (grown or shrunk to fit, same start): the
+        // destination checks say what is overwritten.
+        let restored_into = plan.ops.iter().any(|op| {
+            matches!(op, RestoreOp::RestorePartition { dst, .. } if dst.offset == cur.offset_bytes)
+        });
+        if kept || restored_into {
+            continue;
+        }
+        let what = describe(cur.index, &cur.label, cur.size_bytes, Some(cur.filesystem));
+        let removed = plan
+            .removed_parts
+            .iter()
+            .any(|r| r.offset_bytes == cur.offset_bytes && r.size_bytes == cur.size_bytes);
+        if removed {
+            out.push(CheckResult::new(
+                CheckLevel::Warning,
+                CheckCode::ExistingPartitionRemoved,
+                None,
+                crate::tr!("restore_check.existing_partition_removed", part = what).into_owned(),
+            ));
+        } else {
+            out.push(CheckResult::new(
+                CheckLevel::Error,
+                CheckCode::ExistingPartitionLost,
+                None,
+                crate::tr!("restore_check.existing_partition_lost", part = what).into_owned(),
+            ));
+        }
+    }
 }
 
 /// Geometry of the table itself: bounds, overlaps, alignment, MBR limits.
@@ -621,7 +700,22 @@ fn check_ops(
                     file_targets.push((dst.index, src.filesystem));
                 }
             }
-            RestoreOp::Format { part, fs, .. } => formatted.push((part.index, *fs)),
+            RestoreOp::Format { part, fs, .. } => {
+                formatted.push((part.index, *fs));
+                if fs.is_linux_family() && !ctx.linux_host {
+                    out.push(CheckResult::new(
+                        CheckLevel::Error,
+                        CheckCode::OpUnsupportedHere,
+                        Some(part.index),
+                        crate::tr!(
+                            "restore_check.format_linux_fs_on_windows",
+                            part = ctx.describe_target(part.index, table),
+                            fs = fs.as_str()
+                        )
+                        .into_owned(),
+                    ));
+                }
+            }
             RestoreOp::ExtendFilesystem { part } => {
                 check_extend(
                     plan,
@@ -659,9 +753,18 @@ fn check_ops(
                 None,
                 crate::tr!("restore_check.boot_entries_will_be_written").into_owned(),
             )),
+            // Windows has none of the tools; on Linux the service adds it
+            // itself, for partitions the plan restores.
+            RestoreOp::ChangeIdentities { .. } if !ctx.linux_host => out.push(CheckResult::new(
+                CheckLevel::Error,
+                CheckCode::OpUnsupportedHere,
+                None,
+                crate::tr!("restore_check.change_identities_linux_only").into_owned(),
+            )),
             RestoreOp::WritePartitionTable { .. }
             | RestoreOp::AssignLetter { .. }
             | RestoreOp::EnsureFallbackBootloader { .. }
+            | RestoreOp::ChangeIdentities { .. }
             | RestoreOp::RefreshDiskState => {}
         }
     }
@@ -954,6 +1057,11 @@ fn check_live_system(
             }
         }
     }
+    // Linux mounts the partitions the boot steps change and writes into them
+    // after the restore (see `RestorePlan::touched_partitions_with`).
+    if cfg!(target_os = "linux") {
+        touched.extend(plan.boot_step_partitions());
+    }
     touched.sort_unstable();
     touched.dedup();
 
@@ -968,16 +1076,31 @@ fn check_live_system(
             .map(|i| ctx.describe_target(*i, table))
             .collect::<Vec<_>>()
             .join("; ");
+        let message = if cfg!(target_os = "linux") {
+            crate::tr!("restore_check.live_system_partitions_linux", list = list)
+        } else {
+            crate::tr!("restore_check.live_system_partitions", list = list)
+        };
         out.push(CheckResult::new(
             CheckLevel::Error,
             CheckCode::TargetIsLiveSystemPartition,
             hit.first().copied(),
-            crate::tr!("restore_check.live_system_partitions", list = list).into_owned(),
+            message.into_owned(),
         ));
         return; // the rest is noise next to this
     }
 
-    if ctx.target_is_system_disk && table.is_some() {
+    // Windows applies a new layout on its system disk through the partition
+    // manager; Linux holds a disk whole to write its table, which a disk the
+    // running system stands on cannot be.
+    if ctx.target_is_system_disk && table.is_some() && cfg!(target_os = "linux") {
+        out.push(CheckResult::new(
+            CheckLevel::Error,
+            CheckCode::LiveSystemDiskLayout,
+            None,
+            crate::tr!("restore_check.live_system_disk_layout_linux").into_owned(),
+        ));
+    } else if ctx.target_is_system_disk && table.is_some() {
         out.push(CheckResult::new(
             CheckLevel::Warning,
             CheckCode::LiveSystemDiskLayout,
@@ -1209,7 +1332,8 @@ fn check_format_capacity(
     }
 }
 
-/// `FSCTL_EXTEND_VOLUME` only exists for NTFS. Work out which filesystem will
+/// `FSCTL_EXTEND_VOLUME` only exists for NTFS; Linux grows ext2/3/4, XFS and
+/// btrfs too ([`CheckContext::linux_host`]). Work out which filesystem will
 /// actually be on the partition by the time the extend runs: the one the image
 /// brings for a sector restore, the one [`RestoreOp::Format`] creates otherwise.
 fn check_extend(
@@ -1233,9 +1357,19 @@ fn check_extend(
         _ => None,
     });
 
+    // Windows grows NTFS only; Linux also its own filesystems (resize2fs,
+    // xfs_growfs, `btrfs filesystem resize`) and NTFS through ntfsresize.
+    let growable = |fs: FileSystem| {
+        fs == FileSystem::Ntfs
+            || (ctx.linux_host
+                && matches!(fs, FileSystem::Ext4 | FileSystem::Xfs | FileSystem::Btrfs))
+    };
+    let growable_format = |fs: crate::restore_plan::FormatFs| {
+        fs == crate::restore_plan::FormatFs::Ntfs || (ctx.linux_host && fs.is_linux_family())
+    };
     let fs_name = match (from_image, from_format) {
-        (Some(FileSystem::Ntfs), _) => return,
-        (_, Some(crate::restore_plan::FormatFs::Ntfs)) => return,
+        (Some(fs), _) if growable(fs) => return,
+        (None, Some(fs)) if growable_format(fs) => return,
         (Some(fs), _) => fs.label().to_string(),
         (None, Some(fs)) => fs.as_str().to_string(),
         (None, None) => {
@@ -1249,16 +1383,24 @@ fn check_extend(
         }
     };
 
-    out.push(CheckResult::new(
-        CheckLevel::Error,
-        CheckCode::ExtendNotNtfs,
-        Some(part.index),
+    let message = if ctx.linux_host {
+        crate::tr!(
+            "restore_check.extend_unsupported_linux",
+            part = part_txt,
+            fs = fs_name
+        )
+    } else {
         crate::tr!(
             "restore_check.extend_not_ntfs",
             part = part_txt,
             fs = fs_name
         )
-        .into_owned(),
+    };
+    out.push(CheckResult::new(
+        CheckLevel::Error,
+        CheckCode::ExtendNotNtfs,
+        Some(part.index),
+        message.into_owned(),
     ));
 }
 
@@ -1313,6 +1455,7 @@ mod tests {
             protected_parts: vec![],
             targets: vec![],
             requested_formats: vec![],
+            linux_host: false,
         }
     }
 
@@ -1499,6 +1642,138 @@ mod tests {
         );
         assert!(
             errors(&results).contains(&CheckCode::FileModeUnsupportedFs),
+            "{results:#?}"
+        );
+    }
+
+    /// The owner's system disk (24.10): ESP from LBA 34, /boot, the LUKS root
+    /// — the copy — and a 347 GB BitLocker partition the copy leaves out.
+    fn owners_disk() -> (Vec<PartitionSpec>, Vec<TargetPartition>) {
+        let spec = |index: u32, first_lba: u64, sectors: u64| PartitionSpec {
+            index,
+            first_lba,
+            last_lba: first_lba + sectors - 1,
+            kind: PartitionKind::Gpt {
+                type_guid: crate::gpt::GPT_TYPE_EFI_SYSTEM.into(),
+                part_guid: String::new(),
+                attributes: 0,
+                name: String::new(),
+            },
+        };
+        let parts = vec![
+            spec(1, 34, 2_686_942),
+            spec(2, 2_686_976, 2_097_152),
+            spec(3, 4_784_128, 268_435_456),
+            spec(4, 273_219_584, 726_994_944),
+        ];
+        let now = parts
+            .iter()
+            .map(|e| TargetPartition {
+                index: e.index,
+                offset_bytes: e.offset_bytes(512),
+                size_bytes: e.size_bytes(512),
+                used_bytes: 0,
+                filesystem: FileSystem::Unknown,
+                label: if e.index == 4 {
+                    "MODULATOR WorkDisk-2".into()
+                } else {
+                    String::new()
+                },
+            })
+            .collect();
+        (parts, now)
+    }
+
+    fn owners_table(entries: Vec<PartitionSpec>) -> PartitionTableSpec {
+        PartitionTableSpec {
+            disk_size_bytes: 1_000_215_216 * 512,
+            ..table(entries)
+        }
+    }
+
+    /// The copy back in place, the fourth partition kept as it is: nothing
+    /// is lost and nothing is said about it.
+    #[test]
+    fn a_partition_the_new_table_keeps_in_place_is_not_lost() {
+        let (parts, now) = owners_disk();
+        let mut c = ctx(vec![]);
+        c.targets = now;
+        let results = check_plan(&plan_with(owners_table(parts), vec![]), &c);
+        assert!(
+            !codes(&results).contains(&CheckCode::ExistingPartitionLost)
+                && !codes(&results).contains(&CheckCode::ExistingPartitionRemoved),
+            "{results:#?}"
+        );
+    }
+
+    /// The table of the copy alone, written over the disk: the BitLocker
+    /// partition would vanish. Refused, and named.
+    #[test]
+    fn a_partition_the_copy_does_not_hold_is_not_dropped_silently() {
+        let (parts, now) = owners_disk();
+        let mut c = ctx(vec![]);
+        c.targets = now;
+        let copy_only = owners_table(parts[..3].to_vec());
+        let results = check_plan(&plan_with(copy_only.clone(), vec![]), &c);
+        let lost: Vec<&CheckResult> = results
+            .iter()
+            .filter(|r| r.code == CheckCode::ExistingPartitionLost)
+            .collect();
+        assert_eq!(lost.len(), 1, "{results:#?}");
+        assert_eq!(lost[0].level, CheckLevel::Error);
+        assert!(
+            lost[0].message.contains("WorkDisk-2"),
+            "{}",
+            lost[0].message
+        );
+
+        // Deleted in the designer on purpose: said, not refused.
+        let mut plan = plan_with(copy_only, vec![]);
+        plan.removed_parts.push(crate::restore_plan::RemovedPart {
+            offset_bytes: 273_219_584 * 512,
+            size_bytes: 726_994_944 * 512,
+        });
+        let results = check_plan(&plan, &c);
+        assert!(!errors(&results).contains(&CheckCode::ExistingPartitionLost));
+        assert!(codes(&results).contains(&CheckCode::ExistingPartitionRemoved));
+    }
+
+    /// Placed somewhere else than where they were — moved by alignment — the
+    /// copy's own partitions are replaced only when the person deleted them;
+    /// a table that just covers them is refused too.
+    #[test]
+    fn a_partition_covered_by_the_new_table_needs_the_person_s_word() {
+        let (parts, now) = owners_disk();
+        let mut c = ctx(vec![]);
+        c.targets = now.clone();
+        let moved: Vec<PartitionSpec> = vec![
+            entry(1, 1, 1312),
+            entry(2, 1313, 1024),
+            entry(3, 2337, 131_072),
+        ]
+        .into_iter()
+        .chain(std::iter::once(parts[3].clone()))
+        .collect();
+        let results = check_plan(&plan_with(owners_table(moved.clone()), vec![]), &c);
+        assert_eq!(
+            errors(&results)
+                .iter()
+                .filter(|c| **c == CheckCode::ExistingPartitionLost)
+                .count(),
+            3,
+            "{results:#?}"
+        );
+        let mut plan = plan_with(owners_table(moved), vec![]);
+        plan.removed_parts = now[..3]
+            .iter()
+            .map(|t| crate::restore_plan::RemovedPart {
+                offset_bytes: t.offset_bytes,
+                size_bytes: t.size_bytes,
+            })
+            .collect();
+        let results = check_plan(&plan, &c);
+        assert!(
+            !errors(&results).contains(&CheckCode::ExistingPartitionLost),
             "{results:#?}"
         );
     }
@@ -1861,6 +2136,84 @@ mod tests {
     }
 
     #[test]
+    fn linux_grows_its_own_filesystems_and_ntfs_but_not_fat() {
+        let t = table(vec![entry(1, 1, 200)]);
+        let p1 = part_ref(&t, 1);
+        let plan = plan_with(
+            t,
+            vec![
+                RestoreOp::RestorePartition {
+                    src_index: 1,
+                    dst: p1,
+                    mode: RestoreMode::Sectors,
+                    wipe_free_space: false,
+                    reencrypt: false,
+                },
+                RestoreOp::ExtendFilesystem { part: p1 },
+            ],
+        );
+        for fs in [
+            FileSystem::Ext4,
+            FileSystem::Xfs,
+            FileSystem::Btrfs,
+            FileSystem::Ntfs,
+        ] {
+            let mut c = ctx(vec![source(1, 100 * MIB, 10 * MIB, fs)]);
+            c.linux_host = true;
+            let results = check_plan(&plan, &c);
+            assert!(errors(&results).is_empty(), "{fs:?}: {results:#?}");
+        }
+        let mut c = ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Fat32)]);
+        c.linux_host = true;
+        let results = check_plan(&plan, &c);
+        assert!(
+            errors(&results).contains(&CheckCode::ExtendNotNtfs),
+            "{results:#?}"
+        );
+    }
+
+    #[test]
+    fn a_linux_filesystem_is_formatted_on_linux_only() {
+        let t = table(vec![entry(1, 1, 200)]);
+        let p1 = part_ref(&t, 1);
+        let plan = plan_with(
+            t,
+            vec![
+                RestoreOp::Format {
+                    part: p1,
+                    fs: FormatFs::Xfs,
+                    label: String::new(),
+                    quick: true,
+                },
+                RestoreOp::ExtendFilesystem { part: p1 },
+            ],
+        );
+        let windows = check_plan(&plan, &ctx(Vec::new()));
+        assert!(
+            errors(&windows).contains(&CheckCode::OpUnsupportedHere),
+            "{windows:#?}"
+        );
+        let mut c = ctx(Vec::new());
+        c.linux_host = true;
+        let linux = check_plan(&plan, &c);
+        assert!(errors(&linux).is_empty(), "{linux:#?}");
+    }
+
+    #[test]
+    fn linux_filesystems_have_plain_wire_names() {
+        for (fs, wire) in [
+            (FormatFs::Ext4, "\"ext4\""),
+            (FormatFs::Xfs, "\"xfs\""),
+            (FormatFs::Btrfs, "\"btrfs\""),
+        ] {
+            assert_eq!(serde_json::to_string(&fs).unwrap(), wire);
+            assert!(fs.is_linux_family());
+        }
+        assert!(FormatFs::Ext4.is_same_as(FileSystem::Ext4));
+        assert!(!FormatFs::Ntfs.is_linux_family());
+    }
+
+    #[test]
     fn formatting_a_sector_restored_partition_is_refused() {
         let t = table(vec![entry(1, 1, 200)]);
         let p1 = part_ref(&t, 1);
@@ -1989,8 +2342,50 @@ mod tests {
         c.target_is_system_disk = true;
         c.protected_parts = vec![1, 3];
         let results = check_plan(&plan, &c);
-        assert!(errors(&results).is_empty(), "{results:#?}");
-        assert!(codes(&results).contains(&CheckCode::LiveSystemDiskLayout));
+        if cfg!(target_os = "linux") {
+            // Linux holds a disk whole to write its table, which a disk the
+            // running system stands on cannot be: the layout change is the
+            // refusal, not the partition.
+            assert_eq!(
+                errors(&results),
+                vec![CheckCode::LiveSystemDiskLayout],
+                "{results:#?}"
+            );
+        } else {
+            assert!(errors(&results).is_empty(), "{results:#?}");
+            assert!(codes(&results).contains(&CheckCode::LiveSystemDiskLayout));
+        }
+    }
+
+    #[test]
+    fn the_fallback_loader_on_the_live_esp_is_shown_as_touching_it_on_linux() {
+        // Partition 1 is the ESP the machine booted through; the plan only
+        // restores partition 8, but its fallback step writes into 1.
+        let t = table(vec![entry(1, 1, 100), entry(8, 101, 200)]);
+        let (p1, p8) = (part_ref(&t, 1), part_ref(&t, 8));
+        let mut plan = plan_with(
+            t,
+            vec![
+                RestoreOp::RestorePartition {
+                    src_index: 1,
+                    dst: p8,
+                    mode: RestoreMode::Sectors,
+                    wipe_free_space: false,
+                    reencrypt: false,
+                },
+                RestoreOp::EnsureFallbackBootloader { esp: p1 },
+            ],
+        );
+        plan.ops
+            .retain(|op| !matches!(op, RestoreOp::WritePartitionTable { .. }));
+        let mut c = ctx(vec![source(1, 100 * MIB, 10 * MIB, FileSystem::Ntfs)]);
+        c.protected_parts = vec![1];
+        let mut results = Vec::new();
+        check_live_system(&plan, None, &c, &mut results);
+        let refused = results
+            .iter()
+            .any(|r| r.code == CheckCode::TargetIsLiveSystemPartition && r.part_index == Some(1));
+        assert_eq!(refused, cfg!(target_os = "linux"), "{results:#?}");
     }
 
     #[test]
@@ -2309,6 +2704,8 @@ mod tests {
             image_path: "x.vhdx".into(),
             verify_after: false,
             target_disk_id: None,
+            target_device: None,
+            removed_parts: Vec::new(),
             ops: vec![RestoreOp::RestorePartition {
                 src_index: 1,
                 dst: wrong,
@@ -2346,6 +2743,8 @@ mod tests {
             image_path: "x.vhdx".into(),
             verify_after: false,
             target_disk_id: None,
+            target_device: None,
+            removed_parts: Vec::new(),
             ops: vec![RestoreOp::RestorePartition {
                 src_index: 2,
                 dst: right,
@@ -2373,6 +2772,8 @@ mod tests {
             image_path: "x.vhdx".into(),
             verify_after: false,
             target_disk_id: None,
+            target_device: None,
+            removed_parts: Vec::new(),
             ops: vec![RestoreOp::RestorePartition {
                 src_index: 1,
                 dst: PartRef {
@@ -2420,6 +2821,8 @@ mod tests {
                 image_path: "x.vhdx".into(),
                 verify_after: false,
                 target_disk_id: None,
+                target_device: None,
+                removed_parts: Vec::new(),
                 ops: vec![RestoreOp::RestorePartition {
                     src_index: 1,
                     dst: bad,

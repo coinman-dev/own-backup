@@ -18,6 +18,9 @@ pub struct Item {
 
 pub const COMMAND_PROMPT: u32 = 1;
 pub const INTERFACE: u32 = 2;
+/// The Linux medium's terminal (`foot`), its counterpart of the console.
+#[cfg_attr(windows, allow(dead_code))]
+pub const TERMINAL: u32 = 3;
 pub const REBOOT: u32 = 90;
 pub const SHUTDOWN: u32 = 91;
 pub const CLOSE: u32 = 92;
@@ -90,9 +93,67 @@ pub fn items(on_medium: bool, tools_found: &[bool]) -> Vec<Item> {
     out
 }
 
+/// The Linux medium's menu: the product, a terminal, and the two ways of
+/// ending the session — the same rule about them as in [`items`].
+///
+/// No tools: [`TOOLS`] are Windows programs the WinPE build copies from the
+/// machine that made it, and the Linux medium has none of them. The product
+/// comes first here because a terminal is the rarer need on a medium whose
+/// window does the work; on WinPE the console is first because for years it
+/// was the medium.
+#[cfg_attr(windows, allow(dead_code))]
+pub fn items_linux(on_medium: bool) -> Vec<Item> {
+    let mut out = vec![
+        Item {
+            id: INTERFACE,
+            text: tr!("menu.interface").into_owned(),
+            separator_above: false,
+        },
+        Item {
+            id: TERMINAL,
+            text: tr!("menu.terminal").into_owned(),
+            separator_above: false,
+        },
+    ];
+    if on_medium {
+        out.push(Item {
+            id: REBOOT,
+            text: tr!("menu.reboot").into_owned(),
+            separator_above: true,
+        });
+        out.push(Item {
+            id: SHUTDOWN,
+            text: tr!("menu.shutdown").into_owned(),
+            separator_above: false,
+        });
+    } else {
+        out.push(Item {
+            id: CLOSE,
+            text: tr!("menu.close").into_owned(),
+            separator_above: true,
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_linux_menu_has_the_product_a_terminal_and_the_way_out() {
+        assert_eq!(
+            ids(&items_linux(true)),
+            vec![INTERFACE, TERMINAL, REBOOT, SHUTDOWN]
+        );
+        assert_eq!(ids(&items_linux(false)), vec![INTERFACE, TERMINAL, CLOSE]);
+        let separators: Vec<u32> = items_linux(true)
+            .iter()
+            .filter(|i| i.separator_above)
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(separators, vec![REBOOT], "one line above the way out");
+    }
 
     fn ids(items: &[Item]) -> Vec<u32> {
         items.iter().map(|i| i.id).collect()

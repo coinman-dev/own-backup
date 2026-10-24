@@ -1,5 +1,5 @@
 //! Test-only published metadata/parent-link updates at actual commit edges.
-use std::io::{BufWriter, Write};
+use std::io::BufWriter;
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
@@ -25,6 +25,7 @@ const CASES: &[(&str, Point, bool, bool)] = &[
         true,
     ),
 ];
+#[allow(dead_code)]
 fn case(name: &str) -> (Point, bool, bool) {
     let (_, at, link, legacy) = CASES
         .iter()

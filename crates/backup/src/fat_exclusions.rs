@@ -18,7 +18,7 @@ use tracing::info;
 
 use own_backup_common::Result;
 
-use crate::exclusions::{parse_patterns, ByteRanges, CategorySizes};
+use crate::exclusions::{parse_patterns, ByteRanges, CategorySizes, LeftInCopy, LeftReason};
 use crate::fat_map::{parse_fat32_geometry, Fat32Geometry, RawVolume};
 
 /// Result of a FAT32 exclusion walk.
@@ -34,6 +34,9 @@ pub struct FatExclusionScan {
     /// image via [`MultiPatchReader`](crate::block_reader::MultiPatchReader).
     /// Offsets are volume-relative; patches never overlap.
     pub patches: Vec<(u64, Vec<u8>)>,
+    /// Matched entries whose content is still in the copy, and directories
+    /// the walk could not enter (`exclusions::key_store_left_behind`).
+    pub left: Vec<LeftInCopy>,
 }
 
 impl FatExclusionScan {
@@ -45,6 +48,7 @@ impl FatExclusionScan {
             bytes_excluded: 0,
             categories: CategorySizes::default(),
             patches: Vec::new(),
+            left: Vec::new(),
         }
     }
 }
@@ -85,7 +89,14 @@ pub fn scan_fat32_exclusions(
 
     while let Some((dir_cluster, rel, subtree_excluded)) = stack.pop() {
         if !visited.insert(dir_cluster) {
-            continue; // already walked (or a chain loop) — skip
+            // Already walked (or a chain loop) — skip. Reached again inside
+            // an excluded subtree, it was walked under another name that may
+            // not have been: what it holds may still be in the copy.
+            if subtree_excluded {
+                scan.left
+                    .push(LeftInCopy::new(&rel, LeftReason::Unreadable));
+            }
+            continue;
         }
         walk_directory(
             vol,
@@ -105,6 +116,15 @@ pub fn scan_fat32_exclusions(
 
     // Free every excluded cluster's FAT entry in all FAT copies.
     append_fat32_free_patches(&geom, &mut freed_clusters, &mut scan.patches);
+    // …and count them free in FSInfo, or the filesystem says it has less
+    // space than it has (fsck.fat: «Free cluster summary wrong»).
+    append_fsinfo_patches(
+        vol,
+        &boot,
+        &geom,
+        freed_clusters.len() as u64,
+        &mut scan.patches,
+    )?;
 
     scan.ranges.finalize();
     info!(
@@ -145,6 +165,50 @@ fn append_fat32_free_patches(
         }
         i = j + 1;
     }
+}
+
+/// Add `freed` clusters to the free count of the FSInfo sector and of its
+/// backup copy (FAT32 §6). Only a sector that carries all three FSInfo
+/// signatures and a known count (not `0xFFFFFFFF`) is touched; the next-free
+/// hint stays as it is — it is only a hint.
+fn append_fsinfo_patches(
+    vol: &mut dyn RawVolume,
+    boot: &[u8; 512],
+    geom: &Fat32Geometry,
+    freed: u64,
+    patches: &mut Vec<(u64, Vec<u8>)>,
+) -> Result<()> {
+    if freed == 0 {
+        return Ok(());
+    }
+    let fsinfo = u16::from_le_bytes([boot[48], boot[49]]) as u64;
+    let backup_boot = u16::from_le_bytes([boot[50], boot[51]]) as u64;
+    if fsinfo == 0 || fsinfo == 0xFFFF {
+        return Ok(());
+    }
+    let mut sectors = vec![fsinfo];
+    if backup_boot != 0 && backup_boot != 0xFFFF {
+        sectors.push(backup_boot + fsinfo);
+    }
+    let le32 = |b: &[u8], o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+    let mut sector = [0u8; 512];
+    for n in sectors {
+        let at = n * geom.bytes_per_sector;
+        if at + 512 > vol.len() {
+            continue;
+        }
+        vol.read_at(at, &mut sector)?;
+        let signed = le32(&sector, 0) == 0x4161_5252
+            && le32(&sector, 484) == 0x6141_7272
+            && le32(&sector, 508) == 0xAA55_0000;
+        let count = le32(&sector, 488);
+        if !signed || count == 0xFFFF_FFFF {
+            continue;
+        }
+        let new = (count as u64 + freed).min(geom.cluster_count) as u32;
+        patches.push((at + 488, new.to_le_bytes().to_vec()));
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -388,6 +452,28 @@ struct Pending {
     entries: Vec<(u64, u8)>,
 }
 
+/// A file entry set dropped before it was complete: its name was never
+/// matched and, for a directory, nothing under it was walked. Said in
+/// `scan.left`, so a copy that must prove the key directory gone does not
+/// take silence for it.
+fn abandon_exfat_set(
+    pending: Option<Pending>,
+    rel: &[String],
+    subtree_excluded: bool,
+    scan: &mut FatExclusionScan,
+) {
+    let Some(p) = pending else { return };
+    let mut path = rel.to_vec();
+    path.push(String::from_utf16_lossy(&p.name).to_lowercase());
+    if p.is_dir {
+        scan.left
+            .push(LeftInCopy::new(&path, LeftReason::SubtreeNotWalked));
+    } else if subtree_excluded {
+        scan.left
+            .push(LeftInCopy::new(&path, LeftReason::Unreadable));
+    }
+}
+
 /// Walk an exFAT volume, collecting the cluster byte-ranges of matched files.
 pub fn scan_exfat_exclusions(
     vol: &mut dyn RawVolume,
@@ -440,12 +526,14 @@ pub fn scan_exfat_exclusions(
                     break 'dir;
                 }
                 if etype & 0x80 == 0 {
-                    pending = None; // not-in-use entry: drop any partial set
+                    // not-in-use entry: drop any partial set
+                    abandon_exfat_set(pending.take(), &rel, subtree_excluded, &mut scan);
                     continue;
                 }
                 match etype {
                     EXFAT_FILE => {
                         let attrs = u16le(rec, 4);
+                        abandon_exfat_set(pending.take(), &rel, subtree_excluded, &mut scan);
                         pending = Some(Pending {
                             is_dir: attrs & EXFAT_ATTR_DIRECTORY != 0,
                             name: Vec::new(),
@@ -481,7 +569,11 @@ pub fn scan_exfat_exclusions(
                         }
                     }
                     _ => {
-                        pending = None; // bitmap / upcase / volume label
+                        // Bitmap / upcase / volume label — or a secondary
+                        // entry of a set this walk does not follow (vendor
+                        // extension or allocation), which ends that set
+                        // unevaluated.
+                        abandon_exfat_set(pending.take(), &rel, subtree_excluded, &mut scan);
                         continue;
                     }
                 }
@@ -516,6 +608,7 @@ pub fn scan_exfat_exclusions(
             };
             walked += 1;
         }
+        abandon_exfat_set(pending.take(), &rel, subtree_excluded, &mut scan);
     }
 
     // --- Metadata patches for true removal ---
@@ -722,6 +815,37 @@ fn exfat_file_ranges(
 mod tests {
     use super::*;
     use own_backup_common::OwnBackupError;
+
+    /// An exFAT entry set dropped unevaluated (a vendor secondary entry the
+    /// walk does not follow) is said: a directory as not walked, a file
+    /// inside an excluded subtree as content left behind.
+    #[test]
+    fn an_abandoned_exfat_set_is_reported() {
+        let pending = |is_dir: bool| Pending {
+            is_dir,
+            name: "Keys".encode_utf16().collect(),
+            name_len: 4,
+            first_cluster: 0,
+            data_length: 0,
+            no_fat_chain: false,
+            remaining: 1,
+            entries: Vec::new(),
+        };
+        let mut scan = FatExclusionScan::empty();
+        let rel = vec!["a".to_string()];
+        abandon_exfat_set(None, &rel, true, &mut scan);
+        abandon_exfat_set(Some(pending(false)), &rel, false, &mut scan);
+        assert!(scan.left.is_empty(), "a file outside the rules is not ours");
+        abandon_exfat_set(Some(pending(true)), &rel, false, &mut scan);
+        abandon_exfat_set(Some(pending(false)), &rel, true, &mut scan);
+        assert_eq!(
+            scan.left,
+            vec![
+                LeftInCopy::new(&["a".into(), "keys".into()], LeftReason::SubtreeNotWalked),
+                LeftInCopy::new(&["a".into(), "keys".into()], LeftReason::Unreadable),
+            ]
+        );
+    }
 
     struct MemVolume(Vec<u8>);
     impl RawVolume for MemVolume {

@@ -96,6 +96,7 @@ mod audit {
                 if shape == "disk" {
                     job.disk_source = Some(DiskSourceSpec {
                         disk_number: 1,
+                        device: None,
                         disk_model: "A07 disposable disk".into(),
                         bootable: false,
                         parts: vec![DiskPartSpec {

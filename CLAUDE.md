@@ -13,15 +13,18 @@ Historical open/closed labels are not current status.
 
 ## Product and release
 
-- Windows first; Linux product support is deferred. Linux trait mocks do not
-  establish real Windows behavior (VSS, raw devices, filesystem drivers, DPAPI).
+- Current focus (owner decision 2026-10-18): full Linux parity with the Windows
+  version, shipped as a `.deb` for Ubuntu 24.04+ and Debian 13+ (amd64). Work
+  happens on the owner's Linux machine. The Windows version must not regress;
+  Linux trait mocks do not establish real Windows behavior (VSS, raw devices,
+  filesystem drivers, DPAPI). Linux plan: `.ai/PLAN.md` section 6.
 - Source-available under PolyForm Noncommercial 1.0.0; commercial use needs a
   separate license. Do not describe it as OSI open source. Preserve LICENSE,
   NOTICE, COMMERCIAL-LICENSE.md and THIRD-PARTY-NOTICES.md in distribution.
 - Work, commit and push on `dev`; commit messages are Russian. `main`, tags,
   releases and installed-owner-app updates require the corresponding task.
-- Build only in WSL. Full installer: `scripts/build-installer.sh`.
-  Windows artifacts go to `win/`. Installer source
+- Build in the working checkout on the Linux machine (see AGENTS.md). Full
+  Windows installer: `scripts/build-installer.sh`; Windows artifacts go to `win/`. Installer source
   `packaging/windows/own-backup.nsi` must retain its UTF-8 BOM.
 - Installer controls the service through its own `/install`, `/stop`, `/start`,
   `/uninstall` commands. Do not parse localized `sc`/`taskkill` output or expose

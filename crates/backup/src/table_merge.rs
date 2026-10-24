@@ -266,8 +266,111 @@ pub fn describe_disk(disk: &DiskLayout) -> Vec<String> {
         .collect()
 }
 
+/// What becomes of the partitions a disk has now when a whole-disk copy is
+/// written over it.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Bystanders {
+    /// Not in the copy and clear of every partition it holds: written back
+    /// into the new table exactly as they are, so their data stays reachable.
+    pub kept: Vec<GptPartitionEntry>,
+    /// Partly under a partition of the copy without being one of its places:
+    /// the copy would destroy them.
+    pub overwritten: Vec<GptPartitionEntry>,
+}
+
+/// Sort the disk's current partitions against the copy's layout.
+///
+/// A whole-disk restore puts back what the copy holds. A partition exactly
+/// where one of the copy's is (the disk the copy came from) is that one, and
+/// is replaced. One that no partition of the copy touches — another system,
+/// a data volume, the 347 GB BitLocker partition next to the copied ones on
+/// the owner's disk (24.10) — is kept, entry and all: writing the copy's table
+/// alone used to drop it, and its data was left without a partition. One the
+/// copy would partly cover is lost unless the person agrees to it.
+pub fn bystanders(copy: &DiskLayout, current: &DiskLayout) -> Bystanders {
+    let mut out = Bystanders::default();
+    for cur in &current.partitions {
+        let same = copy
+            .partitions
+            .iter()
+            .any(|c| c.first_lba == cur.first_lba && c.last_lba == cur.last_lba);
+        if same {
+            continue;
+        }
+        let touched = copy
+            .partitions
+            .iter()
+            .any(|c| c.first_lba <= cur.last_lba && cur.first_lba <= c.last_lba);
+        if touched {
+            out.overwritten.push(cur.clone());
+        } else {
+            out.kept.push(cur.clone());
+        }
+    }
+    out
+}
+
+/// The copy's layout with `kept` added, each under its own number unless the
+/// copy uses it — then under the lowest free one.
+pub fn with_bystanders(copy: &DiskLayout, kept: &[GptPartitionEntry]) -> DiskLayout {
+    let mut out = copy.clone();
+    for k in kept {
+        let mut entry = k.clone();
+        if out.partitions.iter().any(|p| p.index == entry.index) {
+            entry.index = (1..)
+                .find(|i| !out.partitions.iter().any(|p| p.index == *i))
+                .unwrap_or(entry.index);
+        }
+        out.partitions.push(entry);
+    }
+    out.partitions.sort_by_key(|p| p.first_lba);
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    /// The owner's disk: the copy holds ESP, /boot and the LUKS root; the
+    /// BitLocker partition right after them is kept, entry and all.
+    #[test]
+    fn a_partition_beside_the_copy_is_kept_and_one_under_it_is_not() {
+        use own_backup_common::gpt::{DiskLayout, GptPartitionEntry};
+        let part = |index: u32, first_lba: u64, last_lba: u64, name: &str| GptPartitionEntry {
+            index,
+            type_guid: "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7".into(),
+            part_guid: format!("00000000-0000-0000-0000-00000000000{index}"),
+            first_lba,
+            last_lba,
+            attributes: 0,
+            name: name.into(),
+        };
+        let layout = |partitions: Vec<GptPartitionEntry>| DiskLayout {
+            disk_guid: String::new(),
+            sector_size: 512,
+            size_bytes: 1_000_215_216 * 512,
+            partitions,
+        };
+        let copy = layout(vec![
+            part(1, 34, 2_686_975, "EFI"),
+            part(2, 2_686_976, 4_784_127, ""),
+            part(3, 4_784_128, 273_219_583, ""),
+        ]);
+        let mut now = copy.partitions.clone();
+        now.push(part(4, 273_219_584, 1_000_214_527, "Basic data partition"));
+        let found = super::bystanders(&copy, &layout(now.clone()));
+        assert!(found.overwritten.is_empty());
+        assert_eq!(found.kept, vec![now[3].clone()]);
+        let written = super::with_bystanders(&copy, &found.kept);
+        assert_eq!(written.partitions.len(), 4);
+        assert_eq!(written.partitions[3], now[3], "verbatim, number and all");
+
+        // A spare disk laid out differently: its partition under the copy's
+        // root is not kept, and is said to be overwritten.
+        let other = layout(vec![part(1, 2048, 400_000_000, "old")]);
+        let found = super::bystanders(&copy, &other);
+        assert!(found.kept.is_empty());
+        assert_eq!(found.overwritten.len(), 1);
+    }
+
     use super::*;
     use own_backup_common::restore_plan::PartitionScheme;
 

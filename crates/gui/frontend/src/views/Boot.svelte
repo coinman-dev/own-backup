@@ -11,10 +11,12 @@
   // Копия всей конфигурации снимается службой перед каждым изменением, без
   // спроса: у правки в прошивке нет своей отмены.
   import { onMount } from 'svelte';
-  import { api } from '../lib/api';
+  import { api, errorCode, errorText } from '../lib/api';
   import { engine, refreshVolumes } from '../lib/engineStore.svelte';
   import type { BootStatus, BootEntry, DiskInfo, Esp, EspLoader } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
+  import { isWindows } from '../lib/platformStore.svelte';
+  import Modal from '../components/Modal.svelte';
 
   let status = $state<BootStatus | null>(null);
   let busy = $state(false);
@@ -45,13 +47,20 @@
     )
   );
 
+  // The service answers `unimplemented` where it does not read the entries
+  // (a system other than Windows and Linux). That is a state of the page, not an error to retry:
+  // without it the page sat on «Читаем…» under a red line for good.
+  let unavailable = $state(false);
+
   async function refresh() {
     busy = true;
     err = null;
     try {
       status = await api.bootStatus();
+      unavailable = false;
     } catch (e) {
-      err = String(e);
+      if (errorCode(e) === 'unimplemented') unavailable = true;
+      else err = errorText(e);
     } finally {
       busy = false;
     }
@@ -94,21 +103,39 @@
     await act({ action: 'move', entry: e.number, to: e.in_menu + delta });
   }
 
-  async function remove(e: BootEntry) {
-    const tail = e.file ? '\n\n' + m.boot_delete_confirm_file({ file: e.file }) : '';
-    if (!confirm(m.boot_delete_confirm({ name: e.name }) + tail)) return;
-    await act({ action: 'delete', entry: e.number });
+  // Questions are asked in the window's own dialog, not with confirm() and
+  // prompt(): WebKitGTK answers confirm() with "yes" without showing
+  // anything, and an entry was deleted unasked (stand, 2026-10-22).
+  let deleting = $state<BootEntry | null>(null);
+  let adding = $state<{ esp: Esp; loader: EspLoader } | null>(null);
+  let newName = $state('');
+
+  function remove(e: BootEntry) {
+    deleting = e;
   }
 
-  async function addEntry(esp: Esp, loader: EspLoader) {
-    const name = prompt(m.boot_new_entry_prompt(), suggestName(loader));
-    if (!name) return;
+  async function confirmRemove() {
+    const e = deleting;
+    deleting = null;
+    if (e) await act({ action: 'delete', entry: e.number });
+  }
+
+  function addEntry(esp: Esp, loader: EspLoader) {
+    newName = suggestName(loader);
+    adding = { esp, loader };
+  }
+
+  async function confirmAdd() {
+    const a = adding;
+    const name = newName.trim();
+    if (!a || !name) return;
+    adding = null;
     await act({
       action: 'create',
       name,
-      disk: esp.disk,
-      partition: esp.partition,
-      file: loader.path,
+      disk: a.esp.disk,
+      partition: a.esp.partition,
+      file: a.loader.path,
     });
   }
 
@@ -116,12 +143,17 @@
   // того же перечисления дисков, что показывает мастер копирования: служба
   // отдаёт в записях только номер, а номер — это то, чем диски отличаются друг
   // от друга меньше всего.
-  function diskLabel(n: number): string {
+  // In Linux a disk is its kernel device, the same string the inventory
+  // calls it by; shown without `/dev/`.
+  function diskLabel(disk: number | string): string {
     const d = engine.disks.find((x: DiskInfo) => {
+      if (typeof disk === 'string') return x.device_id === disk;
       const tail = x.device_id.match(/(\d+)$/);
-      return tail ? Number(tail[1]) === n : false;
+      return tail ? Number(tail[1]) === disk : false;
     });
-    return d ? m.boot_disk_model({ n, model: d.model }) : m.boot_disk({ n });
+    const n = typeof disk === 'string' ? disk.replace(/^\/dev\//, '') : disk;
+    // A virtual disk reports no model: «диск vdb: » said nothing more.
+    return d?.model.trim() ? m.boot_disk_model({ n, model: d.model.trim() }) : m.boot_disk({ n });
   }
 
   // Что предложить в качестве названия. Служба уже опознала файл — её ответ
@@ -131,6 +163,11 @@
     // before the flag said so with the Russian word, always.
     const generic = l.generic ?? l.kind === 'загрузчик';
     return generic ? (l.path.split('\\').filter(Boolean)[1] ?? m.boot_default_entry_name()) : l.kind;
+  }
+
+  // A service from before `safety_copy_dir` was always on Windows.
+  function defaultCopyDir(): string {
+    return isWindows() ? 'C:\\ProgramData\\OwnBackup\\boot' : '/var/lib/own-backup/boot';
   }
 
   onMount(() => {
@@ -149,7 +186,11 @@
     {#if msg}<div class="banner ok">{msg}</div>{/if}
     {#if warn}<div class="banner warn">{warn()}</div>{/if}
 
-    {#if status && !status.uefi}
+    {#if unavailable}
+      <div class="card">
+        <div class="muted">{m.boot_unavailable()}</div>
+      </div>
+    {:else if status && !status.uefi}
       <div class="card">
         <div class="muted">{status.message ?? m.boot_not_uefi()}</div>
       </div>
@@ -237,7 +278,9 @@
 
         <div class="meta dim">{m.boot_one_time_menu_note()}</div>
 
-        <div class="meta dim">{m.boot_stored_in_firmware_note()}</div>
+        <div class="meta dim">
+          {m.boot_stored_in_firmware_note({ dir: status.safety_copy_dir ?? defaultCopyDir() })}
+        </div>
       </div>
 
       {#if orphans.length > 0}
@@ -304,13 +347,58 @@
           </div>
         {/each}
       </div>
-    {:else}
+    {:else if busy || !err}
+      <!-- A failed read is said by the banner above; «Читаем…» under it would
+           promise an answer that is not coming. -->
       <div class="card"><div class="muted">{m.boot_reading()}</div></div>
     {/if}
   </div>
 </div>
 
+{#if deleting}
+  <Modal
+    open
+    danger
+    title={m.boot_delete_entry()}
+    confirmLabel={m.boot_delete_entry()}
+    onClose={() => (deleting = null)}
+    onConfirm={confirmRemove}
+  >
+    <p>{m.boot_delete_confirm({ name: deleting.name })}</p>
+    {#if deleting.file}<p class="muted">{m.boot_delete_confirm_file({ file: deleting.file })}</p>{/if}
+  </Modal>
+{/if}
+
+{#if adding}
+  <Modal
+    open
+    title={m.boot_add_to_menu()}
+    confirmLabel={m.boot_add_to_menu()}
+    confirmDisabled={!newName.trim()}
+    onClose={() => (adding = null)}
+    onConfirm={confirmAdd}
+  >
+    <label class="new-name">
+      <span>{m.boot_new_entry_prompt()}</span>
+      <!-- svelte-ignore a11y_autofocus -->
+      <input
+        class="form-input"
+        type="text"
+        spellcheck="false"
+        bind:value={newName}
+        autofocus
+        onkeydown={(ev) => {
+          if (ev.key === 'Enter') confirmAdd();
+        }}
+      />
+    </label>
+    <p class="muted loader-path">{adding.loader.path}</p>
+  </Modal>
+{/if}
+
 <style>
+  .new-name { display: flex; flex-direction: column; gap: 6px; }
+  .loader-path { margin-top: 8px; }
   /* Прокрутка принадлежит краю окна, а не колонке содержимого. */
   .page { overflow: auto; height: 100%; }
   .inner { padding: 30px 44px; }

@@ -1492,6 +1492,7 @@ mod tests {
             source_os: "windows".into(),
             source_disk: DiskInfo {
                 device_id: r"\\.\PhysicalDrive0".into(),
+                stable_device: String::new(),
                 model: "Test SSD".into(),
                 serial: "S1".into(),
                 size_bytes: 1024 * 1024,

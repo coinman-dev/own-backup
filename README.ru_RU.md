@@ -5,11 +5,12 @@
 </p>
 
 <h1 align="center">Own Backup</h1>
-<p align="center">Резервное копирование дисков и томов Windows блок за блоком — и загрузочный носитель, с которого их можно вернуть.</p>
+<p align="center">Резервное копирование дисков и томов Windows и Linux блок за блоком — и загрузочные носители, с которых их можно вернуть.</p>
 
-[![Релиз](https://img.shields.io/badge/release-0.1.5--beta-orange)](https://github.com/coinman-dev/own-backup/releases/tag/v0.1.5-beta)
+[![Релиз](https://img.shields.io/badge/release-0.1.6--beta-orange)](https://github.com/coinman-dev/own-backup/releases/tag/v0.1.6-beta)
 [![Сборка](https://github.com/coinman-dev/own-backup/actions/workflows/release.yml/badge.svg)](https://github.com/coinman-dev/own-backup/actions/workflows/release.yml)
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-blue)](#скачать)
+[![Linux](https://img.shields.io/badge/Linux-Ubuntu%2024.04%2B%20%2F%20Debian%2013%2B-blue)](#скачать)
 [![Rust](https://img.shields.io/badge/Rust-1.98-orange)](#сборка)
 [![Лицензия](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue)](LICENSE)
 
@@ -19,20 +20,23 @@
 файлы, а с загрузочного носителя — и тот диск, с которого загружается сама
 Windows.
 
-> **0.1.5-beta — предварительный релиз для Windows.** Важную копию проверьте
-> восстановлением на запасной диск или в виртуальную машину, прежде чем на неё
-> полагаться. Код для Linux нужен для разработки и тестов; версии для Linux
-> пока нет.
+> **0.1.6-beta — предварительный релиз, первый с версией для Linux.** Важную
+> копию проверьте восстановлением на запасной диск или в виртуальную машину,
+> прежде чем на неё полагаться, — в Linux особенно: эта версия новая.
 
 ## Скачать
 
 | Вариант | Скачать | Как использовать |
 |---|---|---|
-| Установщик | [own-backup-install.exe](https://github.com/coinman-dev/own-backup/releases/download/v0.1.5-beta/own-backup-install.exe) | Ставит программу для всех пользователей компьютера и запускает её службу. Нужны права администратора. |
+| Установщик для Windows | [own-backup-install.exe](https://github.com/coinman-dev/own-backup/releases/download/v0.1.6-beta/own-backup-install.exe) | Ставит программу для всех пользователей компьютера и запускает её службу. Нужны права администратора. |
+| Пакет для Linux | [own-backup_0.1.6.beta-1_amd64.deb](https://github.com/coinman-dev/own-backup/releases/download/v0.1.6-beta/own-backup_0.1.6.beta-1_amd64.deb) | `sudo apt install ./own-backup_0.1.6.beta-1_amd64.deb` ставит программу, запускает её службу и добавляет вас в группу `own-backup` (войдите в систему заново, чтобы открыть окно). |
+| Загрузочный носитель Linux | [OwnBackup-Linux-0.1.6.beta-1_amd64.iso](https://github.com/coinman-dev/own-backup/releases/download/v0.1.6-beta/OwnBackup-Linux-0.1.6.beta-1_amd64.iso) | Загружает компьютер с диска или флешки (UEFI с Secure Boot или BIOS), чтобы сделать копию его дисков или восстановить их, в том числе диски Windows. Окно записывает его на флешку. |
 
 Windows 10/11, x64. Окну программы нужен Microsoft Edge WebView2 Runtime — в
 Windows 11 он есть, а если его нет в Windows 10, установщик об этом скажет.
-Нет рекламы, телеметрии и проверки обновлений.
+Linux: Ubuntu 24.04 и новее, Debian 13 и новее, amd64; WebKitGTK и всё
+остальное, что нужно окну, пакет ставит сам. Нет рекламы, телеметрии и
+проверки обновлений.
 [Все релизы](https://github.com/coinman-dev/own-backup/releases) ·
 [Изменения](CHANGELOG.ru_RU.md).
 
@@ -82,8 +86,12 @@ Windows 11 он есть, а если его нет в Windows 10, устано�
 - Исключения на NTFS/ReFS и FAT32/exFAT приняты живыми прогонами. Для
   ext2/3/4 и btrfs есть проверки файловой системы и тесты с монтированием и
   записью.
-- Для XFS удаление не доделано для некоторых видов каталогов; часть
-  исключённых имён может остаться записями, заполненными нулями.
+- На ext4, XFS и btrfs файл, который нельзя безопасно удалить, остаётся
+  записью с обнулённым содержимым; итог запуска называет, сколько таких.
+- Linux: работающий том копируется со снимка LVM или device-mapper. Занятый
+  обычный раздел (корень ext4 без LVM и LUKS) на ходу не удержать — копируйте
+  его с загрузочного носителя. Группа томов на нескольких дисках копируется
+  только с предупреждением.
 - Исключения внутри зашифрованного ReFS могут быть пропущены — с явным
   предупреждением в результате.
 - У новых образов `.obk` два поколения заголовка. Носитель, собранный старой
@@ -101,6 +109,10 @@ Windows 11 он есть, а если его нет в Windows 10, устано�
 | Журнал службы, файл на день, хранится тридцать дней | `Logs\own-backup-service-<дата>.log` в папке программы |
 | Что помнит окно: тема, язык | `%LOCALAPPDATA%\com.ownbackup.gui` |
 | Резервные копии | там, где указано в задании; своих копий программа не держит |
+
+В Linux программа лежит в `/usr/bin` и `/usr/libexec/own-backup`, настройки,
+задания и ключи — в `/var/lib/own-backup`, журнал службы — в journald
+(`journalctl -u own-backup`) и в `/var/log/own-backup`.
 
 Повторный запуск установщика обновляет программу на месте. Деинсталлятор
 оставляет настройки, если не сказать иначе, тихое удаление оставляет их
@@ -132,7 +144,13 @@ cargo xwin check --workspace --locked --target x86_64-pc-windows-msvc
 
 sudo apt install nsis           # один раз, ради makensis
 scripts/build-installer.sh      # target/dist/own-backup-install.exe
+scripts/build-deb.sh            # target/dist/own-backup_<версия>_amd64.deb
+scripts/build-linux-media.sh    # target/dist/own-backup-media_<версия>_amd64.iso
 ```
+
+Пакет `.deb` собирайте в Ubuntu 24.04, самой старой поддерживаемой системе:
+он требует те glibc и WebKitGTK, с которыми собран. Носителю нужны root,
+`debootstrap` и зеркало Debian.
 
 Последний скрипт собирает страницы окна и четыре исполняемых файла через
 `cargo xwin` и упаковывает их NSIS
@@ -146,13 +164,14 @@ scripts/build-installer.sh      # target/dist/own-backup-install.exe
 
 ## Автоматические релизы
 
-Тег версии, например `v0.1.5-beta`, запускает
+Тег версии, например `v0.1.6-beta`, запускает
 [сборку релиза](.github/workflows/release.yml). Тег должен совпадать с версией
 в `Cargo.toml`. GitHub собирает исполняемые файлы для Windows x64, упаковывает
 установщик, ставит и удаляет его на сборочной машине, считает суммы SHA-256 и
 публикует релиз только когда файлы готовы. Версия с суффиксом помечается как
 предварительная. Сборку можно запустить и вручную — для существующего тега
-или пробно, без публикации.
+или пробно, без публикации. Пакет и носитель для Linux собираются локально и
+добавляются в релиз.
 
 ## Лицензия
 

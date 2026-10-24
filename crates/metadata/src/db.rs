@@ -8,16 +8,10 @@ pub const SCHEMA_VERSION: u32 = 2;
 
 /// Open (or create) the SQLite database at `path`, enable WAL mode, and run migrations.
 pub fn open_database(path: &Path) -> Result<Connection> {
-    let conn = Connection::open(path).map_err(|e| OwnBackupError::Database(e.to_string()))?;
-
-    // Restrict DB file to owner (root) and group (own-backup) only (0o640).
-    // The database contains encryption_salt in manifest_json, job configs, and file paths.
-    // If world-readable (0o644), any local user could extract sensitive information.
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640))?;
-    }
+    restrict_to_owner(path)?;
+
+    let conn = Connection::open(path).map_err(|e| OwnBackupError::Database(e.to_string()))?;
 
     // Enable WAL for better concurrent read performance.
     conn.execute_batch("PRAGMA journal_mode=WAL;")
@@ -29,6 +23,37 @@ pub fn open_database(path: &Path) -> Result<Connection> {
 
     run_migrations(&conn)?;
     Ok(conn)
+}
+
+/// Make the database and its `-wal`/`-shm` owner-only (0600) before SQLite
+/// opens them.
+///
+/// The database holds encryption salts in manifests, job configurations and
+/// file paths. It used to be chmod-ed to 0640 only AFTER the open — which had
+/// already created it with the umask — and never given a group, while the WAL
+/// and the shared-memory file kept the umask's 0644. SQLite creates a new
+/// `-wal`/`-shm` with the mode of the database file itself, so creating the
+/// database owner-only covers them too; ones left by an earlier run are
+/// narrowed here. An empty file is a valid empty database.
+#[cfg(unix)]
+fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let db = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)?;
+    db.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    for suffix in ["-wal", "-shm"] {
+        let mut side = path.as_os_str().to_owned();
+        side.push(suffix);
+        match std::fs::set_permissions(&side, std::fs::Permissions::from_mode(0o600)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Open the service-only store for remembered volume passwords. The caller is
@@ -196,5 +221,39 @@ mod tests {
             })
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    /// The database and both WAL-mode side files are owner-only — a fresh one,
+    /// and one an older build left with the umask's modes.
+    #[cfg(unix)]
+    #[test]
+    fn database_and_its_side_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("metadata.db");
+        let wal = dir.path().join("metadata.db-wal");
+        let shm = dir.path().join("metadata.db-shm");
+
+        let conn = open_database(&db_path).unwrap();
+        conn.execute_batch("INSERT INTO schema_version VALUES (99, 'now');")
+            .unwrap();
+        assert!(
+            wal.exists() && shm.exists(),
+            "WAL mode keeps both while open"
+        );
+        for p in [&db_path, &wal, &shm] {
+            assert_eq!(mode(p), 0o600, "{}", p.display());
+        }
+        drop(conn);
+
+        // As an older build left them: the umask's mode, and a WAL a crash
+        // kept (an empty one is a valid, empty log).
+        std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::write(&wal, b"").unwrap();
+        std::fs::set_permissions(&wal, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let _conn = open_database(&db_path).unwrap();
+        assert_eq!(mode(&db_path), 0o600);
+        assert_eq!(mode(&wal), 0o600);
     }
 }

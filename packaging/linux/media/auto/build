@@ -1,0 +1,13 @@
+#!/bin/sh
+# `lb build` with its log kept beside the result (build-media.sh passes the
+# output on as it comes). The status is lb's, not tee's.
+set -e
+status=build.status
+{
+    rc=0
+    lb build noauto "${@}" 2>&1 || rc=$?
+    echo "$rc" >"$status"
+} | tee build.log
+rc="$(cat "$status")"
+rm -f "$status"
+exit "$rc"

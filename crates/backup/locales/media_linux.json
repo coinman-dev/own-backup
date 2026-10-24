@@ -1,0 +1,175 @@
+{
+  "_version": 2,
+  "media_linux.stage_builder": {
+    "ru": "Подготовка сборщика",
+    "en": "Preparing the builder"
+  },
+  "media_linux.stage_download": {
+    "ru": "Загрузка пакетов Debian",
+    "en": "Downloading Debian packages"
+  },
+  "media_linux.stage_system": {
+    "ru": "Сборка системы",
+    "en": "Building the system"
+  },
+  "media_linux.stage_iso": {
+    "ru": "Создание ISO",
+    "en": "Making the ISO"
+  },
+  "media_linux.detail_repack": {
+    "ru": "упаковка установленной программы",
+    "en": "packing the installed program"
+  },
+  "media_linux.detail_squashfs": {
+    "ru": "сжатие системы",
+    "en": "compressing the system"
+  },
+  "media_linux.detail_boot": {
+    "ru": "загрузчики",
+    "en": "boot loaders"
+  },
+  "media_linux.detail_iso": {
+    "ru": "запись образа",
+    "en": "writing the image"
+  },
+  "media_linux.detail_saving": {
+    "ru": "сохранение в папку",
+    "en": "saving to the folder"
+  },
+  "media_linux.missing_tools": {
+    "ru": "Для сборки носителя нужны пакеты debootstrap и debian-archive-keyring (нет: %{what}). Установите их: sudo apt install debootstrap debian-archive-keyring",
+    "en": "Building the medium needs the debootstrap and debian-archive-keyring packages (missing: %{what}). Install them: sudo apt install debootstrap debian-archive-keyring"
+  },
+  "media_linux.network": {
+    "ru": "Нет доступа к %{host}: сборке нужен интернет, чтобы скачать пакеты Debian. Проверьте подключение к сети и повторите.",
+    "en": "No access to %{host}: the build needs the internet to download Debian packages. Check the network connection and try again."
+  },
+  "media_linux.not_root": {
+    "ru": "Сценарий сборки запущен не от root — носитель собирает служба.",
+    "en": "The build script is not running as root — the service builds the medium."
+  },
+  "media_linux.arch": {
+    "ru": "Носитель собирается только на amd64, а эта система — %{arch}.",
+    "en": "The medium is built on amd64 only; this system is %{arch}."
+  },
+  "media_linux.bad_deb": {
+    "ru": "Файл пакета не читается как .deb программы own-backup.",
+    "en": "The package file does not read as a .deb of own-backup."
+  },
+  "media_linux.apt_check": {
+    "ru": "Установленный пакет не ставится в Debian 13 (trixie), на котором основан носитель: %{reason}. Пакет, собранный в системе новее Ubuntu 24.04, требует более новых glibc или WebKitGTK, чем есть в Debian 13 — нужен выпуск, собранный в Ubuntu 24.04.",
+    "en": "The installed package does not install on Debian 13 (trixie), which the medium is based on: %{reason}. A package built on a system newer than Ubuntu 24.04 needs a newer glibc or WebKitGTK than Debian 13 has — a release built on Ubuntu 24.04 is needed."
+  },
+  "media_linux.no_iso": {
+    "ru": "live-build завершился, но образа ISO нет.",
+    "en": "live-build finished without an ISO image."
+  },
+  "media_linux.script_error": {
+    "ru": "Сценарий сборки остановился с кодом «%{code}».",
+    "en": "The build script stopped with code \"%{code}\"."
+  },
+  "media_linux.dpkg_unreadable": {
+    "ru": "Не читается база dpkg (%{path}): %{error}",
+    "en": "dpkg's database (%{path}) cannot be read: %{error}"
+  },
+  "media_linux.not_installed": {
+    "ru": "Пакет own-backup не установлен через dpkg, а носитель собирается из установленной программы. Установите пакет .deb (для разработки: own-backup-cli media build-linux --deb ФАЙЛ).",
+    "en": "The own-backup package is not installed through dpkg, and the medium is built from the installed program. Install the .deb package (for development: own-backup-cli media build-linux --deb FILE)."
+  },
+  "media_linux.not_installed_cleanly": {
+    "ru": "Пакет own-backup установлен не до конца (dpkg: %{status}). Завершите установку: sudo dpkg --configure -a",
+    "en": "The own-backup package is not fully installed (dpkg: %{status}). Finish the installation: sudo dpkg --configure -a"
+  },
+  "media_linux.modified": {
+    "ru": "Файлы установленной программы отличаются от установленных пакетом (%{files}) — на носитель должна попасть в точности установленная программа. Переустановите пакет: sudo apt install --reinstall own-backup",
+    "en": "Files of the installed program differ from what the package installed (%{files}) — the medium must carry exactly the installed program. Reinstall the package: sudo apt install --reinstall own-backup"
+  },
+  "media_linux.conffiles_changed": {
+    "ru": "Изменённые файлы настроек вошли на носитель как есть: %{files}",
+    "en": "Changed configuration files went onto the medium as they are: %{files}"
+  },
+  "media_linux.repack_failed": {
+    "ru": "Не удалось упаковать установленную программу: %{error}",
+    "en": "The installed program could not be packed: %{error}"
+  },
+  "media_linux.dest_not_absolute": {
+    "ru": "Папка для ISO должна быть указана полным путём: %{path}",
+    "en": "The folder for the ISO must be a full path: %{path}"
+  },
+  "media_linux.dest_missing": {
+    "ru": "Папка для ISO недоступна (%{path}): %{error}",
+    "en": "The folder for the ISO is not available (%{path}): %{error}"
+  },
+  "media_linux.dest_not_dir": {
+    "ru": "%{path} — не папка",
+    "en": "%{path} is not a folder"
+  },
+  "media_linux.dest_not_owner": {
+    "ru": "Папка %{path} принадлежит не вам. Выберите свою папку — например, «Загрузки».",
+    "en": "The folder %{path} is not yours. Choose a folder of your own — Downloads, for one."
+  },
+  "media_linux.save_failed": {
+    "ru": "Не удалось сохранить ISO в %{path}: %{error}",
+    "en": "The ISO could not be saved in %{path}: %{error}"
+  },
+  "media_linux.deb_unreadable": {
+    "ru": "Не открывается пакет %{path}: %{error}",
+    "en": "The package %{path} cannot be opened: %{error}"
+  },
+  "media_linux.deb_not_owner": {
+    "ru": "%{path} — не ваш обычный файл; пакет для носителя берётся только из ваших файлов.",
+    "en": "%{path} is not a regular file of yours; the medium's package is taken from your own files only."
+  },
+  "media_linux.script_missing": {
+    "ru": "Нет файла сборки носителя %{path}. Переустановите пакет own-backup.",
+    "en": "The medium's build file %{path} is missing. Reinstall the own-backup package."
+  },
+  "media_linux.start_failed": {
+    "ru": "Не удалось запустить сборку (%{path}): %{error}",
+    "en": "The build could not be started (%{path}): %{error}"
+  },
+  "media_linux.no_space": {
+    "ru": "Для сборки нужно около %{need} ГиБ свободного места в %{path}, а свободно %{free} ГиБ. Освободите место и повторите.",
+    "en": "The build needs about %{need} GiB free in %{path}, and %{free} GiB is free. Free some space and try again."
+  },
+  "media_linux.no_space_during": {
+    "ru": "Во время сборки закончилось место в %{path}. Освободите место и повторите.",
+    "en": "The space in %{path} ran out during the build. Free some space and try again."
+  },
+  "media_linux.tools_failed": {
+    "ru": "Носитель не собрался. Последние строки: %{last}. Полный журнал: %{log}",
+    "en": "The medium was not built. Last lines: %{last}. The whole log: %{log}"
+  },
+  "media_linux.clear_failed": {
+    "ru": "Остатки прошлых сборок носителя (%{path}) удалены не полностью.",
+    "en": "What earlier medium builds left (%{path}) was not removed completely."
+  },
+  "media_linux.work_failed": {
+    "ru": "Не удалось создать временную папку для сборки в %{path}: %{error}",
+    "en": "Could not make a temporary folder for the build in %{path}: %{error}"
+  },
+  "media_linux.stick_failed": {
+    "ru": "ISO сохранён (%{path}), но флешка не записана: %{error}",
+    "en": "The ISO was saved (%{path}), but the stick was not written: %{error}"
+    },
+  "media_linux.deb_root_only": {
+    "ru": "Свой пакет .deb для носителя принимается только от root (sudo own-backup-cli media build-linux --deb …) или службой разработчика, запущенной с --foreground: сценарии пакета выполняются при сборке от root.",
+    "en": "A .deb of your own for the medium is accepted only from root (sudo own-backup-cli media build-linux --deb …) or by a developer's service run with --foreground: the package's scripts run as root during the build."
+  },
+  "media_linux.deb_too_large": {
+    "ru": "%{path} больше %{max} МиБ — это не пакет own-backup.",
+    "en": "%{path} is larger than %{max} MiB — it is not the own-backup package."
+  },
+  "media_linux.iso_outside": {
+    "ru": "Сборка назвала образ %{path} не в своей папке или не обычным файлом; он не сохранён.",
+    "en": "The build named the image %{path} outside its own folder or not as a regular file; it was not saved."
+  },
+  "media_linux.iso_unreadable": {
+    "ru": "Не открывается собранный образ %{path}: %{error}",
+    "en": "The built image %{path} cannot be opened: %{error}"
+  },
+  "media_linux.conffiles_deleted": {
+    "ru": "Удалённые администратором файлы настроек не вошли на носитель: %{files}",
+    "en": "Configuration files the administrator deleted are not on the medium: %{files}"
+  }
+}

@@ -1,5 +1,17 @@
 {
   "_version": 2,
+  "bcd.bad_store": {
+    "ru": "хранилище загрузки Windows (BCD) не распознано: %{reason}",
+    "en": "the Windows boot configuration store (BCD) was not recognised: %{reason}"
+  },
+  "regf.bad_hive": {
+    "ru": "файл куста реестра повреждён или не поддерживается: %{reason}",
+    "en": "the registry hive file is damaged or not supported: %{reason}"
+  },
+  "regf.dirty": {
+    "ru": "куст реестра записан не до конца (номера последовательности %{primary} и %{secondary}): часть данных осталась в журналах .LOG1/.LOG2, которые мы не применяем. Загрузите эту Windows один раз или откройте хранилище через bcdedit, чтобы оно было сведено.",
+    "en": "the registry hive was not completely written (sequence numbers %{primary} and %{secondary}): part of its data is still in the .LOG1/.LOG2 logs, which we do not replay. Boot this Windows once or open the store with bcdedit so that it is consolidated."
+  },
   "file_restore_win.verify_listing_diff": {
     "ru": "Содержимое каталога или тип/размер элемента не совпадает: %{path}",
     "en": "Directory contents or entry type/size differs: %{path}"
@@ -227,6 +239,14 @@
     "ru": "Нельзя убедиться, что копия не пишется на копируемый том: %{reason}.",
     "en": "Cannot confirm that the backup is not written to a volume being backed up: %{reason}."
   },
+  "source_identity.dest_not_absolute": {
+    "ru": "путь «%{folder}» не полный (не начинается с /), и по нему не определить диск",
+    "en": "the path “%{folder}” is not absolute (does not start with /), so its disk cannot be determined"
+  },
+  "source_identity.dest_fs_without_disk": {
+    "ru": "«%{folder}» лежит в файловой системе %{fstype} (%{source}), у которой нет определимого диска",
+    "en": "“%{folder}” is on a %{fstype} filesystem (%{source}) that has no disk that can be determined"
+  },
 
   "dest_folder.unavailable": {
     "ru": "папка назначения %{path} недоступна: %{error}.",
@@ -275,6 +295,18 @@
     "en": "reading %{bytes} bytes at offset %{offset} runs past the end of a partition of length %{length}"
   },
 
+  "power_linux.logind_failed": {
+    "ru": "systemd-logind не выполнил запрос: %{error}",
+    "en": "systemd-logind did not carry out the request: %{error}"
+  },
+  "power_linux.clock_before_epoch": {
+    "ru": "Системные часы показывают время до 1970 года — выключение по времени не назначено.",
+    "en": "The system clock reads a time before 1970 — no timed shutdown was scheduled."
+  },
+  "power_linux.wake_reason": {
+    "ru": "Own Backup: пробуждение для копии по расписанию",
+    "en": "Own Backup: woken for a scheduled backup"
+  },
   "power_win.no_shutdown_privilege": {
     "ru": "нет права SeShutdownPrivilege",
     "en": "SeShutdownPrivilege is not held"
@@ -291,5 +323,25 @@
   "restore_map.partition_smaller_than_header": {
     "ru": "раздел (%{window} Б) меньше заголовка своего контейнера (%{header} Б)",
     "en": "the partition (%{window} B) is smaller than its container's header (%{header} B)"
+  },
+  "seal_local_linux.no_machine_key": {
+    "ru": "Хранилище ключей службы недоступно: машинный ключ нельзя защитить через systemd-creds (%{error}). Без него зашифрованные задания и запомненные пароли томов на этой машине не работают — открытого ключа на диске не будет.",
+    "en": "The service key store is unavailable: the machine key cannot be protected with systemd-creds (%{error}). Without it encrypted jobs and remembered volume passwords do not work on this machine — no unprotected key is ever written to disk."
+  },
+  "seal_local_linux.root_only": {
+    "ru": "Хранилище ключей доступно только установленной службе (root).",
+    "en": "The key store is available only to the installed service (root)."
+  },
+  "seal_local_linux.machine_key_missing": {
+    "ru": "Машинного ключа службы нет (каталог ключей создан заново или восстановлен без него) — то, что было им защищено, на этой машине больше не открывается.",
+    "en": "The service's machine key is missing (the key directory was recreated or restored without it) — what it protected can no longer be opened on this machine."
+  },
+  "seal_local_linux.key_store_mount_point": {
+    "ru": "каталог ключей службы %{path} — точка монтирования: его содержимое лежит на томе под другим именем, и исключение по имени не убрало бы его из копии",
+    "en": "the service's key directory %{path} is a mount point: its contents lie on a volume under another name, and leaving out the name would not keep them out of the copy"
+  },
+  "seal_local_linux.unsafe_directory": {
+    "ru": "Каталог «%{what}» доступен не только службе (нужен владелец root и права без записи для других; каталог ключей — ровно 0700); существующий каталог не исправляется молча.",
+    "en": "The directory “%{what}” is not reserved for the service (it must be owned by root and not writable by others; the key directory must be exactly 0700); an existing directory is not silently adjusted."
   }
 }

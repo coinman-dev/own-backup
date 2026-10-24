@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Own Backup (notification area)
+Name[ru]=Own Backup (область уведомлений)
+Comment=Shows whether the backup service is running
+Comment[ru]=Показывает, работает ли служба резервного копирования
+Exec=own-backup-gui --tray
+Icon=own-backup
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-Delay=10

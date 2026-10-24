@@ -1,0 +1,14 @@
+# Wired network on the boot medium, when there is a cable: DHCP on every
+# physical Ethernet port. Optional — nothing at boot waits for it
+# (systemd-networkd-wait-online is masked by the build hook), and the engine
+# needs it only for a destination on another machine.
+[Match]
+Type=ether
+Kind=!*
+
+[Network]
+DHCP=yes
+LinkLocalAddressing=ipv6
+
+[DHCPv4]
+UseDomains=yes

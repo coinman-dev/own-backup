@@ -7,21 +7,22 @@
 - **Commit messages in this repo are in Russian** (see `git log`).
 - UI text exists in Russian and English (`common::tr!`, `Paraglide`), default is Russian.
 
-### Two checkouts and synchronization
-The project lives in two folders that must be kept in sync:
-1. `D:\Development\own-backup` — Windows checkout for editing code, reading logs, and running Windows tools. There is NO Rust toolchain here; never run `cargo` on the Windows host.
-2. `\\wsl$\Ubuntu\home\modulator\Development\own-backup` (inside WSL: `/home/modulator/Development/own-backup`) — WSL2 Ubuntu checkout where everything is built and tested.
-- **Sync is two-way:** another agent (Codex / Claude in Zed) may work and commit directly in the WSL tree. **Before copying anything into WSL**, check `git status` and `git log` there so foreign work is never overwritten.
-- **Line endings:** the repo is strictly LF (`.gitattributes`). When copying text files from Windows to WSL, preserve LF (strip `\r` if needed).
-- **WSL has `automount` disabled:** `/mnt/d` does not exist. Transfers between Windows and WSL go through the UNC path `\\wsl$\Ubuntu\...` from PowerShell/Explorer or via git bundles through `tmp/sync/`.
-- **Temporary and scratch files:** put ALL temporary files into the repo's `tmp/` (git-ignored), never in `%TEMP%`, `~`, or outside the project (opening files outside the project causes Zed/editor freezes on replay).
+### Two checkouts and synchronization (since 2026-10-18)
+The owner now works on a native Linux machine (Ubuntu 26.04, KDE Plasma on Wayland). The project lives in two folders that must be kept in sync:
+1. `/home/modulator/Development/own-backup` — **the working checkout.** Edit, build, test and commit here.
+2. `/run/media/modulator/WorkDisk-1/Development/own-backup` — a copy on the WorkDisk (BitLocker NTFS; under Windows this is `D:\Development\own-backup`). Keep it identical: after committing, bring its `dev` to the same commit (`git pull` there; it must stay clean) and copy the git-ignored working files (`.ai/`, `backup/`, `design/`, `tmp/`) with `rsync` without `--delete`. Do not build in the copy.
+- **Sync is two-way:** another agent or a Windows session may have worked in either folder. **Before syncing**, check `git status` and `git log` on both sides so foreign work is never overwritten.
+- **Line endings:** the repo is strictly LF (`.gitattributes`). Preserve LF when copying text files written under Windows (strip `\r` if needed).
+- **Temporary and scratch files:** put ALL temporary files into the repo's `tmp/` (git-ignored), never in `/tmp`, `~`, or outside the project (opening files outside the project causes Zed/editor freezes on replay).
 
 ### Building and artifacts
-- **Build only in WSL:**
-  - Linux checks and unit tests: `cargo test`
+- **Build on the Linux machine, in the working checkout:**
+  - Linux checks and unit tests: `cargo test` (root-gated tests stay ignored without root).
+  - Since 2026-10-19 the build and stand packages are installed system-wide (protobuf-compiler, libwebkit2gtk-4.1-dev and the other GUI development packages, clang/lld, qemu-system-x86, qemu-utils, ovmf, nodejs/npm), so the GUI builds and runs on this machine. Earlier, without sudo, tools were unpacked from Ubuntu packages into `tmp/tools/`, and that still works: `. tmp/tools/env.sh` sets `PROTOC`, puts clang-cl/lld-link (for `cargo xwin`) and QEMU 10.2 with OVMF/SeaBIOS on `PATH`, and points `PKG_CONFIG_PATH` at the WebKitGTK 4.1 development `.pc` files. That is enough for `cargo check -p own-backup-gui` on Linux; linking and running the Linux GUI need the real packages (`libwebkit2gtk-4.1-dev`), which are not installed.
+  - KVM is usable without sudo (`/dev/kvm` ACL). The Linux stand (`scripts/lab/linux-vm.py`) runs guests where root is available for snapshot, guard, systemd and package checks.
   - Windows cross-compilation: `cargo xwin build --target x86_64-pc-windows-msvc --release`
   - Full installer build: `scripts/build-installer.sh` (produces `target/dist/own-backup-install.exe`)
-- **Built Windows `.exe` files go to:** `\\wsl$\Ubuntu\home\modulator\Development\own-backup\win\` (`own-backup-gui.exe`, `own-backup-service.exe`, `own-backup-cli.exe`, `own-backup-shell.exe`, `own-backup-install.exe`).
+- **Built Windows `.exe` files go to** `win/` (`own-backup-gui.exe`, `own-backup-service.exe`, `own-backup-cli.exe`, `own-backup-shell.exe`, `own-backup-install.exe`).
 - **Antivirus (Avast):**
   - Avoid running `cmd.exe`, `npm`, `npx`, `.bat` shims directly on Windows — build frontends in WSL.
   - If a test `.exe` needs to be run on Windows directly, run it from a subfolder of `D:\OwnBackup\` (e.g. `D:\OwnBackup\theme-test\`) — this path is in Avast exclusions. Never run newly built `.exe` from `tmp\` or `%TEMP%`.
@@ -64,6 +65,7 @@ The owner requested minimal necessary cloud work on 2026-10-06 after an Actions-
 
 - Main: frontend + vendor checks; full cached Windows validation on ready PR or manual dispatch.
 - Release: Windows tests, dependency audits and installer checks gate publication. Do not run Linux Rust tests in GitHub Actions (owner request, 2026-10-10).
+- Linux checks (tests, `cargo check`, clippy, `.deb` builds) run only locally; do not add them to GitHub Actions (owner, 2026-10-18). The free Actions minutes are exhausted until the end of October 2026: do not trigger any workflow (no push to `main`, no PR to `main`, no tags, no manual dispatch) without a new instruction. Pushing to `dev` triggers nothing.
 
 ## Keep the plan readable (owner request, 2026-10-08)
 

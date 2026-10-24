@@ -6,6 +6,8 @@ import { api } from './api';
 import { formatBytes } from './format';
 import { m } from './paraglide/messages';
 import { onLocale } from './i18n.svelte';
+import { isWindows } from './platformStore.svelte';
+import { diskNumber } from './diskNames';
 import type {
   ArchiveSecret,
   DiskInfo,
@@ -18,6 +20,13 @@ export interface VolumeOption {
   device: string;
   label: string;
 }
+
+/** How the last check of a copy ended. Facts, not text: the banner is written
+ *  from them in whatever language the window is in when it is shown. */
+export type VerifyOutcome =
+  | { kind: 'ok'; checked: number; secs: number }
+  | { kind: 'bad'; bad: number; checked: number }
+  | { kind: 'error'; text: string };
 
 export const engine = $state({
   // --- volume cache (shared by wizard source + restore target) ---
@@ -36,6 +45,11 @@ export const engine = $state({
   restoreSummary: null as RestoreSummary | null,
   restoreError: null as string | null,
   verifyProgress: null as EngineProgress | null,
+  /** In the store, not in «Инструменты»: the page is unmounted the moment
+   *  the user walks through the menu, and on the way back a check still
+   *  running in the service had lost its progress bar and, once over, its
+   *  result (2026-10-23). */
+  verifyOutcome: null as VerifyOutcome | null,
 });
 
 /** When the running restore started and how fast it has been going lately.
@@ -130,10 +144,8 @@ export async function refreshVolumes(): Promise<void> {
   try {
     const disks: DiskInfo[] = await api.listDisks();
     // Show disks in physical-drive order (0, 1, 2, …) rather than WMI order.
-    const diskNumber = (d: DiskInfo): number => {
-      const num = d.device_id.match(/(\d+)\s*$/);
-      return num ? parseInt(num[1], 10) : 0;
-    };
+    // Linux disks have no number and keep the inventory's order (real disks,
+    // then device-mapper volumes): the sort is stable.
     engine.disks = [...disks].sort((a, b) => diskNumber(a) - diskNumber(b));
     engine.volumes = disks
       .flatMap((d) =>
@@ -152,7 +164,7 @@ export async function refreshVolumes(): Promise<void> {
       /* keep */
     }
     if (engine.volumes.length === 0) {
-      volumesErrorText = m.eng_no_volumes;
+      volumesErrorText = isWindows() ? m.eng_no_volumes : m.eng_no_volumes_linux;
       engine.volumesError = volumesErrorText();
     }
   } catch (e) {
@@ -239,12 +251,24 @@ export async function runVerify(
   secret?: ArchiveSecret,
   onStarted?: () => void,
 ): Promise<VerifySummary> {
-  if (engine.op) throw new Error(m.eng_busy());
+  if (engine.op) {
+    const text = m.eng_busy();
+    engine.verifyOutcome = { kind: 'error', text };
+    throw new Error(text);
+  }
   engine.op = 'verify';
   engine.verifyProgress = null;
+  engine.verifyOutcome = null;
   verifyStarted = onStarted ?? null;
   try {
-    return await api.verifyNow(imagePath, secret);
+    const v = await api.verifyNow(imagePath, secret);
+    engine.verifyOutcome = v.valid
+      ? { kind: 'ok', checked: v.blocks_checked, secs: v.duration_secs }
+      : { kind: 'bad', bad: v.mismatched_blocks.length, checked: v.blocks_checked };
+    return v;
+  } catch (e) {
+    engine.verifyOutcome = { kind: 'error', text: String(e) };
+    throw e;
   } finally {
     verifyStarted = null;
     engine.op = null;

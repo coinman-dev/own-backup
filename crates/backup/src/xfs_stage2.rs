@@ -16,6 +16,8 @@
 //! щадим целиком, так что дерево refcount'ов не трогается по построению) и
 //! журнал (вход требует чистого лога, LSN в заголовках оставляем старыми).
 
+#![allow(dead_code)]
+
 use own_backup_common::{tr, OwnBackupError, Result};
 use tracing::{info, warn};
 
@@ -850,6 +852,8 @@ pub(crate) fn plan_stage2(
             by_dir.entry(f.parent).or_default().push(f);
         }
         let mut patches: Vec<(u64, Vec<u8>)> = Vec::new();
+        // Опустевшие блоки каталогов и иноды, чьи имена их опустошили.
+        let mut dir_freed: Vec<(crate::xfs_dirent::FreedBlock, Vec<u64>)> = Vec::new();
         for (dir, group) in &by_dir {
             let names: Vec<String> = group.iter().map(|f| f.name.clone()).collect();
             let edit = crate::xfs_dirent::plan_dirent_removal(vol, sb, *dir, &names)?;
@@ -872,6 +876,14 @@ pub(crate) fn plan_stage2(
                 }
             }
             patches.extend(edit.patches);
+            for fb in edit.freed_blocks {
+                let inos = group
+                    .iter()
+                    .filter(|f| fb.names.contains(&f.name))
+                    .map(|f| f.ino)
+                    .collect();
+                dir_freed.push((fb, inos));
+            }
         }
         if !spare.is_empty() {
             for (ino, why) in spare {
@@ -920,10 +932,32 @@ pub(crate) fn plan_stage2(
                 ags_of.entry(*ino).or_default().insert(ag);
             }
         }
+        // Блоки, изъятые из каталогов: в свободное место вместе с блоками
+        // файлов, а из RMAPBT — кусок отображения каталога, не он целиком.
+        let mut trims: BTreeMap<u64, Vec<crate::xfs_efree::RmapTrim>> = BTreeMap::new();
+        for (fb, inos) in &dir_freed {
+            let ag = fb.fsb >> sb.agblklog;
+            let agbno = fb.fsb & mask;
+            returned
+                .entry(ag)
+                .or_default()
+                .push(crate::xfs_efree::Free { agbno, len: 1 });
+            trims
+                .entry(ag)
+                .or_default()
+                .push(crate::xfs_efree::RmapTrim {
+                    owner: fb.dir_ino,
+                    agbno,
+                    len: 1,
+                });
+            for ino in inos {
+                ags_of.entry(*ino).or_default().insert(ag);
+            }
+        }
         for v in returned.values_mut() {
             v.sort_unstable();
         }
-        let ext = crate::xfs_efree::plan_extent_freeing(vol, sb, &returned, &alive)?;
+        let ext = crate::xfs_efree::plan_extent_freeing(vol, sb, &returned, &alive, &trims)?;
         for r in &ext.refusals {
             // Отказ назван по ГРУППЕ, а не по файлу: переполнение и опустошение
             // листа — свойство всей пачки удалений, а не одного экстента.

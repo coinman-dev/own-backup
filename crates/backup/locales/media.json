@@ -513,6 +513,18 @@
     "ru": "%{name}: не переменная загрузки — записывать её отсюда нельзя",
     "en": "%{name} is not a boot variable — it cannot be written from here"
   },
+  "efivars_linux.not_mounted": {
+    "ru": "машина загружена через UEFI, но efivarfs не подключена (%{path}) — записи загрузки не видны. Подключите: mount -t efivarfs efivarfs /sys/firmware/efi/efivars",
+    "en": "the machine booted through UEFI, but efivarfs is not mounted (%{path}) — the boot entries cannot be seen. Mount it: mount -t efivarfs efivarfs /sys/firmware/efi/efivars"
+  },
+  "efivars_linux.read_failed": {
+    "ru": "не прочитать %{name}: %{error}",
+    "en": "could not read %{name}: %{error}"
+  },
+  "efivars_linux.write_short": {
+    "ru": "прошивка приняла %{written} из %{total} байт",
+    "en": "the firmware accepted %{written} of %{total} bytes"
+  },
   "efivars_win.empty_value": {
     "ru": "%{name}: пустое значение стёрло бы переменную",
     "en": "%{name}: an empty value would erase the variable"
@@ -767,5 +779,17 @@
   "esp_scan_win.looks_like_rdrive": {
     "ru": "похоже на R-Drive Image",
     "en": "looks like R-Drive Image"
+  },
+  "esp_scan_linux.no_partition_node": {
+    "ru": "у ядра нет устройства для этого раздела — прочитать его нельзя",
+    "en": "the kernel has no device for this partition — it cannot be read"
+  },
+  "esp_scan_linux.not_fat": {
+    "ru": "раздел помечен как EFI, а внутри не FAT — загрузчиков здесь быть не может",
+    "en": "the partition is marked as EFI but holds no FAT — there can be no loaders here"
+  },
+  "esp_scan_linux.unreadable": {
+    "ru": "раздел не прочитать: %{error}",
+    "en": "the partition cannot be read: %{error}"
   }
 }

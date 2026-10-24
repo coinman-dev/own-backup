@@ -9,21 +9,42 @@
   import { media, ensureMediaMode } from '../lib/mediaStore.svelte';
   import { formatBytes } from '../lib/format';
   import MediaBuildModal from './MediaBuildModal.svelte';
+  import MediaStickModal from './MediaStickModal.svelte';
+  import LinuxMediaBuildModal from './LinuxMediaBuildModal.svelte';
+  import { pickPath } from '../lib/pickPath.svelte';
   import type { BaseImage } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
+  import { isWindows, ensurePlatform } from '../lib/platformStore.svelte';
 
   let bases: BaseImage[] = $state([]);
   let searching = $state(true);
   let searchError: string | null = $state(null);
-  let tab: 'windows' | 'linux' = $state('windows');
+  // The system the window runs on comes first. The Windows medium is built
+  // from Windows' own files with DISM, so on Linux its tab only says so.
+  let tab: 'windows' | 'linux' = $state(isWindows() ? 'windows' : 'linux');
+  /** The Windows medium can be built here at all. */
+  const canBuildWindows = $derived(isWindows());
   let open: 'windows' | 'linux' | null = $state(null);
+  /** Linux: the build dialog, and the writer of a ready ISO it links to. */
+  let linuxOpen = $state(false);
+  let stickOpen = $state(false);
+  // A Winre.wim the user pointed at — taken from an installation ISO, say —
+  // goes before anything the search found. The service reads it first; a file
+  // that will not do is refused with its reason, not built on.
+  let chosen: BaseImage | null = $state(null);
+  let checking = $state(false);
+  let chooseError: string | null = $state(null);
 
-  const windowsBase = $derived(bases[0] ?? null);
+  const windowsBase = $derived(chosen ?? bases[0] ?? null);
 
   onMount(async () => {
-    await ensureMediaMode();
+    await Promise.all([ensureMediaMode(), ensurePlatform()]);
+    // The first draw went by the webview's guess; the backend's answer wins.
+    if (!isWindows()) tab = 'linux';
     // Nothing to look for when running from the medium: it cannot build one.
-    if (!media.active) search();
+    // Nor on Linux: there is no Winre.wim to find, and the service says only
+    // that it does not look.
+    if (!media.active && isWindows()) search();
     else searching = false;
   });
 
@@ -39,9 +60,27 @@
     }
   }
 
+  async function chooseBase() {
+    const path = await pickPath({ directory: false, title: m.bmc_pick_title(), extensions: ['wim'] });
+    if (!path) return;
+    checking = true;
+    chooseError = null;
+    try {
+      chosen = await api.inspectBaseImage(path);
+    } catch (e) {
+      chooseError = String(e);
+    } finally {
+      checking = false;
+    }
+  }
+
   function openDialog() {
     if (media.active) return;
-    if (tab === 'windows' && !windowsBase) return; // nothing to build on
+    if (tab === 'windows' && (!canBuildWindows || !windowsBase)) return; // nothing to build on
+    if (tab === 'linux' && !isWindows()) {
+      linuxOpen = true;
+      return;
+    }
     open = tab;
   }
 </script>
@@ -79,15 +118,21 @@
   </div>
 
   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-  <div class="panel" class:disabled={media.active || (tab === 'windows' && !windowsBase)}
+  <div class="panel" class:disabled={media.active || (tab === 'windows' && (!canBuildWindows || !windowsBase))}
        onclick={openDialog} role="button" tabindex="0">
-    {#if media.active}
+    {#if media.active && !isWindows()}
+      <div class="p-desc">{m.bmc_linux_desc()}</div>
+      <div class="p-meta soon">{m.bmc_on_media_linux()}</div>
+    {:else if media.active}
       <!-- Building from the medium failed at DISM halfway through, which
            explains nothing. Say so before, and say why. -->
       <div class="p-desc">
         {m.bmc_on_media()} <code>X:</code> {m.bmc_on_media_ramdisk()}
       </div>
       <div class="p-meta soon">{m.bmc_on_media_hint()}</div>
+    {:else if tab === 'windows' && !canBuildWindows}
+      <div class="p-desc">{m.bmc_windows_desc()}</div>
+      <div class="p-meta soon">{m.bmc_windows_needs_windows()}</div>
     {:else if tab === 'windows'}
       <div class="p-desc">{m.bmc_windows_desc()}</div>
       {#if searching}
@@ -109,6 +154,26 @@
           </span>
         </div>
       {/if}
+      {#if !searching}
+        <!-- Inside the clickable panel: a click here must not open the build. -->
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+        <div class="p-choose" onclick={(e) => e.stopPropagation()}>
+          {#if chosen}
+            <span class="p-chosen" title={chosen.path}>{m.bmc_chosen({ path: chosen.path })}</span>
+            <button class="link" onclick={() => { chosen = null; chooseError = null; }}>{m.bmc_chosen_forget()}</button>
+          {/if}
+          <button class="link" disabled={checking} onclick={chooseBase}>
+            {checking ? m.bmc_pick_checking() : m.bmc_pick()}
+          </button>
+        </div>
+        {#if chooseError}
+          <div class="p-warn">{@render warnIcon()}<span>{chooseError}</span></div>
+        {/if}
+      {/if}
+    {:else if !isWindows()}
+      <div class="p-desc">{m.bmc_linux_desc()}</div>
+      <div class="p-meta">{m.bmc_linux_build()}</div>
+      <div class="p-go">{m.bmc_click_to_build_linux()}</div>
     {:else}
       <div class="p-desc">{m.bmc_linux_desc()}</div>
       <div class="p-meta soon">{m.bmc_linux_soon()}</div>
@@ -116,6 +181,17 @@
     {/if}
   </div>
 </div>
+
+{#if linuxOpen}
+  <LinuxMediaBuildModal
+    onClose={() => (linuxOpen = false)}
+    onWriteReady={() => { linuxOpen = false; stickOpen = true; }}
+  />
+{/if}
+
+{#if stickOpen}
+  <MediaStickModal onClose={() => (stickOpen = false)} />
+{/if}
 
 {#if open}
   <MediaBuildModal
@@ -153,4 +229,8 @@
   .p-warn-icon { flex: none; margin-top: 1px; }
   .p-warn code, .p-desc code { font-family: monospace; }
   .p-go { font-size: 12px; font-weight: 600; color: var(--accent-text); margin-top: 10px; }
+  .p-choose { display: flex; align-items: center; gap: 14px; margin-top: 10px; font-size: 12px; cursor: default; }
+  .p-chosen { color: var(--text-secondary); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .link { flex: none; padding: 0; border: none; background: none; font-family: var(--font); font-size: 12px; color: var(--accent-text); text-decoration: underline; cursor: pointer; }
+  .link:disabled { color: var(--text-muted); cursor: default; text-decoration: none; }
 </style>

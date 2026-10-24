@@ -2,6 +2,116 @@
 
 # Changelog
 
+## 0.1.6-beta — 2026-10-24
+
+### Added
+
+- **Linux version.** A `.deb` package for Ubuntu 24.04+ and Debian 13+
+  (amd64) with the same service, window and command line as on Windows. It
+  backs up volumes and whole disks with ext4, XFS, btrfs, NTFS, FAT32 and
+  exFAT, including LVM (every logical volume of a physical volume in one
+  snapshot) and open LUKS containers (read through a device-mapper
+  snapshot, the container header kept in the copy). Full, incremental and
+  differential chains in VHDX, qcow2 and encrypted OBK; exclusions that
+  really remove the files on ext4, XFS, btrfs and FAT, and on NTFS through
+  ntfs-3g. The service key store uses systemd-creds (with the TPM 2.0 when
+  there is one). A volume or a whole disk is restored through the service,
+  with the choice to give the restored file systems, LUKS containers and
+  volume groups new identities (UUIDs, labels, initramfs rebuilt) when the
+  originals are still on the machine. The **Boot** page edits UEFI boot
+  entries; the window has a tray icon and starts with the session. The
+  service runs under systemd, asks polkit before destructive actions and
+  logs to journald and a file.
+- Backups are interchangeable between Windows and Linux, VHDX chains
+  included: a copy made on one system opens, validates and restores on the
+  other.
+- **Linux boot medium.** A Debian 13 live ISO with the program on a labwc
+  desktop with our own taskbar; it boots with UEFI (Secure Boot through
+  Debian's signed shim) and BIOS, from a CD or a USB stick, and restores
+  Windows copies as well as Linux ones. The window builds it from the
+  installed package or downloads the ready one of the same version from the
+  release, and writes it onto a USB stick.
+- The boot medium card lets you choose a Winre.wim by hand (for example one
+  taken from a Windows installation image). The service reads it first and
+  refuses an installation image, a split or non-x64 image with the reason;
+  a build given such a file is refused the same way.
+
+### Fixed
+
+- An unfinished VHDX or qcow2 image of a run whose service was killed is now
+  deleted when the service starts again (or at the next run, if the backup
+  disk was not connected). The service records each such file in its
+  protected folder before writing it, so only files it has proved its own
+  are deleted. Leftovers of earlier versions and of runs outside the service
+  stay where they are.
+- The FAT boot image inside the medium's ISO keeps long names
+  (`EFI\Microsoft`, `boot.stl`) instead of cutting them to 8.3.
+- The empty part of the compression slider follows the theme.
+- A job or history save that fails (for example on a full disk) no longer
+  leaves a half-written temporary file holding the space.
+- The window and the service exchange messages up to 64 MB: a job list
+  past 4 MB (very long exclusion lists) no longer breaks every request.
+- A source volume keeps its chain when it is named differently: by a new
+  drive letter, its volume GUID path or a mount point. It used to start a new
+  full copy, because the chain was matched by the name in the file name.
+- A mount point (`C:\Mount\Data`) works as a source: it is read as the
+  volume mounted there, its images are named by that volume, and a
+  destination elsewhere on C: is no longer refused as "the same volume".
+- A ReFS volume inside BitLocker is copied with its used-block map and its
+  exclusions applied, locked or unlocked. It used to fail: under BitLocker
+  ReFS ends before the device does, the cluster size could not be derived,
+  and the sector-by-sector fallback hit the unreadable tail.
+- A job remembers the folders it wrote into before its destination was
+  changed, and deleting the job deletes its copies there too — even after
+  the activity journal (200 runs) has forgotten that folder.
+- A chain never grows past 60 images: the next run starts a new full copy
+  whatever the scheme. A job of "only increments" without consolidation
+  (saved before the modes existed, or made outside the window) used to grow
+  past what the VHDX reader follows (64), after which every new copy was
+  unreadable and retention stopped.
+- XFS: every excluded file is now truly removed (1403 of 1403 on the test
+  corpus, was 1369). A directory data block that would be left empty is taken
+  out of the directory and returned to free space, as the kernel does, and
+  is zeroed so the deleted names do not stay behind.
+- The service restarts by itself after a crash (in 10 s, then 1 and 5 min).
+  It used to stay stopped until the next reboot, and scheduled copies with it.
+- A whole-disk restore keeps the partitions that are not in the backup, on
+  Windows and on Linux. It used to rewrite the partition table from the
+  backup alone.
+- Restoring a disk keeps the boot code in LBA 0 (MBR) when the partition
+  table is rewritten; on Linux the sectors after it (GRUB's core.img) stay
+  too.
+- NTFS exclusions cover named streams (Zone.Identifier and others) and
+  content stored inside the MFT record. A file with many names or streams,
+  whose record continues in extension records, no longer drops out of the
+  exclusions entirely.
+- qcow2: after consolidation the old bytes of replaced clusters are wiped,
+  so excluded content does not survive in dead clusters.
+- A backup interrupted because the service was stopped or killed is
+  recorded as interrupted, and the schedule runs it again.
+- The service no longer does one thing at a time for the whole machine:
+  a restore is still exclusive, but copies, checks and mounts of different
+  backup folders and the boot medium build run side by side; a scheduled
+  check gives way to an action of a person on the same folder.
+- A scheduled whole-disk backup with an encrypted partition needs the saved
+  password only for that partition (ESP and `/boot` next to LUKS used to
+  make every run skip), and a skipped run is shown under **Activity**.
+- The end of a backup no longer waits forever behind a hung device: each
+  VSS step has a time limit, and the window says "releasing the volume
+  snapshot" or "opening the finished backup" instead of "flushing the
+  cache".
+- The result says how many excluded files an ext4, XFS or btrfs volume
+  kept under their names with their contents zeroed.
+- Validating an image under **Tools** keeps its progress bar and result
+  when you leave the page and come back.
+- On Windows the service writes the settings and the service data folder
+  is open only to SYSTEM and administrators.
+- Error messages no longer start with an English prefix.
+- Dependencies: tokio past an I/O-safety flaw (RUSTSEC-2026-0386), Vite past
+  advisories of its development server, and zbus 6 instead of the
+  unmaintained zvariant crates; the Linux taskbar calls libgtk-layer-shell
+  directly instead of its archived Rust bindings.
+
 ## 0.1.5-beta — 2026-10-17
 
 ### Added

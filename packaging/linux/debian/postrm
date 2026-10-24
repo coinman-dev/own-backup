@@ -1,0 +1,69 @@
+#!/bin/sh
+# Own Backup: after the files are gone.
+set -e
+
+if [ -d /run/systemd/system ]; then
+    systemctl --system daemon-reload >/dev/null || true
+fi
+
+if [ "$1" = "remove" ]; then
+    deb-systemd-helper mask own-backup.service >/dev/null || true
+fi
+
+# A medium build the removal stopped (prerm) leaves its temporary folder;
+# nothing of a build is meant to outlive it. Only root's folders of that
+# name (nobody else can make one) and never with something mounted inside.
+if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+    for d in /var/tmp/own-backup-media.*; do
+        if [ ! -d "$d" ] || [ -L "$d" ] || [ "$(stat -c %u "$d")" != 0 ]; then
+            continue
+        fi
+        if grep -q " $d/" /proc/self/mountinfo 2>/dev/null; then
+            echo "own-backup: something is still mounted under $d; kept" >&2
+        else
+            rm -rf --one-file-system "$d"
+        fi
+    done
+fi
+
+if [ "$1" = "purge" ]; then
+    deb-systemd-helper purge own-backup.service >/dev/null || true
+    deb-systemd-helper unmask own-backup.service >/dev/null || true
+
+    # Settings, jobs, history and the remembered volume and archive keys go
+    # with a purge, and only with a purge — never while an engine is running
+    # (one started by hand would write half of it back and lose the key it
+    # uses). Backups are elsewhere and are never touched.
+    if [ -d /run/systemd/system ] && systemctl is-active --quiet own-backup.service; then
+        echo "own-backup: the service is still running; /var/lib/own-backup was kept" >&2
+    elif [ -S /run/own-backup/service.sock ] && command -v fuser >/dev/null \
+        && fuser -s /run/own-backup/service.sock 2>/dev/null; then
+        echo "own-backup: an engine still holds its socket; /var/lib/own-backup was kept" >&2
+    else
+        rm -rf --one-file-system /var/lib/own-backup /var/log/own-backup
+        # The cache older versions kept for the boot medium (a few GiB), unless a
+        # build stopped by force left something mounted inside it.
+        if [ -d /var/cache/own-backup ]; then
+            if grep -q ' /var/cache/own-backup/' /proc/self/mountinfo 2>/dev/null; then
+                echo "own-backup: something is still mounted under /var/cache/own-backup; kept" >&2
+            else
+                rm -rf --one-file-system /var/cache/own-backup
+            fi
+        fi
+        # A marker in /run/own-backup/frozen is the only record of a file
+        # system a killed engine left frozen or read-only; keep it for
+        # `own-backup-cli cleanup-snapshots` (or a reboot). An image still
+        # mounted under /run/own-backup/mounts is not descended into.
+        rmdir /run/own-backup/frozen 2>/dev/null || true
+        if [ -d /run/own-backup/frozen ]; then
+            echo "own-backup: /run/own-backup/frozen is not empty (a file system may still be frozen); kept" >&2
+        else
+            rm -rf --one-file-system /run/own-backup
+        fi
+    fi
+    # The group own-backup stays: its GID may still own files, and a
+    # reinstall would otherwise need every member added again. Remove it
+    # with `groupdel own-backup` if it is no longer wanted.
+fi
+
+exit 0

@@ -6,10 +6,17 @@
   import { saveJob, runJob, decryptVolume, decryptedVolumes } from '../lib/jobStore.svelte';
   import { formatBytes } from '../lib/format';
   import { diskSegments, msrKept } from '../lib/diskLayout';
+  // Per-source token of the file-name preview — core's source_token, mirrored.
+  import { sourceToken } from '../lib/sourceToken';
   import PasswordField from '../components/PasswordField.svelte';
   import ArchiveKeyModal from '../components/ArchiveKeyModal.svelte';
   import type { Job, DiskInfo, PartitionInfo } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
+  import { examplePath, joinPath } from '../lib/paths';
+  import { caps, ensureCapabilities, dropUnsupported, canChain, offersWholeDisk, wholeDiskOf } from '../lib/capabilitiesStore.svelte';
+  import { isWindows } from '../lib/platformStore.svelte';
+  import { diskCaption, diskTableText, diskNumber, isSpecDisk, diskFileTag, mapperKind } from '../lib/diskNames';
+  import type { DestinationCheck } from '../lib/types';
 
   interface Props {
     mode: 'wizard' | 'edit';
@@ -25,6 +32,23 @@
   let { mode, job, onCancel, onDone, startEncrypted = false }: Props = $props();
 
   let step = $state(0);
+  // What the service's engine carries out: anything else is not offered, since
+  // a job holding it is refused at run time (Linux, for now — see
+  // `own_backup_core::capabilities`, the table the run refuses by).
+  $effect(() => {
+    void ensureCapabilities();
+  });
+  const cap = $derived(caps.value);
+  /** The engine writes one image of a whole disk; whether THIS disk can be
+   *  named for it is `wholeDiskOf` (Linux: it needs a by-id name). */
+  const wholeDisk = $derived(offersWholeDisk(cap));
+  const diskWhole = (d: DiskInfo) => wholeDiskOf(cap, d);
+  // A new draft (template or clone) starts as a job this engine runs: the
+  // template turns exclusions on, a clone may carry a chain. A saved job is
+  // left as it is until it is saved again (`finish`).
+  $effect(() => {
+    if (mode === 'wizard') dropUnsupported(job, cap);
+  });
   // A function, not a string: the text is drawn in whatever language the
   // window speaks when it is drawn. The service's own errors are wrapped as is.
   let error: (() => string) | null = $state(null);
@@ -37,6 +61,16 @@
   const alreadyEncrypted = $derived(!!job.archive_encryption);
   // svelte-ignore state_referenced_locally
   let wantEncryption = $state(!!job.archive_encryption || startEncrypted);
+  /** This engine writes chains in the chosen container (Linux: not VHDX). */
+  const chainOk = $derived(canChain(cap, wantEncryption ? 'obk' : job.image_format));
+  /** The containers it does write chains in, as the format list names them;
+   *  OBK only where it is offered at all. */
+  const chainFormatNames = $derived(
+    cap.chain_formats
+      .filter((f) => f !== 'obk' || cap.archive_encryption)
+      .map((f) => (f === 'vhdx' ? 'VHDX' : f === 'obk' ? 'OBK' : f))
+      .join(', '),
+  );
   let encPassword = $state('');
   let encPasswordAgain = $state('');
   /** Matches the service's own floor; a slow KDF does not rescue a short one. */
@@ -66,6 +100,13 @@
     if (formatLocked) return;
     wantEncryption = v === 'obk';
     job.image_format = v === 'vhdx' ? 'vhdx' : 'qcow2';
+    // A chain this engine does not write in the new container (Linux: VHDX)
+    // falls back to full copies here, visibly, not at run time.
+    if (job.scheme.method !== 'full' && !canChain(cap, v)) {
+      job.scheme.method = 'full';
+      job.scheme.rolling_incrementals = null;
+      job.scheme.only_incremental = false;
+    }
     error = null;
   }
   /** The settings' zstd level, which a job without its own follows. Read once;
@@ -131,12 +172,15 @@
   ];
 
   // Event triggers for kind='event'. Third field = badge text ('' = works).
-  const eventTriggers: [string, () => string, string][] = [
+  // Only those the service's scheduler fires: logon/logoff come from the
+  // Windows service control handler and do not exist on Linux.
+  const allEventTriggers: [string, () => string, string][] = [
     ['dest_connected', m.wiz_evt_dest_connected, ''],
     ['logon', m.wiz_evt_logon, ''],
     ['logoff', m.wiz_evt_logoff, ''],
     ['startup', m.wiz_evt_startup, ''],
   ];
+  const eventTriggers = $derived(allEventTriggers.filter(([v]) => cap.schedule_events.includes(v)));
 
   // «После подключения внешнего устройства» (usb_connect) was never wired;
   // what it was for — the backup drive being plugged in — is dest_connected.
@@ -172,9 +216,6 @@
   // Unknown / unformatted → empty string (the UI shows nothing, not "—").
   function fsLabel(fs: string): string {
     return FS_LABELS[fs] ?? (fs === 'unknown' ? '' : fs);
-  }
-  function tableLabel(t: string): string {
-    return t === 'gpt' ? 'GPT' : t === 'mbr' ? 'MBR' : t.toUpperCase();
   }
 
   // Openable device for a partition (letter "C:" or a `\\?\Volume{GUID}` path
@@ -222,17 +263,6 @@
     const dec = p.volume_device ? decryptedVolumes[p.volume_device] : undefined;
     return fsLabel(dec ? dec.filesystem : p.filesystem);
   }
-  // Per-source token used in the file-name preview (mirrors core's source_token:
-  // letter for lettered volumes, V+8 hex of the GUID for letterless volumes,
-  // P<disk><offsetHex> for physical-offset partitions).
-  function sourceToken(device: string): string {
-    const pm = device.match(/^part:(\d+):(\d+):/);
-    if (pm) return `P${pm[1]}${BigInt(pm[2]).toString(16).toUpperCase()}`;
-    const m = device.match(/Volume\{([0-9a-fA-F]+)/);
-    if (m) return 'V' + m[1].slice(0, 8).toUpperCase();
-    return driveLetter(device) ?? 'X';
-  }
-
   function isSelected(dev: string): boolean {
     return job.sources.includes(dev);
   }
@@ -278,14 +308,11 @@
     if (partUsed(p) > 0) t += ' ' + m.wiz_seg_used({ size: formatBytes(partUsed(p)) });
     const fs = partFs(p);
     if (fs) t += ` ${fs}`;
+    // Linux: the name the system's own tools show (`/dev/nvme0n1p2`).
+    if (p.kernel_device) t += ` · ${p.kernel_device}`;
     return t;
   }
 
-  // Physical drive number from the device id (`\\.\PhysicalDrive3` → 3).
-  function diskNumber(d: DiskInfo): number {
-    const m = d.device_id.match(/(\d+)\s*$/);
-    return m ? parseInt(m[1], 10) : 0;
-  }
   // ---- What belongs to booting (rewritten from scratch 2026-08-21) ----------
   //
   // The old switch answered this by taking EVERY volume of the disk, on the
@@ -386,7 +413,7 @@
    *  True for every disk a new job picks; false for jobs saved before that
    *  became unconditional, which still hold one image per volume. */
   function isDiskCaptured(d: DiskInfo): boolean {
-    return job.disk_source != null && job.disk_source.disk_number === diskNumber(d);
+    return job.disk_source != null && isSpecDisk(job.disk_source, d);
   }
   function layoutOnlyParts(d: DiskInfo): number[] {
     // Keyed on the captured layout, not on bootability: `retain_for_backup`
@@ -504,8 +531,17 @@
    *  partition out of such an image (`RestoreOp::RestorePartition`).
    */
   function captureDiskSource(d: DiskInfo) {
+    // An engine without whole-disk copies writes one image per volume; a
+    // `disk_source` would only get the job refused.
+    if (!diskWhole(d)) {
+      job.disk_source = null;
+      return;
+    }
+    // Linux names the disk by its by-id device; its number means nothing.
+    const byDevice = cap.disk_named_by === 'device';
     job.disk_source = {
-      disk_number: diskNumber(d),
+      disk_number: byDevice ? 0 : diskNumber(d),
+      device: byDevice ? d.stable_device : undefined,
       disk_model: d.model || d.device_id,
       parts: [],
       bootable: isBootableCopy(d),
@@ -575,7 +611,7 @@
   // Keep disk_source.parts in sync with the currently-selected backable
   // partitions of a disk (behaviour B: only kept volumes stay in the layout).
   function syncDiskSourceParts(d: DiskInfo) {
-    if (!job.disk_source || job.disk_source.disk_number !== diskNumber(d)) return;
+    if (!job.disk_source || !isSpecDisk(job.disk_source, d)) return;
     const parts = d.partitions
       .filter((p) => { const dev = partDevice(p); return !!dev && job.sources.includes(dev); })
       .map((p) => ({ part_index: p.index, device: partDevice(p)!, filesystem: p.filesystem }));
@@ -677,6 +713,7 @@
    *  survives the switch being flicked twice. */
   function toggleBootableCopy(d: DiskInfo) {
     if (sourceReadonly) return; // fixed source on the "Параметры" screen
+    if (!diskWhole(d)) return; // a bootable copy IS a whole-disk copy
     if (!isBootableDisk(d)) return; // nothing on this disk boots
     if (isBootableCopy(d)) {
       bootCopyOn = bootCopyOn.filter((id) => id !== d.device_id);
@@ -711,7 +748,31 @@
   // Exclusions — two OS-specific lists behind a Windows / Linux tab. The engine
   // applies Windows masks to NTFS/ReFS/FAT partitions and Linux masks to
   // ext/btrfs/xfs ones (Linux-FS enforcement is a follow-up).
-  let exclTab = $state<'windows' | 'linux'>('windows');
+  let exclTab = $state<'windows' | 'linux'>(isWindows() ? 'windows' : 'linux');
+  /** The user picked a tab: stop choosing it for them. */
+  let exclTabPicked = $state(false);
+  function pickExclTab(t: 'windows' | 'linux') {
+    exclTab = t;
+    exclTabPicked = true;
+  }
+  /** The tab whose masks apply to what is being copied: Linux for ext/XFS/
+   *  btrfs sources, Windows for NTFS/FAT ones; the window's own system when
+   *  the sources say nothing (or both). */
+  function preferredExclTab(): 'windows' | 'linux' {
+    const fss = job.sources.map((dev) => {
+      const p = findPart(dev);
+      if (!p) return '';
+      return decryptedFs(p) || fsName(p);
+    });
+    const linux = fss.some((f) => LINUX_FS.has(f));
+    const windows = fss.some((f) => ['ntfs', 're_fs', 'fat32', 'ex_fat'].includes(f));
+    if (linux && !windows) return 'linux';
+    if (windows && !linux) return 'windows';
+    return isWindows() ? 'windows' : 'linux';
+  }
+  $effect(() => {
+    if (stepKey === 'exclusions' && !exclTabPicked) exclTab = preferredExclTab();
+  });
   let newPattern = $state('');
   // Old jobs deserialize without patterns_linux — keep it an array defensively.
   function exclList(): string[] {
@@ -756,6 +817,64 @@
     return null;
   });
 
+  // The service's own answer to "is the destination on a source?" — the check
+  // the save makes, by the ranges volumes occupy, so a letterless source and a
+  // Linux mount are seen too. Asked as the folder is typed, a moment after the
+  // last key.
+  let destCheck = $state<DestinationCheck | null>(null);
+  let destCheckSerial = 0;
+  $effect(() => {
+    const sources = [...job.sources];
+    const folder = job.dest_folder.trim();
+    const serial = ++destCheckSerial;
+    if (sources.length === 0 || !folder) {
+      destCheck = null;
+      return;
+    }
+    const timer = setTimeout(() => {
+      api.checkDestination(sources, folder).then(
+        (r) => {
+          if (serial === destCheckSerial) destCheck = r;
+        },
+        () => {
+          // An older service without the check: the save still makes it.
+          if (serial === destCheckSerial) destCheck = null;
+        },
+      );
+    }, 400);
+    return () => clearTimeout(timer);
+  });
+  // Linux: which mount the «destination connected» trigger waits for — the
+  // drive the folder is on, by the rule the service fires by. A letter says
+  // that on Windows; here it is asked as the folder is typed.
+  let destMount = $state<string | null>(null);
+  let destMountSerial = 0;
+  $effect(() => {
+    const folder = job.dest_folder.trim();
+    const wanted =
+      !isWindows() && job.schedule.kind === 'event' && job.schedule.event_trigger === 'dest_connected';
+    const serial = ++destMountSerial;
+    if (!wanted || !folder) {
+      destMount = null;
+      return;
+    }
+    const timer = setTimeout(() => {
+      api.destinationMount(folder).then(
+        (mount) => {
+          if (serial === destMountSerial) destMount = mount;
+        },
+        () => {
+          if (serial === destMountSerial) destMount = null;
+        },
+      );
+    }, 300);
+    return () => clearTimeout(timer);
+  });
+  /** The source the destination sits on, as the service named it. */
+  const destOnSource = $derived(
+    destCheck?.placement === 'on_source' && !collisionLetter ? destCheck.source : null,
+  );
+
   // Representative timestamp for the file-name preview (fixed at open — the
   // real one is stamped when the backup actually runs).
   const pad2 = (n: number) => String(n).padStart(2, '0');
@@ -792,9 +911,8 @@
     const folder = job.dest_folder.trim();
     if (!folder || job.sources.length === 0) return '';
     const safe = safeFileStem(job.name, 'backup');
-    const token = job.disk_source ? `disk${job.disk_source.disk_number}` : sourceToken(job.sources[0]);
-    const sep = folder.endsWith('\\') || folder.endsWith('/') ? '' : '\\';
-    return `${folder}${sep}${safe}_${token}_full_${previewStamp}.${previewExt}`;
+    const token = job.disk_source ? diskFileTag(job.disk_source) : sourceToken(job.sources[0]);
+    return joinPath(folder, `${safe}_${token}_full_${previewStamp}.${previewExt}`);
   });
 
   // Universal "folder + file name" field (2-in-1). At rest it shows the full
@@ -809,8 +927,7 @@
     const folder = job.dest_folder.trim();
     const name = job.name.trim();
     if (!folder && !name) return '';
-    const sep = folder && !/[\\/]$/.test(folder) ? '\\' : '';
-    return `${folder}${sep}${name}`;
+    return joinPath(folder, name);
   }
   $effect(() => {
     if (!destFocused) pathText = editablePath();
@@ -848,6 +965,17 @@
       step = 0;
       return false;
     }
+    if (destOnSource) {
+      const source = destOnSource;
+      error = () => m.wiz_dest_on_source({ source });
+      step = 0;
+      return false;
+    }
+    if (job.schedule.kind === 'event' && !cap.schedule_events.includes(job.schedule.event_trigger)) {
+      error = m.wiz_err_event_unsupported;
+      goToStep('schedule');
+      return false;
+    }
     error = null;
     return true;
   }
@@ -867,6 +995,9 @@
   interface EncryptedVolume {
     device: string;
     label: string;
+    /// Linux: an opened LUKS mapping. It reads as it is; its password is for
+    /// the snapshot taken of it while it is in use.
+    mapping: boolean;
     /// "пароль", "ключ восстановления (48 цифр)", "TPM + PIN"… Empty when the
     /// service could not read the volume's metadata (or is an older build).
     methods: string[];
@@ -881,7 +1012,10 @@
   function encryptedSelected(): { device: string; label: string }[] {
     return job.sources
       .map((dev, i) => ({ device: dev, label: job.source_labels[i] ?? dev }))
-      .filter(({ device }) => findPart(device)?.is_encrypted);
+      .filter(({ device }) => {
+        const p = findPart(device);
+        return !!(p?.is_encrypted || p?.container_password);
+      });
   }
   // Encrypted volumes shown in the password panel UNDER a disk: those already
   // selected, plus — when the disk is a bootable copy — any still-unselected
@@ -895,7 +1029,7 @@
   function encryptedForDisk(d: DiskInfo): EncryptedVolume[] {
     const boot = isBootableCopy(d);
     return d.partitions
-      .filter((p) => p.is_encrypted && partDevice(p))
+      .filter((p) => (p.is_encrypted || p.container_password) && partDevice(p))
       .filter((p) => boot || job.sources.includes(partDevice(p)!))
       .map((p) => {
         const dev = partDevice(p)!;
@@ -903,6 +1037,7 @@
         return {
           device: dev,
           label: i >= 0 ? (job.source_labels[i] ?? partLabel(p)) : partLabel(p),
+          mapping: !p.is_encrypted && !!p.container_password,
           methods: p.unlock_methods ?? [],
           // "Открыть нечем" is only believed when the volume said WHY. A bare
           // `false` with no reason means the service could not read the
@@ -918,12 +1053,10 @@
   // state of C: — and asking it for "пароль" is asking for something that does
   // not exist on that volume.
   function needsRecoveryKey(e: EncryptedVolume): boolean {
-    if (e.recoveryKeyOnly !== undefined) return e.recoveryKeyOnly;
-    // A service from before the flag names the protectors in Russian, always.
-    return (
-      !e.methods.includes('пароль') &&
-      e.methods.some((m) => m.startsWith('ключ восстановления'))
-    );
+    // Decided by the service's flag, never by the protectors' names: the
+    // window and the service ship together, and the guess from Russian words
+    // kept for services older than the flag is gone.
+    return e.recoveryKeyOnly ?? false;
   }
   // What to ask this volume for, in the words of its own metadata.
   function promptFor(e: EncryptedVolume): string {
@@ -1159,7 +1292,7 @@
   // The source step is complete: a source is chosen, any encrypted volume is
   // unlocked, and a destination folder is set. "Далее" stays disabled until then.
   function canLeaveSource(): boolean {
-    return job.sources.length > 0 && allEncryptedDecrypted() && !!job.dest_folder.trim();
+    return job.sources.length > 0 && allEncryptedDecrypted() && !!job.dest_folder.trim() && !destOnSource;
   }
   function nextHint(): (() => string) | null {
     // The hint names the question the screen is actually asking: at stage 1 it
@@ -1180,10 +1313,18 @@
         : () => m.wiz_hint_enter_pw({ label });
     }
     if (!job.dest_folder.trim()) return m.wiz_hint_pick_dest;
+    if (destOnSource) {
+      const source = destOnSource;
+      return () => m.wiz_dest_on_source({ source });
+    }
     return null;
   }
 
   async function finish(run: boolean) {
+    // What this engine would refuse the job for goes before it is saved: the
+    // steps do not offer it, but a cloned or older job can still carry it.
+    dropUnsupported(job, cap);
+    if (!cap.archive_encryption && !alreadyEncrypted) wantEncryption = false;
     if (!validate()) return;
     // A run needs every encrypted source unlocked first — the password is
     // stored (and verified) when the user clicks "Расшифровать".
@@ -1207,7 +1348,7 @@
     // boot entries. `isBootableCopy` reads what the job ACTUALLY captures in
     // that mode, which is the honest answer to the same question.
     if (job.disk_source) {
-      const d = engine.disks.find((x) => diskNumber(x) === job.disk_source!.disk_number);
+      const d = engine.disks.find((x) => isSpecDisk(job.disk_source!, x));
       if (d) job.disk_source = { ...job.disk_source, bootable: isBootableCopy(d) };
     }
     // Turning encryption on cannot go through an ordinary save: the service
@@ -1257,9 +1398,7 @@
     const spec = job.disk_source;
     const owners = [...new Set(job.sources.map((dev) => diskOfDevice(dev)?.device_id ?? ''))];
     const d = spec
-      ? engine.disks.find(
-          (x) => diskNumber(x) === spec.disk_number && (x.model || x.device_id) === spec.disk_model,
-        )
+      ? engine.disks.find((x) => isSpecDisk(spec, x, true))
       : owners.length === 1
         ? engine.disks.find((x) => x.device_id === owners[0])
         : undefined;
@@ -1336,6 +1475,9 @@
         </label>
       {/if}
     </div>
+    {#if list.some((e) => e.mapping)}
+      <div class="pw-hint">{m.wiz_pw_mapping_hint()}</div>
+    {/if}
 
     {#if sharedPw && showShared}
       <div class="pw-row shared">
@@ -1516,13 +1658,13 @@
                     <div class="disk-head">
                       <span class="disk-model">{d.model || d.device_id}</span>
                       <span class="disk-head-right">
-                        <span class="disk-meta">{formatBytes(d.size_bytes)} · {tableLabel(d.partition_table)}</span>
+                        <span class="disk-meta">{formatBytes(d.size_bytes)} · {diskTableText(d)}</span>
                       </span>
                     </div>
                     <div class="disk-body">
                       <div class="disk-ico">
                         <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--disk-icon)" stroke-width="1.6"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
-                        <div class="disk-name">{m.wiz_disk_n({ n: d.device_id.replace(/\D+/g, '') || '' })}</div>
+                        <div class="disk-name">{diskCaption(d)}</div>
                       </div>
                       <div class="bar">
                         {#each diskSegments(d) as seg}
@@ -1543,6 +1685,7 @@
                     <span class="disk-model">{d.model || d.device_id}</span>
                     <span class="disk-head-right">
                       {#if isBootableCopy(d)}<span class="whole-badge">{m.wiz_badge_bootable()}</span>{/if}
+                      {#if diskWhole(d)}
                       <label
                         class="boot-toggle"
                         class:disabled={!isBootableDisk(d)}
@@ -1558,13 +1701,14 @@
                         />
                         <span>{m.wiz_boot_toggle()}</span>
                       </label>
-                      <span class="disk-meta">{formatBytes(d.size_bytes)} · {tableLabel(d.partition_table)}</span>
+                      {/if}
+                      <span class="disk-meta">{formatBytes(d.size_bytes)} · {diskTableText(d)}</span>
                     </span>
                   </div>
                   <div class="disk-body">
                     <div class="disk-ico">
                       <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--disk-icon)" stroke-width="1.6"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
-                      <div class="disk-name">{m.wiz_disk_n({ n: d.device_id.replace(/\D+/g, '') || '' })}</div>
+                      <div class="disk-name">{diskCaption(d)}</div>
                     </div>
                     <div class="bar">
                       {#each diskSegments(d) as seg}
@@ -1685,7 +1829,7 @@
                 oninput={onDestInput}
                 onfocus={() => (destFocused = true)}
                 onblur={() => (destFocused = false)}
-                placeholder="D:\OwnBackup"
+                placeholder={examplePath('folder')}
                 spellcheck="false"
                 title={destDisplay}
               />
@@ -1694,6 +1838,20 @@
           </div>
           {#if collisionLetter}
             <div class="warn-note"><svg class="ico-inline" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--error)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M9 9l6 6M15 9l-6 6"/></svg> {m.wiz_dest_collision({ letter: collisionLetter ?? '' })}</div>
+          {:else if destOnSource}
+            <div class="warn-note"><svg class="ico-inline" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--error)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M9 9l6 6M15 9l-6 6"/></svg> {m.wiz_dest_on_source({ source: destOnSource })}</div>
+          {:else if destCheck?.placement === 'cannot_tell'}
+            <div class="note">{m.wiz_dest_cannot_tell({ reason: destCheck.reason })}</div>
+          {/if}
+          {#each destCheck?.key_store_unknown ?? [] as k (k.source)}
+            <div class="note">{m.wiz_key_store_unknown({ source: k.source, reason: k.reason })}</div>
+          {/each}
+          {#if !sourceReadonly && activeDisk && !diskWhole(activeDisk)}
+            {#if wholeDisk && !mapperKind(activeDisk)}
+              <div class="note">{m.wiz_volumes_separate_no_id()}</div>
+            {:else if job.sources.length > 1}
+              <div class="note">{m.wiz_volumes_separate()}</div>
+            {/if}
           {/if}
           {/if}
         </div>
@@ -1754,10 +1912,16 @@
           <div class="note info">
             <svg class="ico-inline" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--info)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg> {m.wiz_event_note()}
             {#if job.schedule.event_trigger === 'dest_connected'}
-              {@const destLetter = driveLetter(job.dest_folder)}
-              {destLetter
-                ? m.wiz_event_dest_letter({ letter: destLetter })
-                : m.wiz_event_dest_generic()}
+              {#if isWindows()}
+                {@const destLetter = driveLetter(job.dest_folder)}
+                {destLetter
+                  ? m.wiz_event_dest_letter({ letter: destLetter })
+                  : m.wiz_event_dest_generic()}
+              {:else if destMount}
+                {m.wiz_event_dest_mount({ mount: destMount })}
+              {:else}
+                {m.wiz_event_dest_no_mount()}
+              {/if}
             {/if}
           </div>
         {:else if job.schedule.kind !== 'none'}
@@ -1768,7 +1932,7 @@
                переход в спящий режим» убраны (2026-09-26): первое не нужно,
                второе больше не выбор — во время копии компьютер не засыпает
                никогда. -->
-          {#if job.schedule.kind === 'daily' || job.schedule.kind === 'weekly' || job.schedule.kind === 'monthly'}
+          {#if cap.wake_to_run && (job.schedule.kind === 'daily' || job.schedule.kind === 'weekly' || job.schedule.kind === 'monthly')}
             <label class="chk"><input type="checkbox" bind:checked={job.schedule.wake_to_run} /> {m.wiz_sched_wake()}</label>
             {#if job.schedule.wake_to_run}
               <div class="note sub">
@@ -1798,9 +1962,11 @@
           class="wide"
           disabled={formatLocked}
         >
-          <option value="vhdx">{m.wiz_format_vhdx()}</option>
+          <option value="vhdx">{isWindows() ? m.wiz_format_vhdx() : m.wiz_format_vhdx_plain()}</option>
           <option value="qcow2">{m.wiz_format_qcow2()}</option>
-          <option value="obk">{m.wiz_format_obk()}</option>
+          {#if cap.archive_encryption || alreadyEncrypted || wantEncryption}
+            <option value="obk">{m.wiz_format_obk()}</option>
+          {/if}
         </select>
         {#if alreadyEncrypted}
           <div class="note">
@@ -1844,7 +2010,7 @@
         {:else if job.image_format === 'qcow2' && !wantEncryption}
           <div class="note">{m.wiz_qcow2_note()}</div>
         {:else if !wantEncryption}
-          <div class="note">{m.wiz_vhdx_note()}</div>
+          <div class="note">{isWindows() ? m.wiz_vhdx_note() : m.wiz_vhdx_note_linux()}</div>
         {/if}
 
         {#if wantEncryption || job.image_format === 'qcow2'}
@@ -1871,10 +2037,18 @@
         <div class="field-label mt">{m.wiz_method()}</div>
         <select bind:value={job.scheme.method} onchange={onMethodChange} class="wide">
           <option value="full">{m.wiz_method_full()}</option>
-          <option value="incremental">{m.wiz_method_incremental()}</option>
-          <option value="differential">{m.wiz_method_differential()}</option>
+          {#if (chainOk && cap.methods.includes('incremental')) || job.scheme.method === 'incremental'}
+            <option value="incremental">{m.wiz_method_incremental()}</option>
+          {/if}
+          {#if (chainOk && cap.methods.includes('differential')) || job.scheme.method === 'differential'}
+            <option value="differential">{m.wiz_method_differential()}</option>
+          {/if}
         </select>
-        {#if job.scheme.method === 'full'}
+        {#if !cap.methods.includes('incremental') && !cap.methods.includes('differential')}
+          <div class="note">{m.wiz_method_full_note()} {m.wiz_method_only_full()}</div>
+        {:else if !chainOk && job.scheme.method === 'full'}
+          <div class="note">{m.wiz_method_full_note()} {m.wiz_method_chain_formats({ formats: chainFormatNames })}</div>
+        {:else if job.scheme.method === 'full'}
           <div class="note">{m.wiz_method_full_note()}</div>
         {:else if job.scheme.method === 'incremental'}
           <div class="note">{m.wiz_method_inc_note()}</div>
@@ -1933,13 +2107,16 @@
 
       <!-- exclusions -->
       {#if stepKey === 'exclusions'}
-        <label class="chk"><input type="checkbox" bind:checked={job.exclusions.enabled} /> {m.wiz_excl_enable()}</label>
+        {#if !cap.exclusions}
+          <div class="note warn">{m.wiz_excl_unavailable()}</div>
+        {/if}
+        <label class="chk" class:dim={!cap.exclusions}><input type="checkbox" bind:checked={job.exclusions.enabled} disabled={!cap.exclusions && !job.exclusions.enabled} /> {m.wiz_excl_enable()}</label>
         <div class="note">{@html m.wiz_excl_note_masks()}<br />{@html m.wiz_excl_note_removal()}</div>
 
         <!-- Windows / Linux списки: движок применяет их по типу ФС раздела. -->
         <div class="excl-tabs">
-          <button class="excl-tab" class:active={exclTab === 'windows'} onclick={() => (exclTab = 'windows')}>Windows</button>
-          <button class="excl-tab" class:active={exclTab === 'linux'} onclick={() => (exclTab = 'linux')}>Linux</button>
+          <button class="excl-tab" class:active={exclTab === 'windows'} onclick={() => pickExclTab('windows')}>Windows</button>
+          <button class="excl-tab" class:active={exclTab === 'linux'} onclick={() => pickExclTab('linux')}>Linux</button>
         </div>
         {#if exclTab === 'windows'}
           <div class="note sub">{m.wiz_excl_windows_note()}</div>
@@ -2024,7 +2201,9 @@
                     </select> {m.wiz_min()}
                   </label>
                 {/if}
-                <label class="chk"><input type="checkbox" bind:checked={job.verification.schedule.wake_to_run} /> {m.wiz_sched_wake()}</label>
+                {#if cap.wake_to_run}
+                  <label class="chk"><input type="checkbox" bind:checked={job.verification.schedule.wake_to_run} /> {m.wiz_sched_wake()}</label>
+                {/if}
               {/if}
             </div>
           {/if}
@@ -2038,6 +2217,8 @@
                 <svg class="ico-inline" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--accent-text)" stroke-width="2.2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg> {alreadyEncrypted ? m.wiz_adv_enc_on_set() : m.wiz_adv_enc_on_pw()}
                 <button class="link" onclick={() => goToStep('scheme')}>{m.wiz_scheme_link()}</button>.
               </div>
+            {:else if !cap.archive_encryption}
+              <div class="note">{m.wiz_adv_enc_unavailable()}</div>
             {:else}
               <div class="note">
                 {m.wiz_adv_enc_off()}
@@ -2075,7 +2256,7 @@
               {m.wiz_adv_retry_hint()}
             </div>
           </div>
-          {#if !media.active}
+          {#if !media.active && (cap.after_backup || job.advanced.after_backup !== 'none')}
             <div class="adv-group">
               <div class="adv-title">{m.wiz_adv_after()}</div>
               <select class="wide" bind:value={job.advanced.after_backup}>
@@ -2087,14 +2268,18 @@
                 <div class="adv-hint flush">
                   {job.advanced.after_backup === 'sleep'
                     ? m.wiz_adv_after_sleep_hint()
-                    : m.wiz_adv_after_shutdown_hint()}
+                    : isWindows()
+                      ? m.wiz_adv_after_shutdown_hint()
+                      : m.wiz_adv_after_shutdown_hint_linux()}
                   {m.wiz_adv_after_only_if()}
                 </div>
               {/if}
             </div>
           {/if}
+          {#if cap.low_priority || cap.speed_limit || job.advanced.low_priority || job.advanced.speed_limit_mbps > 0}
           <div class="adv-group">
             <div class="adv-title">{m.wiz_adv_performance()}</div>
+            {#if cap.low_priority || job.advanced.low_priority}
             <label class="chk">
               <input type="checkbox" bind:checked={job.advanced.low_priority} />
               {m.wiz_adv_low_priority()}
@@ -2102,6 +2287,8 @@
             <div class="adv-hint">
               {m.wiz_adv_low_priority_hint()}
             </div>
+            {/if}
+            {#if cap.speed_limit || job.advanced.speed_limit_mbps > 0}
             <label class="chk">
               <input
                 type="checkbox"
@@ -2123,8 +2310,15 @@
               />
               {m.wiz_mb_s()}
             </label>
+            {/if}
           </div>
-          <div class="note">{m.wiz_adv_no_sleep()}</div>
+          {/if}
+          {#if !cap.after_backup || !cap.low_priority || !cap.speed_limit}
+            <div class="note">{m.wiz_adv_unavailable()}</div>
+          {/if}
+          {#if cap.keeps_awake}
+            <div class="note">{m.wiz_adv_no_sleep()}</div>
+          {/if}
         </div>
       {/if}
     </div>
@@ -2354,6 +2548,7 @@
   .sub-chk { margin: 8px 0 0 26px; }
   .sub-hint { margin: 4px 0 0 52px; font-size: 12.5px; line-height: 1.45; color: var(--text-muted); }
   .sub-chk.dim, .sub-hint.dim { opacity: 0.45; cursor: default; }
+  .chk.dim { opacity: 0.55; }
   .field-label { font-size: 15px; font-weight: 600; color: var(--head); margin-bottom: 10px; }
   .field-label.mt { margin-top: 26px; }
   .num { width: 60px; padding: 5px 8px; border: 1px solid var(--border-strong); border-radius: 6px; margin: 0 4px; background: var(--input-bg); color: var(--text); }

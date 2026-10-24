@@ -255,6 +255,15 @@ impl JobStore {
         })?;
         ServiceKeyStore::new(data_dir)
     }
+
+    /// What protects this machine's key store (`dpapi`, `tpm2`, `host`), or
+    /// why there is none — without opening any key.
+    pub fn key_store_protection(&self) -> Result<&'static str> {
+        let data_dir = self.jobs_path.parent().ok_or_else(|| {
+            OwnBackupError::Config(tr!("archive_setup.no_state_dir").into_owned())
+        })?;
+        ServiceKeyStore::protection(data_dir)
+    }
 }
 
 #[cfg(test)]

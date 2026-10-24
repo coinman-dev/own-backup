@@ -3,9 +3,11 @@
 rust_i18n::i18n!("locales", fallback = "ru");
 
 pub mod aligned_volume;
+pub mod bcd;
 pub mod bitlocker;
 pub mod block_reader;
 pub mod block_source;
+pub mod boot_code;
 pub mod btrfs_exclusions;
 pub mod btrfs_map;
 pub mod chains;
@@ -14,8 +16,13 @@ pub mod consolidate;
 pub mod decrypt;
 pub mod dest_folder;
 pub mod efivars;
+// Shared by both engines.
+mod engine_core;
 pub mod esp_fallback;
+pub mod esp_fallback_tree;
 pub mod esp_scan;
+#[cfg(target_os = "linux")]
+pub mod esp_scan_linux;
 pub mod exclusions;
 pub mod export;
 pub mod ext_exclusions;
@@ -25,8 +32,10 @@ pub mod fat_map;
 pub mod fs_uuid;
 pub mod gpt_reader;
 pub mod gpt_writer;
+pub mod identity_clash;
 pub mod iscsi;
 pub mod luks;
+pub mod luks_rebuild;
 pub mod mbr_writer;
 pub mod ntfs_map;
 pub mod ntfs_scan;
@@ -34,18 +43,23 @@ pub mod overlay;
 pub mod pending_image;
 pub mod qcow2;
 pub mod raw_copy;
+pub mod regf;
 pub mod registry_win;
+pub mod removal_types;
 pub mod restore_map;
 pub mod san_policy;
 /// Шифрование копий: ключи задания, ключ цепочки, шифр кластеров (`.ai/PLAN.md` §7).
 pub mod seal;
 pub mod secrets;
+pub mod sector_restore;
 pub mod sidecar;
 pub mod source_identity;
 pub mod table_merge;
 pub mod table_writer;
+pub mod unlock_probe;
 pub mod used_sectors;
 pub mod vhdx_bat;
+pub mod vhdx_chain;
 pub mod xfs_dirent;
 pub mod xfs_efree;
 pub mod xfs_exclusions;
@@ -58,11 +72,40 @@ pub mod xfs_stage2;
 pub mod exclusion_corpus;
 
 #[cfg(target_os = "linux")]
+pub mod disk_session_linux;
+#[cfg(target_os = "linux")]
+pub mod efivars_linux;
+#[cfg(target_os = "linux")]
 pub mod engine_linux;
+#[cfg(target_os = "linux")]
+pub mod identity_change_linux;
+#[cfg(target_os = "linux")]
+pub mod identity_check_linux;
+#[cfg(target_os = "linux")]
+pub mod identity_refs_linux;
+#[cfg(target_os = "linux")]
+pub mod initramfs_image_linux;
+#[cfg(target_os = "linux")]
+pub mod initramfs_linux;
+// The engine's Linux platform: the volume pipeline runs on it.
+#[cfg(target_os = "linux")]
+mod engine_platform_linux;
 #[cfg(target_os = "linux")]
 pub mod linux_device;
 #[cfg(target_os = "linux")]
+pub mod linux_tools;
+#[cfg(target_os = "linux")]
+pub mod media_linux_build;
+#[cfg(target_os = "linux")]
+pub mod media_stick_linux;
+#[cfg(target_os = "linux")]
 pub mod nbd_linux;
+#[cfg(target_os = "linux")]
+mod ntfs_names_linux;
+#[cfg(target_os = "linux")]
+pub mod restore_disk_linux;
+#[cfg(target_os = "linux")]
+pub mod udev_hold_linux;
 pub mod vhdx_format;
 
 pub mod attach_win;
@@ -78,6 +121,9 @@ pub mod disk_session_win;
 pub mod efivars_win;
 #[cfg(target_os = "windows")]
 pub mod engine_win;
+// The engine's Windows platform: the volume pipeline runs on it.
+#[cfg(target_os = "windows")]
+mod engine_platform_win;
 #[cfg(target_os = "windows")]
 pub mod esp_fallback_win;
 #[cfg(target_os = "windows")]
@@ -89,6 +135,7 @@ pub mod fat_writer;
 pub mod file_restore_win;
 #[cfg(target_os = "windows")]
 pub mod format_win;
+pub mod image_fold;
 pub mod iscsi_win;
 pub mod iso9660;
 #[cfg(target_os = "windows")]
@@ -96,11 +143,15 @@ pub mod letters_win;
 #[cfg(target_os = "windows")]
 pub mod media_build_win;
 pub mod media_layout;
+pub mod media_linux;
 pub mod media_preflight_win;
+pub mod media_stick;
 #[cfg(target_os = "windows")]
 pub mod media_tools_win;
 #[cfg(target_os = "windows")]
 pub mod obk_removal_win;
+#[cfg(target_os = "linux")]
+pub mod power_linux;
 #[cfg(target_os = "windows")]
 pub mod power_win;
 #[cfg(target_os = "windows")]

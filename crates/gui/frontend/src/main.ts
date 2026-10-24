@@ -4,9 +4,12 @@ import App from './App.svelte';
 import { mount } from 'svelte';
 import { initTheme } from './lib/themeStore.svelte';
 import { initI18n } from './lib/i18n.svelte';
+import { ensurePlatform } from './lib/platformStore.svelte';
 
 initTheme();
 initI18n();
+// Not awaited: the first draw goes by the webview's own guess.
+void ensurePlatform();
 
 const target = document.getElementById('app')!;
 

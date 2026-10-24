@@ -1,5 +1,5 @@
 //! Interrupt real data preparation before any new generation is published.
-use std::io::{BufWriter, Write};
+use std::io::BufWriter;
 use std::path::Path;
 
 use sha2::{Digest, Sha256};

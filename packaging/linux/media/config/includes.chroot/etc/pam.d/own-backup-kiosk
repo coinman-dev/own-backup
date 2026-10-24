@@ -1,0 +1,8 @@
+# The medium's window session (own-backup-kiosk.service): no password — the
+# unit starts it, nobody logs in — but a real logind session, so the window
+# is an active local session on seat0 and cage may take the seat.
+auth      required  pam_permit.so
+account   required  pam_permit.so
+session   required  pam_env.so
+session   required  pam_limits.so
+session   required  pam_systemd.so

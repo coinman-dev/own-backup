@@ -15,6 +15,8 @@
   import InfoModal from '../components/InfoModal.svelte';
   import PasswordField from '../components/PasswordField.svelte';
   import DiskMap from '../components/DiskMap.svelte';
+  import { mapperKind, diskCaption, isSpecDisk } from '../lib/diskNames';
+  import { isWindows } from '../lib/platformStore.svelte';
   import { diskSegments, msrKept } from '../lib/diskLayout';
   import type { MapSlot } from '../components/DiskMap.svelte';
   import { m } from '../lib/paraglide/messages';
@@ -320,14 +322,39 @@
     return p.volume_device ? p.volume_device : null;
   }
   function isBootableCopy(d: DiskInfo): boolean {
-    return job.disk_source != null && job.disk_source.disk_number === diskNumber(d);
+    return job.disk_source != null && isSpecDisk(job.disk_source, d);
   }
+  /** The volumes this copy was made of. A job says; a copy added by hand
+   *  (made by the CLI, or elsewhere) has no job, and then its own record does
+   *  (`source_device`). Without that a copy of a volume that is right here
+   *  read "диск этой копии не подключён", and with no map there was nothing
+   *  to click for step 2 — no restore at all. */
+  const copySources = $derived(
+    job.sources.length > 0
+      ? job.sources
+      : activeInfo?.source_device
+        ? [activeInfo.source_device]
+        : [],
+  );
+  /** Is this partition one the copy was made of? By the name the job keeps
+   *  (`/dev/disk/by-partuuid/…`, `C:`) or, on Linux, by the kernel's name — a
+   *  copy made from the command line names `/dev/vdb1`. */
+  function isCopySource(p: PartitionInfo): boolean {
+    const dev = partDevice(p);
+    return (
+      (!!dev && copySources.includes(dev)) ||
+      (!!p.kernel_device && copySources.includes(p.kernel_device))
+    );
+  }
+  /** The same, as the devices the map highlights. */
+  const copySourceDevices = $derived(
+    engine.disks.flatMap((d) =>
+      d.partitions.filter(isCopySource).map((p) => partDevice(p) ?? ''),
+    ).filter((dev) => dev !== '').concat(copySources),
+  );
   function diskHasSelection(d: DiskInfo): boolean {
     if (isBootableCopy(d)) return true;
-    return d.partitions.some((p) => {
-      const dev = partDevice(p);
-      return !!dev && job.sources.includes(dev);
-    });
+    return d.partitions.some(isCopySource);
   }
   // The archived disk map, in priority order:
   //  1. the snapshot embedded in the IMAGE FILE (works without jobs.json / on a
@@ -370,6 +397,23 @@
     }));
   });
   const systemDisks = $derived(engine.disks);
+  /** Disks a copy can be restored onto. Not a device-mapper volume: the
+   *  inventory lists an opened LUKS container or an LVM volume as a "disk" of
+   *  its own, but it has no partition table to write and is a view of another
+   *  disk. And on Linux not the disk the running system stands on — the
+   *  running root, its /boot and ESP are there, and that disk is restored
+   *  from the boot medium. (Windows keeps its own rule: the service protects
+   *  the running system's partitions and its ESP, and a data partition of
+   *  that disk is still a target.) */
+  function isRunningSystemDisk(d: DiskInfo): boolean {
+    return !isWindows() && d.partitions.some((p) => p.is_system);
+  }
+  const targetDisks = $derived(
+    systemDisks.filter((d) => !mapperKind(d) && !isRunningSystemDisk(d)),
+  );
+  const hiddenSystemDisks = $derived(
+    systemDisks.filter((d) => !mapperKind(d) && isRunningSystemDisk(d)),
+  );
 
   // --- Restore-mapping wizard (what → where) --------------------------------
   // Step 1: pick a target disk below (others collapse; source selection clears).
@@ -425,11 +469,11 @@
     const d = backedUpDisks[0];
     if (!d) return [] as number[];
     return d.partitions
-      .filter((p) => !!p.volume_device && job.sources.includes(p.volume_device))
+      .filter(isCopySource)
       .map((p) => p.index);
   });
 
-  const targetDisk = $derived(systemDisks.find((d) => d.device_id === targetDiskId) ?? null);
+  const targetDisk = $derived(targetDisks.find((d) => d.device_id === targetDiskId) ?? null);
   const srcDisk = $derived(backedUpDisks[0] ?? null);
 
   // A GPT stores partition positions as LBA numbers, so the same table means
@@ -667,6 +711,13 @@
   /** Findings from the last dry run, shown above the queue. */
   let checks = $state<CheckResult[]>([]);
   let letterChanges = $state<LetterChange[]>([]);
+  /** The last preview showed identities the restore would duplicate here
+   *  (Linux); going ahead after seeing them is the choice to keep them. */
+  let identityClashesShown = $state(false);
+  /** Linux: what to do about the duplicates the preview showed — keep them,
+   *  change them on the restored copy, or change them and fix the restored
+   *  system's fstab, crypttab and boot loader to match. */
+  let identityAction = $state<'keep' | 'change' | 'change_fix'>('keep');
   let checking = $state(false);
   let checkError: string | null = $state(null);
   /** D16 — off by default: a sector restore writes only the used blocks, so old
@@ -903,6 +954,19 @@
     const i = slots.findIndex((s) => s.kind === 'free' && s.offset === offset);
     if (i < 0) return;
     const cell = slots[i] as { offset: number; size: number; share: number };
+    // Back where they were, sector for sector, when this free stretch holds
+    // the copy's own places: on the disk it came from (its partitions deleted
+    // first) or one laid out the same way. Then it always fits — and the
+    // partitions beside it, which the copy does not hold, stay exactly as
+    // they are. Moved to 1 MiB boundaries instead, the owner's copy (an ESP
+    // from LBA 34) came out 1 MiB too long for the room its own partitions
+    // left before a 347 GB BitLocker partition (24.10).
+    const first = Math.min(...srcBackupParts.map((p) => p.offset_bytes));
+    const last = Math.max(...srcBackupParts.map((p) => p.offset_bytes + p.size_bytes));
+    if (srcBackupParts.length > 0 && first >= cell.offset && last <= cell.offset + cell.size) {
+      placeAsWas(i, cell);
+      return;
+    }
     // Every partition starts on a 1 MiB boundary, so the copy needs a little
     // more room than the sum of its parts: the source's own sizes are not round
     // (this ESP is 1.28 GiB) and each one pushes the next start up to the next
@@ -966,6 +1030,47 @@
     previewIdx = placed.map((s) => (s as { p: PartitionInfo }).p.index);
     if (rest > 0) placed.push({ kind: 'free', offset: cursor, size: rest, share: sub[sub.length - 1] });
     slots = normalize([...slots.slice(0, i), ...placed, ...slots.slice(i + 1)]);
+    fitMsg = null;
+  }
+
+  /** The copy's partitions at their own offsets inside free cell `i`, with the
+   *  gaps they had between them, and their own numbers where those are free. */
+  function placeAsWas(i: number, cell: { offset: number; size: number; share: number }) {
+    if (!slots) return;
+    pushHistory();
+    const parts = [...srcBackupParts].sort((a, b) => a.offset_bytes - b.offset_bytes);
+    const pieces: ({ part: PartitionInfo } | { free: number; size: number })[] = [];
+    let cursor = cell.offset;
+    for (const sp of parts) {
+      if (sp.offset_bytes > cursor) pieces.push({ free: cursor, size: sp.offset_bytes - cursor });
+      pieces.push({ part: sp });
+      cursor = sp.offset_bytes + sp.size_bytes;
+    }
+    const cellEnd = cell.offset + cell.size;
+    if (cellEnd > cursor) pieces.push({ free: cursor, size: cellEnd - cursor });
+    const sizes = pieces.map((x) => ('part' in x ? x.part.size_bytes : x.size));
+    const sub = allocateShares(sizes, (minShare * 100) / cell.share).map(
+      (s) => (s * cell.share) / 100,
+    );
+    const taken = new Set(curParts.map((p) => p.index));
+    let next = Math.max(0, ...curParts.map((p) => p.index), ...parts.map((p) => p.index)) + 1;
+    const placed: MapSlot[] = pieces.map((x, k) => {
+      if (!('part' in x)) return { kind: 'free' as const, offset: x.free, size: x.size, share: sub[k] };
+      const index = taken.has(x.part.index) ? next++ : x.part.index;
+      taken.add(index);
+      return {
+        kind: 'part' as const,
+        p: { ...x.part, index, volume_device: '', volume_letter: null },
+        share: sub[k],
+      };
+    });
+    // In the order of the copy's partitions, which is what pairs them up.
+    previewIdx = srcBackupParts.map((sp) => {
+      const k = pieces.findIndex((x) => 'part' in x && x.part.index === sp.index);
+      return (placed[k] as { p: PartitionInfo }).p.index;
+    });
+    const before = slots;
+    slots = normalize([...before.slice(0, i), ...placed, ...before.slice(i + 1)]);
     fitMsg = null;
   }
 
@@ -1074,7 +1179,8 @@
     // Choosing a Windows filesystem implies a Basic Data partition; "не
     // форматировать" leaves the type alone, since that is the case where the
     // user is most likely aiming at something else (Linux, swap, ESP).
-    if (fs) createDlg.gptType = GPT_TYPES[0].guid;
+    // A Linux filesystem implies the Linux filesystem type.
+    if (fs) createDlg.gptType = ['ext4', 'xfs', 'btrfs'].includes(fs) ? GPT_TYPES[4].guid : GPT_TYPES[0].guid;
   }
   // Create = split that free cell in place: [new partition][leftover free].
   function doCreate() {
@@ -1262,8 +1368,9 @@
     }
   }
 
-  /** The filesystem name as `FormatFs` spells it, or null when we cannot
-   *  create it (Linux filesystems — Windows has no mkfs for them). */
+  /** The filesystem name as `FormatFs` spells it, or null when this system
+   *  cannot create it (Windows has no mkfs for the Linux filesystems, Linux
+   *  no ReFS formatter). */
   function formatFsOf(fs: string): FormatFs | null {
     switch ((fs || '').toLowerCase()) {
       case 'ntfs':
@@ -1273,10 +1380,23 @@
       case 'exfat':
         return 'exfat';
       case 'refs':
-        return 'refs';
+        return isWindows() ? 'refs' : null;
+      case 'ext4':
+        return isWindows() ? null : 'ext4';
+      case 'xfs':
+        return isWindows() ? null : 'xfs';
+      case 'btrfs':
+        return isWindows() ? null : 'btrfs';
       default:
         return null;
     }
+  }
+
+  /** Filesystems the service can grow to a larger partition: NTFS on Windows
+   *  (D2); on Linux also ext2/3/4, XFS and btrfs. */
+  function growable(fs: string): boolean {
+    const f = (fs || '').toLowerCase();
+    return f === 'ntfs' || (!isWindows() && (f === 'ext4' || f === 'xfs' || f === 'btrfs'));
   }
 
   /** Assemble the plan. Returns null when no target disk is chosen. */
@@ -1391,13 +1511,10 @@
         reencrypt: mode === 'sectors' && willReencrypt.includes(m.src),
       });
       // A larger target leaves a tail the filesystem does not know about; only
-      // NTFS can claim it automatically (D2). In file mode the filesystem was
-      // just made at full size, so there is nothing to extend.
-      if (
-        mode === 'sectors' &&
-        dst.size > sp.size_bytes &&
-        (sp.filesystem || '').toLowerCase() === 'ntfs'
-      ) {
+      // some filesystems can claim it automatically (D2, `growable`). In file
+      // mode the filesystem was just made at full size, so there is nothing to
+      // extend.
+      if (mode === 'sectors' && dst.size > sp.size_bytes && growable(sp.filesystem)) {
         ops.push({ op: 'extend_filesystem', part: dst });
       }
     }
@@ -1470,9 +1587,20 @@
     return {
       id: crypto.randomUUID(),
       target_disk: diskNumber(d),
+      // On Linux the disk is named by its device: a number derived from
+      // `/dev/sda` names nothing.
+      target_device: d.device_id,
       image_path: activeInfo?.image_path || currentPath,
       verify_after: verifyAfter,
       ops,
+      // What the person deleted from the disk as it is now: a partition the
+      // new table no longer has where it was. The service refuses to lose
+      // any other (ExistingPartitionLost).
+      removed_parts: (targetDisk?.partitions ?? [])
+        .filter(
+          (o) => !curParts.some((c) => c.offset_bytes === o.offset_bytes && c.size_bytes === o.size_bytes),
+        )
+        .map((o) => ({ offset_bytes: o.offset_bytes, size_bytes: o.size_bytes })),
     };
   }
 
@@ -1663,6 +1791,8 @@
       );
       checks = res.results;
       letterChanges = res.letter_changes;
+      identityClashesShown = (res.identity_clashes?.length ?? 0) > 0;
+      identityAction = 'keep';
       // Apply the plan that came BACK: the dry run resolves drive-letter
       // conflicts by editing it, and applying the one we sent would throw the
       // fix away.
@@ -1782,6 +1912,10 @@
         { ...checkedPlan, verify_after: verifyAfter },
         passphrases,
         archiveSecretFor(checkedPlan.image_path),
+        // The duplicates were in the checks the person confirmed, with the
+        // choice next to them.
+        identityClashesShown ? (identityAction === 'keep' ? 'keep' : 'change') : undefined,
+        identityClashesShown && identityAction === 'change_fix',
       );
     } catch (e) {
       applyError = String(e);
@@ -1906,7 +2040,10 @@
         <!-- An imported copy has no job to draw a map from: everything is
              inside the sealed file, and "the map below" would point at
              nothing. -->
-        <span>{backedUpDisks.length > 0 ? m.rd_key_note() : m.rd_key_note_no_map()}</span>
+        <span>
+          {backedUpDisks.length > 0 ? m.rd_key_note() : m.rd_key_note_no_map()}
+          {#if decryptedParts.length > 0}{m.rd_key_note_encryption()}{/if}
+        </span>
         <button class="btn ghost tiny" onclick={() => askKey()}>{m.rd_enter_password()}</button>
       </div>
     {/if}
@@ -1919,7 +2056,7 @@
           <DiskMap
             disk={d}
             center={i === 0 ? copyNav : undefined}
-            selected={targetDiskId ? [] : job.sources}
+            selected={targetDiskId ? [] : copySourceDevices}
             selectedIndices={targetDiskId ? [] : [...(activeInfo?.backed_up_parts ?? []), ...layoutOnlyParts]}
             readonly
             boot={i === 0 && isBootable}
@@ -1989,7 +2126,11 @@
           </div>
         {/if}
       </div>
-    {:else if decryptedParts.length > 0}
+    {:else if decryptedParts.length > 0 && !keyNeeded && !infoLoading}
+      <!-- Not while the copy is sealed or still being read: until then the
+           screen knows only the job's record, not what the copy kept, and
+           «the copy did not record the container» was said over a copy that
+           kept its LUKS header (owner, 24.10). -->
       {@const one = decryptedParts.length === 1}
       {@const kind = allBitLocker ? ' (BitLocker)' : allLuks ? ' (LUKS)' : ''}
       <div class="luks-warn">
@@ -2053,6 +2194,11 @@
         {#if !targetDiskId}{m.rd_where_sub_disk()}{:else}{m.rd_where_sub_part()}{/if}
       </span>
     </div>
+    {#if hiddenSystemDisks.length > 0 && !targetDiskId}
+      <div class="hint-small">
+        {m.rd_target_running_hidden({ disks: hiddenSystemDisks.map((d) => diskCaption(d)).join(', ') })}
+      </div>
+    {/if}
     {#if systemDisks.length === 0}
       <div class="loading-note searching">
         <span class="spinner" aria-hidden="true"></span>
@@ -2060,7 +2206,7 @@
       </div>
     {:else if !targetDiskId}
       <div class="disks">
-        {#each systemDisks as d (d.device_id)}
+        {#each targetDisks as d (d.device_id)}
           <DiskMap disk={d} onDisk={() => selectTargetDisk(d)} />
         {/each}
       </div>
@@ -2157,6 +2303,12 @@
           </li>
         {/each}
       </ol>
+      {#if (planRun.edited_files?.length ?? 0) > 0}
+        <div class="run-followups">
+          <div class="run-fu-head">{m.rd_edited_files_head()}</div>
+          {#each planRun.edited_files ?? [] as f}<div class="finding info">{f}</div>{/each}
+        </div>
+      {/if}
       {#if planRun.follow_ups.length > 0}
         <div class="run-followups">
           <div class="run-fu-head">{m.rd_followups_head()}</div>
@@ -2281,17 +2433,25 @@
       <div class="row2">
         <label class="fld">
           <span>{m.rd_filesystem()}</span>
-          <!-- Only filesystems Windows can actually create (D9). A Linux
-               partition is made by picking the GPT type on the right and
-               leaving this on "не форматировать" — Windows has no mkfs for
-               ext4, and offering it here would produce a partition the queue
-               claims is formatted and that is in fact empty. -->
+          <!-- Only filesystems this system can actually create (D9). On
+               Windows a Linux partition is made by picking the GPT type on the
+               right and leaving this on "не форматировать" — Windows has no
+               mkfs for ext4, and offering it there would produce a partition
+               the queue claims is formatted and that is in fact empty. Linux
+               creates its own filesystems and has no ReFS formatter. -->
           <select value={createDlg.fs} onchange={(e) => onFsChange((e.currentTarget as HTMLSelectElement).value)}>
             <option value="">{m.rd_no_format_opt()}</option>
+            {#if !isWindows()}
+              <option value="ext4">ext4</option>
+              <option value="xfs">XFS</option>
+              <option value="btrfs">Btrfs</option>
+            {/if}
             <option value="ntfs">NTFS</option>
             <option value="fat32">FAT32</option>
             <option value="exfat">exFAT</option>
-            <option value="refs">ReFS</option>
+            {#if isWindows()}
+              <option value="refs">ReFS</option>
+            {/if}
           </select>
         </label>
         {#if isGpt}
@@ -2395,6 +2555,21 @@
         <input type="checkbox" bind:checked={verifyAfter} />
         <span>{m.rd_verify_after()}</span>
       </label>
+      {#if identityClashesShown}
+        <div class="dialog-title sub">{m.rd_identity_title()}</div>
+        <label class="opt">
+          <input type="radio" bind:group={identityAction} value="keep" />
+          <span>{m.rd_identity_keep()}</span>
+        </label>
+        <label class="opt">
+          <input type="radio" bind:group={identityAction} value="change" />
+          <span>{m.rd_identity_change()}</span>
+        </label>
+        <label class="opt">
+          <input type="radio" bind:group={identityAction} value="change_fix" />
+          <span>{m.rd_identity_change_fix()} <em>{m.rd_identity_change_fix_note()}</em></span>
+        </label>
+      {/if}
 
       <!-- The password field is not repeated here. It lives on the page, next
            to the "вернуть шифрование" checkbox that raises the question, and a

@@ -1,5 +1,7 @@
 {
   "_version": 2,
+  "scheduler.skipped_no_password": {"ru": "Копия по расписанию не запущена: для %{volumes} не сохранён пароль. Откройте задание, введите пароль и отметьте «Запомнить».", "en": "The scheduled backup did not start: no password is saved for %{volumes}. Open the job, enter the password and tick «Remember»."},
+  "scheduler.skipped_catch_up": {"ru": "Пропущенная копия начнётся сама вскоре после этого.", "en": "The missed backup then starts by itself shortly afterwards."},
   "grpc_server.busy_archive_reauthorize": {"ru": "Восстановление разрешения на автоматические копии", "en": "Restoring automatic backup authorization"},
   "scheduled_verification.panicked": {"ru": "Проверка прервана внутренней ошибкой. Подробности — в журнале службы.", "en": "Verification stopped due to an internal error. See the service log for details."},
   "grpc_server.target_disk_changed": {
@@ -198,6 +200,42 @@
     "ru": "диск %{disk}",
     "en": "disk %{disk}"
   },
+  "grpc_server.busy_media_stick": {
+    "ru": "запись носителя на флешку",
+    "en": "writing the medium onto a stick"
+  },
+  "grpc_server.busy_media_build": {
+    "ru": "сборка загрузочного носителя Linux",
+    "en": "building the Linux boot medium"
+  },
+  "grpc_server.busy_media_cache": {
+    "ru": "удаление остатков сборки носителя",
+    "en": "removing what medium builds left"
+  },
+  "grpc_server.media_linux_cancelled": {
+    "ru": "сборка носителя отменена; незаконченные файлы удалены",
+    "en": "the medium build was cancelled; the unfinished files were removed"
+  },
+  "grpc_server.media_linux_only": {
+    "ru": "носитель на основе Linux собирается службой только в Linux",
+    "en": "the Linux-based medium is built by the service on Linux only"
+  },
+  "grpc_server.busy_which_stick": {
+    "ru": "флешка %{device}",
+    "en": "stick %{device}"
+  },
+  "grpc_server.media_stick_cancelled": {
+    "ru": "запись отменена; начало флешки стёрто — до новой записи она не загружается",
+    "en": "the write was cancelled; the stick's start was wiped — it does not boot until written again"
+  },
+  "grpc_server.media_stick_list_again": {
+    "ru": "в запросе нет описания выбранной флешки (модель, серийный номер, объём) — без него нельзя проверить, что под этим именем всё ещё она. Обновите список флешек и выберите снова (окно или own-backup-cli этой же версии)",
+    "en": "the request does not describe the chosen stick (model, serial, size) — without that it cannot be checked that the name still means it. Refresh the list of sticks and choose again (in the window or own-backup-cli of this version)"
+  },
+  "grpc_server.media_stick_linux_only": {
+    "ru": "запись носителя Linux на флешку есть только в Linux-версии",
+    "en": "writing the Linux medium onto a stick is available in the Linux version only"
+  },
   "grpc_server.plan_refused": {
     "ru": "План не прошёл проверку — ничего не записано:\n%{refusals}",
     "en": "The plan did not pass the checks — nothing was written:\n%{refusals}"
@@ -249,6 +287,18 @@
   "grpc_server.boot_disk_not_given": {
     "ru": "не сказан диск",
     "en": "no disk given"
+  },
+  "grpc_server.boot_not_a_disk": {
+    "ru": "%{disk} — не целый диск этой машины",
+    "en": "%{disk} is not a whole disk of this machine"
+  },
+  "grpc_server.boot_no_esp_there": {
+    "ru": "на диске %{disk} нет раздела EFI с номером %{partition}",
+    "en": "disk %{disk} has no EFI System Partition number %{partition}"
+  },
+  "grpc_server.boot_bad_partition_guid": {
+    "ru": "у раздела непонятный GUID: %{guid}",
+    "en": "the partition has an unreadable GUID: %{guid}"
   },
   "grpc_server.boot_partition_not_given": {
     "ru": "не сказан раздел",
@@ -311,12 +361,12 @@
     "en": "\n  WARNING: could not add “%{user}” to group “%{group}”: %{error}\n  Add it manually:  sudo usermod -aG %{group} %{user}"
   },
   "install.linux_installed": {
-    "ru": "systemd-юнит установлен и запущен: %{path}\n  Статус:  systemctl status %{unit}.service",
-    "en": "systemd unit installed and started: %{path}\n  Status:  systemctl status %{unit}.service"
+    "ru": "Служба включена и запущена (юнит %{path}).\n  Статус:  systemctl status %{unit}.service\n  Доступ из окна для пользователя:  sudo own-backup-service --grant-access ИМЯ",
+    "en": "The service is enabled and running (unit %{path}).\n  Status:  systemctl status %{unit}.service\n  Window access for a user:  sudo own-backup-service --grant-access NAME"
   },
   "install.linux_removed": {
-    "ru": "systemd-юнит %{unit}.service удалён.",
-    "en": "systemd unit %{unit}.service removed."
+    "ru": "Служба %{unit}.service остановлена и отключена.",
+    "en": "Service %{unit}.service stopped and disabled."
   },
   "install.linux_started": {
     "ru": "systemd-юнит %{unit}.service запущен.",
@@ -361,6 +411,10 @@
   "install.purge_failed": {
     "ru": "Папку %{path} не удалось удалить целиком: не поддалось записей — %{count}.",
     "en": "Folder %{path} could not be deleted completely: entries that would not go — %{count}."
+  },
+  "main.busy_media_cleanup": {
+    "ru": "уборка после прерванной сборки носителя",
+    "en": "cleaning up after an interrupted medium build"
   },
   "main.info_background": {
     "ru": "Это фоновая служба «%{name}». Обычно ею управляет система (автозапуск при загрузке).",
@@ -418,6 +472,10 @@
     "ru": "режим загрузочного носителя: состояние на диске носителя, службу не устанавливать (в WinPE включается сам)",
     "en": "bootable media mode: state kept on the media drive, the service is not installed (turns on by itself in WinPE)"
   },
+  "data_dir_acl.foreign_link": {
+    "ru": "папка данных %{path} — ссылка, которую создала не система и не администраторы (владелец %{owner}): служба не запущена, чтобы не хранить задания, журнал и ключ доступа там, куда ведёт ссылка. Удалите ссылку (администратор) и запустите службу снова",
+    "en": "the data folder %{path} is a link made by someone other than SYSTEM or the Administrators (owner %{owner}): the service did not start, so as not to keep its jobs, history and access token wherever the link leads. Remove the link (as an administrator) and start the service again"
+  },
   "single_instance.already_running": {
     "ru": "служба Own Backup уже запущена — второй экземпляр не нужен и ничего не менял",
     "en": "the Own Backup service is already running — a second instance is not needed and changed nothing"
@@ -425,5 +483,99 @@
   "single_instance.could_not_check": {
     "ru": "не удалось проверить, не запущена ли служба уже (%{reason}) — запуск отменён, чтобы не получилось двух движков сразу",
     "en": "could not check whether the service is already running (%{reason}) — start cancelled so that two engines never run at once"
-  }
+  },
+  "grpc_server.archive_key_store_missing": {"ru": "Шифрование копий в Linux пока недоступно: нет хранилища ключей службы. Ключ восстановления не выдан — без хранилища разрешение нельзя было бы завершить.", "en": "Archive encryption is not available on Linux yet: the service has no key store. No recovery key was issued — without the store the authorization could never be completed."},
+  "main.socket_in_use": {
+    "ru": "сокет %{path} отвечает: служба Own Backup уже запущена — второй экземпляр не запущен и ничего не менял",
+    "en": "socket %{path} answers: the Own Backup service is already running — a second instance did not start and changed nothing"
+  },
+  "main.socket_unknown": {
+    "ru": "не удалось проверить сокет %{path} (%{error}) — запуск отменён, чтобы не отнять сокет у работающей службы",
+    "en": "could not check socket %{path} (%{error}) — start cancelled so as not to take the socket from a running service"
+  },
+  "peer_access.not_local_session": {
+    "ru": "Отказано: управлять службой можно только из активного локального сеанса (за этим компьютером) или от имени root. Удалённые сеансы, в том числе SSH, и неактивные сеансы не допускаются.",
+    "en": "Access denied: the service can be controlled only from an active local session (at this computer) or as root. Remote sessions, SSH included, and inactive sessions are not allowed."
+  },
+  "peer_access.unknown_peer": {
+    "ru": "Отказано: не удалось определить, какой пользователь подключился к службе.",
+    "en": "Access denied: could not determine which user connected to the service."
+  },
+  "install.linux_unit_unreadable": {
+    "ru": "служба не установлена или её юнит не читается (%{path}: %{error}) — обновлять нечего; для установки: --install",
+    "en": "the service is not installed or its unit cannot be read (%{path}: %{error}) — nothing to update; to install: --install"
+  },
+  "install.linux_unit_no_exec": {
+    "ru": "в юните %{path} нет ExecStart — неизвестно, какой файл служба запускает; переустановите: --install",
+    "en": "unit %{path} has no ExecStart — it is unknown which file the service runs; reinstall: --install"
+  },
+  "settings.not_saved": {
+    "ru": "Параметры не сохранены: %{error}",
+    "en": "The settings were not saved: %{error}"
+  },
+  "settings.mirror_not_absolute": {
+    "ru": "Папку для копии журнала нужно указать полным путём, без «.» и «..»: «%{path}».",
+    "en": "The log mirror folder must be a full path, without “.” or “..”: “%{path}”."
+  },
+  "settings.mirror_not_local": {
+    "ru": "Папку для копии журнала нужно указать на диске с буквой, например «E:\\Журналы»: служба не пишет в сетевые папки от вашего имени — «%{path}».",
+    "en": "The log mirror folder must be on a drive with a letter, such as “E:\\Logs”: the service does not write to network folders on your behalf — “%{path}”."
+  },
+  "settings.mirror_unknown_caller": {
+    "ru": "Не удалось определить, кто меняет папку копии журнала, — служба пишет туда от имени администратора, поэтому изменение не принято. Выключить копию можно и так.",
+    "en": "Could not tell who is changing the log mirror folder — the service writes there as an administrator, so the change was not accepted. Switching the mirror off is still possible."
+  },
+  "settings.mirror_missing": {
+    "ru": "Папки «%{path}» нет. Подключите диск или флешку, создайте на нём папку и сохраните снова.",
+    "en": "There is no folder “%{path}”. Connect the disk or USB stick, create the folder on it and save again."
+  },
+  "settings.mirror_unreadable": {
+    "ru": "Папку «%{path}» не удалось проверить: %{error}",
+    "en": "The folder “%{path}” could not be checked: %{error}"
+  },
+  "settings.mirror_symlink": {
+    "ru": "Путь «%{path}» проходит через символьную ссылку %{link}. Укажите настоящий путь к папке.",
+    "en": "The path “%{path}” goes through the symbolic link %{link}. Give the real path of the folder."
+  },
+  "settings.mirror_not_dir": {
+    "ru": "«%{path}» — не папка.",
+    "en": "“%{path}” is not a folder."
+  },
+  "settings.mirror_not_yours": {
+    "ru": "Служба пишет копию журнала от имени администратора, поэтому указать можно только свою папку — владельцем «%{path}» должны быть вы (например, папка в домашнем каталоге или на флешке, подключённой в вашем сеансе).",
+    "en": "The service writes the log mirror as an administrator, so only a folder of your own can be named — you must be the owner of “%{path}” (for example, a folder in your home directory or on a USB stick mounted in your session)."
+  },
+  "install.linux_no_unit": {
+    "ru": "Юнит %{unit}.service не найден ни в /etc/systemd/system, ни в /usr/lib/systemd/system. Службу устанавливает пакет own-backup (.deb): sudo apt install ./own-backup_*.deb",
+    "en": "Unit %{unit}.service was found neither in /etc/systemd/system nor in /usr/lib/systemd/system. The service is installed by the own-backup package (.deb): sudo apt install ./own-backup_*.deb"
+  },
+  "install.linux_legacy_unit_removed": {
+    "ru": "Удалён юнит, записанный прежней версией --install: %{path} (он перекрывал юнит из пакета).",
+    "en": "Removed the unit an earlier --install wrote: %{path} (it overrode the packaged unit)."
+  },
+  "install.linux_no_user": {
+    "ru": "Не указано, кому дать доступ: укажите имя (--grant-access ИМЯ) или запустите через pkexec или sudo.",
+    "en": "No user to grant access to: give a name (--grant-access NAME) or run through pkexec or sudo."
+  },
+  "install.linux_root_needs_no_group": {
+    "ru": "Пользователю root доступ к службе дан всегда — группа ему не нужна.",
+    "en": "root always has access to the service and needs no group."
+  },
+  "main.cmd_grant_access": {
+    "ru": "дать пользователю доступ к службе из окна и CLI (Linux, от root)",
+    "en": "give a user access to the service from the window and the CLI (Linux, as root)"
+  },
+  "main.shutdown_cancelled": {
+    "ru": "Выключение компьютера отменено, когда служба уже останавливалась; служба завершается с ошибкой, чтобы systemd запустил её снова.",
+    "en": "The shutdown was called off after the service had begun stopping; the service exits with an error so that systemd starts it again."
+  },
+  "polkit.denied": {
+    "ru": "Отказано: для этого действия (%{action}) нужно подтверждение администратора, а оно не получено. Запрос показывает агент polkit вашего сеанса; от root (sudo own-backup-cli …) подтверждение не нужно.",
+    "en": "Denied: this action (%{action}) needs an administrator's confirmation, and it was not given. Your session's polkit agent shows the request; as root (sudo own-backup-cli …) none is needed."
+  },
+  "polkit.unavailable": {
+    "ru": "Отказано: для этого действия (%{action}) нужно подтверждение администратора, но polkit недоступен (%{error}). Выполните действие от root (sudo own-backup-cli …).",
+    "en": "Denied: this action (%{action}) needs an administrator's confirmation, but polkit is unavailable (%{error}). Run it as root (sudo own-backup-cli …)."
+  },
+  "grpc_server.archive_key_store_unavailable": {"ru": "Шифрование копий недоступно: у службы нет хранилища ключей (%{error}). Ключ восстановления не выдан — без хранилища разрешение нельзя было бы завершить.", "en": "Archive encryption is unavailable: the service has no key store (%{error}). No recovery key was issued — without the store the authorization could never be completed."}
 }

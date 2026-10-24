@@ -3,10 +3,22 @@
 rust_i18n::i18n!("locales", fallback = "ru");
 
 mod app_state;
+// The decision is plain code tested everywhere; only Windows applies it.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod data_dir_acl;
 mod grpc_server;
 mod install;
+#[cfg(target_os = "linux")]
+mod logind_events;
+#[cfg(unix)]
+mod peer_access;
+#[cfg(target_os = "linux")]
+mod polkit;
 mod scheduled_verification;
 mod scheduler;
+#[cfg(unix)]
+mod sd_notify;
+mod settings;
 mod shutdown;
 mod single_instance;
 
@@ -59,6 +71,9 @@ enum Mode {
     /// Delete what the service keeps on this machine: settings, jobs, history
     /// and remembered volume keys. The uninstaller's «удалить также настройки».
     PurgeData,
+    /// Add a person to the access group (Linux): `--grant-access [USER]`, as
+    /// root — by `pkexec` from the window, by `sudo`, or by hand.
+    GrantAccess,
     /// Console run for development: loopback TCP, no auth, easy to attach a
     /// debugger/curl. `--foreground` / `-f`.
     Foreground,
@@ -110,6 +125,7 @@ fn mode_of(args: &[String]) -> Mode {
             "/status" | "--status" | "status" => return Mode::Status,
             "/update" | "--update" | "update" => return Mode::Update,
             "/purge-data" | "--purge-data" | "purge-data" => return Mode::PurgeData,
+            "/grant-access" | "--grant-access" | "grant-access" => return Mode::GrantAccess,
             "-f" | "--foreground" => return Mode::Foreground,
             "--run" | "run" | "--daemon" | "daemon" => return Mode::Daemon,
             _ => {}
@@ -120,7 +136,7 @@ fn mode_of(args: &[String]) -> Mode {
 
 /// Today's service log, in the shared `Logs` folder beside the exe (what the
 /// user looks for), else the data dir (LocalSystem can always write there),
-/// else temp.
+/// else temp. On Linux `/var/log/own-backup` (`log_files::log_dir`).
 fn open_service_log() -> Option<(own_backup_common::log_files::DailyLog, std::path::PathBuf)> {
     let dir = own_backup_common::log_files::log_dir(&AppConfig::default().data_dir)?;
     let log = own_backup_common::log_files::DailyLog::new(dir, "own-backup-service");
@@ -155,6 +171,60 @@ fn start_log_housekeeping() {
     });
 }
 
+/// The service log file, and — when systemd started the service with its
+/// output going to the journal (`$JOURNAL_STREAM`, Linux) — the same lines on
+/// stderr, so `journalctl -u own-backup` shows them too. Each line carries
+/// the `<N>` syslog prefix of its level, which journald reads as the priority
+/// (`SyslogLevelPrefix=`, on by default). Anywhere else it is the file alone.
+struct JournalCopy<W> {
+    file: W,
+    journal: bool,
+}
+
+impl<W> JournalCopy<W> {
+    fn new(file: W) -> Self {
+        Self {
+            file,
+            journal: cfg!(target_os = "linux") && std::env::var_os("JOURNAL_STREAM").is_some(),
+        }
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for JournalCopy<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // The file is the log that must exist; the journal copy is best-effort.
+        let n = self.file.write(buf)?;
+        if self.journal {
+            let mut stderr = std::io::stderr().lock();
+            for line in buf[..n].split_inclusive(|b| *b == b'\n') {
+                let _ = stderr.write_all(syslog_prefix(line).as_bytes());
+                let _ = stderr.write_all(line);
+            }
+        }
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+/// `<N>` for a formatted tracing line — `2026-10-19T…Z  WARN target: …` — by
+/// its level word: err 3, warning 4, info 6, debug 7.
+fn syslog_prefix(line: &[u8]) -> &'static str {
+    let level = std::str::from_utf8(line)
+        .ok()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .unwrap_or("");
+    match level {
+        "ERROR" => "<3>",
+        "WARN" => "<4>",
+        "INFO" => "<6>",
+        "DEBUG" | "TRACE" => "<7>",
+        _ => "<6>",
+    }
+}
+
 /// Set up logging to a file next to the exe (so a service running under the SCM,
 /// which has no console, still produces a diagnosable log) and record startup
 /// facts. The level is the settings' «Уровень журнала», followed while running
@@ -166,7 +236,9 @@ fn init_logging() {
     let config_path = AppConfig::default_path();
     // The boot medium starts with no config at all, and its log is the one
     // that has to explain a restore afterwards.
-    let fallback = if own_backup_common::media_mode::is_windows_pe() {
+    let fallback = if own_backup_common::media_mode::is_windows_pe()
+        || own_backup_common::media_mode::is_linux_medium()
+    {
         "debug"
     } else {
         "info"
@@ -182,7 +254,7 @@ fn init_logging() {
             // The second copy, on whatever drive the user named — the only one
             // that survives a restore that takes the machine down with it.
             let tee = TeeLog::new(
-                f,
+                JournalCopy::new(f),
                 MirrorLog::new(AppConfig::default_path(), "own-backup-service.log"),
             );
             let mirror = tee.mirror_path();
@@ -342,12 +414,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Mode::Status => install::status(),
         Mode::Update => install::update_from_here(),
         Mode::PurgeData => install::purge_data(),
+        Mode::GrantAccess => grant_access(&args),
         // Foreground/dev uses TCP on localhost for easy debugging.
         Mode::Foreground => run_loop(true),
         // Daemon (systemd) uses the OS production transport (UDS/named pipe).
         Mode::Daemon => run_loop(false),
         Mode::Service => run_service_mode(),
     }
+}
+
+/// `--grant-access [USER]`: the word after the flag, unless it is another flag.
+fn grant_access(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let user = grant_access_user(args);
+    #[cfg(not(target_os = "windows"))]
+    {
+        install::grant_access(user)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = user;
+        Err("--grant-access is for Linux; on Windows access follows the console session".into())
+    }
+}
+
+fn grant_access_user(args: &[String]) -> Option<&str> {
+    let at = args.iter().position(|a| {
+        matches!(
+            a.as_str(),
+            "/grant-access" | "--grant-access" | "grant-access"
+        )
+    })?;
+    args.get(at + 1)
+        .map(String::as_str)
+        .filter(|a| !a.starts_with('-') && !a.starts_with('/'))
 }
 
 /// Human-facing description printed when the binary is launched directly in a
@@ -372,6 +471,8 @@ fn print_info() {
     println!("  /status       {}", tr!("main.cmd_status"));
     println!("  /update       {}", tr!("main.cmd_update"));
     println!("  /purge-data   {}", tr!("main.cmd_purge"));
+    #[cfg(not(target_os = "windows"))]
+    println!("  --grant-access [USER]  {}", tr!("main.cmd_grant_access"));
     println!("  --foreground  {}", tr!("main.cmd_foreground"));
     println!("  --run         {}", tr!("main.cmd_run"));
     println!("  --media       {}", tr!("main.cmd_media"));
@@ -392,15 +493,66 @@ fn run_loop(use_tcp: bool) -> Result<(), Box<dyn std::error::Error>> {
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
         let (controller, signal) = create_shutdown_channel();
+        // Registered here, before anything is spawned: until a handler exists,
+        // SIGTERM's default action kills the process outright.
+        let stop_requested = stop_signal()?;
+        // A second way to be asked to stop: logind announcing a shutdown.
+        let (os_stop_tx, mut os_stop_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
         tokio::spawn(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            info!("Ctrl+C received, shutting down...");
+            tokio::select! {
+                _ = stop_requested => {}
+                Some(()) = os_stop_rx.recv() => {}
+            }
+            #[cfg(unix)]
+            sd_notify::stopping();
             controller.trigger_shutdown();
         });
-        // No SCM control handler here (foreground/daemon), so no OS events — keep
-        // the sender alive so the scheduler's receiver simply never yields.
-        let (_os_tx, os_rx) = tokio::sync::mpsc::unbounded_channel::<scheduler::OsEvent>();
-        run_main_loop(signal, use_tcp, os_rx).await
+        // No SCM control handler here. On Linux the installed engine hears
+        // logind instead (shutdown, logon, logoff); elsewhere, and for a
+        // foreground or boot-medium run, the sender is only kept alive so the
+        // scheduler's receiver simply never yields.
+        let (os_tx, os_rx) = tokio::sync::mpsc::unbounded_channel::<scheduler::OsEvent>();
+        #[cfg(target_os = "linux")]
+        let cancelled_shutdown = (!use_tcp && !own_backup_common::media_mode::is_media_mode())
+            .then(|| logind_events::spawn(os_tx.clone(), os_stop_tx.clone()));
+        let _keep = (os_tx, os_stop_tx);
+        run_main_loop(signal, use_tcp, os_rx).await?;
+        #[cfg(target_os = "linux")]
+        if cancelled_shutdown.is_some_and(|c| c.happened()) {
+            // An error exit, so that systemd starts the engine again.
+            return Err(tr!("main.shutdown_cancelled").into_owned().into());
+        }
+        Ok(())
+    })
+}
+
+/// Resolves when the process is asked to stop: Ctrl+C everywhere, and on Unix
+/// also SIGTERM and SIGHUP.
+///
+/// SIGTERM is how systemd stops the unit — `systemctl stop`, shutdown, a
+/// package upgrade. Left to its default action it killed the engine in the
+/// middle of writing an image, skipping the worker's final history and the
+/// socket/token cleanup. SIGHUP (the terminal of a `--foreground` run went
+/// away) is treated the same: there is no configuration to reload.
+#[cfg(unix)]
+fn stop_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut term = signal(SignalKind::terminate())?;
+    let mut hup = signal(SignalKind::hangup())?;
+    Ok(async move {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => info!("Ctrl+C received, shutting down..."),
+            _ = term.recv() => info!("SIGTERM received, shutting down..."),
+            _ = hup.recv() => info!("SIGHUP received, shutting down..."),
+        }
+    })
+}
+
+#[cfg(not(unix))]
+fn stop_signal() -> std::io::Result<impl std::future::Future<Output = ()>> {
+    Ok(async {
+        let _ = tokio::signal::ctrl_c().await;
+        info!("Ctrl+C received, shutting down...");
     })
 }
 
@@ -510,7 +662,26 @@ pub async fn run_main_loop(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = AppConfig::default();
 
-    std::fs::create_dir_all(&config.data_dir)?;
+    prepare_data_dir(&config.data_dir)?;
+    // The installed service's data folder is SYSTEM's and the
+    // Administrators' (`data_dir_acl`). A link to elsewhere somebody else
+    // made stops the start before the service writes anything there.
+    #[cfg(windows)]
+    let protect_data = !use_tcp
+        && !own_backup_common::media_mode::is_media_mode()
+        && matches!(
+            data_dir_acl::check_root(&config.data_dir)?,
+            data_dir_acl::RootKind::Folder
+        );
+    // A config.toml that a user owns stops steering the service here. Before
+    // the folder is protected: which mirror folder it may keep depends on
+    // who owned it.
+    #[cfg(windows)]
+    settings::adopt_config_file(&AppConfig::default_path());
+    #[cfg(windows)]
+    if protect_data {
+        data_dir_acl::protect(&config.data_dir);
+    }
 
     // Everyone's logs, swept by the one process that is always here.
     start_log_housekeeping();
@@ -536,6 +707,32 @@ pub async fn run_main_loop(
             return Err(Box::new(e));
         }
     };
+    // The lock above is per data directory, but the socket and the token are
+    // machine-wide: an engine started with another data directory got all the
+    // way to the socket — its scheduler already running — and took it over.
+    #[cfg(unix)]
+    let _runtime_ownership = if use_tcp {
+        None
+    } else {
+        claim_runtime_dir(&config).map_err(|e| {
+            warn!(error = %e, "Refusing to start a second engine");
+            eprintln!("{e}");
+            e
+        })?
+    };
+    // The root CLI on this machine learns from here where this instance
+    // keeps its data — above all its key directory, which a copy the CLI
+    // makes must leave out too (decision 6/E4). Not a reason to stop: the
+    // configured directory is still known to it.
+    #[cfg(target_os = "linux")]
+    if !use_tcp {
+        if let Some(runtime) = config.socket_path().parent() {
+            if let Err(e) = own_backup_common::service_data_dir::publish(runtime, &config.data_dir)
+            {
+                warn!(error = %e, "the data directory could not be published for the CLI");
+            }
+        }
+    }
 
     let conn = own_backup_metadata::open_database(&config.db_path())?;
     info!("Metadata database initialized");
@@ -547,6 +744,15 @@ pub async fn run_main_loop(
     // an event fan-out for progress streams, and the background worker that
     // actually drives backups.
     let store = own_backup_core::JobStore::try_load(&config.data_dir)?;
+    // A copy the previous process was making when it died (killed, power
+    // cut) has no record of its own; it gets one now, as interrupted.
+    match store.record_killed_runs() {
+        0 => {}
+        n => info!(
+            runs = n,
+            "runs cut off by a dead service recorded as interrupted"
+        ),
+    }
     // A local authorization whose job is gone opens an archive on this machine
     // with no password and is accounted for by nothing. Deleting a job retires
     // its own; this catches what older builds and interrupted transactions
@@ -613,7 +819,136 @@ pub async fn run_main_loop(
     } else {
         std::sync::Arc::new(own_backup_core::PasswordStore::new(config.db_path()))
     };
-    #[cfg(not(target_os = "windows"))]
+    // Unfinished VHDX/qcow2 images are recorded in the same SYSTEM-only
+    // directory, so that what a killed run left can be proved ours and
+    // deleted (`pending_image`). Destinations connected now are swept at
+    // once; the rest at the next run.
+    #[cfg(target_os = "windows")]
+    if let Some(dir) = _private_secret_guard
+        .as_ref()
+        .and_then(|guard| guard.path().parent())
+    {
+        match own_backup_backup::pending_image::use_ledger(dir.join("pending-images")) {
+            Ok(()) => {
+                std::thread::spawn(own_backup_backup::pending_image::reclaim_abandoned);
+            }
+            Err(e) => tracing::warn!(error = %e, "unfinished images will not be reclaimed"),
+        }
+    }
+    // The same on Linux, in a root-only directory beside the data: only the
+    // installed service, which runs as root, keeps the records.
+    #[cfg(unix)]
+    let installed_service = !use_tcp
+        && !own_backup_common::media_mode::is_media_mode()
+        // SAFETY: geteuid has no preconditions.
+        && unsafe { libc::geteuid() } == 0;
+    #[cfg(unix)]
+    if installed_service {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let dir = config.data_dir.join("pending-images");
+        let made = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .and_then(|()| std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)))
+            .map_err(own_backup_common::OwnBackupError::from)
+            .and_then(|()| own_backup_backup::pending_image::use_ledger(dir));
+        match made {
+            Ok(()) => {
+                std::thread::spawn(own_backup_backup::pending_image::reclaim_abandoned);
+            }
+            Err(e) => tracing::warn!(error = %e, "unfinished images will not be reclaimed"),
+        }
+    }
+    // A snapshot a killed run left behind keeps growing with every write to
+    // its origin until it fills the volume group (LVM) or its store in the
+    // destination folder (device-mapper); a device-mapper one also keeps the
+    // origin running through our layer.
+    #[cfg(target_os = "linux")]
+    if installed_service {
+        tokio::spawn(async {
+            let removed = own_backup_snapshot::linux::remove_orphaned_snapshots().await;
+            if removed > 0 {
+                info!(removed, "snapshots left by interrupted runs removed");
+            }
+        });
+        // A udev hold a killed restore left behind keeps udisks, LVM, md and
+        // systemd away from that disk until the next reboot.
+        own_backup_backup::udev_hold_linux::sweep_stale_holds(std::path::Path::new(
+            own_backup_backup::udev_hold_linux::RULES_DIR,
+        ));
+        // A medium build runs as a transient unit outside this cgroup, so
+        // an engine killed or upgraded mid-build leaves it running, its
+        // binds under its temporary folder mounted. Stopped and the folder
+        // removed (and the cache of older versions) before any build may
+        // start: the slot is held until then.
+        let slot = busy
+            .reserve(
+                own_backup_core::busy::Doing::new(
+                    tr!("main.busy_media_cleanup"),
+                    own_backup_backup::media_linux_build::WORK_PARENTS[0],
+                )
+                .shared(["media-build"]),
+            )
+            .ok();
+        std::thread::spawn(move || {
+            let _slot = slot;
+            if own_backup_backup::media_linux_build::recover_abandoned_build() {
+                info!("a medium build left by an earlier run was stopped and cleaned");
+            }
+        });
+    }
+    // The installed Linux service keeps remembered volume passwords (an
+    // opened LUKS mapping's among them) in its root-only key directory —
+    // which the engine leaves out of every copy — sealed by the key store's
+    // machine key (`systemd-creds`). Passwords an older build sealed with
+    // `secret.key` beside the public data move there first.
+    // Wherever this instance keeps its key directory, the engine leaves it
+    // out of every copy of the volume it is on (decision 6/E4).
+    #[cfg(target_os = "linux")]
+    own_backup_backup::seal::local::register_data_dir(&config.data_dir);
+    #[cfg(target_os = "linux")]
+    let passwords = if installed_service {
+        // A key store that cannot be opened (a data directory others may
+        // write, no systemd-creds, a sealing failure) costs the remembered
+        // passwords, not the service: plain copies keep running, and the
+        // window does not offer encryption (`with_key_store`).
+        let opened = own_backup_backup::seal::local::PrivateSecretDatabase::new(&config.data_dir)
+            .and_then(|guard| {
+                let store = own_backup_core::PasswordStore::new_private_sealed(
+                    config.db_path(),
+                    guard.path().to_path_buf(),
+                    guard.secret_store(),
+                );
+                // Rows that cannot move yet stay where they are and are
+                // tried again at the next start.
+                match store.migrate_legacy(&config.db_path()) {
+                    Ok(0) => {}
+                    Ok(moved) => info!(
+                        moved,
+                        "legacy volume passwords migrated to the private database"
+                    ),
+                    Err(e) => warn!(error = %e, "legacy volume passwords not migrated yet"),
+                }
+                guard.validate_files()?;
+                Ok(store)
+            });
+        match opened {
+            Ok(store) => std::sync::Arc::new(store),
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "service key store unavailable: volume passwords are kept for this run only"
+                );
+                std::sync::Arc::new(own_backup_core::PasswordStore::memory_only(
+                    config.db_path(),
+                ))
+            }
+        }
+    } else {
+        std::sync::Arc::new(own_backup_core::PasswordStore::new(config.db_path()))
+    };
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     let passwords = std::sync::Arc::new(own_backup_core::PasswordStore::new(config.db_path()));
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let verification_worker = scheduled_verification::spawn(
@@ -643,8 +978,10 @@ pub async fn run_main_loop(
     let shutdown_watcher = tokio::spawn(async move {
         worker_shutdown.wait_for_shutdown().await;
         worker_stop.send_replace(true);
+        // The stop is marked before anything is cancelled: a run that ends
+        // cancelled now is recorded as interrupted, not as a person's cancel.
+        worker_busy.cancel_for_stop();
         worker_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
-        worker_busy.cancel_whatever_is_running();
     });
     info!(
         "Backup orchestrator ready ({} job(s) loaded)",
@@ -737,7 +1074,7 @@ pub async fn run_main_loop(
         .add_service(service)
         .serve_with_shutdown(addr, async move {
             shutdown.wait_for_shutdown().await;
-            busy.cancel_whatever_is_running();
+            busy.cancel_for_stop();
             busy.wait_until_idle().await;
         })
         .await;
@@ -767,8 +1104,8 @@ async fn stop_worker(
     watcher: tokio::task::JoinHandle<()>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     stop.send_replace(true);
+    busy.cancel_for_stop();
     cancel.store(true, std::sync::atomic::Ordering::SeqCst);
-    busy.cancel_whatever_is_running();
     watcher.abort();
     // The worker owns the backup result and writes its final history before
     // returning. Aborting it here would release its busy guard while the
@@ -923,12 +1260,84 @@ fn chown_to_group(path: &std::path::Path, gid: u32) {
     }
 }
 
+/// Create the data directory.
+///
+/// On Unix it is not left to the umask: it holds the job store, the activity
+/// journal (with the Argon2id-sealed archive keys) and the metadata database,
+/// and a default 0755 made them readable by every local user. 0750 with the
+/// access group — members still read `config.toml` — and 0700 for the boot
+/// medium's directory. An existing directory (an older build made it, or the
+/// log fallback got there first) is tightened to that, never widened.
+#[cfg(unix)]
+fn prepare_data_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    let media = own_backup_common::media_mode::is_media_mode();
+    let allowed = if media { 0o700 } else { 0o750 };
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(allowed)
+        .create(dir)?;
+    let mode = std::fs::metadata(dir)?.permissions().mode() & 0o777;
+    if mode & !allowed != 0 {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode & allowed))?;
+    }
+    // SAFETY: geteuid has no preconditions. Only root may hand the directory
+    // to a group; a development run under OWN_BACKUP_DATA_DIR keeps its own.
+    if !media && unsafe { libc::geteuid() } == 0 {
+        if let Some(gid) = own_backup_group_gid() {
+            chown_to_group(dir, gid);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn prepare_data_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)
+}
+
+/// The runtime directory holding the socket and the token: 0750 and the
+/// access group, so members can traverse to the socket and nobody else can.
+#[cfg(unix)]
+fn prepare_runtime_dir(dir: &std::path::Path, group_gid: Option<u32>) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o750))?;
+    if let Some(gid) = group_gid {
+        chown_to_group(dir, gid);
+    }
+    Ok(())
+}
+
+/// Claim the machine-wide runtime directory the way the data directory is
+/// claimed (`single_instance`), before anything else starts.
+///
+/// `None` when there is nothing more to claim: the data directory IS the
+/// runtime directory, and its lock — the same file — is already held.
+#[cfg(unix)]
+fn claim_runtime_dir(
+    config: &AppConfig,
+) -> Result<Option<single_instance::Ownership>, Box<dyn std::error::Error>> {
+    let socket_path = config.socket_path();
+    let Some(dir) = socket_path.parent() else {
+        return Ok(None);
+    };
+    prepare_runtime_dir(dir, own_backup_group_gid())?;
+    if std::fs::canonicalize(dir).ok() == std::fs::canonicalize(&config.data_dir).ok() {
+        return Ok(None);
+    }
+    Ok(Some(single_instance::claim(dir)?))
+}
+
 /// Serve gRPC over Unix Domain Socket.
 ///
 /// Socket: /run/own-backup/service.sock, 0o660, chowned to the `own-backup`
 /// group — group members (added by `--install`) reach the service without
-/// root; everyone else is refused by filesystem permissions. There is no
-/// listening TCP port in this mode.
+/// root; everyone else is refused by filesystem permissions. Each call is
+/// further checked against the caller's login session (`peer_access`), the
+/// counterpart of the Windows console-session check. There is no listening
+/// TCP port in this mode.
 #[cfg(unix)]
 async fn serve_uds(
     config: AppConfig,
@@ -946,17 +1355,41 @@ async fn serve_uds(
     let group_gid = own_backup_group_gid();
 
     if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
-        // 0o750 + group own-backup so members can traverse to the socket/token.
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o750))?;
-        if let Some(gid) = group_gid {
-            chown_to_group(parent, gid);
-        }
+        prepare_runtime_dir(parent, group_gid)?;
     }
 
-    // Remove stale socket from previous run
-    if socket_path.exists() {
-        std::fs::remove_file(&socket_path)?;
+    // A socket left by a killed engine refuses connections and is removed. One
+    // that answers belongs to a live engine — an older build without the
+    // runtime lock, say — and deleting it would cut that engine off from every
+    // client while it keeps running.
+    match std::os::unix::net::UnixStream::connect(&socket_path) {
+        Ok(_) => {
+            let e = tr!("main.socket_in_use", path = socket_path.display()).into_owned();
+            warn!(socket = %socket_path.display(), "Refusing to start a second engine");
+            eprintln!("{e}");
+            return Err(e.into());
+        }
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+            ) =>
+        {
+            match std::fs::remove_file(&socket_path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(e) => {
+            return Err(tr!(
+                "main.socket_unknown",
+                path = socket_path.display(),
+                error = e
+            )
+            .into_owned()
+            .into())
+        }
     }
 
     let uds = UnixListener::bind(&socket_path)?;
@@ -979,20 +1412,27 @@ async fn serve_uds(
     }
 
     info!("gRPC server (UDS) listening on {:?}", socket_path);
+    // The socket answers and the token is readable: only now is the unit
+    // "active" (Type=notify), so a client started right after `systemctl
+    // start` finds both.
+    crate::sd_notify::ready();
 
     let busy = state.busy.clone();
     let service = BackupServiceImpl::new(state, token, shutdown.clone()).into_service();
-    Server::builder()
+    let served = Server::builder()
         .add_service(service)
         .serve_with_incoming_shutdown(UnixListenerStream::new(uds), async move {
             shutdown.wait_for_shutdown().await;
-            busy.cancel_whatever_is_running();
+            busy.cancel_for_stop();
             busy.wait_until_idle().await;
         })
-        .await?;
+        .await;
 
+    // Ours either way: the runtime lock is held, so no other engine has
+    // published a socket or a token since.
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_file(&config.token_path());
+    served?;
     Ok(())
 }
 
@@ -1000,12 +1440,26 @@ async fn serve_uds(
 /// pipe is a byte stream just like a socket, so read/write delegate straight to
 /// the inner [`NamedPipeServer`].
 #[cfg(windows)]
-struct NamedPipeConn(tokio::net::windows::named_pipe::NamedPipeServer);
+struct NamedPipeConn(tokio::net::windows::named_pipe::NamedPipeServer, PipeCaller);
+
+/// Who is at the other end of a named-pipe connection, found when it was
+/// accepted (`client_in_active_console`); every request on it carries this in
+/// its extensions, which is how `settings::caller_of` knows the user.
+#[cfg(windows)]
+#[derive(Debug, Clone)]
+pub(crate) struct PipeCaller {
+    /// The client process's user, `S-1-5-…`.
+    pub sid: String,
+    /// SYSTEM, or a token elevated as an administrator.
+    pub elevated: bool,
+}
 
 #[cfg(windows)]
 impl tonic::transport::server::Connected for NamedPipeConn {
-    type ConnectInfo = ();
-    fn connect_info(&self) -> Self::ConnectInfo {}
+    type ConnectInfo = PipeCaller;
+    fn connect_info(&self) -> Self::ConnectInfo {
+        self.1.clone()
+    }
 }
 
 #[cfg(windows)]
@@ -1047,12 +1501,17 @@ impl tokio::io::AsyncWrite for NamedPipeConn {
 #[cfg(windows)]
 struct PipeSecurity(windows::Win32::Security::PSECURITY_DESCRIPTOR);
 
+/// The client, if it runs in the active console session as the user logged on
+/// there (`None` refuses the connection).
 #[cfg(windows)]
-fn client_in_active_console(server: &tokio::net::windows::named_pipe::NamedPipeServer) -> bool {
+fn client_in_active_console(
+    server: &tokio::net::windows::named_pipe::NamedPipeServer,
+) -> Option<PipeCaller> {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::Security::{
-        EqualSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
+        EqualSid, GetTokenInformation, TokenElevation, TokenUser, TOKEN_ELEVATION, TOKEN_QUERY,
+        TOKEN_USER,
     };
     use windows::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeClientSessionId};
     use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
@@ -1088,43 +1547,54 @@ fn client_in_active_console(server: &tokio::net::windows::named_pipe::NamedPipeS
 
     let active = unsafe { WTSGetActiveConsoleSessionId() };
     if active == u32::MAX {
-        return false;
+        return None;
     }
     let mut client = u32::MAX;
     let pipe = HANDLE(server.as_raw_handle());
     if unsafe { GetNamedPipeClientSessionId(pipe, &mut client) }.is_err() || client != active {
-        return false;
+        return None;
     }
     let mut process_id = 0u32;
     if unsafe { GetNamedPipeClientProcessId(pipe, &mut process_id) }.is_err() {
-        return false;
+        return None;
     }
-    let Ok(process) =
-        (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) })
-    else {
-        return false;
-    };
-    let process = Owned(process);
+    let process =
+        Owned(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) }.ok()?);
     let mut client_token = HANDLE::default();
     if unsafe { OpenProcessToken(process.0, TOKEN_QUERY, &mut client_token) }.is_err() {
-        return false;
+        return None;
     }
     let client_token = Owned(client_token);
+    let a = user_sid(client_token.0)?;
+    // TOKEN_USER is pointer-aligned in the API buffer; read_unaligned avoids
+    // assuming Vec<u8>'s alignment. The pointed-to SID lives in `a`.
+    let a_user = unsafe { std::ptr::read_unaligned(a.as_ptr().cast::<TOKEN_USER>()) };
+    let sid = unsafe { own_backup_common::win_acl::sid_string(a_user.User.Sid) }?;
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut len = 0u32;
+    let elevated = sid == own_backup_common::win_acl::SYSTEM_SID
+        || (unsafe {
+            GetTokenInformation(
+                client_token.0,
+                TokenElevation,
+                Some(std::ptr::addr_of_mut!(elevation).cast()),
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut len,
+            )
+        }
+        .is_ok()
+            && elevation.TokenIsElevated != 0);
+    let caller = PipeCaller { sid, elevated };
     let mut console_token = HANDLE::default();
     if unsafe { WTSQueryUserToken(active, &mut console_token) }.is_err() {
         // A stripped WinPE may have no WTS token; its single temporary console
         // session is still distinguished by the check above.
-        return own_backup_common::media_mode::is_media_mode();
+        return own_backup_common::media_mode::is_media_mode().then_some(caller);
     }
     let console_token = Owned(console_token);
-    let (Some(a), Some(b)) = (user_sid(client_token.0), user_sid(console_token.0)) else {
-        return false;
-    };
-    // TOKEN_USER is pointer-aligned in the API buffer; read_unaligned avoids
-    // assuming Vec<u8>'s alignment. Both pointed-to SIDs live in a/b below.
-    let a_user = unsafe { std::ptr::read_unaligned(a.as_ptr().cast::<TOKEN_USER>()) };
+    let b = user_sid(console_token.0)?;
     let b_user = unsafe { std::ptr::read_unaligned(b.as_ptr().cast::<TOKEN_USER>()) };
-    unsafe { EqualSid(a_user.User.Sid, b_user.User.Sid).is_ok() }
+    unsafe { EqualSid(a_user.User.Sid, b_user.User.Sid).is_ok() }.then_some(caller)
 }
 
 // The descriptor is immutable after construction; only a raw pointer prevents
@@ -1246,16 +1716,18 @@ async fn serve_named_pipe(
                     } {
                         Ok(s) => s,
                         Err(e) => {
-                            yield Ok(NamedPipeConn(connected));
+                            if let Some(caller) = client_in_active_console(&connected) {
+                                yield Ok(NamedPipeConn(connected, caller));
+                            }
                             yield Err(e);
                             return;
                         }
                     };
-                    if !client_in_active_console(&connected) {
+                    let Some(caller) = client_in_active_console(&connected) else {
                         tracing::warn!(target: "security", "named-pipe client outside the active console session rejected");
                         continue;
-                    }
-                    yield Ok(NamedPipeConn(connected));
+                    };
+                    yield Ok(NamedPipeConn(connected, caller));
                 }
                 Err(e) => {
                     // Recreate the instance and keep serving.
@@ -1285,7 +1757,7 @@ async fn serve_named_pipe(
         .add_service(service)
         .serve_with_incoming_shutdown(incoming, async move {
             shutdown.wait_for_shutdown().await;
-            busy.cancel_whatever_is_running();
+            busy.cancel_for_stop();
             busy.wait_until_idle().await;
         })
         .await?;
@@ -1441,6 +1913,39 @@ mod tests {
         assert_eq!(mode_of(&args("--media /status")), Mode::Status);
         // On its own it selects nothing: the SCM launches us with no words.
         assert_eq!(mode_of(&args("--media")), Mode::Service);
+    }
+
+    #[test]
+    fn journal_lines_carry_their_level_as_a_syslog_priority() {
+        let line = |level: &str| format!("2026-10-19T16:26:28.486128Z {level} security: text\n");
+        assert_eq!(syslog_prefix(line("ERROR").as_bytes()), "<3>");
+        assert_eq!(syslog_prefix(line(" WARN").as_bytes()), "<4>");
+        assert_eq!(syslog_prefix(line(" INFO").as_bytes()), "<6>");
+        assert_eq!(syslog_prefix(line("DEBUG").as_bytes()), "<7>");
+        assert_eq!(syslog_prefix(b"continuation of a message\n"), "<6>");
+    }
+
+    #[test]
+    fn without_a_journal_the_copy_is_the_file_alone() {
+        use std::io::Write;
+        let mut copy = JournalCopy {
+            file: Vec::new(),
+            journal: false,
+        };
+        copy.write_all(b"one\ntwo\n").unwrap();
+        assert_eq!(copy.file, b"one\ntwo\n");
+    }
+
+    #[test]
+    fn grant_access_takes_the_user_after_it_and_nothing_else() {
+        assert_eq!(mode_of(&args("--grant-access alice")), Mode::GrantAccess);
+        assert_eq!(
+            grant_access_user(&args("--grant-access alice")),
+            Some("alice")
+        );
+        assert_eq!(grant_access_user(&args("--grant-access")), None);
+        assert_eq!(grant_access_user(&args("--grant-access --media")), None);
+        assert_eq!(grant_access_user(&args("--run")), None);
     }
 
     #[test]

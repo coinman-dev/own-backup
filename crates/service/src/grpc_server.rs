@@ -17,9 +17,20 @@ use tracing::info;
 
 use crate::app_state::AppState;
 
+/// The engine of this system: verification is the shared one on both.
+#[cfg(target_os = "linux")]
+use own_backup_backup::engine_linux as platform_engine;
+#[cfg(target_os = "windows")]
+use own_backup_backup::engine_win as platform_engine;
+
 pub mod proto {
     tonic::include_proto!("ownbackup");
 }
+
+/// Restore and verify on Linux: the handlers' Linux halves (PLAN §6, stage 3).
+#[cfg(target_os = "linux")]
+#[path = "restore_linux.rs"]
+mod restore_linux;
 
 use proto::backup_service_server::{BackupService, BackupServiceServer};
 use proto::*;
@@ -46,6 +57,8 @@ impl BackupServiceImpl {
 
     pub fn into_service(self) -> BackupServiceServer<BackupServiceImpl> {
         BackupServiceServer::new(self)
+            .max_decoding_message_size(own_backup_common::MAX_RPC_MESSAGE)
+            .max_encoding_message_size(own_backup_common::MAX_RPC_MESSAGE)
     }
 
     /// Take the machine for one destructive operation, or turn the caller away
@@ -54,40 +67,59 @@ impl BackupServiceImpl {
     /// `failed_precondition` and not `unavailable`: nothing is broken, the
     /// answer is simply "not now", and a client can retry when the thing that
     /// is running has ended.
-    fn reserve(
+    async fn reserve(
         &self,
         what: &str,
         which: &str,
     ) -> Result<own_backup_core::busy::Reservation, Status> {
-        if self.shutdown.is_shutdown_requested() {
-            return Err(Status::unavailable("service is stopping"));
-        }
-        let slot = self
-            .state
-            .busy
-            .reserve(own_backup_core::busy::Doing::new(what, which))
-            .map_err(|held| Status::failed_precondition(held.refusal()))?;
-        if self.shutdown.is_shutdown_requested() {
-            return Err(Status::unavailable("service is stopping"));
-        }
-        Ok(slot)
+        self.take(own_backup_core::busy::Doing::new(what, which))
+            .await
     }
 
     /// The same, for an operation the client already has an id for — a restore
     /// plan is cancelled by its plan id, and that is what the window knows.
-    fn reserve_with_id(
+    async fn reserve_with_id(
         &self,
         what: &str,
         which: &str,
         id: uuid::Uuid,
     ) -> Result<own_backup_core::busy::Reservation, Status> {
+        self.take(own_backup_core::busy::Doing::with_id(what, which, id))
+            .await
+    }
+
+    /// For an operation that may run beside others, holding only
+    /// `resources` (`own_backup_core::busy`): a chain's folder, the medium
+    /// builder, a stick.
+    async fn reserve_on<I, S>(
+        &self,
+        what: &str,
+        which: &str,
+        resources: I,
+    ) -> Result<own_backup_core::busy::Reservation, Status>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.take(own_backup_core::busy::Doing::new(what, which).shared(resources))
+            .await
+    }
+
+    /// Take what `doing` needs. These are operations a person started: a
+    /// scheduled verification in the way steps aside (it is cancelled, and
+    /// its end is waited for briefly); anything else in the way is said.
+    async fn take(
+        &self,
+        doing: own_backup_core::busy::Doing,
+    ) -> Result<own_backup_core::busy::Reservation, Status> {
         if self.shutdown.is_shutdown_requested() {
             return Err(Status::unavailable("service is stopping"));
         }
         let slot = self
             .state
             .busy
-            .reserve(own_backup_core::busy::Doing::with_id(what, which, id))
+            .reserve_soon(doing, std::time::Duration::from_secs(30))
+            .await
             .map_err(|held| Status::failed_precondition(held.refusal()))?;
         if self.shutdown.is_shutdown_requested() {
             return Err(Status::unavailable("service is stopping"));
@@ -113,7 +145,10 @@ impl BackupServiceImpl {
         // Which device is under that number NOW. `PhysicalDriveN` is a slot:
         // unplug a USB disk and plug another in, and the number moves (audit
         // AUD-01, point 5).
+        #[cfg(not(target_os = "linux"))]
         let now = live_disk_id(plan.target_disk).await;
+        #[cfg(target_os = "linux")]
+        let now = restore_linux::live_disk_id(plan);
         match plan
             .target_disk_id
             .as_ref()
@@ -124,13 +159,14 @@ impl BackupServiceImpl {
                 let was = plan.target_disk_id.clone().unwrap_or_default();
                 tracing::warn!(
                     disk = plan.target_disk,
+                    device = ?plan.target_device,
                     expected = ?was,
                     found = ?now,
                     "the target disk is not the one the plan was made for"
                 );
                 return Ok(vec![tr!(
                     "grpc_server.target_disk_changed",
-                    disk = plan.target_disk,
+                    disk = plan_disk_name(plan),
                     was_serial = was.serial,
                     was_size = was.size_bytes,
                     now_serial = now.serial,
@@ -166,7 +202,10 @@ impl BackupServiceImpl {
         }
         correct_disk_size(plan);
 
-        let results = check_plan(plan, &ctx);
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+        let mut results = check_plan(plan, &ctx);
+        #[cfg(target_os = "linux")]
+        results.extend(own_backup_core::restore_exec::linux_refusals(plan));
         for r in &results {
             match r.level {
                 CheckLevel::Error => tracing::warn!(
@@ -210,7 +249,17 @@ impl BackupServiceImpl {
             // What the image holds. The client read the same sidecar, but the
             // service can read it again and this is the sizes every "will it
             // fit" answer is computed from.
-            sources: image_sources(&plan.image_path, keys).unwrap_or(from_client.sources),
+            sources: image_sources(&plan.image_path, keys).unwrap_or_else(|| {
+                // A copy made from the command line has no snapshot of the
+                // live disk. The window's list, when it sent one, says more;
+                // without it (a plan applied from elsewhere) the copy's own
+                // partition table still gives every size.
+                if from_client.sources.is_empty() {
+                    image_layout_sources(&plan.image_path, keys).unwrap_or_default()
+                } else {
+                    from_client.sources
+                }
+            }),
             source_sector_size: image_sector_size(&plan.image_path, keys)
                 .unwrap_or(from_client.source_sector_size),
             ..Default::default()
@@ -241,6 +290,10 @@ impl BackupServiceImpl {
                 ctx.targets.iter().map(|t| t.index).collect()
             }
         };
+        // Linux disks are named by device, not number: the facts above came
+        // back empty or unsure, and these replace them.
+        #[cfg(target_os = "linux")]
+        restore_linux::fill_context(plan, &mut ctx, keys);
         ctx
     }
 }
@@ -297,6 +350,55 @@ fn image_sources(
             })
             .collect(),
     )
+}
+
+/// A whole-disk copy's partitions from its partition table — how full each
+/// one is stays unknown (0). `None` when the copy is not a whole-disk image.
+fn image_layout_sources(
+    image: &std::path::Path,
+    keys: Option<&own_backup_backup::seal::context::ArchiveKeys>,
+) -> Option<Vec<own_backup_common::restore_check::SourcePartition>> {
+    let sidecar = read_sidecar_for_checks(image, keys)?;
+    let disk = sidecar.disk_manifest.as_ref()?;
+    Some(layout_sources(disk, &sidecar.info.luks_headers))
+}
+
+/// Each partition of `disk`'s table, with the filesystem its image recorded.
+fn layout_sources(
+    disk: &own_backup_common::gpt::DiskBackupManifest,
+    luks_headers: &[own_backup_common::image::LuksHeaderBackup],
+) -> Vec<own_backup_common::restore_check::SourcePartition> {
+    use own_backup_common::image::VolumeCaptureMode;
+    use own_backup_common::types::FileSystem;
+    let sector = u64::from(disk.layout.sector_size.max(1));
+    disk.layout
+        .partitions
+        .iter()
+        .map(|p| {
+            let image = disk.images.iter().find(|i| i.part_index == p.index);
+            let filesystem = match image.map(|i| i.filesystem.to_ascii_lowercase()).as_deref() {
+                Some("ntfs") => FileSystem::Ntfs,
+                Some("fat32" | "fat" | "vfat") => FileSystem::Fat32,
+                Some("exfat") => FileSystem::ExFat,
+                Some("ext2" | "ext3" | "ext4") => FileSystem::Ext4,
+                Some("xfs") => FileSystem::Xfs,
+                Some("btrfs") => FileSystem::Btrfs,
+                Some("refs") => FileSystem::ReFs,
+                _ => FileSystem::Unknown,
+            };
+            own_backup_common::restore_check::SourcePartition {
+                index: p.index,
+                size_bytes: (p.last_lba + 1).saturating_sub(p.first_lba) * sector,
+                used_bytes: 0,
+                filesystem,
+                label: p.name.clone(),
+                encrypted_at_source: image
+                    .and_then(|i| i.encryption.as_ref())
+                    .is_some_and(|e| e.capture_mode == VolumeCaptureMode::Plaintext),
+                luks_header_available: luks_headers.iter().any(|h| h.part_index == p.index),
+            }
+        })
+        .collect()
 }
 
 /// The copy's own description of itself, for the plan checks — with the key
@@ -377,7 +479,7 @@ async fn live_disk_id(disk: u32) -> own_backup_common::restore_plan::TargetDiskI
     id
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 async fn live_disk_id(_disk: u32) -> own_backup_common::restore_plan::TargetDiskId {
     own_backup_common::restore_plan::TargetDiskId::default()
 }
@@ -568,7 +670,15 @@ fn change_volume_letter(
 
 /// Authenticate an incoming request via bearer token. Empty expected token =
 /// auth disabled (dev/TCP mode). Constant-time comparison avoids a timing oracle.
+/// A call over the Unix socket must also come from root or a user with an
+/// active local session (`peer_access`): the token alone admits every member
+/// of the access group, from anywhere.
 fn check_auth<T>(req: &Request<T>, expected: &str) -> Result<(), Status> {
+    #[cfg(unix)]
+    crate::peer_access::check(
+        req.extensions()
+            .get::<tonic::transport::server::UdsConnectInfo>(),
+    )?;
     if expected.is_empty() {
         return Ok(());
     }
@@ -614,6 +724,92 @@ struct ManualSecret {
     recovery_key: Option<String>,
 }
 
+/// A file `ReadImageMeta` may read as root for a caller: one of our copies,
+/// by an absolute path, a regular file and not a link to something else. The
+/// service runs as root; without this the call would read and parse any file
+/// the caller names.
+fn image_meta_target(path: &std::path::Path) -> Result<(), Status> {
+    let refuse = || {
+        Status::invalid_argument(format!(
+            "{} is not a backup copy (.obk, .vhdx, .avhdx, .qcow2)",
+            path.display()
+        ))
+    };
+    if !path.is_absolute() {
+        return Err(refuse());
+    }
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !matches!(ext.as_str(), "obk" | "vhdx" | "avhdx" | "qcow2") {
+        return Err(refuse());
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_file() => Ok(()),
+        Ok(_) => Err(refuse()),
+        Err(e) => Err(Status::not_found(format!("{}: {e}", path.display()))),
+    }
+}
+
+/// The open header of an `.obk`, as `ReadImageMeta` hands it out.
+#[derive(serde::Serialize)]
+struct ImageListingOut {
+    job_id: String,
+    chain_id: String,
+    backup_id: String,
+    role: String,
+    created_at: String,
+    parent_file_name: Option<String>,
+    virtual_size: u64,
+}
+
+impl From<own_backup_backup::seal::obk::ObkListing> for ImageListingOut {
+    fn from(l: own_backup_backup::seal::obk::ObkListing) -> Self {
+        Self {
+            job_id: l.job_id,
+            chain_id: l.chain_id.to_string(),
+            backup_id: l.backup_id.to_string(),
+            role: format!("{:?}", l.role).to_lowercase(),
+            created_at: l.created_at,
+            parent_file_name: l.parent_file_name,
+            virtual_size: l.virtual_size,
+        }
+    }
+}
+
+/// A copy's description, as `ReadImageMeta` hands it out: what a window shows
+/// and plans with. Not the block checksums (megabytes, and only a verify uses
+/// them) and not the LUKS headers' bytes — which partitions have one is what a
+/// window needs; the header itself stays in the copy for the restore.
+#[derive(serde::Serialize)]
+struct ImageSidecarOut {
+    info: own_backup_backup::sidecar::SidecarInfo,
+    manifest: own_backup_common::image::ImageManifest,
+    disk_manifest: Option<own_backup_common::gpt::DiskBackupManifest>,
+}
+
+impl From<own_backup_backup::Sidecar> for ImageSidecarOut {
+    fn from(mut s: own_backup_backup::Sidecar) -> Self {
+        hide_header_bytes(&mut s.info);
+        Self {
+            info: s.info,
+            manifest: s.manifest,
+            disk_manifest: s.disk_manifest,
+        }
+    }
+}
+
+/// Keep which partitions have a LUKS header, drop the header's bytes: a key
+/// slot is an offline password-guessing target, and the window only needs to
+/// know the header is there.
+fn hide_header_bytes(info: &mut own_backup_backup::sidecar::SidecarInfo) {
+    for h in &mut info.luks_headers {
+        h.header_b64.clear();
+    }
+}
+
 /// Keys for a MANUAL mount, restore or verify, from what the person typed.
 ///
 /// **Never the service's own key store**, and that is the line §7.4 draws: a
@@ -629,7 +825,7 @@ struct ManualSecret {
 /// Slow: opening the envelope is Argon2id at the production profile, seconds.
 /// [`manual_keys_off_thread`] is what callers use, so that the machine's single
 /// busy slot is not held for the length of a key derivation.
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn manual_keys(
     image: &std::path::Path,
     secret: &ManualSecret,
@@ -672,12 +868,80 @@ fn manual_keys(
 /// The key file reports it as a `Config` error, whose `Display` puts an English
 /// «Configuration error:» in front — and that is what the unlock dialog showed
 /// under a mistyped password.
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn refused_secret(e: own_backup_common::OwnBackupError) -> Status {
     match e {
         own_backup_common::OwnBackupError::Config(m) => Status::permission_denied(m),
         other => Status::permission_denied(other.to_string()),
     }
+}
+
+/// Ask for the passphrases of the LUKS containers a whole-disk restore puts
+/// back, or let it through when nothing is missing or wrong. Asking is a
+/// `FAILED_PRECONDITION` whose details carry the list as JSON
+/// ([`own_backup_common::engine_dto::LUKS_PASSPHRASES_DETAIL`]), so a client
+/// asks for exactly those partitions and decides from structured fields.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[allow(clippy::result_large_err)]
+fn luks_gate(
+    needs: Vec<own_backup_common::engine_dto::LuksPassphraseNeedDto>,
+) -> Result<(), Status> {
+    if needs.is_empty() {
+        return Ok(());
+    }
+    let text = own_backup_backup::luks_rebuild::describe_needs(&needs);
+    tracing::warn!(needs = %text, "LUKS containers to put back: asking for their passphrases");
+    let details =
+        serde_json::json!({ own_backup_common::engine_dto::LUKS_PASSPHRASES_DETAIL: needs });
+    Err(Status::with_details(
+        tonic::Code::FailedPrecondition,
+        text,
+        serde_json::to_vec(&details).unwrap_or_default().into(),
+    ))
+}
+
+/// The LUKS containers a whole-disk restore of `image` puts back, with the
+/// `passphrases` the client sent (by source partition): settled on a blocking
+/// thread — seconds of key derivation per container — before the operation
+/// reserves the machine, and asked for through [`luks_gate`] when one is
+/// missing or wrong. Gives back the copy's keys, the passphrases (zeroized on
+/// drop) and the containers' keys they gave — handed to the engine, which
+/// then does not derive them again.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[allow(clippy::result_large_err)]
+async fn luks_needs(
+    image: std::path::PathBuf,
+    keys: Option<own_backup_backup::seal::context::ArchiveKeys>,
+    passphrases: std::collections::HashMap<u32, String>,
+) -> Result<LuksSecrets, Status> {
+    let passphrases: std::collections::HashMap<u32, zeroize::Zeroizing<String>> = passphrases
+        .into_iter()
+        .map(|(k, v)| (k, zeroize::Zeroizing::new(v)))
+        .collect();
+    let (keys, passphrases, checked) = tokio::task::spawn_blocking(move || {
+        use own_backup_backup::luks_rebuild::{check_passphrases, containers_to_rebuild};
+        let checked = own_backup_backup::sidecar::read_sidecar_with_keys(&image, keys.as_ref())
+            .and_then(|sidecar| containers_to_rebuild(&sidecar))
+            .and_then(|containers| check_passphrases(&containers, &passphrases));
+        (keys, passphrases, checked)
+    })
+    .await
+    .map_err(|e| Status::internal(format!("container check panicked: {e}")))?;
+    let checked = checked.map_err(|e| Status::failed_precondition(e.to_string()))?;
+    luks_gate(checked.needs)?;
+    Ok(LuksSecrets {
+        keys,
+        passphrases,
+        known: checked.keys,
+    })
+}
+
+/// What [`luks_needs`] settled.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+struct LuksSecrets {
+    keys: Option<own_backup_backup::seal::context::ArchiveKeys>,
+    passphrases: std::collections::HashMap<u32, zeroize::Zeroizing<String>>,
+    known: std::collections::HashMap<u32, own_backup_backup::luks::LuksParams>,
 }
 
 /// [`manual_keys`] on a blocking thread, **before** the operation reserves the
@@ -690,15 +954,15 @@ async fn manual_keys_off_thread(
     image: std::path::PathBuf,
     secret: ManualSecret,
 ) -> Result<Option<own_backup_backup::seal::context::ArchiveKeys>, Status> {
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     {
         tokio::task::spawn_blocking(move || manual_keys(&image, &secret))
             .await
             .map_err(|e| Status::internal(format!("key task panicked: {e}")))?
     }
-    // The engine itself is Windows-only, so nothing here can use a key anyway;
-    // the operation that follows refuses with its own message.
-    #[cfg(not(target_os = "windows"))]
+    // No engine here, so nothing can use a key anyway; the operation that
+    // follows refuses with its own message.
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = (image, secret);
         Ok(None)
@@ -762,15 +1026,30 @@ fn correct_disk_size(plan: &mut own_backup_common::restore_plan::RestorePlan) {
             }
         }
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    restore_linux::correct_disk_size(plan);
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = plan;
     }
 }
 
+/// How a message names a plan's target disk: by number on Windows, by its
+/// device on Linux, where `target_disk` carries no meaning (always 0).
+fn plan_disk_name(plan: &own_backup_common::restore_plan::RestorePlan) -> String {
+    if cfg!(target_os = "linux") {
+        plan.target_device
+            .clone()
+            .filter(|d| !d.trim().is_empty())
+            .unwrap_or_else(|| plan.target_disk.to_string())
+    } else {
+        plan.target_disk.to_string()
+    }
+}
+
 /// Message returned by the direct engine RPCs when built off Windows (the VHDX
 /// engine is Windows-only for now — see plan phase 8).
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn engine_msg() -> String {
     tr!("grpc_server.engine_windows_only").into_owned()
 }
@@ -786,6 +1065,69 @@ fn emit_engine<T: serde::Serialize>(
         kind: kind.into(),
         json: serde_json::to_string(payload).unwrap_or_default(),
     });
+}
+
+/// `CheckDestination`: the destination question of [`validate_job`], asked
+/// before there is a job to save. The same two checks in the same order, so
+/// the wizard says what the save would say. `placement` is decided on, the
+/// texts are only shown.
+fn destination_answer(sources: &[String], dest_folder: &str) -> serde_json::Value {
+    let sources: Vec<String> = sources
+        .iter()
+        .filter(|s| !s.trim().is_empty())
+        .cloned()
+        .collect();
+    let mut answer = placement_answer(&sources, dest_folder);
+    answer["key_store_unknown"] = key_store_unknown(&sources);
+    answer
+}
+
+/// The sources on which it cannot be told whether the service's key
+/// directory lies (ZFS, overlayfs): the engine treats them as holding it
+/// (decision 6/E4) — a copy that cannot leave it out is refused — and the
+/// wizard says so before the run. `[{ source, reason }]`; empty off Linux.
+fn key_store_unknown(sources: &[String]) -> serde_json::Value {
+    #[cfg(target_os = "linux")]
+    {
+        use own_backup_backup::seal::local::{key_store_placement, KeyStorePlacement};
+        // Linux sources are device paths; anything else is not one to place.
+        sources
+            .iter()
+            .filter(|s| s.starts_with('/'))
+            .filter_map(|s| match key_store_placement(s) {
+                KeyStorePlacement::CannotTell(why) => {
+                    Some(serde_json::json!({ "source": s, "reason": why }))
+                }
+                KeyStorePlacement::Clear | KeyStorePlacement::Here => None,
+            })
+            .collect()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = sources;
+        serde_json::json!([])
+    }
+}
+
+/// Where the destination sits: `{ placement, source, reason }`.
+fn placement_answer(sources: &[String], dest_folder: &str) -> serde_json::Value {
+    let answer = |placement: &str, source: &str, reason: &str| serde_json::json!({ "placement": placement, "source": source, "reason": reason });
+    let sources = sources.to_vec();
+    if sources.is_empty() || dest_folder.trim().is_empty() {
+        return answer("clear", "", "");
+    }
+    let job = own_backup_core::Job {
+        sources,
+        ..Default::default()
+    };
+    if let Some(letter) = own_backup_core::dest_collision_letter(&job, dest_folder) {
+        return answer("on_source", &format!("{letter}:"), "");
+    }
+    match own_backup_core::dest_placement(&job, dest_folder) {
+        own_backup_core::DestPlacement::Clear => answer("clear", "", ""),
+        own_backup_core::DestPlacement::OnSource(source) => answer("on_source", &source, ""),
+        own_backup_core::DestPlacement::CannotTell(why) => answer("cannot_tell", "", &why),
+    }
 }
 
 /// Shared save/run validation: name + at least one source, dest non-empty, and
@@ -913,6 +1255,11 @@ impl BackupService for BackupServiceImpl {
         req: Request<DeleteJobRequest>,
     ) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
+        // Deleting the job's images is deleting backups; the job alone is not.
+        #[cfg(target_os = "linux")]
+        if req.get_ref().delete_files {
+            crate::polkit::authorize(&req, crate::polkit::Action::DeleteBackups).await?;
+        }
         let DeleteJobRequest { id, delete_files } = req.into_inner();
 
         // A run in flight is writing into the very files this is about to
@@ -938,7 +1285,15 @@ impl BackupService for BackupServiceImpl {
                     // Deleting a job's images is destructive work on the same
                     // folders a backup writes and a restore reads, so it takes
                     // the machine's slot like the rest (audit AUD-02).
-                    let _slot = self.reserve(&tr!("grpc_server.busy_delete_copies"), &job.name)?;
+                    let _slot = self
+                        .reserve_on(
+                            &tr!("grpc_server.busy_delete_copies"),
+                            &job.name,
+                            [own_backup_core::busy::chain_resource(std::path::Path::new(
+                                &job.dest_folder,
+                            ))],
+                        )
+                        .await?;
                     own_backup_core::delete_job_files(&self.state.store, &job)
                 }
                 None => own_backup_core::JobFilesDeleted::default(),
@@ -1012,7 +1367,9 @@ impl BackupService for BackupServiceImpl {
         }
         let p: In = serde_json::from_str(&req.into_inner().json)
             .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
-        let _slot = self.reserve(&tr!("grpc_server.busy_volume_letter"), &p.device)?;
+        let _slot = self
+            .reserve(&tr!("grpc_server.busy_volume_letter"), &p.device)
+            .await?;
         let volumes = hidden_volumes_now().await?;
         let Some(volume) = volumes
             .iter()
@@ -1182,13 +1539,29 @@ impl BackupService for BackupServiceImpl {
                 linux_last_mounted: probe.linux_last_mounted,
             }
         };
-        #[cfg(not(target_os = "windows"))]
-        let dto = VolumeUnlockDto {
-            ok: true,
-            filesystem: String::new(),
-            label: String::new(),
-            used_bytes: 0,
-            linux_last_mounted: String::new(),
+        #[cfg(target_os = "linux")]
+        let dto = {
+            let (vol, pw) = (p.volume.clone(), p.password.clone());
+            let probe = tokio::task::spawn_blocking(move || {
+                own_backup_backup::engine_linux::unlock_and_probe(&vol, &pw)
+            })
+            .await
+            .map_err(|e| Status::internal(format!("probe task panicked: {e}")))?
+            .map_err(|e| Status::internal(e.to_string()))?;
+            VolumeUnlockDto {
+                ok: probe.ok,
+                filesystem: probe.filesystem,
+                label: probe.label,
+                used_bytes: probe.used_bytes,
+                linux_last_mounted: probe.linux_last_mounted,
+            }
+        };
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        let dto: VolumeUnlockDto = {
+            let _ = &p;
+            return Err(Status::unimplemented(
+                "volume unlock is not available on this platform",
+            ));
         };
 
         // Only cache a password that actually unlocked the volume. Key by the
@@ -1292,6 +1665,85 @@ impl BackupService for BackupServiceImpl {
         }))
     }
 
+    async fn backup_capabilities(
+        &self,
+        req: Request<Empty>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        let caps = own_backup_core::capabilities::current();
+        // Linux: encryption is offered only where this machine has a key
+        // store, and the window is told what protects it (TPM2 or host key).
+        #[cfg(target_os = "linux")]
+        let caps = {
+            let store = self.state.store.clone();
+            let protection = tokio::task::spawn_blocking(move || store.key_store_protection())
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            own_backup_core::capabilities::with_key_store(caps, protection)
+        };
+        let json = serde_json::to_string(&caps).map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(JsonReply { json }))
+    }
+
+    async fn check_destination(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[derive(serde::Deserialize)]
+        struct In {
+            sources: Vec<String>,
+            dest_folder: String,
+        }
+        let p: In = serde_json::from_str(&req.into_inner().json)
+            .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+        // Off the runtime: the answer reads the mount table and sysfs on Linux
+        // and opens volumes on Windows, and the wizard asks as the user types.
+        let answer =
+            tokio::task::spawn_blocking(move || destination_answer(&p.sources, &p.dest_folder))
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(Response::new(JsonReply {
+            json: answer.to_string(),
+        }))
+    }
+
+    // --- Settings (config.toml) -------------------------------------------
+
+    /// The config as this service reads it. On Linux the window cannot always
+    /// read root's data folder itself, and this is the copy that counts.
+    async fn get_settings(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        let config =
+            tokio::task::spawn_blocking(own_backup_common::config::AppConfig::load_or_default)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+        json_reply(&config)
+    }
+
+    /// Change the fields present in the request (`SettingsPatch`), checked
+    /// for this caller (`settings`), and return what is stored now.
+    async fn save_settings(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        let caller = crate::settings::caller_of(&req);
+        let patch: own_backup_common::config::SettingsPatch =
+            serde_json::from_str(&req.into_inner().json)
+                .map_err(|e| Status::invalid_argument(format!("bad settings JSON: {e}")))?;
+        let saved = tokio::task::spawn_blocking(move || {
+            crate::settings::save(
+                &own_backup_common::config::AppConfig::default_path(),
+                &patch,
+                caller,
+            )
+        })
+        .await
+        .map_err(|e| Status::internal(e.to_string()))??;
+        json_reply(&saved)
+    }
+
     // --- Direct engine operations ----------------------------------------
 
     async fn restore_volume(
@@ -1325,7 +1777,9 @@ impl BackupService for BackupServiceImpl {
             // machine with a backup, another restore or a verify (audit
             // AUD-02); the guard travels into the blocking closure so it is
             // released even if the engine panics there.
-            let slot = self.reserve(&tr!("grpc_server.busy_volume_restore"), &p.target)?;
+            let slot = self
+                .reserve(&tr!("grpc_server.busy_volume_restore"), &p.target)
+                .await?;
             let cancel = slot.cancel();
             let events = self.state.events.clone();
             let image_path = std::path::PathBuf::from(&p.image_path);
@@ -1380,7 +1834,11 @@ impl BackupService for BackupServiceImpl {
                 duration_secs: summary.duration.as_secs_f64(),
             })
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
+        {
+            self.restore_volume_linux(req).await
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
             let _ = req;
             Err(Status::unimplemented(engine_msg()))
@@ -1389,10 +1847,10 @@ impl BackupService for BackupServiceImpl {
 
     async fn verify_image(&self, req: Request<JsonRequest>) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         {
-            use own_backup_backup::engine_win::verify_image_with_keys;
             use own_backup_common::engine_dto::{EngineProgress, VerifySummaryDto};
+            use platform_engine::verify_image_with_keys;
 
             #[derive(serde::Deserialize)]
             struct In {
@@ -1408,7 +1866,15 @@ impl BackupService for BackupServiceImpl {
             // mid-change is how a good image gets reported as damaged.
             let path = std::path::PathBuf::from(&p.image_path);
             let keys = manual_keys_off_thread(path.clone(), p.secret).await?;
-            let slot = self.reserve(&tr!("grpc_server.busy_validation"), &p.image_path)?;
+            let slot = self
+                .reserve_on(
+                    &tr!("grpc_server.busy_validation"),
+                    &p.image_path,
+                    [own_backup_core::busy::image_chain_resource(
+                        std::path::Path::new(&p.image_path),
+                    )],
+                )
+                .await?;
             info!(image = %p.image_path, "VerifyImage RPC started");
             let cancel = slot.cancel();
             let events = self.state.events.clone();
@@ -1458,7 +1924,7 @@ impl BackupService for BackupServiceImpl {
                 duration_secs: summary.duration.as_secs_f64(),
             })
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
             let _ = req;
             Err(Status::unimplemented(engine_msg()))
@@ -1494,6 +1960,8 @@ impl BackupService for BackupServiceImpl {
         req: Request<JsonRequest>,
     ) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
+        #[cfg(target_os = "linux")]
+        crate::polkit::authorize(&req, crate::polkit::Action::DeleteBackups).await?;
         #[derive(serde::Deserialize)]
         struct In {
             job_id: String,
@@ -1511,7 +1979,15 @@ impl BackupService for BackupServiceImpl {
         // already calls itself the current one, and it would start writing an
         // increment onto the very image this is about to delete the moment the
         // slot is let go.
-        let slot = self.reserve(&tr!("grpc_server.busy_delete_copies"), &job.name)?;
+        let slot = self
+            .reserve_on(
+                &tr!("grpc_server.busy_delete_copies"),
+                &job.name,
+                [own_backup_core::busy::chain_resource(std::path::Path::new(
+                    &job.dest_folder,
+                ))],
+            )
+            .await?;
         if self.state.queue.snapshot().current.as_deref() == Some(p.job_id.as_str()) {
             return Err(Status::failed_precondition(
                 tr!("grpc_server.job_running_cannot_delete").into_owned(),
@@ -1537,12 +2013,12 @@ impl BackupService for BackupServiceImpl {
     /// «Проверить последнюю версию» / «проверить все версии» of a job.
     async fn verify_job(&self, req: Request<JsonRequest>) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         {
-            use own_backup_backup::engine_win::{verify_image_scoped, VerifyScope};
             use own_backup_common::engine_dto::{
                 JobVerifyImage, JobVerifyProgress, JobVerifySummary,
             };
+            use platform_engine::{verify_image_scoped, VerifyScope};
 
             #[derive(serde::Deserialize)]
             struct In {
@@ -1576,7 +2052,15 @@ impl BackupService for BackupServiceImpl {
             // One key opens every copy of a job, so it is derived once, from
             // the first — and before the slot is taken, like any manual verify.
             let keys = manual_keys_off_thread(first.0.clone(), p.secret).await?;
-            let slot = self.reserve(&tr!("grpc_server.busy_validation"), &job.name)?;
+            let slot = self
+                .reserve_on(
+                    &tr!("grpc_server.busy_validation"),
+                    &job.name,
+                    [own_backup_core::busy::chain_resource(std::path::Path::new(
+                        &job.dest_folder,
+                    ))],
+                )
+                .await?;
             info!(job = %p.job_id, images = targets.len(), all_versions = p.all_versions, "VerifyJob RPC started");
             let cancel = slot.cancel();
             let events = self.state.events.clone();
@@ -1670,7 +2154,7 @@ impl BackupService for BackupServiceImpl {
             })?;
             json_reply(&summary)
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
             let _ = req;
             Err(Status::unimplemented(engine_msg()))
@@ -1704,7 +2188,15 @@ impl BackupService for BackupServiceImpl {
         }
 
         let keys = manual_keys_off_thread(image.clone(), p.secret).await?;
-        let slot = self.reserve(&tr!("grpc_server.busy_export"), &p.image_path)?;
+        let slot = self
+            .reserve_on(
+                &tr!("grpc_server.busy_export"),
+                &p.image_path,
+                [own_backup_core::busy::image_chain_resource(
+                    std::path::Path::new(&p.image_path),
+                )],
+            )
+            .await?;
         info!(image = %p.image_path, target = %p.target_path, "ExportImage RPC started");
         let cancel = slot.cancel();
         let events = self.state.events.clone();
@@ -1788,7 +2280,15 @@ impl BackupService for BackupServiceImpl {
             // What protects a live mount is the check consolidation already
             // makes: it refuses an image that has a mount beside it.
             let keys = manual_keys_off_thread(path.clone(), p.secret).await?;
-            let slot = self.reserve(&tr!("grpc_server.busy_mount"), &p.image_path)?;
+            let slot = self
+                .reserve_on(
+                    &tr!("grpc_server.busy_mount"),
+                    &p.image_path,
+                    [own_backup_core::busy::image_chain_resource(
+                        std::path::Path::new(&p.image_path),
+                    )],
+                )
+                .await?;
             let mount_point = tokio::task::spawn_blocking(move || {
                 let _slot = slot;
                 mount_image_with_keys(&path, rw, keys.as_ref())
@@ -1812,23 +2312,38 @@ impl BackupService for BackupServiceImpl {
         }
         #[cfg(target_os = "linux")]
         {
-            use own_backup_backup::engine_linux::mount_image;
+            use own_backup_backup::engine_linux::mount_image_with_options;
             use own_backup_common::engine_dto::MountResultDto;
 
             #[derive(serde::Deserialize)]
             struct In {
                 image_path: String,
                 read_write: Option<bool>,
+                /// What to do about identities the mounted copy shares with
+                /// this machine's own devices (`restore_linux::mount_identity_gate`).
+                #[serde(default)]
+                identity_choice: Option<own_backup_common::engine_dto::IdentityChoice>,
             }
             let p: In = serde_json::from_str(&req.into_inner().json)
                 .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+            restore_linux::mount_choice_allowed(p.identity_choice)?;
             let path = std::path::PathBuf::from(&p.image_path);
             let rw = p.read_write.unwrap_or(false);
             let image_path = p.image_path.clone();
-            let mount_point = tokio::task::spawn_blocking(move || mount_image(&path, rw))
-                .await
-                .map_err(|e| Status::internal(format!("mount task panicked: {e}")))?
-                .map_err(|e| Status::internal(e.to_string()))?;
+            let probed = path.clone();
+            let clashes =
+                tokio::task::spawn_blocking(move || restore_linux::image_clashes(&probed))
+                    .await
+                    .map_err(|e| Status::internal(format!("identity check panicked: {e}")))?
+                    .map_err(|e| Status::internal(e.to_string()))?;
+            let kept = restore_linux::mount_identity_gate(clashes, p.identity_choice)?;
+            // XFS refuses a second filesystem of one UUID unless told.
+            let extra = own_backup_backup::identity_check_linux::mount_options_for(&kept);
+            let mount_point =
+                tokio::task::spawn_blocking(move || mount_image_with_options(&path, rw, &extra))
+                    .await
+                    .map_err(|e| Status::internal(format!("mount task panicked: {e}")))?
+                    .map_err(|e| Status::internal(e.to_string()))?;
 
             {
                 let mut mounts = self.state.active_mounts.lock().unwrap();
@@ -1861,19 +2376,7 @@ impl BackupService for BackupServiceImpl {
                 tokio::task::spawn_blocking(own_backup_backup::winre_find::find_base_images)
                     .await
                     .map_err(|e| Status::internal(format!("base image search panicked: {e}")))?;
-            let out: Vec<BaseImageDto> = found
-                .into_iter()
-                .map(|b| BaseImageDto {
-                    path: b.path.display().to_string(),
-                    origin: b.origin.describe().to_string(),
-                    name: b.info.name,
-                    build: b.info.build,
-                    language: b.info.language,
-                    architecture: b.info.architecture,
-                    total_bytes: b.info.total_bytes,
-                    warnings: b.warnings,
-                })
-                .collect();
+            let out: Vec<BaseImageDto> = found.into_iter().map(base_image_dto).collect();
             info!(count = out.len(), "base images offered");
             return json_reply(&out);
         }
@@ -1881,6 +2384,43 @@ impl BackupService for BackupServiceImpl {
         Err(Status::unimplemented(
             tr!("grpc_server.media_windows_only").into_owned(),
         ))
+    }
+
+    async fn inspect_base_image(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        media_build_unavailable()?;
+        #[cfg(target_os = "windows")]
+        {
+            #[derive(serde::Deserialize)]
+            struct Chosen {
+                path: String,
+            }
+            let chosen: Chosen = serde_json::from_str(&req.into_inner().json)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            let path = std::path::PathBuf::from(chosen.path.trim());
+            let judged = tokio::task::spawn_blocking(move || {
+                own_backup_backup::winre_find::inspect_chosen(&path)
+            })
+            .await
+            .map_err(|e| Status::internal(format!("base image check panicked: {e}")))?;
+            return match judged {
+                Ok(base) => json_reply(&base_image_dto(base)),
+                Err(why) => {
+                    info!(%why, "chosen base image refused");
+                    Err(Status::failed_precondition(why))
+                }
+            };
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = req;
+            Err(Status::unimplemented(
+                tr!("grpc_server.media_windows_only").into_owned(),
+            ))
+        }
     }
 
     async fn list_drivers(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
@@ -1990,7 +2530,16 @@ impl BackupService for BackupServiceImpl {
                         Status::failed_precondition(tr!("grpc_server.winre_not_found").into_owned())
                     })?
             } else {
-                std::path::PathBuf::from(&opts.base_wim)
+                // Judged like the found ones before anything is unpacked: the
+                // build itself only checks that the file is a WIM.
+                let chosen = std::path::PathBuf::from(opts.base_wim.trim());
+                tokio::task::spawn_blocking(move || {
+                    own_backup_backup::winre_find::inspect_chosen(&chosen)
+                })
+                .await
+                .map_err(|e| Status::internal(format!("base image check panicked: {e}")))?
+                .map_err(Status::failed_precondition)?
+                .path
             };
 
             let program_dir = std::env::current_exe()
@@ -2122,6 +2671,387 @@ impl BackupService for BackupServiceImpl {
         }
     }
 
+    async fn list_media_sticks(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[cfg(target_os = "linux")]
+        {
+            let sticks =
+                tokio::task::spawn_blocking(own_backup_backup::media_stick_linux::list_sticks)
+                    .await
+                    .map_err(|e| Status::internal(format!("stick listing panicked: {e}")))?;
+            json_reply(&sticks)
+        }
+        #[cfg(not(target_os = "linux"))]
+        Err(Status::unimplemented(
+            tr!("grpc_server.media_stick_linux_only").into_owned(),
+        ))
+    }
+
+    /// Erase a USB stick and write the Linux medium's ISO onto it. The same
+    /// gates as a whole-disk restore: an administrator's yes, the one slot the
+    /// machine has, and the running system's disks out of reach.
+    async fn write_media_stick(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[cfg(target_os = "linux")]
+        {
+            use own_backup_backup::media_stick_linux::{write_stick, StickStage};
+            use own_backup_common::engine_dto::{
+                MediaProgressDto, MediaStageDto, MediaStickReportDto, MediaStickWriteDto,
+            };
+
+            crate::polkit::authorize(&req, crate::polkit::Action::Restore).await?;
+            let p: MediaStickWriteDto = serde_json::from_str(&req.into_inner().json)
+                .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+            // Which stick the person chose, as listed: without it a name like
+            // /dev/sdb may mean a disk plugged in since. An older client does
+            // not send it; it is refused, not trusted.
+            let expect = p.expect.clone().ok_or_else(|| {
+                Status::failed_precondition(tr!("grpc_server.media_stick_list_again").into_owned())
+            })?;
+            // The stick's own refusals first ("not a stick", "eject it"): the
+            // guard would call a mounted stick part of the running system.
+            let device = p.device.clone();
+            tokio::task::spawn_blocking(move || {
+                own_backup_backup::media_stick_linux::check_stick(&device)?;
+                own_backup_restore::guard_target_disk_device(&device)
+            })
+            .await
+            .map_err(|e| Status::internal(format!("stick check panicked: {e}")))?
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+            let slot = self
+                .reserve_on(
+                    &tr!("grpc_server.busy_media_stick"),
+                    &tr!("grpc_server.busy_which_stick", device = p.device.as_str()),
+                    [format!("disk:{}", p.device.trim())],
+                )
+                .await?;
+            let cancel = slot.cancel();
+            let events = self.state.events.clone();
+            let stages: Vec<MediaStageDto> = StickStage::ALL
+                .iter()
+                .map(|s| MediaStageDto {
+                    id: s.id().into(),
+                    title: s.title(),
+                })
+                .collect();
+            let device = p.device.clone();
+            let report = tokio::task::spawn_blocking(move || {
+                let _slot = slot;
+                let _awake = keep_awake(&tr!("grpc_server.busy_media_stick"));
+                let mut emit = |stage: StickStage, percent: u64| {
+                    let index = StickStage::ALL.iter().position(|s| *s == stage);
+                    emit_engine(
+                        &events,
+                        "media",
+                        &MediaProgressDto {
+                            stages: stages.clone(),
+                            stage_index: index.unwrap_or(0),
+                            percent,
+                            detail: String::new(),
+                            finished: stage == StickStage::Logs && percent == 100,
+                        },
+                    );
+                };
+                write_stick(
+                    std::path::Path::new(&p.iso_path),
+                    &p.device,
+                    &expect,
+                    &cancel,
+                    &mut emit,
+                )
+            })
+            .await
+            .map_err(|e| Status::internal(format!("stick write panicked: {e}")))?
+            .map_err(|e| match e {
+                own_backup_common::OwnBackupError::Cancelled => {
+                    Status::cancelled(tr!("grpc_server.media_stick_cancelled").into_owned())
+                }
+                other => Status::failed_precondition(other.to_string()),
+            })?;
+            info!(
+                device = %device,
+                mb = report.iso_bytes / 1_048_576,
+                log = ?report.log_partition,
+                "boot medium written onto a stick"
+            );
+            json_reply(&MediaStickReportDto {
+                device,
+                iso_bytes: report.iso_bytes,
+                volume_id: report.volume_id,
+                log_partition: report.log_partition,
+                log_skipped: report.log_skipped,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = req;
+            Err(Status::unimplemented(
+                tr!("grpc_server.media_stick_linux_only").into_owned(),
+            ))
+        }
+    }
+
+    /// Linux: can a medium be built now, and what an earlier build left in
+    /// the cache.
+    async fn linux_media_status(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        media_build_unavailable()?;
+        #[cfg(target_os = "linux")]
+        {
+            use own_backup_common::engine_dto::LinuxMediaStatusDto;
+            let s = tokio::task::spawn_blocking(own_backup_backup::media_linux_build::status)
+                .await
+                .map_err(|e| Status::internal(format!("media status panicked: {e}")))?;
+            json_reply(&LinuxMediaStatusDto {
+                installed_version: s.installed_version.unwrap_or_default(),
+                cache_dir: s.cache_dir.display().to_string(),
+                cache_bytes: s.cache_bytes,
+                free_bytes: s.free_bytes,
+                need_bytes: s.need_bytes,
+                problems: s.problems,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = req;
+            Err(Status::unimplemented(
+                tr!("grpc_server.media_linux_only").into_owned(),
+            ))
+        }
+    }
+
+    /// Linux: build the boot medium from the installed package, save the ISO
+    /// into the caller's folder and, when asked, write it onto a stick. The
+    /// destructive-operation slot is held throughout: the build is long, runs
+    /// as root, and its stick write erases a disk.
+    async fn build_linux_media(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        media_build_unavailable()?;
+        #[cfg(target_os = "linux")]
+        {
+            use own_backup_backup::media_linux::LinuxStage;
+            use own_backup_backup::media_linux_build::{
+                build, open_callers_file, open_output_dir, BuildRequest,
+            };
+            use own_backup_common::engine_dto::{
+                LinuxMediaBuildDto, LinuxMediaReportDto, MediaProgressDto, MediaStageDto,
+                MediaStickReportDto,
+            };
+            use own_backup_common::OwnBackupError;
+
+            // The person's words, without the error kind's English prefix.
+            fn refused(e: OwnBackupError) -> Status {
+                match e {
+                    OwnBackupError::Cancelled => {
+                        Status::cancelled(tr!("grpc_server.media_linux_cancelled").into_owned())
+                    }
+                    OwnBackupError::Config(m)
+                    | OwnBackupError::Device(m)
+                    | OwnBackupError::RestoreIncompatible(m) => Status::failed_precondition(m),
+                    other => Status::failed_precondition(other.to_string()),
+                }
+            }
+
+            let info = req
+                .extensions()
+                .get::<tonic::transport::server::UdsConnectInfo>();
+            let over_socket = info.is_some();
+            let (uid, gid) = crate::peer_access::caller_ids(info)?;
+            let p: LinuxMediaBuildDto = serde_json::from_str(&req.get_ref().json)
+                .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+            let with_stick = !p.stick_device.trim().is_empty();
+            // A .deb of the caller's runs its maintainer scripts as root in
+            // the build: root's (the CLI under sudo) or a foreground
+            // development run's only, and refused before any password is asked.
+            if !p.deb_path.trim().is_empty() {
+                own_backup_backup::media_linux_build::given_deb_allowed(over_socket, uid)
+                    .map_err(|e| {
+                        tracing::warn!(target: "security", uid, "a .deb for the medium refused from a non-root caller");
+                        match e {
+                            OwnBackupError::Config(m) => Status::permission_denied(m),
+                            other => Status::permission_denied(other.to_string()),
+                        }
+                    })?;
+            }
+            // The build itself, then — with a stick — erasing it, which is
+            // the restore question. polkit answers one action per check and
+            // keeps an `auth_admin_keep` answer per action, so without a
+            // kept answer the person is asked twice; an administrator's
+            // polkit rule may grant both at once.
+            for action in crate::polkit::media_build_actions(with_stick) {
+                crate::polkit::authorize(&req, *action).await?;
+            }
+
+            let stick = if with_stick {
+                // Which stick the person chose, as listed (see write_media_stick).
+                let expect = p.stick_expect.clone().ok_or_else(|| {
+                    Status::failed_precondition(
+                        tr!("grpc_server.media_stick_list_again").into_owned(),
+                    )
+                })?;
+                let device = p.stick_device.trim().to_string();
+                let checked = device.clone();
+                tokio::task::spawn_blocking(move || {
+                    own_backup_backup::media_stick_linux::check_stick(&checked)?;
+                    own_backup_restore::guard_target_disk_device(&checked)
+                })
+                .await
+                .map_err(|e| Status::internal(format!("stick check panicked: {e}")))?
+                .map_err(refused)?;
+                Some((device, expect))
+            } else {
+                None
+            };
+            let dir = p.output_dir.clone();
+            let deb_path = p.deb_path.trim().to_string();
+            let (out, deb) = tokio::task::spawn_blocking(move || {
+                let out = open_output_dir(&dir, uid, gid)?;
+                let deb = if deb_path.is_empty() {
+                    None
+                } else {
+                    Some(open_callers_file(&deb_path, uid)?)
+                };
+                Ok::<_, OwnBackupError>((out, deb))
+            })
+            .await
+            .map_err(|e| Status::internal(format!("folder check panicked: {e}")))?
+            .map_err(refused)?;
+
+            // The builder, and the stick it writes when there is one.
+            let mut needs = vec!["media-build".to_string()];
+            if with_stick {
+                needs.push(format!("disk:{}", p.stick_device.trim()));
+            }
+            let slot = self
+                .reserve_on(
+                    &tr!("grpc_server.busy_media_build"),
+                    &out.path.display().to_string(),
+                    needs,
+                )
+                .await?;
+            let cancel = slot.cancel();
+            let events = self.state.events.clone();
+            let plan = LinuxStage::plan(with_stick);
+            let stages: Vec<MediaStageDto> = plan
+                .iter()
+                .map(|s| MediaStageDto {
+                    id: s.id().into(),
+                    title: s.title(),
+                })
+                .collect();
+            info!(
+                folder = %out.path.display(),
+                uid,
+                stick = %p.stick_device,
+                given_deb = !p.deb_path.trim().is_empty(),
+                "building the Linux boot medium"
+            );
+            let report = tokio::task::spawn_blocking(move || {
+                let _slot = slot;
+                let _awake = keep_awake(&tr!("grpc_server.busy_media_build"));
+                let last = *plan.last().unwrap_or(&LinuxStage::Iso);
+                let mut emit = |stage: LinuxStage, percent: u64, detail: &str| {
+                    emit_engine(
+                        &events,
+                        "media",
+                        &MediaProgressDto {
+                            stages: stages.clone(),
+                            stage_index: plan.iter().position(|s| *s == stage).unwrap_or(0),
+                            percent,
+                            detail: detail.to_string(),
+                            finished: stage == last && percent == 100,
+                        },
+                    );
+                };
+                build(BuildRequest { out, deb, stick }, &cancel, &mut emit)
+            })
+            .await
+            .map_err(|e| Status::internal(format!("medium build panicked: {e}")))?
+            .map_err(|e| {
+                tracing::warn!(error = %e, "the Linux boot medium was not built");
+                refused(e)
+            })?;
+            info!(
+                iso = %report.iso_path.display(),
+                mb = report.iso_bytes >> 20,
+                version = %report.version,
+                stick = report.stick.is_some(),
+                "Linux boot medium built"
+            );
+            let device = p.stick_device.trim().to_string();
+            json_reply(&LinuxMediaReportDto {
+                iso_path: report.iso_path.display().to_string(),
+                iso_bytes: report.iso_bytes,
+                version: report.version,
+                from_installed: report.from_installed,
+                warnings: report.warnings,
+                stick: report.stick.map(|s| MediaStickReportDto {
+                    device,
+                    iso_bytes: s.iso_bytes,
+                    volume_id: s.volume_id,
+                    log_partition: s.log_partition,
+                    log_skipped: s.log_skipped,
+                }),
+                cache_dir: report.cache_dir.display().to_string(),
+                cache_bytes: report.cache_bytes,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = req;
+            Err(Status::unimplemented(
+                tr!("grpc_server.media_linux_only").into_owned(),
+            ))
+        }
+    }
+
+    /// Linux: remove what medium builds left behind (folders of builds a
+    /// killed service did not finish, the cache of older versions). Not
+    /// while a build (or anything else) holds the slot.
+    async fn clear_linux_media_cache(
+        &self,
+        req: Request<Empty>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[cfg(target_os = "linux")]
+        {
+            use own_backup_common::engine_dto::LinuxMediaCacheClearedDto;
+            crate::polkit::authorize(&req, crate::polkit::Action::BuildMedia).await?;
+            let slot = self
+                .reserve_on(
+                    &tr!("grpc_server.busy_media_cache"),
+                    own_backup_backup::media_linux_build::WORK_PARENTS[0],
+                    ["media-build"],
+                )
+                .await?;
+            let freed = tokio::task::spawn_blocking(move || {
+                let _slot = slot;
+                own_backup_backup::media_linux_build::clear_cache()
+            })
+            .await
+            .map_err(|e| Status::internal(format!("cache removal panicked: {e}")))?
+            .map_err(|e| match e {
+                own_backup_common::OwnBackupError::Config(m) => Status::failed_precondition(m),
+                other => Status::failed_precondition(other.to_string()),
+            })?;
+            info!(mb = freed >> 20, "what medium builds left was removed");
+            json_reply(&LinuxMediaCacheClearedDto { freed_bytes: freed })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = req;
+            Err(Status::unimplemented(
+                tr!("grpc_server.media_linux_only").into_owned(),
+            ))
+        }
+    }
+
     async fn unmount_image(&self, req: Request<JsonRequest>) -> Result<Response<Empty>, Status> {
         check_auth(&req, &self.service_token)?;
         #[cfg(target_os = "windows")]
@@ -2190,6 +3120,11 @@ impl BackupService for BackupServiceImpl {
                 target_disk: u32,
                 #[serde(default)]
                 force: bool,
+                /// The LUKS containers' own passphrases, by source partition
+                /// index: each container the copy holds decrypted is put back
+                /// under its saved header. Not the copy's password (`secret`).
+                #[serde(default)]
+                passphrases: std::collections::HashMap<u32, String>,
                 #[serde(flatten)]
                 secret: ManualSecret,
             }
@@ -2201,20 +3136,33 @@ impl BackupService for BackupServiceImpl {
             own_backup_restore::guard_target_disk(p.target_disk)
                 .map_err(|e| Status::failed_precondition(e.to_string()))?;
 
-            let slot = self.reserve(
-                &tr!("grpc_server.busy_disk_restore"),
-                &tr!("grpc_server.busy_which_disk", disk = p.target_disk),
-            )?;
+            // The copy's keys, then its containers' passphrases — asked for
+            // before the slot is taken and before a byte is written.
+            let manifest_path = std::path::PathBuf::from(&p.manifest_path);
+            let keys = manual_keys_off_thread(manifest_path.clone(), p.secret).await?;
+            let LuksSecrets {
+                keys,
+                passphrases,
+                known,
+            } = luks_needs(manifest_path.clone(), keys, p.passphrases).await?;
+
+            let slot = self
+                .reserve(
+                    &tr!("grpc_server.busy_disk_restore"),
+                    &tr!("grpc_server.busy_which_disk", disk = p.target_disk),
+                )
+                .await?;
             let cancel = slot.cancel();
             let events = self.state.events.clone();
-            let manifest_path = std::path::PathBuf::from(&p.manifest_path);
             let request = DiskRestoreRequest {
-                manifest_path: manifest_path.clone(),
+                manifest_path,
                 target_disk: p.target_disk,
                 verify_checksums: true,
                 // From what the person typed, never from the service's own
                 // store: that key is for scheduled COPIES (see `manual_keys`).
-                encryption: manual_keys_off_thread(manifest_path, p.secret).await?,
+                encryption: keys,
+                passphrases,
+                known_keys: known,
             };
 
             let summary = tokio::task::spawn_blocking(move || {
@@ -2253,13 +3201,28 @@ impl BackupService for BackupServiceImpl {
             .map_err(|e| Status::internal(format!("disk restore task panicked: {e}")))?
             .map_err(|e| Status::internal(e.to_string()))?;
 
-            json_reply(&DiskRestoreSummaryDto {
-                partitions: summary.partitions as u64,
-                bytes_written: summary.bytes_written,
-                duration_secs: summary.duration.as_secs_f64(),
+            #[derive(serde::Serialize)]
+            struct Out {
+                #[serde(flatten)]
+                summary: DiskRestoreSummaryDto,
+                /// Partitions put back as the LUKS containers they were.
+                #[serde(skip_serializing_if = "Vec::is_empty")]
+                luks_containers: Vec<u32>,
+            }
+            json_reply(&Out {
+                summary: DiskRestoreSummaryDto {
+                    partitions: summary.partitions as u64,
+                    bytes_written: summary.bytes_written,
+                    duration_secs: summary.duration.as_secs_f64(),
+                },
+                luks_containers: summary.containers,
             })
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "linux")]
+        {
+            self.restore_disk_linux(req).await
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
             let _ = req;
             Err(Status::unimplemented(engine_msg()))
@@ -2297,12 +3260,36 @@ impl BackupService for BackupServiceImpl {
             recovery_key: String,
             fingerprint: String,
             job_id: String,
+            /// What will keep this machine's authorization: `dpapi`, `tpm2`
+            /// or `host`.
+            key_protection: &'static str,
         }
         let p: In = serde_json::from_str(&req.into_inner().json)
             .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
         // The job as it will be once encrypted: over plaintext copies that is a
         // format change, and it must be refused now rather than by every run.
         validate_job(&p.job, true)?;
+        // Without a local key store the authorization can never be confirmed:
+        // handing out a recovery key for it would be a promise nobody keeps.
+        // Linux has one where `systemd-creds` can protect its machine key.
+        #[cfg(target_os = "linux")]
+        let key_protection = {
+            let store = self.state.store.clone();
+            tokio::task::spawn_blocking(move || store.key_store_protection())
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?
+                .map_err(|e| {
+                    Status::failed_precondition(
+                        tr!("grpc_server.archive_key_store_unavailable", error = e).into_owned(),
+                    )
+                })?
+        };
+        #[cfg(target_os = "windows")]
+        let key_protection = "dpapi";
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        return Err(Status::failed_precondition(
+            tr!("grpc_server.archive_key_store_missing").into_owned(),
+        ));
 
         // Sealing the envelope is Argon2id at the production profile — seconds,
         // not milliseconds, and it must not sit on the async runtime.
@@ -2312,13 +3299,14 @@ impl BackupService for BackupServiceImpl {
             .map_err(|e| Status::internal(format!("key setup task panicked: {e}")))?
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
-        info!(job = %begun.job_id, fingerprint = %begun.fingerprint,
+        info!(job = %begun.job_id, fingerprint = %begun.fingerprint, key_protection,
             "Archive encryption prepared — waiting for the recovery key to be confirmed");
         json_reply(&Out {
             token: begun.token,
             recovery_key: begun.recovery_key.to_string(),
             fingerprint: begun.fingerprint,
             job_id: begun.job_id,
+            key_protection,
         })
     }
 
@@ -2333,6 +3321,9 @@ impl BackupService for BackupServiceImpl {
             token: String,
             recovery_key: String,
         }
+        // Commits a key that opens the job's archives without a password.
+        #[cfg(target_os = "linux")]
+        crate::polkit::authorize(&req, crate::polkit::Action::ManageKeys).await?;
         let p: In = serde_json::from_str(&req.into_inner().json)
             .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
 
@@ -2340,7 +3331,18 @@ impl BackupService for BackupServiceImpl {
         let prepared = setup
             .pending_job(&p.token)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        let slot = self.reserve(&tr!("grpc_server.busy_archive_setup"), &prepared.name)?;
+        let slot = self
+            .reserve_on(
+                &tr!("grpc_server.busy_archive_setup"),
+                &prepared.name,
+                [
+                    own_backup_core::busy::chain_resource(std::path::Path::new(
+                        &prepared.dest_folder,
+                    )),
+                    "archive-keys".to_string(),
+                ],
+            )
+            .await?;
         let queue = self.state.queue.snapshot();
         if queue.current.as_deref() == Some(prepared.id.as_str())
             || queue.pending.iter().any(|id| id == &prepared.id)
@@ -2370,6 +3372,9 @@ impl BackupService for BackupServiceImpl {
         req: Request<JsonRequest>,
     ) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
+        // New keys replace the ones the archive opens with.
+        #[cfg(target_os = "linux")]
+        crate::polkit::authorize(&req, crate::polkit::Action::ManageKeys).await?;
         #[derive(serde::Deserialize)]
         struct In {
             job_id: String,
@@ -2384,7 +3389,16 @@ impl BackupService for BackupServiceImpl {
             .store
             .get(&p.job_id)
             .ok_or_else(|| Status::not_found(tr!("grpc_server.job_not_found").into_owned()))?;
-        let slot = self.reserve(&tr!("grpc_server.busy_archive_reauthorize"), &job.name)?;
+        let slot = self
+            .reserve_on(
+                &tr!("grpc_server.busy_archive_reauthorize"),
+                &job.name,
+                [
+                    own_backup_core::busy::chain_resource(std::path::Path::new(&job.dest_folder)),
+                    "archive-keys".to_string(),
+                ],
+            )
+            .await?;
         let queue = self.state.queue.snapshot();
         if queue.current.as_deref() == Some(job.id.as_str())
             || queue.pending.iter().any(|id| id == &job.id)
@@ -2438,6 +3452,49 @@ impl BackupService for BackupServiceImpl {
     /// failure. Everything here comes out of the open header, which is why it
     /// needs nothing: it is also why none of it is a fact about the contents
     /// (`seal/obk/listing.rs`).
+    async fn read_image_meta(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[derive(serde::Deserialize)]
+        struct In {
+            image_path: String,
+            part: String,
+            #[serde(flatten)]
+            secret: ManualSecret,
+        }
+        let p: In = serde_json::from_str(&req.into_inner().json)
+            .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+        let path = std::path::PathBuf::from(&p.image_path);
+        image_meta_target(&path)?;
+        match p.part.as_str() {
+            "listing" => {
+                let listing = tokio::task::spawn_blocking({
+                    let path = path.clone();
+                    move || own_backup_backup::seal::obk::read_listing(&path)
+                })
+                .await
+                .map_err(|e| Status::internal(format!("listing task panicked: {e}")))?
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                json_reply(&ImageListingOut::from(listing))
+            }
+            "sidecar" => {
+                let keys = manual_keys_off_thread(path.clone(), p.secret).await?;
+                let sidecar = tokio::task::spawn_blocking(move || {
+                    own_backup_backup::sidecar::read_sidecar_with_keys(&path, keys.as_ref())
+                })
+                .await
+                .map_err(|e| Status::internal(format!("sidecar task panicked: {e}")))?
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                json_reply(&ImageSidecarOut::from(sidecar))
+            }
+            other => Err(Status::invalid_argument(format!(
+                "part must be \"listing\" or \"sidecar\", not {other:?}"
+            ))),
+        }
+    }
+
     async fn inspect_image(
         &self,
         req: Request<JsonRequest>,
@@ -2493,6 +3550,13 @@ impl BackupService for BackupServiceImpl {
         req: Request<JsonRequest>,
     ) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
+        // No plan executor here: previewing a plan that can never be applied
+        // answers a question nobody asked.
+        if cfg!(not(any(target_os = "windows", target_os = "linux"))) {
+            return Err(Status::unimplemented(
+                tr!("grpc_server.engine_windows_only").into_owned(),
+            ));
+        }
         use own_backup_common::restore_check::{check_plan, CheckContext};
         use own_backup_common::restore_plan::RestorePlan;
 
@@ -2534,8 +3598,35 @@ impl BackupService for BackupServiceImpl {
         // Stamp the plan with WHICH DEVICE the user is looking at. The client
         // sends this plan back to be applied, and by then `PhysicalDriveN` may
         // point somewhere else entirely (audit AUD-01, point 5).
-        p.plan.target_disk_id = Some(live_disk_id(p.plan.target_disk).await);
-        let results = check_plan(&p.plan, &ctx);
+        #[cfg(not(target_os = "linux"))]
+        {
+            p.plan.target_disk_id = Some(live_disk_id(p.plan.target_disk).await);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            p.plan.target_disk_id = Some(restore_linux::live_disk_id(&p.plan));
+        }
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+        let mut results = check_plan(&p.plan, &ctx);
+        // What this engine does not do, and what the restore would duplicate
+        // on this machine — said by the preview, not halfway through the run.
+        #[cfg(target_os = "linux")]
+        let identity_clashes = {
+            results.extend(own_backup_core::restore_exec::linux_refusals(&p.plan));
+            let plan = p.plan.clone();
+            let (archive, found) = tokio::task::spawn_blocking(move || {
+                let found = restore_linux::plan_clashes(&plan, archive.as_ref());
+                (archive, found)
+            })
+            .await
+            .map_err(|e| Status::internal(format!("identity check panicked: {e}")))?;
+            let _ = archive;
+            let found = found.map_err(|e| Status::internal(e.to_string()))?;
+            results.extend(restore_linux::clash_findings(&found));
+            found
+        };
+        #[cfg(not(target_os = "linux"))]
+        let identity_clashes: Vec<own_backup_common::engine_dto::IdentityClashDto> = Vec::new();
 
         // The dry run is where a restore usually stops, and until now it left no
         // trace at all: the user saw a red box in a dialog and the log had
@@ -2575,6 +3666,7 @@ impl BackupService for BackupServiceImpl {
             "plan": p.plan,
             "results": results,
             "letter_changes": letter_changes,
+            "identity_clashes": identity_clashes,
         }))
     }
 
@@ -2583,6 +3675,14 @@ impl BackupService for BackupServiceImpl {
         req: Request<JsonRequest>,
     ) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
+        // No plan executor here.
+        if cfg!(not(any(target_os = "windows", target_os = "linux"))) {
+            return Err(Status::unimplemented(
+                tr!("grpc_server.engine_windows_only").into_owned(),
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        crate::polkit::authorize(&req, crate::polkit::Action::Restore).await?;
         use own_backup_common::restore_plan::RestorePlan;
         use own_backup_common::restore_state::RunStatus;
 
@@ -2598,6 +3698,16 @@ impl BackupService for BackupServiceImpl {
             /// `passphrases`, which put a source volume's own container back.
             #[serde(default, flatten)]
             secret: ManualSecret,
+            /// Linux: what to do about identities the restore would duplicate
+            /// on this machine (`restore_linux::identity_gate`).
+            #[serde(default)]
+            #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+            identity_choice: Option<own_backup_common::engine_dto::IdentityChoice>,
+            /// Linux, with `change`: also edit the restored system's fstab,
+            /// crypttab and boot configuration.
+            #[serde(default)]
+            #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+            fix_references: bool,
         }
         let raw = req.into_inner().json;
         // A bare plan is still accepted — nothing needs a passphrase unless it
@@ -2606,15 +3716,22 @@ impl BackupService for BackupServiceImpl {
             mut plan,
             passphrases,
             secret,
+            identity_choice,
+            fix_references,
         } = serde_json::from_str::<In>(&raw)
             .or_else(|_| {
                 serde_json::from_str::<RestorePlan>(&raw).map(|plan| In {
                     plan,
                     passphrases: Default::default(),
                     secret: Default::default(),
+                    identity_choice: None,
+                    fix_references: false,
                 })
             })
             .map_err(|e| Status::invalid_argument(format!("bad plan JSON: {e}")))?;
+        // The identity step is the service's to add (below), never the client's.
+        #[cfg(target_os = "linux")]
+        restore_linux::set_identity_step(&mut plan, None, &[], false);
 
         // Before the machine is reserved: deriving the key is seconds, and a
         // mistyped password must not hold the one slot the machine has.
@@ -2637,6 +3754,24 @@ impl BackupService for BackupServiceImpl {
                 tr!("grpc_server.plan_refused", refusals = refusals.join("\n")).into_owned(),
             ));
         }
+        // What the restore would duplicate here needs the person's choice,
+        // asked before the machine is reserved.
+        #[cfg(target_os = "linux")]
+        let archive = {
+            let checked = plan.clone();
+            let (archive, found) = tokio::task::spawn_blocking(move || {
+                let found = restore_linux::plan_clashes(&checked, archive.as_ref());
+                (archive, found)
+            })
+            .await
+            .map_err(|e| Status::internal(format!("identity check panicked: {e}")))?;
+            let found = found.map_err(|e| Status::internal(e.to_string()))?;
+            let found = restore_linux::identity_gate(found, identity_choice)?;
+            restore_linux::set_identity_step(&mut plan, identity_choice, &found, fix_references);
+            archive
+        };
+        #[cfg(not(target_os = "linux"))]
+        let _ = (identity_choice, fix_references);
 
         // One destructive operation at a time, and the check IS the taking.
         // The old version read `restore_run` under one lock and wrote the new
@@ -2647,11 +3782,13 @@ impl BackupService for BackupServiceImpl {
         //
         // The token comes with the slot, addressed by plan id, so a cancel
         // that arrives late cannot hit the run that started after it (D18).
-        let slot = self.reserve_with_id(
-            &tr!("grpc_server.busy_restore"),
-            &tr!("grpc_server.busy_which_disk", disk = plan.target_disk),
-            plan.id,
-        )?;
+        let slot = self
+            .reserve_with_id(
+                &tr!("grpc_server.busy_restore"),
+                &tr!("grpc_server.busy_which_disk", disk = plan_disk_name(&plan)),
+                plan.id,
+            )
+            .await?;
         let cancel = slot.cancel();
         let initial = own_backup_core::restore_exec::initial_state(&plan);
         *self.state.restore_run.lock().unwrap() = Some(initial.clone());
@@ -2909,21 +4046,10 @@ impl BackupService for BackupServiceImpl {
                     "timeout_secs": cfg.timeout,
                     "found_by": cfg.found_by,
                     "dangling": cfg.dangling.iter().map(|n| format!("{n:04X}")).collect::<Vec<_>>(),
-                    "entries": cfg.entries.iter().map(|e| serde_json::json!({
-                        "number": format!("{:04X}", e.number),
-                        "name": e.option.description,
-                        "in_menu": e.order_index.map(|i| i + 1),
-                        "active": e.option.is_active(),
-                        "current": e.is_current,
-                        "next": e.is_next,
-                        "device_entry": e.is_device_entry(),
-                        "file": e.option.file_path(),
-                        "partition_guid": e.option.hard_drive().and_then(|h| h.partition_guid()),
-                        "partition_number": e.option.hard_drive().map(|h| h.partition_number),
-                        // An entry whose device path we did not fully read is
-                        // shown and not offered for editing.
-                        "editable": e.option.fully_understood(),
-                    })).collect::<Vec<_>>(),
+                    "safety_copy_dir": efivars_win::safety_copy_dir().0.display().to_string(),
+                    "entries": cfg.entries.iter().map(|e| boot_entry_json(
+                        e.number, &e.option, e.order_index, e.is_current, e.is_next,
+                    )).collect::<Vec<_>>(),
                     "esps": esps.iter().map(|p| serde_json::json!({
                         "disk": p.disk,
                         "partition": p.partition,
@@ -2948,130 +4074,191 @@ impl BackupService for BackupServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?;
             json_reply(&value)
         }
-        #[cfg(not(target_os = "windows"))]
+        // The same answer from efivarfs. A disk is its kernel device
+        // (`/dev/nvme0n1`), the inventory's `device_id` for it: Linux has no
+        // disk numbers that last.
+        #[cfg(target_os = "linux")]
         {
-            json_reply(&serde_json::json!({
-                "uefi": false,
-                "message": tr!("grpc_server.boot_read_windows_only").into_owned(),
-            }))
+            use own_backup_backup::efivars_linux::{safety_copy_dir, Efivarfs};
+            use own_backup_backup::esp_scan_linux;
+
+            let copy_dir = safety_copy_dir(&self.state.config.data_dir).0;
+            let value = tokio::task::spawn_blocking(move || -> own_backup_common::Result<_> {
+                let efi = Efivarfs::default();
+                if !efi.is_uefi() {
+                    return Ok(serde_json::json!({
+                        "uefi": false,
+                        "message": tr!("grpc_server.boot_bios_machine").into_owned(),
+                    }));
+                }
+                let cfg = efi.read_config()?;
+                let esps = esp_scan_linux::scan(&cfg.entries)?;
+                Ok(serde_json::json!({
+                    "uefi": true,
+                    "order": cfg.order.iter().map(|n| format!("{n:04X}")).collect::<Vec<_>>(),
+                    "current": cfg.current.map(|n| format!("{n:04X}")),
+                    "next": cfg.next.map(|n| format!("{n:04X}")),
+                    "timeout_secs": cfg.timeout,
+                    "dangling": cfg.dangling.iter().map(|n| format!("{n:04X}")).collect::<Vec<_>>(),
+                    "safety_copy_dir": copy_dir.display().to_string(),
+                    "entries": cfg.entries.iter().map(|e| boot_entry_json(
+                        e.number, &e.option, e.order_index, e.is_current, e.is_next,
+                    )).collect::<Vec<_>>(),
+                    "esps": esps.iter().map(|p| serde_json::json!({
+                        "disk": p.disk,
+                        "partition": p.partition,
+                        "guid": p.partition_guid,
+                        "size_bytes": p.size_bytes,
+                        "unreadable": p.unreadable,
+                        "loaders": p.loaders.iter().map(|l| serde_json::json!({
+                            "path": l.found.path,
+                            "size": l.found.size,
+                            "kind": l.found.kind,
+                            "generic": l.found.generic,
+                            "fallback": l.found.fallback,
+                            "second_stage":
+                                l.found.role == own_backup_backup::esp_scan::Role::SecondStage,
+                            "named_by": l.named_by.map(|n| format!("{n:04X}")),
+                        })).collect::<Vec<_>>(),
+                    })).collect::<Vec<_>>(),
+                }))
+            })
+            .await
+            .map_err(|e| Status::internal(format!("boot status task panicked: {e}")))?
+            .map_err(|e| Status::internal(e.to_string()))?;
+            json_reply(&value)
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        {
+            Err(Status::unimplemented(
+                tr!("grpc_server.boot_read_windows_only").into_owned(),
+            ))
         }
     }
 
-    /// Change one thing about it.
-    ///
-    /// The safety copy and the guard on the currently-booted entry live in
-    /// `efivars_win::apply_action`, not here: the command line goes through the
-    /// same door, and rules that each caller has to remember are rules that one
-    /// of them eventually will not.
+    /// One change to the boot configuration. The service takes a copy of the
+    /// whole configuration first and refuses to remove or hide the entry this
+    /// machine booted from unless `force` says so (`apply_action` on each
+    /// system). On Linux the change is asked of polkit as well: the socket
+    /// admits any local session, and changing how the machine boots is an
+    /// administrator's decision.
     async fn boot_action(&self, req: Request<JsonRequest>) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
-        #[cfg(target_os = "windows")]
+        #[cfg(target_os = "linux")]
+        crate::polkit::authorize(&req, crate::polkit::Action::BootConfig).await?;
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         {
-            use own_backup_backup::efivars_win::{apply_action, Action};
-
-            #[derive(serde::Deserialize)]
-            struct In {
-                action: String,
-                entry: Option<String>,
-                name: Option<String>,
-                on: Option<bool>,
-                to: Option<usize>,
-                force: Option<bool>,
-                disk: Option<u32>,
-                partition: Option<u32>,
-                file: Option<String>,
-                position: Option<usize>,
-                secs: Option<u16>,
-                clear: Option<bool>,
-            }
-            let p: In = serde_json::from_str(&req.into_inner().json)
+            let p: BootActionIn = serde_json::from_str(&req.into_inner().json)
                 .map_err(|e| Status::invalid_argument(format!("boot_action: {e}")))?;
 
-            let entry = || -> Result<u16, Status> {
-                let s = p.entry.as_deref().unwrap_or_default();
-                u16::from_str_radix(s.trim().trim_start_matches("0x"), 16).map_err(|_| {
-                    Status::invalid_argument(
-                        tr!("grpc_server.boot_not_entry_number", value = s).into_owned(),
-                    )
-                })
-            };
-            let want = |o: Option<String>, what: &str| -> Result<String, Status> {
-                o.ok_or_else(|| {
-                    Status::invalid_argument(
-                        tr!("grpc_server.boot_not_given", what = what).into_owned(),
-                    )
-                })
-            };
-
-            let action = match p.action.as_str() {
-                "rename" => Action::Rename {
-                    entry: entry()?,
-                    name: want(p.name.clone(), &tr!("grpc_server.boot_field_name"))?,
-                },
-                "set_active" => Action::SetActive {
-                    entry: entry()?,
-                    on: p.on.unwrap_or(true),
-                    force: p.force.unwrap_or(false),
-                },
-                "move" => Action::Move {
-                    entry: entry()?,
-                    to: p.to.unwrap_or(0).saturating_sub(1),
-                },
-                "delete" => Action::Delete {
-                    entry: entry()?,
-                    force: p.force.unwrap_or(false),
-                },
-                "create" => Action::Create {
-                    name: want(p.name.clone(), &tr!("grpc_server.boot_field_name"))?,
-                    disk: p.disk.ok_or_else(|| {
-                        Status::invalid_argument(
-                            tr!("grpc_server.boot_disk_not_given").into_owned(),
-                        )
-                    })?,
-                    partition: p.partition.ok_or_else(|| {
-                        Status::invalid_argument(
-                            tr!("grpc_server.boot_partition_not_given").into_owned(),
-                        )
-                    })?,
-                    file: want(p.file.clone(), &tr!("grpc_server.boot_field_loader_path"))?,
-                    position: p.position.map(|x| x.saturating_sub(1)),
-                },
-                "boot_next" => Action::BootNext {
-                    entry: if p.clear.unwrap_or(false) {
-                        None
-                    } else {
-                        Some(entry()?)
+            #[cfg(target_os = "windows")]
+            let done = {
+                use own_backup_backup::efivars_win::{apply_action, Action};
+                let action = match p.common()? {
+                    BootActionKind::Same(a) => match a {
+                        SameAction::Rename { entry, name } => Action::Rename { entry, name },
+                        SameAction::SetActive { entry, on, force } => {
+                            Action::SetActive { entry, on, force }
+                        }
+                        SameAction::Move { entry, to } => Action::Move { entry, to },
+                        SameAction::Delete { entry, force } => Action::Delete { entry, force },
+                        SameAction::BootNext { entry } => Action::BootNext { entry },
+                        SameAction::Timeout { secs } => Action::Timeout { secs },
                     },
-                },
-                "timeout" => Action::Timeout {
-                    secs: p.secs.ok_or_else(|| {
-                        Status::invalid_argument(
-                            tr!("grpc_server.boot_secs_not_given").into_owned(),
-                        )
-                    })?,
-                },
-                other => {
-                    return Err(Status::invalid_argument(
-                        tr!("grpc_server.boot_unknown_action", action = other).into_owned(),
-                    ))
-                }
+                    BootActionKind::Create {
+                        name,
+                        file,
+                        position,
+                    } => Action::Create {
+                        name,
+                        disk: p
+                            .disk
+                            .as_ref()
+                            .and_then(|d| d.as_u64())
+                            .and_then(|d| u32::try_from(d).ok())
+                            .ok_or_else(|| {
+                                Status::invalid_argument(
+                                    tr!("grpc_server.boot_disk_not_given").into_owned(),
+                                )
+                            })?,
+                        partition: p.partition()?,
+                        file,
+                        position,
+                    },
+                };
+                let done = tokio::task::spawn_blocking(move || apply_action(action))
+                    .await
+                    .map_err(|e| Status::internal(format!("boot action task panicked: {e}")))?
+                    .map_err(|e| Status::failed_precondition(e.to_string()))?;
+                (
+                    done.message,
+                    done.safety_copy.path,
+                    done.safety_copy.durable,
+                    done.created,
+                )
             };
 
-            let done = tokio::task::spawn_blocking(move || apply_action(action))
+            #[cfg(target_os = "linux")]
+            let done = {
+                use own_backup_backup::efivars_linux::{safety_copy_dir, Action, Efivarfs};
+                let kind = p.common()?;
+                let disk = p.disk.as_ref().and_then(|d| d.as_str()).map(str::to_string);
+                let partition = p.partition.map(|_| p.partition()).transpose()?;
+                let (copy_dir, durable) = safety_copy_dir(&self.state.config.data_dir);
+                let done = tokio::task::spawn_blocking(
+                    move || -> own_backup_common::Result<own_backup_backup::efivars_linux::Done> {
+                        let action = match kind {
+                            BootActionKind::Same(a) => match a {
+                                SameAction::Rename { entry, name } => {
+                                    Action::Rename { entry, name }
+                                }
+                                SameAction::SetActive { entry, on, force } => {
+                                    Action::SetActive { entry, on, force }
+                                }
+                                SameAction::Move { entry, to } => Action::Move { entry, to },
+                                SameAction::Delete { entry, force } => {
+                                    Action::Delete { entry, force }
+                                }
+                                SameAction::BootNext { entry } => Action::BootNext { entry },
+                                SameAction::Timeout { secs } => Action::Timeout { secs },
+                            },
+                            BootActionKind::Create {
+                                name,
+                                file,
+                                position,
+                            } => Action::Create {
+                                name,
+                                hd: linux_esp_partition(disk.as_deref(), partition)?,
+                                file,
+                                position,
+                            },
+                        };
+                        Efivarfs::default().apply_action(action, &copy_dir, durable)
+                    },
+                )
                 .await
                 .map_err(|e| Status::internal(format!("boot action task panicked: {e}")))?
                 .map_err(|e| Status::failed_precondition(e.to_string()))?;
-            tracing::info!(message = %done.message, "boot configuration changed");
+                (
+                    done.message,
+                    done.safety_copy.path,
+                    done.safety_copy.durable,
+                    done.created,
+                )
+            };
+
+            let (message, safety_copy, durable, created) = done;
+            tracing::info!(message = %message, "boot configuration changed");
             json_reply(&serde_json::json!({
-                "message": done.message,
-                "safety_copy": done.safety_copy.path.display().to_string(),
+                "message": message,
+                "safety_copy": safety_copy.display().to_string(),
                 // На носителе копия может лежать на временном диске: экран
                 // обязан это сказать, а не показать путь и промолчать.
-                "safety_copy_durable": done.safety_copy.durable,
-                "created": done.created.map(|n| format!("{n:04X}")),
+                "safety_copy_durable": durable,
+                "created": created.map(|n| format!("{n:04X}")),
             }))
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
             Err(Status::unimplemented(
                 tr!("grpc_server.boot_change_windows_only").into_owned(),
@@ -3080,9 +4267,329 @@ impl BackupService for BackupServiceImpl {
     }
 }
 
+/// One boot entry as the boot page reads it — the same on both systems.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn boot_entry_json(
+    number: u16,
+    option: &own_backup_backup::efivars::LoadOption,
+    order_index: Option<usize>,
+    current: bool,
+    next: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "number": format!("{number:04X}"),
+        "name": option.description,
+        "in_menu": order_index.map(|i| i + 1),
+        "active": option.is_active(),
+        "current": current,
+        "next": next,
+        // Names a device, not a file: firmware made it and remakes it.
+        "device_entry": option.file_path().is_none(),
+        "file": option.file_path(),
+        "partition_guid": option.hard_drive().and_then(|h| h.partition_guid()),
+        "partition_number": option.hard_drive().map(|h| h.partition_number),
+        // An entry whose device path we did not fully read is
+        // shown and not offered for editing.
+        "editable": option.fully_understood(),
+    })
+}
+
+/// What the boot page asks to change, as it sends it. `disk` is a number on
+/// Windows (`PhysicalDriveN`) and a device path on Linux.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[derive(serde::Deserialize)]
+struct BootActionIn {
+    action: String,
+    entry: Option<String>,
+    name: Option<String>,
+    on: Option<bool>,
+    to: Option<usize>,
+    force: Option<bool>,
+    disk: Option<serde_json::Value>,
+    partition: Option<u32>,
+    file: Option<String>,
+    position: Option<usize>,
+    secs: Option<u16>,
+    clear: Option<bool>,
+}
+
+/// The actions both systems spell the same way.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+enum SameAction {
+    Rename { entry: u16, name: String },
+    SetActive { entry: u16, on: bool, force: bool },
+    Move { entry: u16, to: usize },
+    Delete { entry: u16, force: bool },
+    BootNext { entry: Option<u16> },
+    Timeout { secs: u16 },
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+enum BootActionKind {
+    Same(SameAction),
+    /// The partition is named differently on each system; the caller reads it.
+    Create {
+        name: String,
+        file: String,
+        position: Option<usize>,
+    },
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+impl BootActionIn {
+    fn entry(&self) -> Result<u16, Status> {
+        let s = self.entry.as_deref().unwrap_or_default();
+        u16::from_str_radix(s.trim().trim_start_matches("0x"), 16).map_err(|_| {
+            Status::invalid_argument(
+                tr!("grpc_server.boot_not_entry_number", value = s).into_owned(),
+            )
+        })
+    }
+
+    fn want(o: Option<&String>, what: &str) -> Result<String, Status> {
+        o.cloned().ok_or_else(|| {
+            Status::invalid_argument(tr!("grpc_server.boot_not_given", what = what).into_owned())
+        })
+    }
+
+    fn partition(&self) -> Result<u32, Status> {
+        self.partition.ok_or_else(|| {
+            Status::invalid_argument(tr!("grpc_server.boot_partition_not_given").into_owned())
+        })
+    }
+
+    fn common(&self) -> Result<BootActionKind, Status> {
+        let name = || Self::want(self.name.as_ref(), &tr!("grpc_server.boot_field_name"));
+        Ok(BootActionKind::Same(match self.action.as_str() {
+            "rename" => SameAction::Rename {
+                entry: self.entry()?,
+                name: name()?,
+            },
+            "set_active" => SameAction::SetActive {
+                entry: self.entry()?,
+                on: self.on.unwrap_or(true),
+                force: self.force.unwrap_or(false),
+            },
+            "move" => SameAction::Move {
+                entry: self.entry()?,
+                to: self.to.unwrap_or(0).saturating_sub(1),
+            },
+            "delete" => SameAction::Delete {
+                entry: self.entry()?,
+                force: self.force.unwrap_or(false),
+            },
+            "create" => {
+                return Ok(BootActionKind::Create {
+                    name: name()?,
+                    file: Self::want(
+                        self.file.as_ref(),
+                        &tr!("grpc_server.boot_field_loader_path"),
+                    )?,
+                    position: self.position.map(|x| x.saturating_sub(1)),
+                })
+            }
+            "boot_next" => SameAction::BootNext {
+                entry: if self.clear.unwrap_or(false) {
+                    None
+                } else {
+                    Some(self.entry()?)
+                },
+            },
+            "timeout" => SameAction::Timeout {
+                secs: self.secs.ok_or_else(|| {
+                    Status::invalid_argument(tr!("grpc_server.boot_secs_not_given").into_owned())
+                })?,
+            },
+            other => {
+                return Err(Status::invalid_argument(
+                    tr!("grpc_server.boot_unknown_action", action = other).into_owned(),
+                ))
+            }
+        }))
+    }
+}
+
+/// The partition a new Linux boot entry points at: slot `partition` of the
+/// GPT on the whole disk `disk` (`/dev/<kernel name>`), read off the disk now.
+/// Only an EFI System Partition is accepted — a firmware entry naming
+/// anything else would not boot, and the page offers nothing else.
+#[cfg(target_os = "linux")]
+fn linux_esp_partition(
+    disk: Option<&str>,
+    partition: Option<u32>,
+) -> own_backup_common::Result<own_backup_backup::efivars::HardDrive> {
+    use own_backup_common::OwnBackupError;
+    let bad = |m: std::borrow::Cow<'static, str>| OwnBackupError::Device(m.into_owned());
+    let disk = disk.ok_or_else(|| bad(tr!("grpc_server.boot_disk_not_given")))?;
+    let partition = partition.ok_or_else(|| bad(tr!("grpc_server.boot_partition_not_given")))?;
+    // A kernel disk name and nothing else: the path is read as root.
+    let name = disk.strip_prefix("/dev/").unwrap_or_default();
+    let sys = std::path::Path::new("/sys/class/block");
+    if name.is_empty()
+        || name.contains('/')
+        || !sys.join(name).exists()
+        || own_backup_common::linux_block::is_partition(sys, name)
+    {
+        return Err(bad(tr!("grpc_server.boot_not_a_disk", disk = disk)));
+    }
+    let layout = own_backup_backup::esp_scan_linux::read_layout(disk)?;
+    let part = layout
+        .partitions
+        .iter()
+        .find(|p| p.index == partition)
+        .filter(|p| {
+            p.type_guid
+                .eq_ignore_ascii_case(own_backup_common::linux_block::ESP_TYPE_GUID)
+        })
+        .ok_or_else(|| {
+            bad(tr!(
+                "grpc_server.boot_no_esp_there",
+                disk = disk,
+                partition = partition
+            ))
+        })?;
+    own_backup_backup::efivars::HardDrive::from_gpt(
+        part.index,
+        part.first_lba,
+        part.last_lba,
+        &part.part_guid,
+    )
+    .ok_or_else(|| {
+        bad(tr!(
+            "grpc_server.boot_bad_partition_guid",
+            guid = part.part_guid.as_str()
+        ))
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    /// `ReadImageMeta` reads as root for its caller: only our copies, by an
+    /// absolute path, regular files — not a link to `/etc/shadow`.
+    #[cfg(unix)]
+    #[test]
+    fn the_service_reads_only_copies_for_a_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let copy = dir.path().join("job_full.obk");
+        std::fs::write(&copy, b"x").unwrap();
+        assert!(super::image_meta_target(&copy).is_ok());
+        let other = dir.path().join("notes.txt");
+        std::fs::write(&other, b"x").unwrap();
+        assert!(super::image_meta_target(&other).is_err(), "not a copy");
+        assert!(
+            super::image_meta_target(std::path::Path::new("job_full.obk")).is_err(),
+            "relative"
+        );
+        let link = dir.path().join("shadow.qcow2");
+        std::os::unix::fs::symlink("/etc/shadow", &link).unwrap();
+        assert!(super::image_meta_target(&link).is_err(), "a link");
+        let folder = dir.path().join("dir.vhdx");
+        std::fs::create_dir(&folder).unwrap();
+        assert!(super::image_meta_target(&folder).is_err(), "a folder");
+        assert!(super::image_meta_target(&dir.path().join("gone.obk")).is_err());
+    }
+
+    /// The window learns which partitions keep a header, not the header.
+    #[test]
+    fn a_window_gets_the_header_s_place_not_its_bytes() {
+        let mut info = own_backup_backup::sidecar::SidecarInfo::new_full("disk.obk", 0);
+        let header = own_backup_common::image::LuksHeaderBackup {
+            part_index: 3,
+            data_offset: 16 << 20,
+            sector_size: 512,
+            kind: own_backup_common::image::VolumeEncryptionKind::Luks2,
+            header_b64: "TFVLU7q+".into(),
+        };
+        info.luks_headers.push(header);
+        super::hide_header_bytes(&mut info);
+        assert_eq!(info.luks_headers.len(), 1);
+        assert_eq!(info.luks_headers[0].part_index, 3);
+        assert!(info.luks_headers[0].header_b64.is_empty());
+    }
+
+    /// A command-line whole-disk copy has no live-disk snapshot; its own
+    /// partition table still names every partition the plan restores.
+    #[test]
+    fn a_whole_disk_copy_without_a_snapshot_is_described_by_its_table() {
+        use own_backup_common::gpt::{
+            DiskBackupManifest, DiskImageRef, DiskLayout, GptPartitionEntry,
+        };
+        use own_backup_common::types::FileSystem;
+        let entry = |index, first, last| GptPartitionEntry {
+            index,
+            type_guid: String::new(),
+            part_guid: String::new(),
+            first_lba: first,
+            last_lba: last,
+            attributes: 0,
+            name: format!("p{index}"),
+        };
+        let image = |index, fs: &str| DiskImageRef {
+            part_index: index,
+            token: String::new(),
+            image_file_name: String::new(),
+            filesystem: fs.into(),
+            encryption: None,
+        };
+        let disk = DiskBackupManifest {
+            format_version: 1,
+            created_at: String::new(),
+            job_id: None,
+            disk_number: 0,
+            disk_model: String::new(),
+            layout: DiskLayout {
+                disk_guid: String::new(),
+                sector_size: 512,
+                size_bytes: 1 << 32,
+                partitions: vec![
+                    entry(1, 2048, 4095),
+                    entry(14, 4096, 4097),
+                    entry(15, 8192, 16383),
+                ],
+            },
+            images: vec![image(1, "ext4"), image(15, "FAT32")],
+            source_disk: None,
+        };
+        let sources = super::layout_sources(&disk, &[]);
+        let by = |i: u32| sources.iter().find(|s| s.index == i).unwrap();
+        assert_eq!(sources.len(), 3);
+        assert_eq!(by(1).size_bytes, 2048 * 512);
+        assert_eq!(by(1).filesystem, FileSystem::Ext4);
+        assert_eq!(by(14).filesystem, FileSystem::Unknown);
+        assert_eq!(by(14).size_bytes, 2 * 512);
+        assert_eq!(by(15).filesystem, FileSystem::Fat32);
+        assert_eq!(by(15).label, "p15");
+    }
+
+    /// The English text of this refusal once belonged to another message (the
+    /// destination-on-source one, REPORT-cloud-gui2). It must speak of what
+    /// it refuses.
+    #[test]
+    fn encrypting_over_plain_copies_is_explained_in_both_languages() {
+        let catalog: serde_json::Value =
+            serde_json::from_str(include_str!("../locales/service.json")).unwrap();
+        let entry = &catalog["grpc_server.job_encrypt_over_plain_copies"];
+        assert!(entry["ru"].as_str().unwrap().contains("Шифрование"));
+        let en = entry["en"].as_str().unwrap();
+        assert!(en.starts_with("Encryption cannot be turned on"), "{en}");
+        assert!(!en.contains("destination"), "{en}");
+    }
+
     use super::*;
+
+    #[test]
+    fn a_plans_disk_is_named_by_its_device_on_linux() {
+        let mut plan =
+            own_backup_common::restore_plan::RestorePlan::new(3, "/x.qcow2".into(), Vec::new());
+        assert_eq!(plan_disk_name(&plan), "3");
+        plan.target_device = Some("/dev/disk/by-id/usb-Disk".into());
+        let want = if cfg!(target_os = "linux") {
+            "/dev/disk/by-id/usb-Disk"
+        } else {
+            "3"
+        };
+        assert_eq!(plan_disk_name(&plan), want);
+    }
 
     fn make_service(dir: &std::path::Path) -> BackupServiceImpl {
         let (_, shutdown) = crate::shutdown::create_shutdown_channel();
@@ -3109,6 +4616,41 @@ mod tests {
         BackupServiceImpl::new(state, String::new(), shutdown)
     }
 
+    /// The wizard's destination check says what the save would: a letter
+    /// collision first, by name, before anything is looked up.
+    #[test]
+    fn destination_answer_is_the_save_check() {
+        let on = destination_answer(&["C:".into()], r"C:\Backups");
+        assert_eq!(on["placement"], "on_source");
+        assert_eq!(on["source"], "C:");
+        // A drive letter is not a Linux device: nothing to warn about.
+        assert_eq!(on["key_store_unknown"], serde_json::json!([]));
+        // Nothing to compare yet: no answer to give, and no refusal either.
+        assert_eq!(destination_answer(&[], r"C:\Backups")["placement"], "clear");
+        assert_eq!(
+            destination_answer(&["C:".into()], "  ")["placement"],
+            "clear"
+        );
+        assert_eq!(
+            destination_answer(&["  ".into()], r"C:\Backups")["placement"],
+            "clear"
+        );
+    }
+
+    #[tokio::test]
+    async fn capabilities_are_served_as_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let svc = make_service(dir.path());
+        let reply = svc
+            .backup_capabilities(Request::new(Empty {}))
+            .await
+            .unwrap()
+            .into_inner();
+        let v: serde_json::Value = serde_json::from_str(&reply.json).unwrap();
+        assert_eq!(v["os"], own_backup_core::capabilities::current().os);
+        assert!(v["methods"].as_array().unwrap().contains(&"full".into()));
+    }
+
     #[tokio::test]
     async fn shutdown_refuses_new_destructive_operations() {
         let dir = tempfile::tempdir().unwrap();
@@ -3116,11 +4658,12 @@ mod tests {
         let svc = make_service_with_shutdown(dir.path(), shutdown);
         controller.trigger_shutdown();
         assert_eq!(
-            svc.reserve("verify", "image").unwrap_err().code(),
+            svc.reserve("verify", "image").await.unwrap_err().code(),
             tonic::Code::Unavailable
         );
         assert_eq!(
             svc.reserve_with_id("restore", "plan", uuid::Uuid::new_v4())
+                .await
                 .unwrap_err()
                 .code(),
             tonic::Code::Unavailable
@@ -3194,6 +4737,43 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
+    }
+
+    /// A job list past gRPC's default 4 MiB still travels both ways through
+    /// the real client: on the stand (2026-10-17) a 6 MB list failed every
+    /// request that read the jobs.
+    #[tokio::test]
+    async fn a_job_list_larger_than_four_megabytes_still_travels() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_controller, shutdown) = crate::shutdown::create_shutdown_channel();
+        let svc = make_service_with_shutdown(dir.path(), shutdown);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(svc.into_service())
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
+        );
+        // Straight to this server: `connect` tries the service socket first,
+        // and on a machine with the package installed that is another service.
+        let mut client =
+            own_backup_client::BackupClient::connect_tcp_only(format!("http://{addr}"), "")
+                .await
+                .unwrap();
+        let mut big = own_backup_core::Job {
+            name: "big".into(),
+            source: "C:".into(),
+            dest_folder: dir.path().display().to_string(),
+            ..Default::default()
+        };
+        big.exclusions.patterns = (0..6000)
+            .map(|i| format!("{i}-{}", "x".repeat(1000)))
+            .collect();
+        let saved = client.save_job(&big).await.unwrap();
+        let listed = client.list_jobs().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, saved.id);
+        assert_eq!(listed[0].exclusions.patterns.len(), 6000);
     }
 
     fn job(name: &str, source: &str, dest: &str) -> String {
@@ -3570,6 +5150,22 @@ fn media_build_unavailable() -> Result<(), Status> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn base_image_dto(
+    b: own_backup_backup::winre_find::BaseImage,
+) -> own_backup_common::engine_dto::BaseImageDto {
+    own_backup_common::engine_dto::BaseImageDto {
+        path: b.path.display().to_string(),
+        origin: b.origin.describe().to_string(),
+        name: b.info.name,
+        build: b.info.build,
+        language: b.info.language,
+        architecture: b.info.architecture,
+        total_bytes: b.info.total_bytes,
+        warnings: b.warnings,
+    }
+}
+
 /// Where the WebView2 runtime lives on this machine.
 ///
 /// The installed Evergreen runtime keeps its version in the folder name, so the
@@ -3691,7 +5287,12 @@ fn keep_awake(what: &str) -> Option<Box<dyn Send>> {
         own_backup_backup::power_win::KeepAwake::new(&format!("Own Backup: {what}"))
             .map(|k| Box::new(k) as Box<dyn Send>)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        own_backup_backup::power_linux::KeepAwake::new(&format!("Own Backup: {what}"))
+            .map(|k| Box::new(k) as Box<dyn Send>)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = what;
         None

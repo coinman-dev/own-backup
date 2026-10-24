@@ -21,7 +21,9 @@ use windows::Win32::Foundation::{
     CloseHandle, ERROR_HANDLE_EOF, ERROR_MORE_DATA, ERROR_NO_MORE_FILES, HANDLE,
 };
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FileFullDirectoryInfo, GetFileInformationByHandleEx, FILE_FLAG_BACKUP_SEMANTICS,
+    CreateFileW, FileFullDirectoryInfo, FileIdBothDirectoryInfo, FileStreamInfo, FindClose,
+    FindFirstFileNameW, FindNextFileNameW, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
     FILE_SHARE_WRITE, OPEN_EXISTING,
 };
@@ -31,6 +33,7 @@ use windows::Win32::System::IO::DeviceIoControl;
 use own_backup_common::Result;
 
 use crate::exclusions::{parse_patterns, ByteRanges, CategorySizes};
+pub use crate::exclusions::{ExcludedPath, ExclusionScan};
 use crate::win_device::to_wide;
 
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
@@ -38,24 +41,7 @@ const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 /// Right needed to enumerate a directory's contents.
 const FILE_LIST_DIRECTORY: u32 = 0x0001;
 
-/// One directory entry from [`list_dir_backup`].
-pub struct DirEntryInfo {
-    pub name: String,
-    pub size: u64,
-    pub attributes: u32,
-}
-
-/// A matched entry, recorded at its highest match point (a matched directory
-/// is one record — its contents are implied). Fed to the mount-&-delete pass
-/// ([`crate::true_removal_win`]) that truly removes NTFS/ReFS exclusions from
-/// the finished image.
-pub struct ExcludedPath {
-    /// Path relative to the volume root, original case, `\`-separated.
-    pub rel: String,
-    pub is_dir: bool,
-    /// Junction/symlink: delete the reparse entry itself, never its target.
-    pub is_reparse: bool,
-}
+pub use crate::exclusions::DirEntryInfo;
 
 /// List a directory using `FILE_FLAG_BACKUP_SEMANTICS` + a directory handle, so
 /// ACL-restricted folders (System Volume Information, protected app data) can be
@@ -63,6 +49,16 @@ pub struct ExcludedPath {
 /// which opens without backup semantics and is denied. Sizes/attributes come
 /// straight from the enumeration, so no per-file open is needed here.
 pub fn list_dir_backup(dir: &std::path::Path) -> Result<Vec<DirEntryInfo>> {
+    list_dir(dir, false)
+}
+
+/// [`list_dir_backup`] with each entry's file id (`FileIdBothDirectoryInfo`):
+/// on NTFS the MFT record number of the entry, known without opening it.
+pub fn list_dir_backup_ids(dir: &std::path::Path) -> Result<Vec<DirEntryInfo>> {
+    list_dir(dir, true)
+}
+
+fn list_dir(dir: &std::path::Path, with_ids: bool) -> Result<Vec<DirEntryInfo>> {
     let wide = to_wide(&dir.to_string_lossy());
     // SAFETY: `wide` outlives the call.
     let handle = unsafe {
@@ -78,6 +74,11 @@ pub fn list_dir_backup(dir: &std::path::Path) -> Result<Vec<DirEntryInfo>> {
     }
     .map_err(|e| own_backup_common::OwnBackupError::Device(format!("open dir: {e}")))?;
     let handle = FileHandle(handle);
+    let class = if with_ids {
+        FileIdBothDirectoryInfo
+    } else {
+        FileFullDirectoryInfo
+    };
 
     let mut out = Vec::new();
     let mut buf = vec![0u8; 64 * 1024];
@@ -86,7 +87,7 @@ pub fn list_dir_backup(dir: &std::path::Path) -> Result<Vec<DirEntryInfo>> {
         let call = unsafe {
             GetFileInformationByHandleEx(
                 handle.0,
-                FileFullDirectoryInfo,
+                class,
                 buf.as_mut_ptr() as *mut _,
                 buf.len() as u32,
             )
@@ -100,69 +101,9 @@ pub fn list_dir_backup(dir: &std::path::Path) -> Result<Vec<DirEntryInfo>> {
                 )))
             }
         }
-        // Parse the FILE_FULL_DIR_INFO chain in `buf`. Field offsets (x64):
-        //   NextEntryOffset@0, EndOfFile@40, FileAttributes@56,
-        //   FileNameLength(bytes)@60, FileName@68.
-        let mut off = 0usize;
-        loop {
-            let rec = &buf[off..];
-            if rec.len() < 68 {
-                break;
-            }
-            let next = u32::from_le_bytes(rec[0..4].try_into().unwrap()) as usize;
-            let size = i64::from_le_bytes(rec[40..48].try_into().unwrap()).max(0) as u64;
-            let attrs = u32::from_le_bytes(rec[56..60].try_into().unwrap());
-            let name_len = u32::from_le_bytes(rec[60..64].try_into().unwrap()) as usize;
-            if 68 + name_len <= rec.len() {
-                let name: Vec<u16> = rec[68..68 + name_len]
-                    .chunks_exact(2)
-                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                    .collect();
-                let name = String::from_utf16_lossy(&name);
-                if name != "." && name != ".." {
-                    out.push(DirEntryInfo {
-                        name,
-                        size,
-                        attributes: attrs,
-                    });
-                }
-            }
-            if next == 0 {
-                break;
-            }
-            off += next;
-            if off >= buf.len() {
-                break;
-            }
-        }
+        out.extend(crate::exclusions::parse_dir_info(&buf, with_ids));
     }
     Ok(out)
-}
-
-/// Outcome of an exclusion scan over a volume.
-pub struct ExclusionScan {
-    /// Merged excluded byte ranges (volume offsets), finalized.
-    pub ranges: ByteRanges,
-    pub files_excluded: u64,
-    pub entries_scanned: u64,
-    /// Total bytes of excluded extents (before merging).
-    pub bytes_excluded: u64,
-    /// Byte totals per file category for the files that STAY in the backup
-    /// (excluded files are not part of the archive). Powers the dashboard
-    /// breakdown — the walk visits every file anyway, so this is free.
-    pub categories: CategorySizes,
-    /// Matched entries at their highest match point, for the true-removal
-    /// (mount-&-delete) pass over the finished image. Includes entries the
-    /// zeroing step cannot handle (resident files, reparse points, files
-    /// whose extents failed to resolve) — the driver deletes them all the
-    /// same.
-    pub paths: Vec<ExcludedPath>,
-    /// Per-file resolved extent bytes, filled only when the caller asks for it
-    /// (`scan-exclusions --list`). Diagnostics for the B0 comparison against
-    /// `scripts/ntfs-mft-probe.py`: the two methods agreed on the file set to
-    /// 0.26% and disagreed on the byte total by a third, and a per-file diff is
-    /// the only thing that says which one is lying.
-    pub file_bytes: Vec<(String, u64)>,
 }
 
 /// Walk `volume_read_path` (`\\.\E:` or a VSS snapshot device path) and
@@ -251,6 +192,7 @@ fn collect_excluded_ranges_inner(
                         rel: rel_path.to_string(),
                         is_dir,
                         is_reparse,
+                        whole_records: Vec::new(),
                     }),
                     _ => {
                         warn!(path = %child.display(), "matched path outside the scan root — not recorded for removal")
@@ -264,8 +206,46 @@ fn collect_excluded_ranges_inner(
                     stack.push((child, rel_child, matched));
                 }
             } else if matched && !is_reparse {
-                match file_extent_ranges(&child, cluster_size, &mut scan.ranges) {
+                // One open for the links, the extents and the streams.
+                let handle = match open_attributes(&child) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        warn!(file = %child.display(), error = %e,
+                              "Exclusion scan: cannot open — file stays in the backup");
+                        scan.categories.add(&rel_child, info.size);
+                        continue;
+                    }
+                };
+                // A hard link with a name outside the rules: the data is that
+                // name's too, and stays (the entry itself still goes).
+                match name_outside_rules(&handle, &child, &parsed) {
+                    Ok(false) => {}
+                    Ok(true) => {
+                        trace!(file = %child.display(),
+                               "Exclusion scan: a hard link of it stays — its data stays in the backup");
+                        scan.categories.add(&rel_child, info.size);
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!(file = %child.display(), error = %e,
+                              "Exclusion scan: cannot list the names of a hard-linked file — its data stays in the backup");
+                        scan.categories.add(&rel_child, info.size);
+                        continue;
+                    }
+                }
+                // Collected apart and merged only when complete: half a
+                // file's extents would cut it, not exclude it.
+                let mut own = ByteRanges::new();
+                match handle_extent_ranges(&handle, &child, cluster_size, &mut own) {
                     Ok(bytes) => {
+                        for (s, e) in own.iter() {
+                            scan.ranges.add(s, e);
+                        }
+                        // Its named streams (Zone.Identifier, any ADS) are its
+                        // content too, in clusters of their own.
+                        let bytes = bytes
+                            + stream_extent_ranges(&handle, &child, cluster_size, &mut scan.ranges);
+
                         scan.files_excluded += 1;
                         scan.bytes_excluded += bytes;
                         if collect_file_bytes {
@@ -305,22 +285,12 @@ fn collect_excluded_ranges_inner(
     Ok(scan)
 }
 
-/// RAII handle for the queried file.
-struct FileHandle(HANDLE);
-impl Drop for FileHandle {
-    fn drop(&mut self) {
-        // SAFETY: handle owned by us, closed exactly once.
-        let _ = unsafe { CloseHandle(self.0) };
-    }
-}
-
-/// Append the cluster extents of `path` (as byte ranges) to `ranges`.
-/// Returns the number of excluded bytes. Resident files (data inside the MFT
-/// record) have no extents and contribute nothing.
-fn file_extent_ranges(path: &Path, cluster_size: u32, ranges: &mut ByteRanges) -> Result<u64> {
+/// Open `path` for its attributes only — enough for its links, streams and
+/// extents. FILE_READ_ATTRIBUTES opens even exclusively-locked files
+/// (pagefile.sys); BACKUP_SEMANTICS is required for directories and system
+/// files; OPEN_REPARSE_POINT: the link itself, never its target.
+fn open_attributes(path: &Path) -> Result<FileHandle> {
     let wide = to_wide(&path.to_string_lossy());
-    // FILE_READ_ATTRIBUTES opens even exclusively-locked files (pagefile.sys);
-    // BACKUP_SEMANTICS is required for directories and system files.
     // SAFETY: `wide` outlives the call.
     let handle = unsafe {
         CreateFileW(
@@ -334,8 +304,160 @@ fn file_extent_ranges(path: &Path, cluster_size: u32, ranges: &mut ByteRanges) -
         )
     }
     .map_err(|e| own_backup_common::OwnBackupError::Device(format!("CreateFileW failed: {e}")))?;
-    let handle = FileHandle(handle);
+    Ok(FileHandle(handle))
+}
 
+/// Whether the file open as `handle` (at `path`) has a hard link outside the
+/// rules: more than one link, and not every name Windows lists for it
+/// (`FindFirstFileNameW`) excluded. An 8.3 short name is no link of its own
+/// and is not counted.
+fn name_outside_rules(
+    handle: &FileHandle,
+    path: &Path,
+    parsed: &[crate::exclusions::ExclusionPattern],
+) -> Result<bool> {
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `info` is a live, writable struct of the expected type.
+    unsafe { GetFileInformationByHandle(handle.0, &mut info) }.map_err(|e| {
+        own_backup_common::OwnBackupError::Device(format!("GetFileInformationByHandle: {e}"))
+    })?;
+    if info.nNumberOfLinks <= 1 {
+        return Ok(false);
+    }
+    let names = hard_link_names(path)?;
+    Ok(!crate::exclusions::every_name_excluded(&names, parsed))
+}
+
+/// Every name of the file at `path`, volume-relative (`\dir\file`).
+fn hard_link_names(path: &Path) -> Result<Vec<String>> {
+    use windows::core::PWSTR;
+    let wide = to_wide(&path.to_string_lossy());
+    let mut buf = vec![0u16; 32_768];
+    let mut names = Vec::new();
+    let mut len = buf.len() as u32;
+    // SAFETY: `wide` outlives the call; `buf` holds `len` characters.
+    let find =
+        unsafe { FindFirstFileNameW(PCWSTR(wide.as_ptr()), 0, &mut len, PWSTR(buf.as_mut_ptr())) }
+            .map_err(|e| {
+                own_backup_common::OwnBackupError::Device(format!("FindFirstFileNameW: {e}"))
+            })?;
+    let take = |buf: &[u16], len: u32| {
+        let n = (len as usize).min(buf.len());
+        let end = buf[..n].iter().position(|&c| c == 0).unwrap_or(n);
+        String::from_utf16_lossy(&buf[..end])
+    };
+    names.push(take(&buf, len));
+    let result = loop {
+        len = buf.len() as u32;
+        // SAFETY: as above; `find` is the open enumeration.
+        match unsafe { FindNextFileNameW(find, &mut len, PWSTR(buf.as_mut_ptr())) } {
+            Ok(()) => names.push(take(&buf, len)),
+            Err(e) if e.code() == ERROR_HANDLE_EOF.to_hresult() => break Ok(names),
+            Err(e) => {
+                break Err(own_backup_common::OwnBackupError::Device(format!(
+                    "FindNextFileNameW: {e}"
+                )))
+            }
+        }
+    };
+    // SAFETY: the enumeration handle is ours, closed once.
+    let _ = unsafe { FindClose(find) };
+    result
+}
+
+/// The named data streams of the open file `handle`: their path suffixes
+/// (`:Zone.Identifier:$DATA`) and sizes. Needs no access right beyond the
+/// open itself.
+pub(crate) fn named_streams(handle: HANDLE) -> Result<Vec<(String, u64)>> {
+    let mut buf = vec![0u8; 16 * 1024];
+    loop {
+        // SAFETY: the buffer is valid for the size passed.
+        let call = unsafe {
+            GetFileInformationByHandleEx(
+                handle,
+                FileStreamInfo,
+                buf.as_mut_ptr() as *mut _,
+                buf.len() as u32,
+            )
+        };
+        match call {
+            Ok(()) => return Ok(crate::exclusions::named_streams_from_info(&buf)),
+            // A file with no data stream at all (a directory without one).
+            Err(e) if e.code() == ERROR_HANDLE_EOF.to_hresult() => return Ok(Vec::new()),
+            Err(e) if e.code() == ERROR_MORE_DATA.to_hresult() && buf.len() < 4 << 20 => {
+                let grown = buf.len() * 4;
+                buf = vec![0u8; grown];
+            }
+            Err(e) => {
+                return Err(own_backup_common::OwnBackupError::Device(format!(
+                    "FileStreamInfo: {e}"
+                )))
+            }
+        }
+    }
+}
+
+/// Append the cluster extents of every named stream of the file open as
+/// `handle` (at `path`) to `ranges` and return their bytes. A stream that
+/// cannot be resolved stays in the backup, said in the log — as a file that
+/// cannot be resolved does.
+fn stream_extent_ranges(
+    handle: &FileHandle,
+    path: &Path,
+    cluster_size: u32,
+    ranges: &mut ByteRanges,
+) -> u64 {
+    let streams = match named_streams(handle.0) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(file = %path.display(), error = %e,
+                  "Exclusion scan: cannot list the named streams — they stay in the backup");
+            return 0;
+        }
+    };
+    let mut bytes = 0u64;
+    for (name, _) in streams {
+        let stream = PathBuf::from(format!("{}{name}", path.to_string_lossy()));
+        // Collected apart and merged only when complete: half a stream's
+        // extents would cut it, not exclude it.
+        let mut own = ByteRanges::new();
+        match file_extent_ranges(&stream, cluster_size, &mut own) {
+            Ok(n) => {
+                for (s, e) in own.iter() {
+                    ranges.add(s, e);
+                }
+                bytes += n;
+            }
+            Err(e) => warn!(stream = %stream.display(), error = %e,
+                            "Exclusion scan: cannot resolve a named stream — it stays in the backup"),
+        }
+    }
+    bytes
+}
+
+/// RAII handle for the queried file.
+struct FileHandle(HANDLE);
+impl Drop for FileHandle {
+    fn drop(&mut self) {
+        // SAFETY: handle owned by us, closed exactly once.
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+/// Append the cluster extents of `path` (as byte ranges) to `ranges`.
+/// Returns the number of excluded bytes. Resident files (data inside the MFT
+/// record) have no extents and contribute nothing.
+fn file_extent_ranges(path: &Path, cluster_size: u32, ranges: &mut ByteRanges) -> Result<u64> {
+    handle_extent_ranges(&open_attributes(path)?, path, cluster_size, ranges)
+}
+
+/// [`file_extent_ranges`] of a file already open as `handle` (at `path`).
+fn handle_extent_ranges(
+    handle: &FileHandle,
+    path: &Path,
+    cluster_size: u32,
+    ranges: &mut ByteRanges,
+) -> Result<u64> {
     let cs = cluster_size as u64;
     let mut bytes_excluded = 0u64;
     let mut starting_vcn: i64 = 0;

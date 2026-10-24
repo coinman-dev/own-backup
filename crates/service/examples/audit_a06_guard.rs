@@ -313,6 +313,8 @@ mod probe {
                 target_disk: 0,
                 verify_checksums: true,
                 encryption: None,
+                passphrases: Default::default(),
+                known_keys: Default::default(),
             },
             |_| Ok(()),
         )?;

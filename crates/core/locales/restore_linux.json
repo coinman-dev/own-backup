@@ -1,0 +1,131 @@
+{
+  "_version": 2,
+  "restore_exec_linux.no_target_device": {
+    "ru": "В плане не указано устройство диска назначения. В Linux диски не опознаются по номеру — обновите окно программы и составьте план заново.",
+    "en": "The plan does not name the target disk's device. On Linux disks are not identified by number — update the program window and build the plan again."
+  },
+  "restore_exec_linux.no_format_refs": {
+    "ru": "ReFS в Linux не создать: выберите для раздела ext4, XFS, btrfs, NTFS, FAT32 или exFAT.",
+    "en": "ReFS cannot be created on Linux: choose ext4, XFS, btrfs, NTFS, FAT32 or exFAT for the partition."
+  },
+  "restore_exec_linux.no_letters": {
+    "ru": "Буквы дисков — понятие Windows; в Linux назначить букву нельзя. Уберите этот шаг из плана.",
+    "en": "Drive letters are a Windows concept; one cannot be assigned on Linux. Remove this step from the plan."
+  },
+  "restore_exec_linux.no_file_mode": {
+    "ru": "Пофайловое восстановление в Linux пока не сделано: восстановите раздел посекторно.",
+    "en": "File-by-file restore is not implemented on Linux yet: restore the partition sector by sector."
+  },
+  "restore_exec_linux.table_on_live_disk": {
+    "ru": "Работающая система использует разделы диска %{disk}, поэтому его разметку менять нельзя. Восстановите в существующий свободный раздел или с загрузочного носителя.",
+    "en": "The running system uses partitions of disk %{disk}, so its partition table cannot be changed. Restore into an existing unused partition, or from the bootable media."
+  },
+  "restore_exec_linux.touches_live_system": {
+    "ru": "план затрагивает разделы, которыми пользуется работающая система: %{parts}. Загрузитесь с загрузочного носителя и повторите.",
+    "en": "the plan touches partitions the running system uses: %{parts}. Boot from the bootable media and try again."
+  },
+  "restore_exec_linux.udev_not_settled": {
+    "ru": "Данные записаны и проверены, но система не успела показать новые разделы (%{error}). Если их не видно, переподключите диск или перезагрузитесь.",
+    "en": "The data is written and checked, but the system did not finish showing the new partitions (%{error}). If they are not visible, reconnect the disk or restart."
+  },
+  "restore_exec_linux.no_partition_node": {
+    "ru": "Ядро не показывает раздел %{part} диска назначения.",
+    "en": "The kernel shows no partition %{part} on the target disk."
+  },
+  "restore_exec_linux.partition_moved": {
+    "ru": "Раздел %{part} (%{node}) сейчас лежит не там, где его проверял план (смещение %{offset}, размер %{size}). Обновите карту диска и составьте план заново.",
+    "en": "Partition %{part} (%{node}) is not where the plan checked it (offset %{offset}, size %{size}). Refresh the disk map and build the plan again."
+  },
+  "restore_exec_linux.disk_reread": {
+    "ru": "Ядро и udev показывают новую разметку %{disk}.",
+    "en": "The kernel and udev show the new layout of %{disk}."
+  },
+  "restore_boot_linux.boot_step_on_live_partition": {
+    "ru": "Загрузочный шаг не выполнен: раздел %{part} (%{node}) использует работающая система (например, это раздел EFI, с которого она загрузилась), а план его не восстанавливает.",
+    "en": "The boot step was not run: the running system uses partition %{part} (%{node}) (for example, it is the EFI partition it booted from), and the plan does not restore it."
+  },
+  "restore_boot_linux.entries_kept_current": {
+    "ru": "Запись Boot%{entry}, с которой загружена эта система, оставлена как есть и сохранена в порядке загрузки.",
+    "en": "Entry Boot%{entry}, which this system booted from, was left as it is and kept in the boot order."
+  },
+  "restore_boot_linux.entries_orphaned": {
+    "ru": "Не записаны записи, указывающие на разделы, которых на этой машине нет: %{entries}.",
+    "en": "Entries naming partitions this machine does not have were not written: %{entries}."
+  },
+  "restore_boot_linux.windows_bios": {
+    "ru": "Windows на BIOS из Linux пока не подготовить к загрузке: нужна правка BCD. Загрузите восстановленную систему с носителя Windows и выполните bcdboot, или восстановите с загрузочного носителя Own Backup на Windows PE.",
+    "en": "A BIOS Windows cannot be made bootable from Linux yet: its BCD needs editing. Start the restored system from Windows media and run bcdboot, or restore from the Own Backup Windows PE boot media."
+  },
+  "restore_boot_linux.windows_no_esp": {
+    "ru": "Для загрузки Windows через UEFI нужен системный раздел EFI, а в плане его нет.",
+    "en": "Starting Windows through UEFI needs an EFI System Partition, and the plan has none."
+  },
+  "restore_boot_linux.windows_guids_changed": {
+    "ru": "Диск получил не те GUID, что в копии (исходный диск, вероятно, подключён к этой машине), поэтому BCD копии описывает другой диск. Правка BCD из Linux пока не сделана: выполните bcdboot из среды восстановления Windows или восстановите с загрузочного носителя Own Backup на Windows PE.",
+    "en": "The disk did not get the copy's GUIDs (the source disk is probably attached to this machine), so the copy's BCD describes another disk. Editing the BCD from Linux is not implemented yet: run bcdboot from the Windows recovery environment, or restore from the Own Backup Windows PE boot media."
+  },
+  "restore_boot_linux.boot_status_kept": {
+    "ru": "Не удалось удалить \\Windows\\bootstat.dat (%{error}): при первом запуске Windows может показать экран восстановления — выберите обычный запуск.",
+    "en": "Could not remove \\Windows\\bootstat.dat (%{error}): on first start Windows may show the recovery screen — choose a normal start."
+  },
+  "restore_boot_linux.no_windows_loader": {
+    "ru": "На восстановленном системном разделе EFI нет загрузчика Windows (%{path}).",
+    "en": "The restored EFI System Partition has no Windows boot loader (%{path})."
+  },
+  "restore_boot_linux.entry_present": {
+    "ru": "Запись загрузки Windows Boot Manager уже есть (Boot%{entry}).",
+    "en": "A Windows Boot Manager entry is already there (Boot%{entry})."
+  },
+  "restore_boot_linux.entry_last_in_menu": {
+    "ru": "Новая запись добавлена в конец меню загрузки; чтобы Windows запускалась первой, переставьте её в настройках загрузки.",
+    "en": "The new entry is added at the end of the boot menu; to start Windows first, move it up in the boot settings."
+  },
+  "restore_boot_linux.no_firmware_entry": {
+    "ru": "Запись в меню загрузки этой машины не добавлена (машина загружена не через UEFI). Диск загрузится через \\EFI\\BOOT\\BOOTX64.EFI.",
+    "en": "No entry was added to this machine's boot menu (it did not boot through UEFI). The disk starts through \\EFI\\BOOT\\BOOTX64.EFI."
+  },
+  "restore_boot_linux.bad_partition_guid": {
+    "ru": "У системного раздела EFI неверный GUID (%{guid}).",
+    "en": "The EFI System Partition has an invalid GUID (%{guid})."
+  },
+  "restore_boot_linux.windows_not_disk_copy": {
+    "ru": "Подготовить Windows к загрузке из Linux можно только из копии целого диска: по копии тома не узнать, на какие разделы указывает BCD. Выполните bcdboot из среды восстановления Windows.",
+    "en": "Windows can be made bootable from Linux only from a whole-disk copy: a volume copy does not say which partitions its BCD names. Run bcdboot from the Windows recovery environment."
+  },
+  "restore_fs_linux.no_refs": {
+    "ru": "ReFS в Linux не создать.",
+    "en": "ReFS cannot be created on Linux."
+  },
+  "restore_fs_linux.formatted": {
+    "ru": "На %{node} создана файловая система %{fs}.",
+    "en": "Created a %{fs} filesystem on %{node}."
+  },
+  "restore_fs_linux.grown": {
+    "ru": "Файловая система на %{node} расширена на весь раздел.",
+    "en": "The filesystem on %{node} was grown to fill its partition."
+  },
+  "restore_fs_linux.cannot_grow": {
+    "ru": "Файловую систему на %{node} (%{fs}) здесь не расширить: умеем ext2/3/4, XFS, btrfs и NTFS.",
+    "en": "The filesystem on %{node} (%{fs}) cannot be grown here: ext2/3/4, XFS, btrfs and NTFS can."
+  },
+  "restore_fs_linux.btrfs_clone_mounted": {
+    "ru": "btrfs на %{node} повторяет файловую систему, которая уже есть на этой машине, и ядро приняло бы его за оригинал (ядро старше 6.7 — любой такой btrfs, любое ядро — btrfs из нескольких устройств), поэтому расширение не выполнено. Смените идентификаторы при восстановлении (у btrfs из нескольких устройств это невозможно) или расширьте его на другой машине.",
+    "en": "The btrfs on %{node} duplicates a filesystem this machine already has, and the kernel would take it for the original (a kernel older than 6.7 any such btrfs, every kernel a btrfs spanning several devices), so it was not grown. Change the identities during the restore (not possible for a multi-device btrfs), or grow it on another machine."
+  },
+  "restore_exec.change_identities_linux_only": {
+    "ru": "Смена идентификаторов восстановленной копии есть только в Linux; этот план составлен не для этой машины.",
+    "en": "Changing the restored copy's identities exists on Linux only; this plan was not made for this machine."
+  },
+  "restore_exec_linux.identities_changed": {
+    "ru": "Идентификаторов сменено: %{count} — %{list}.",
+    "en": "Identities changed: %{count} — %{list}."
+  },
+  "restore_exec_linux.identities_unchanged": {
+    "ru": "Повторяющихся идентификаторов на восстановленных разделах не осталось — менять нечего.",
+    "en": "No duplicate identities are left on the restored partitions — nothing to change."
+  },
+  "restore_exec_linux.identity_change_failed": {
+    "ru": "Данные восстановлены и проверены, но смена идентификаторов не завершена: %{error}. Уже сменено: %{done}.",
+    "en": "The data is restored and checked, but changing the identities did not finish: %{error}. Already changed: %{done}."
+  }
+}

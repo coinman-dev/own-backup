@@ -13,8 +13,8 @@
 use tracing::{debug, info};
 use windows::Win32::Foundation::ERROR_MORE_DATA;
 use windows::Win32::System::Ioctl::{
-    FSCTL_GET_NTFS_VOLUME_DATA, FSCTL_GET_VOLUME_BITMAP, NTFS_VOLUME_DATA_BUFFER,
-    STARTING_LCN_INPUT_BUFFER,
+    FSCTL_GET_NTFS_VOLUME_DATA, FSCTL_GET_REFS_VOLUME_DATA, FSCTL_GET_VOLUME_BITMAP,
+    NTFS_VOLUME_DATA_BUFFER, REFS_VOLUME_DATA_BUFFER, STARTING_LCN_INPUT_BUFFER,
 };
 use windows::Win32::System::IO::DeviceIoControl;
 
@@ -39,6 +39,8 @@ pub struct NtfsUsedSectorMap {
     total_clusters: u64,
     volume_len: u64,
     block_size: u32,
+    /// Whether the bytes past the last cluster are copied (see [`tail_readable`]).
+    copy_tail: bool,
 }
 
 impl NtfsUsedSectorMap {
@@ -48,7 +50,7 @@ impl NtfsUsedSectorMap {
     /// `block_size` is the backup block size in bytes (must be a multiple of
     /// the volume sector size; typically 1 MiB).
     pub fn open(volume_path: &str, block_size: u32) -> Result<Self> {
-        let device = WinRawDevice::open_read(volume_path)?;
+        let mut device = WinRawDevice::open_read(volume_path)?;
         let volume_len = device.length();
 
         // Cluster size + count. NTFS exposes them via FSCTL_GET_NTFS_VOLUME_DATA.
@@ -56,7 +58,12 @@ impl NtfsUsedSectorMap {
         // read the cluster count from the bitmap header and derive the cluster
         // size from the volume length (validated). Any doubt → error → the engine
         // falls back to sector-by-sector.
-        let (cluster_size, total_clusters) = match ntfs_volume_data(&device) {
+        // ReFS answers its own query with the cluster size, which the length
+        // cannot give when the filesystem is shorter than the device: under
+        // BitLocker ReFS ends 64 MB before it (stand, 2026-10-18).
+        let (cluster_size, total_clusters) = match ntfs_volume_data(&device)
+            .or_else(|| refs_volume_data(&device))
+        {
             Some((cs, tc)) if cs != 0 && tc != 0 => (cs, tc),
             _ => {
                 let tc = probe_bitmap_cluster_count(&device).map_err(|e| {
@@ -153,12 +160,23 @@ impl NtfsUsedSectorMap {
             "volume bitmap loaded"
         );
 
+        let copy_tail = total_clusters * cluster_size as u64 >= volume_len
+            || tail_readable(&mut device, volume_len);
+        if !copy_tail {
+            info!(
+                volume = volume_path,
+                filesystem_end = total_clusters * cluster_size as u64,
+                volume_len,
+                "the device past the filesystem's last cluster cannot be read — not copied"
+            );
+        }
         let (block_used, used_count) = fold_bitmap(
             &bitmap,
             total_clusters,
             cluster_size,
             volume_len,
             block_size,
+            copy_tail,
         );
         info!(
             volume = volume_path,
@@ -175,6 +193,7 @@ impl NtfsUsedSectorMap {
             total_clusters,
             volume_len,
             block_size,
+            copy_tail,
         })
     }
 
@@ -217,6 +236,7 @@ impl NtfsUsedSectorMap {
             self.cluster_size,
             self.volume_len,
             self.block_size,
+            self.copy_tail,
         );
         self.block_used = block_used;
         self.used_count = used_count;
@@ -249,6 +269,41 @@ fn ntfs_volume_data(device: &WinRawDevice) -> Option<(u32, u64)> {
     }
     .is_ok();
     ok.then_some((vd.BytesPerCluster, vd.TotalClusters as u64))
+}
+
+/// ReFS cluster size + count via `FSCTL_GET_REFS_VOLUME_DATA`. `None` on any
+/// failure (not ReFS, or an old ReFS that does not answer it).
+fn refs_volume_data(device: &WinRawDevice) -> Option<(u32, u64)> {
+    let mut vd = REFS_VOLUME_DATA_BUFFER {
+        ByteCount: std::mem::size_of::<REFS_VOLUME_DATA_BUFFER>() as u32,
+        ..Default::default()
+    };
+    let mut returned = 0u32;
+    // SAFETY: out pointer valid for the size passed.
+    let ok = unsafe {
+        DeviceIoControl(
+            device.handle(),
+            FSCTL_GET_REFS_VOLUME_DATA,
+            None,
+            0,
+            Some(&mut vd as *mut _ as *mut _),
+            std::mem::size_of::<REFS_VOLUME_DATA_BUFFER>() as u32,
+            Some(&mut returned),
+            None,
+        )
+    }
+    .is_ok();
+    (ok && vd.TotalClusters > 0).then_some((vd.BytesPerCluster, vd.TotalClusters as u64))
+}
+
+/// Can the last sector of the device be read? Past a ReFS volume under
+/// BitLocker it cannot — the encryption keeps its own data there, and a
+/// read of it returns nothing, which failed the whole copy. A tail that
+/// reads is copied as before.
+fn tail_readable(device: &mut WinRawDevice, volume_len: u64) -> bool {
+    let sector = device.sector_size().max(512) as u64;
+    let mut buf = vec![0u8; sector as usize];
+    volume_len >= sector && device.read_at(volume_len - sector, &mut buf).is_ok()
 }
 
 /// Read just the cluster count from `FSCTL_GET_VOLUME_BITMAP` (the `BitmapSize`
@@ -319,14 +374,16 @@ fn fold_bitmap(
     cluster_size: u32,
     volume_len: u64,
     block_size: u32,
+    copy_tail: bool,
 ) -> (Vec<bool>, u64) {
     let total_blocks = volume_len.div_ceil(block_size as u64);
     let mut block_used = vec![false; total_blocks as usize];
 
     // Bytes past the last cluster (e.g. the NTFS backup boot sector at the
-    // end of the volume) are not covered by the bitmap — always copy them.
+    // end of the volume) are not covered by the bitmap — copied whenever they
+    // can be read at all.
     let clusters_end = total_clusters * cluster_size as u64;
-    if clusters_end < volume_len {
+    if copy_tail && clusters_end < volume_len {
         let first_tail_block = clusters_end / block_size as u64;
         for b in block_used.iter_mut().skip(first_tail_block as usize) {
             *b = true;
@@ -369,5 +426,25 @@ impl UsedSectorMap for NtfsUsedSectorMap {
 
     fn used_block_count(&self) -> u64 {
         self.used_count
+    }
+}
+
+impl crate::engine_core::platform::NativeUsedMap for NtfsUsedSectorMap {
+    fn open(read_path: &str, block_size: u32) -> Result<Self> {
+        NtfsUsedSectorMap::open(read_path, block_size)
+    }
+
+    fn cluster_size(&self) -> u32 {
+        NtfsUsedSectorMap::cluster_size(self)
+    }
+
+    /// Clears the retained bitmap's bits — nothing here can fail.
+    fn apply_excluded_ranges(&mut self, ranges: &ByteRanges) -> Result<()> {
+        NtfsUsedSectorMap::apply_excluded_ranges(self, ranges);
+        Ok(())
+    }
+
+    fn release_bitmap(&mut self) {
+        NtfsUsedSectorMap::release_bitmap(self)
     }
 }

@@ -10,7 +10,7 @@
 //! sockets, fast and slow symlinks, shared and private xattr blocks, reflink
 //! copies, and (for btrfs) enough big files to give the checksum tree real
 //! internal nodes — built by the KERNEL through a mount, not assembled by
-//! debugfs, and shared by ext4, xfs and btrfs alike.
+//! debugfs, and shared by ext4, xfs, btrfs and NTFS (through ntfs-3g) alike.
 //!
 //! Everything under `cache/` is meant to be excluded, everything under `keep/`
 //! must come out untouched. `Corpus::verify_kept` is the half every filesystem
@@ -34,6 +34,11 @@ pub struct Caps {
     /// get wrong — the C-1 regression hid behind exactly that); ext and xfs
     /// are fine with none.
     pub big_files: usize,
+    /// Named data streams (NTFS ADS, `user.*` through ntfs-3g) on excluded
+    /// and kept files — in clusters of their own, inside the file record, and
+    /// so many that the record overflows into extension records behind an
+    /// attribute list.
+    pub streams: bool,
 }
 
 impl Caps {
@@ -42,6 +47,7 @@ impl Caps {
             xattr: true,
             reflink: false,
             big_files: 0,
+            streams: false,
         }
     }
     pub const fn xfs() -> Self {
@@ -49,6 +55,7 @@ impl Caps {
             xattr: true,
             reflink: true,
             big_files: 0,
+            streams: false,
         }
     }
     pub const fn btrfs() -> Self {
@@ -56,6 +63,19 @@ impl Caps {
             xattr: true,
             reflink: true,
             big_files: 200,
+            streams: false,
+        }
+    }
+    /// NTFS through ntfs-3g: no `trusted.*` attributes (its xattrs are named
+    /// streams, `user.*` only — see `streams`) and no reflinks; device nodes,
+    /// FIFOs and sockets become Interix files, links reparse points, hard
+    /// links real ones.
+    pub const fn ntfs() -> Self {
+        Caps {
+            xattr: false,
+            reflink: false,
+            big_files: 0,
+            streams: true,
         }
     }
 }
@@ -73,6 +93,13 @@ pub struct Corpus {
     /// The hard-linked name inside `cache/` whose twin lives in `keep/`: a
     /// removable-set invariant says it stays (and keeps `cache/` alive with it).
     pub straddling_link: PathBuf,
+    /// Named streams of kept files (`user.*` attribute name) → their exact
+    /// contents.
+    pub kept_streams: Vec<(PathBuf, String, Vec<u8>)>,
+    /// Byte strings only excluded files held — content too small for a 4 KiB
+    /// run of the excluded fill (resident data, short streams): none of them
+    /// may be found anywhere in the image.
+    pub secrets: Vec<Vec<u8>>,
 }
 
 /// Content that says which file it came from, so a block landing in the wrong
@@ -259,6 +286,8 @@ pub fn populate(mnt: &Path, caps: Caps) -> Corpus {
         kept_links: Vec::new(),
         excluded: Vec::new(),
         straddling_link: cache.join("hard_in.bin"),
+        kept_streams: Vec::new(),
+        secrets: Vec::new(),
     };
     let write_kept = |c: &mut Corpus, p: PathBuf, data: Vec<u8>| {
         std::fs::write(&p, &data).unwrap();
@@ -374,6 +403,48 @@ pub fn populate(mnt: &Path, caps: Caps) -> Corpus {
         c.excluded.push(cache.join("private_xattr.bin"));
     }
 
+    if caps.streams {
+        // An excluded file whose named streams are its biggest part: one in
+        // clusters of its own, filled like every excluded byte, and a short
+        // one inside its record. All of it goes with the file.
+        let ads = cache.join("ads_big.bin");
+        std::fs::write(&ads, [0xAB; 8192]).unwrap();
+        setxattr(&ads, "user.big", &[0xAB; 20_000]);
+        setxattr(
+            &ads,
+            "user.Zone.Identifier",
+            b"[ZoneTransfer]\r\nZoneId=3\r\nADS-ZONE-SECRET",
+        );
+        c.secrets.push(b"ADS-ZONE-SECRET".to_vec());
+        c.excluded.push(ads);
+        // So many streams that the record overflows: ntfs-3g moves streams
+        // (and the file's name) into extension records behind an attribute
+        // list, where a reader that stays in the base record never looks.
+        let many = cache.join("ads_many.bin");
+        std::fs::write(&many, [0xAB; 4096]).unwrap();
+        for i in 0..30 {
+            let mut v = format!("ADS-LIST-SECRET-{i:02}-").into_bytes();
+            v.resize(100, b'q');
+            setxattr(&many, &format!("user.s{i:02}"), &v);
+        }
+        setxattr(&many, "user.bigx", &[0xAB; 40_000]);
+        c.secrets.push(b"ADS-LIST-SECRET".to_vec());
+        c.excluded.push(many);
+        // A kept file's streams stay, byte for byte.
+        let kept = keep.join("ads_kept.bin");
+        write_kept(&mut c, kept.clone(), pattern(903, 8192));
+        for (name, value) in [
+            ("user.keepstream", pattern(904, 20_000)),
+            (
+                "user.Zone.Identifier",
+                b"[ZoneTransfer]\r\nZoneId=3\r\n".to_vec(),
+            ),
+        ] {
+            setxattr(&kept, name, &value);
+            c.kept_streams.push((kept.clone(), name.to_string(), value));
+        }
+    }
+
     if caps.reflink {
         // Shared extents: the excluded file's data is also the kept clone's, so
         // not a byte of it may be zeroed.
@@ -427,6 +498,13 @@ impl Corpus {
                 md.mode() & libc::S_IFMT,
                 *ifmt,
                 "{tag}: {} сменил тип",
+                p.display()
+            );
+        }
+        for (p, name, want) in &self.kept_streams {
+            assert!(
+                getxattr(p, name) == *want,
+                "{tag}: поток {name} файла {} повреждён",
                 p.display()
             );
         }

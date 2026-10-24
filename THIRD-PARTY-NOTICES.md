@@ -33,6 +33,29 @@ changes recorded in each `OWN-BACKUP-PATCH.json` and validated by the same
 script. These local compatibility copies must be reviewed when the GUI
 stack can move to newer upstream GTK bindings.
 
+### Local binrw compatibility fix
+
+`vendor/binrw` is binrw 0.11.3 (MIT), which `ntfs` 0.4.0 — its latest
+release — needs. Two lines are changed so it keeps compiling on future Rust
+releases: the `default_reader` helper is written out with the signature its
+`#[binrw::parser]` attribute generates, and `extern crate self as binrw` is
+made `pub`. Its own warnings are silenced as in the GTK copies. The registry
+checksum and the changed-file hashes are in `vendor/binrw/OWN-BACKUP-PATCH.json`,
+checked by `scripts/check-vendor.py`.
+
+## Linux: system libraries and the boot medium
+
+The `.deb` links against libraries of the system it is installed on — GTK 3,
+WebKitGTK, gtk-layer-shell (the boot medium's strip), libayatana-appindicator
+and others named in its `Depends` — which the package manager installs under
+their own licenses; the package does not carry them.
+
+The Linux boot medium is a Debian 13 live system built from unmodified Debian
+packages (the kernel, systemd, labwc, cage, foot, Mesa, firmware and the rest
+of its package list), each under its own license, with its copyright file in
+`/usr/share/doc/<package>/copyright` on the medium and its source in the
+Debian archive.
+
 ## Windows: mounting a backup image needs no third-party component
 
 An image is shown to Windows as a disk by serving it from this program as an

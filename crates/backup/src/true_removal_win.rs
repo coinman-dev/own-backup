@@ -40,7 +40,8 @@ use windows::Win32::Storage::FileSystem::{
 use own_backup_common::{OwnBackupError, Result};
 
 use crate::checksum::compute_block_checksum;
-use crate::exclusions_win::{list_dir_backup, ExcludedPath};
+use crate::exclusions_win::{list_dir_backup, list_dir_backup_ids, ExcludedPath};
+pub use crate::removal_types::{InsideRemoval, RemovalOutcome};
 use crate::sidecar::BlockChecksum;
 use crate::vhdx::{attach_vhdx, create_differencing_vhdx, merge_into_parent, AttachMode};
 use crate::vhdx_bat::allocated_payload_blocks;
@@ -81,20 +82,6 @@ const FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE: u32 = 0x10;
 #[repr(C)]
 struct FileDispositionInfoRaw {
     delete_file: u8, // BOOLEAN
-}
-
-/// What the removal pass did to the image.
-pub struct RemovalOutcome {
-    /// Filesystem entries deleted (files + directories + reparse points,
-    /// including everything inside recursively deleted directories).
-    pub entries_deleted: u64,
-    /// Entries that could not be deleted (kept in the image; warned).
-    pub entries_failed: u64,
-    /// Backup blocks whose checksum was recomputed after the merge.
-    pub blocks_rehashed: u64,
-    /// Checksum entries newly added (driver wrote into previously-free space,
-    /// e.g. USN journal growth).
-    pub blocks_added: u64,
 }
 
 fn dev_err(what: &str, e: impl std::fmt::Display) -> OwnBackupError {
@@ -230,18 +217,6 @@ pub fn remove_excluded_from_image(
         "true removal: excluded files deleted from the image by the FS driver"
     );
     Ok(Some(outcome))
-}
-
-/// What the "exclude inside the finished image" pass did — the removal outcome
-/// plus the figures the result screen shows, which on this path can only be
-/// learned from the image's own filesystem.
-pub struct InsideRemoval {
-    pub outcome: RemovalOutcome,
-    pub files_excluded: u64,
-    pub bytes_excluded: u64,
-    pub categories: crate::exclusions::CategorySizes,
-    /// Bytes actually overwritten with zeros inside the image.
-    pub bytes_zeroed: u64,
 }
 
 /// Apply file exclusions to an image whose SOURCE could not be walked.
@@ -906,9 +881,17 @@ fn delete_paths_on_volume_root(
         if crate::exclusions::recreated_by_windows(&p.rel) {
             skipped += 1;
             debug!(path = %p.rel, "true removal: emptying the folder Windows recreates on mount");
-            delete_children(&full, &mut deleted, &mut failed);
+            delete_children(&full, &p.whole_records, &mut deleted, &mut failed);
         } else {
-            delete_tree(&full, p.is_dir, p.is_reparse, &mut deleted, &mut failed);
+            delete_tree(
+                &full,
+                p.is_dir,
+                p.is_reparse,
+                &p.whole_records,
+                None,
+                &mut deleted,
+                &mut failed,
+            );
         }
         if idx % 64 == 0 {
             tick(done_before + idx as u64 + 1, total_paths_all);
@@ -1145,20 +1128,36 @@ pub fn delete_folder_with_backup_rights(path: &Path) -> (u64, u64) {
         &path.to_string_lossy(),
         true,
         false,
+        &[],
+        None,
         &mut deleted,
         &mut failed,
     );
     (deleted, failed)
 }
 
-/// Delete one filesystem entry (recursing into non-reparse directories first).
-/// Failures are counted and warned, never fatal — excluding less than asked is
-/// safe, breaking the pass over one stubborn file is not.
+/// The entries of the directory at `path`; with their file ids when there are
+/// records to clear (`whole`), so that only those are opened. A listing that
+/// cannot carry ids falls back to the plain one — each file is then opened to
+/// learn its id, as before.
+fn list_children(path: &str, whole: &[u64]) -> Result<Vec<crate::exclusions::DirEntryInfo>> {
+    if !whole.is_empty() {
+        match list_dir_backup_ids(Path::new(path)) {
+            Ok(entries) => return Ok(entries),
+            Err(e) => {
+                debug!(dir = %path, error = %e, "true removal: no file ids in the listing")
+            }
+        }
+    }
+    list_dir_backup(Path::new(path))
+}
+
 /// Delete everything inside a directory and leave the directory itself. For
 /// the one folder that cannot go (see the call site); a directory that cannot
-/// even be listed is reported once, not per missing child.
-fn delete_children(path: &str, deleted: &mut u64, failed: &mut u64) {
-    match list_dir_backup(Path::new(path)) {
+/// even be listed is reported once, not per missing child. `whole`: as for
+/// [`delete_tree`].
+fn delete_children(path: &str, whole: &[u64], deleted: &mut u64, failed: &mut u64) {
+    match list_children(path, whole) {
         Ok(entries) => {
             for e in entries {
                 let child = format!("{path}\\{}", e.name);
@@ -1166,6 +1165,8 @@ fn delete_children(path: &str, deleted: &mut u64, failed: &mut u64) {
                     &child,
                     e.attributes & FILE_ATTRIBUTE_DIRECTORY != 0,
                     e.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0,
+                    whole,
+                    e.file_id,
                     deleted,
                     failed,
                 );
@@ -1178,16 +1179,39 @@ fn delete_children(path: &str, deleted: &mut u64, failed: &mut u64) {
     }
 }
 
-fn delete_tree(path: &str, is_dir: bool, is_reparse: bool, deleted: &mut u64, failed: &mut u64) {
+/// Delete one filesystem entry (recursing into non-reparse directories first).
+/// Failures are counted and warned, never fatal — excluding less than asked is
+/// safe, breaking the pass over one stubborn file is not. `whole`: the MFT
+/// records the `$MFT` scan saw go under every name they have and holding
+/// content inside the record (sorted) — the files whose resident content is
+/// cleared before they go. `file_id`: the entry's id from its directory
+/// listing, when the listing gave one.
+fn delete_tree(
+    path: &str,
+    is_dir: bool,
+    is_reparse: bool,
+    whole: &[u64],
+    file_id: Option<u64>,
+    deleted: &mut u64,
+    failed: &mut u64,
+) {
     if is_dir && !is_reparse {
         // Children first: NTFS/ReFS only delete empty directories.
-        match list_dir_backup(Path::new(path)) {
+        match list_children(path, whole) {
             Ok(entries) => {
                 for e in entries {
                     let child = format!("{path}\\{}", e.name);
                     let child_is_dir = e.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
                     let child_is_reparse = e.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
-                    delete_tree(&child, child_is_dir, child_is_reparse, deleted, failed);
+                    delete_tree(
+                        &child,
+                        child_is_dir,
+                        child_is_reparse,
+                        whole,
+                        e.file_id,
+                        deleted,
+                        failed,
+                    );
                 }
             }
             Err(e) => {
@@ -1195,6 +1219,12 @@ fn delete_tree(path: &str, is_dir: bool, is_reparse: bool, deleted: &mut u64, fa
                 *failed += 1;
                 return;
             }
+        }
+    } else if !is_dir && !is_reparse && !whole.is_empty() {
+        // Known from the listing not to be one of them: not opened at all.
+        let listed = file_id.map(|id| whole.binary_search(&(id & RECORD_MASK)).is_ok());
+        if listed != Some(false) {
+            clear_resident(path, whole);
         }
     }
     match delete_one(path) {
@@ -1204,6 +1234,137 @@ fn delete_tree(path: &str, is_dir: bool, is_reparse: bool, deleted: &mut u64, fa
             *failed += 1;
         }
     }
+}
+
+/// The low 48 bits of an NTFS file reference: the MFT record number.
+const RECORD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+
+/// Overwrite with zeros, through the driver and in place, the content of the
+/// file at `path` and of its named streams that may be resident — kept inside
+/// its MFT record — when the scan saw its record go under every name
+/// (`whole`). Deleting a file frees its record but does not clear it, so its
+/// small content and short streams (`Zone.Identifier`) would stay in the
+/// image's MFT; what lives in clusters the scan already left out of the copy.
+/// Best effort: what cannot be cleared is said in the log, and the deletion
+/// goes on.
+///
+/// Not the same as the Linux pass, and the difference is said: ntfs-3g
+/// empties `$LogFile` when it mounts the volume, the Windows driver keeps its
+/// journal — and the journal of the image holds the old bytes of every
+/// record this overwrote (the undo half of the update), plus whatever the
+/// source's own journal held when it was copied. No API resets the journal
+/// of a mounted volume, and writing `$LogFile` ourselves is writing NTFS
+/// metadata, which this pass does not do. So a copy whose records were
+/// cleared here carries a note that resident content may remain in the
+/// journal ([`resident_content_may_remain_in_journal`]).
+fn clear_resident(path: &str, whole: &[u64]) {
+    use windows::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_READONLY,
+        FILE_FLAGS_AND_ATTRIBUTES, FILE_READ_ATTRIBUTES,
+    };
+    let wide = to_wide(path);
+    // SAFETY: `wide` outlives the call.
+    let handle = match unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            FILE_READ_ATTRIBUTES.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+    } {
+        Ok(h) => FileHandle(h),
+        Err(e) => {
+            warn!(path, error = %e, "true removal: cannot open a file to clear its content");
+            return;
+        }
+    };
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `info` is a live, writable struct of the expected type.
+    if let Err(e) = unsafe { GetFileInformationByHandle(handle.0, &mut info) } {
+        warn!(path, error = %e, "true removal: cannot identify a file to clear its content");
+        return;
+    }
+    let record = ((info.nFileIndexHigh as u64) << 32 | info.nFileIndexLow as u64) & RECORD_MASK;
+    if whole.binary_search(&record).is_err() {
+        return; // a name of it stays elsewhere, or the scan could not tell
+    }
+    let streams = match crate::exclusions_win::named_streams(handle.0) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(path, error = %e, "true removal: cannot list a file's named streams to clear them");
+            Vec::new()
+        }
+    };
+    drop(handle);
+    // Read-only does not survive the deletion anyway, and it refuses the
+    // write — whatever SeRestorePrivilege allows.
+    if info.dwFileAttributes & FILE_ATTRIBUTE_READONLY.0 != 0 {
+        // SAFETY: `wide` outlives the call.
+        let _ = unsafe {
+            SetFileAttributesW(
+                PCWSTR(wide.as_ptr()),
+                FILE_FLAGS_AND_ATTRIBUTES(info.dwFileAttributes & !FILE_ATTRIBUTE_READONLY.0),
+            )
+        };
+    }
+    let size = (info.nFileSizeHigh as u64) << 32 | info.nFileSizeLow as u64;
+    let max = crate::exclusions::NTFS_RESIDENT_MAX;
+    if size > 0 && size <= max {
+        if let Err(e) = overwrite_with_zeros(path, size) {
+            warn!(path, error = %e,
+                  "true removal: a small file's content could not be cleared before its deletion");
+        }
+    }
+    for (name, len) in streams {
+        if len == 0 || len > max {
+            continue;
+        }
+        let stream = format!("{path}{name}");
+        if let Err(e) = overwrite_with_zeros(&stream, len) {
+            warn!(stream = %stream, error = %e,
+                  "true removal: a named stream could not be cleared before its deletion");
+        }
+    }
+}
+
+/// Write `len` zero bytes over the start of the stream at `path`.
+fn overwrite_with_zeros(path: &str, len: u64) -> Result<()> {
+    use windows::Win32::Storage::FileSystem::{WriteFile, FILE_WRITE_DATA};
+    let wide = to_wide(path);
+    // SAFETY: `wide` outlives the call.
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            FILE_WRITE_DATA.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+    }
+    .map_err(|e| dev_err("open for clearing", e))?;
+    let handle = FileHandle(handle);
+    let zeros = vec![0u8; len as usize];
+    let mut written = 0u32;
+    // SAFETY: the buffer outlives the synchronous call; a fresh handle
+    // writes from offset 0.
+    unsafe { WriteFile(handle.0, Some(&zeros), Some(&mut written), None) }
+        .map_err(|e| dev_err("write zeros", e))?;
+    if written as u64 != len {
+        return Err(dev_err(
+            "write zeros",
+            format!("{written} of {len} bytes written"),
+        ));
+    }
+    // No flush per file: the record is one buffer in the driver's cache, the
+    // deletion that follows changes that same buffer, and the teardown
+    // flushes the volume before it is dismounted — what reaches the image is
+    // the record with both changes in it.
+    Ok(())
 }
 
 /// Delete a single entry via its handle: POSIX semantics + ignore-readonly,

@@ -25,6 +25,7 @@
 
 use std::ffi::c_void;
 use std::ptr::null_mut;
+use std::time::{Duration, Instant};
 
 use tracing::{debug, info, warn};
 use windows::core::{Interface, GUID, HRESULT};
@@ -33,7 +34,7 @@ use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 
 use own_backup_common::{OwnBackupError, Result};
 
-use crate::vss_raw::{IVssBackupComponentsRaw, VssApi, VSS_S_ASYNC_FINISHED};
+use crate::vss_raw::{IVssBackupComponentsRaw, VssApi, VSS_S_ASYNC_FINISHED, VSS_S_ASYNC_PENDING};
 
 fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -63,23 +64,65 @@ fn initialize_com() -> Result<()> {
     Ok(())
 }
 
+/// How long one asynchronous VSS step may take before it is cancelled.
+///
+/// Generous on purpose: writers are given 60 s to freeze, and gathering their
+/// metadata on a busy machine takes minutes. The limit exists for the step
+/// that never ends. On 2026-10-24 `BackupComplete` did not return while a
+/// failing USB stick held Windows' device stack (PnP) and the services behind
+/// the writers (Windows Search, the antivirus) stopped answering: the image
+/// was finished and synced, and the run waited on it with no end, the window
+/// saying "flushing the cache" all the while.
+const VSS_STEP_LIMIT: Duration = Duration::from_secs(10 * 60);
+
+/// How often a step that is still running is said in the log.
+const VSS_STEP_REPORT: Duration = Duration::from_secs(60);
+
 /// Wait for an `IVssAsync` operation and verify it finished successfully.
 ///
+/// Polls the status instead of `Wait(INFINITE)`, so a step that never ends is
+/// cancelled after `limit` and reported as a failure rather than holding the
+/// run forever.
+///
 /// Takes ownership of the raw pointer returned by the vtable call.
-fn wait_async(ptr: *mut c_void, what: &str) -> Result<()> {
+fn wait_async(ptr: *mut c_void, what: &str, limit: Duration) -> Result<()> {
     if ptr.is_null() {
         return Err(OwnBackupError::Vss(format!("{what}: null IVssAsync")));
     }
     // SAFETY: ptr is a valid IVssAsync we own; from_raw takes over the reference.
     let async_op = unsafe { IVssAsync::from_raw(ptr) };
-    // SAFETY: interface pointer is valid.
-    unsafe { async_op.Wait(u32::MAX) }
-        .map_err(|e| OwnBackupError::Vss(format!("{what}: Wait failed: {e}")))?;
-
-    let mut status = HRESULT(0);
-    // SAFETY: out pointer valid.
-    unsafe { async_op.QueryStatus(&mut status, std::ptr::null_mut()) }
-        .map_err(|e| OwnBackupError::Vss(format!("{what}: QueryStatus failed: {e}")))?;
+    let started = Instant::now();
+    let mut next_report = VSS_STEP_REPORT;
+    let status = loop {
+        let mut status = HRESULT(0);
+        // SAFETY: out pointer valid.
+        unsafe { async_op.QueryStatus(&mut status, std::ptr::null_mut()) }
+            .map_err(|e| OwnBackupError::Vss(format!("{what}: QueryStatus failed: {e}")))?;
+        if status != VSS_S_ASYNC_PENDING {
+            break status;
+        }
+        let waited = started.elapsed();
+        if waited >= limit {
+            // SAFETY: interface pointer is valid. Whatever Cancel says, the
+            // step is given up on: its result is no longer waited for.
+            let cancelled = unsafe { async_op.Cancel() };
+            warn!(
+                what,
+                waited_s = waited.as_secs(),
+                cancel = ?cancelled,
+                "VSS step did not finish in time — cancelled"
+            );
+            return Err(OwnBackupError::Vss(format!(
+                "{what}: no answer from VSS within {} min — cancelled",
+                limit.as_secs() / 60
+            )));
+        }
+        if waited >= next_report {
+            info!(what, waited_s = waited.as_secs(), "VSS step still running");
+            next_report += VSS_STEP_REPORT;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
 
     if status != VSS_S_ASYNC_FINISHED {
         return Err(OwnBackupError::Vss(format!(
@@ -165,7 +208,7 @@ impl VssSnapshotSession {
             "GatherWriterMetadata",
             &mut async_ptr
         )?;
-        wait_async(async_ptr, "GatherWriterMetadata")?;
+        wait_async(async_ptr, "GatherWriterMetadata", VSS_STEP_LIMIT)?;
         com_call!(self, free_writer_metadata, "FreeWriterMetadata")?;
 
         com_call!(
@@ -188,12 +231,12 @@ impl VssSnapshotSession {
 
         let mut async_ptr: *mut c_void = null_mut();
         com_call!(self, prepare_for_backup, "PrepareForBackup", &mut async_ptr)?;
-        wait_async(async_ptr, "PrepareForBackup")?;
+        wait_async(async_ptr, "PrepareForBackup", VSS_STEP_LIMIT)?;
 
         // Freeze/thaw point — this is where the shadow copy is actually taken.
         let mut async_ptr: *mut c_void = null_mut();
         com_call!(self, do_snapshot_set, "DoSnapshotSet", &mut async_ptr)?;
-        wait_async(async_ptr, "DoSnapshotSet")?;
+        wait_async(async_ptr, "DoSnapshotSet", VSS_STEP_LIMIT)?;
 
         // Fetch the shadow device path.
         let mut prop = VSS_SNAPSHOT_PROP::default();
@@ -234,10 +277,15 @@ impl VssSnapshotSession {
 
     /// Notify writers that the backup succeeded, then release the snapshot.
     pub fn complete(mut self) -> Result<()> {
+        // Said before the step, not only after it: when it never ends, this
+        // line is the last one in the log and names where the run stands.
+        info!("VSS: BackupComplete — telling the writers the copy is done");
         let mut async_ptr: *mut c_void = null_mut();
         com_call!(self, backup_complete, "BackupComplete", &mut async_ptr)?;
-        wait_async(async_ptr, "BackupComplete")?;
+        // Asked for, whatever its wait comes to: AbortBackup after it would
+        // only be one more call into a VSS that is not answering.
         self.completed = true;
+        wait_async(async_ptr, "BackupComplete", VSS_STEP_LIMIT)?;
         info!("VSS backup completed, releasing shadow copy");
         // Drop releases the components object; the auto-release snapshot
         // (VSS_CTX_BACKUP) is deleted by VSS on release.

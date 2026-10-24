@@ -1,5 +1,9 @@
 export interface DiskInfo {
   device_id: string;
+  /** Linux: `/dev/disk/by-id/…`, the name a whole-disk job keeps (it names
+   *  the same disk after a reboot, `device_id` may not). Absent on Windows,
+   *  for a device-mapper volume and for a disk udev gave no such name. */
+  stable_device?: string;
   model: string;
   serial: string;
   size_bytes: number;
@@ -48,6 +52,19 @@ export interface PartitionInfo {
   recovery_key_only?: boolean;
   /** Can Own Backup open it with something the user can type? */
   unlockable?: boolean;
+  /** Linux: the kernel's name for the device (`/dev/nvme0n1p2`, `/dev/dm-0`),
+   *  for showing. `volume_device` is then a name that survives a reboot
+   *  (`/dev/disk/by-partuuid/…`, `/dev/mapper/…`) and is what a job keeps.
+   *  Absent on Windows. */
+  kernel_device?: string;
+  /** Linux: `crypt` (an opened LUKS/BitLocker container — the filesystem
+   *  inside) or `lvm` (a logical volume) for a device-mapper volume, listed
+   *  as a disk of its own; absent for a partition. */
+  mapper_kind?: string;
+  /** Linux: an opened LUKS mapping. Its filesystem reads as it is, but a
+   *  snapshot of it while it is in use needs the container's password — the
+   *  wizard asks for it as for an encrypted volume. */
+  container_password?: boolean;
 }
 
 export interface BackupJob {
@@ -160,7 +177,9 @@ export interface EspLoader {
 }
 
 export interface Esp {
-  disk: number;
+  /** Windows: the disk number (`PhysicalDriveN`). Linux: the kernel device
+   *  (`/dev/nvme0n1`), the inventory's `device_id` for the disk. */
+  disk: number | string;
   partition: number;
   guid: string;
   size_bytes: number;
@@ -177,6 +196,9 @@ export interface BootStatus {
   timeout_secs?: number | null;
   found_by?: string;
   dangling?: string[];
+  /** Where the copy taken before each change goes. Absent from an older
+   *  service. */
+  safety_copy_dir?: string;
   entries?: BootEntry[];
   esps?: Esp[];
 }
@@ -219,6 +241,8 @@ export interface ServiceStatus {
   uptime_secs: number;
   active_jobs: number;
   active_mounts: ActiveMount[];
+  /** Running, but refusing this window (`PermissionDenied`). */
+  access_denied?: boolean;
 }
 
 /** Startup health of the backup service (for the "install/start the service" warning). */
@@ -228,6 +252,77 @@ export interface ServiceHealth {
   /** Running from the boot medium: the service is a plain process there, and
    *  there is nowhere to install it to, so `installed: false` is expected. */
   media: boolean;
+  /** Reachable, and refusing this window on every call (`PermissionDenied`):
+   *  on Linux, a window outside the active local session (SSH, say). */
+  access_denied?: boolean;
+  /** Not reachable because the access group keeps this user out (Linux):
+   *  not a member, or added after this session began. `ok` otherwise. */
+  group_access?: 'ok' | 'not_member' | 'relogin';
+}
+
+/** Where the window runs (the `platform_info` command). */
+export interface PlatformInfo {
+  /** `windows` or `linux`. */
+  os: string;
+  /** The service channel: the named pipe on Windows, the Unix socket elsewhere. */
+  channel: string;
+  /** The folder this window logs to, when it could open one. */
+  ui_log_dir: string | null;
+  /** The service's log folder where it is fixed (Linux); null on Windows. */
+  service_log_dir: string | null;
+}
+
+/** What the service's backup engine and scheduler carry out
+ *  (`own_backup_core::capabilities`, served by the service). Windows:
+ *  everything. */
+export interface BackupCapabilities {
+  os: string;
+  /** `full`, `incremental`, `differential` — those a run carries out. A chain
+   *  also needs its container in `chain_formats`. */
+  methods: string[];
+  /** Containers a chain is written in: `vhdx`, `qcow2`, `obk` (encrypted). */
+  chain_formats: string[];
+  exclusions: boolean;
+  /** One image of a whole disk (`disk_source`); without it, one per volume. */
+  whole_disk: boolean;
+  /** How `disk_source` names the disk: `number` (Windows) or `device`
+   *  (Linux: `disk_source.device`, a `/dev/disk/by-id/…` path). */
+  disk_named_by: 'number' | 'device';
+  speed_limit: boolean;
+  low_priority: boolean;
+  after_backup: boolean;
+  /** Encrypted archives (OBK). */
+  archive_encryption: boolean;
+  /** What keeps this machine's archive keys: `dpapi` (Windows), `tpm2` or
+   *  `host` (Linux, systemd-creds); empty when there is no key store. Absent
+   *  from an older service. */
+  archive_key_protection?: string;
+  /** `schedule.event_trigger` values the scheduler fires. */
+  schedule_events: string[];
+  wake_to_run: boolean;
+  /** The machine does not sleep while a copy runs. */
+  keeps_awake: boolean;
+}
+
+/** The service's answer to "is this destination on a source?". */
+export interface DestinationCheck {
+  placement: 'clear' | 'on_source' | 'cannot_tell';
+  /** The source it is on (`on_source`). */
+  source: string;
+  /** Why it could not be told, in the service's words (`cannot_tell`). */
+  reason: string;
+  /** Linux: sources where it cannot be told whether the service's key
+   *  directory lies on them (ZFS, overlayfs). The engine treats them as
+   *  holding it: a copy that cannot leave it out is refused. Missing from an
+   *  older service. */
+  key_store_unknown?: { source: string; reason: string }[];
+}
+
+/** A command failure with a kind to act on (`CodedError` in the GUI crate):
+ *  `code` is decided on, `message` is only shown. */
+export interface CodedError {
+  code: 'unimplemented' | 'permission_denied' | 'unavailable' | 'other';
+  message: string;
 }
 
 /** The keyboard layout the focused window is typing in (boot medium only). */
@@ -430,6 +525,10 @@ export interface JobRun {
   started_at: string;
   finished_at: string;
   status: 'success' | 'error' | 'cancelled' | string;
+  /** Cancelled because the service stopped (shutdown, restart, update), not by a person. */
+  interrupted?: boolean;
+  /** The scheduler did not start it: something it needed (a saved volume password) was missing. */
+  skipped?: boolean;
   image_path: string;
   source_bytes: number;
   bytes_copied: number;
@@ -459,6 +558,16 @@ export interface JobRun {
    *  (Windows Update does this to WinRE) and the job followed them — said
    *  in words; '' or absent when nothing changed. */
   layout_changed?: string;
+  /** Other things to know about how the copy was made, one sentence each
+   *  (a snapshot store allocated in full, the service's key directory left
+   *  out). Absent when there is nothing to say. */
+  notes?: string[];
+  /** What kind of failure `error` is, decided by the service from the
+   *  error's structure: `archive_reauthorize` — authorizing the job again
+   *  helps; `key_protection` — the machine's key protection (TPM,
+   *  systemd-creds) failed, and authorizing again would not. Absent
+   *  otherwise. */
+  error_kind?: 'archive_reauthorize' | 'key_protection' | string;
   /** Set by the service while this run is not in its history files (the
    *  write failed and is retried before the next run) — said in words. */
   record_error?: string;
@@ -598,6 +707,9 @@ export interface DiskPartSpec {
 /** Whole-disk (bootable) backup metadata attached to a job. */
 export interface DiskSourceSpec {
   disk_number: number;
+  /** Linux: the disk's `/dev/disk/by-id/…` device (a number names no disk
+   *  there). Absent on Windows. */
+  device?: string | null;
   disk_model: string;
   parts: DiskPartSpec[];
   /** "Загрузочная копия диска" is on for this disk. Decides whether the
@@ -723,6 +835,9 @@ export interface JobProgress {
    * 'prepare'    = exclusion scan (blocks_done counts scanned entries)
    * 'backup'     = copying blocks
    * 'finalize'   = flushing the image to disk / detaching (no granular progress)
+   * 'release'    = releasing the volume snapshot (VSS BackupComplete on Windows)
+   * 'exclusions-open' = opening the finished image for the pass below
+   *                (attached as a disk on Windows)
    * 'exclusions' = post-copy true-removal / in-image exclusion pass
    *                (blocks_done counts processed entries; minutes on big volumes)
    * 'verify'     = post-backup validation
@@ -784,7 +899,7 @@ export interface PartitionTableSpec {
 
 /** Only what we can actually create. "Не форматировать" is the absence of a
  *  `format` operation, not a value here. */
-export type FormatFs = 'ntfs' | 'fat32' | 'exfat' | 'refs';
+export type FormatFs = 'ntfs' | 'fat32' | 'exfat' | 'refs' | 'ext4' | 'xfs' | 'btrfs';
 export type RestoreMode = 'sectors' | 'files';
 
 export interface PartRef {
@@ -831,6 +946,8 @@ export type RestoreOp =
       reencrypt: boolean;
     }
   | { op: 'extend_filesystem'; part: PartRef }
+  /** Added by the service on Linux, never by the window. */
+  | { op: 'change_identities'; parts: PartRef[]; fix_references: boolean }
   | { op: 'assign_letter'; part: PartRef; letter: string }
   | { op: 'finalize_boot'; windows_part: PartRef; esp: PartRef | null; uefi: boolean }
   /** Copy the bootloader to `\EFI\BOOT\BOOTX64.EFI` — the only path UEFI tries
@@ -848,9 +965,15 @@ export type RestoreOp =
 export interface RestorePlan {
   id: string;
   target_disk: number;
+  /** Linux: the target disk's device. Linux disks have no stable number, so
+   *  there `target_disk` names nothing; Windows ignores this. */
+  target_device?: string;
   image_path: string;
   verify_after: boolean;
   ops: RestoreOp[];
+  /** Partitions of the target disk the person deleted in the designer, as
+   *  they are now; any other the new table drops is refused by the service. */
+  removed_parts?: { offset_bytes: number; size_bytes: number }[];
 }
 
 export type CheckLevel = 'info' | 'warning' | 'error';
@@ -915,6 +1038,9 @@ export interface DryRunResult {
   plan: RestorePlan;
   results: CheckResult[];
   letter_changes: LetterChange[];
+  /** Linux: identities the restore would duplicate on this machine. Shown as
+   *  warnings in `results`; applying after they were shown keeps them. */
+  identity_clashes?: unknown[];
 }
 
 // ---------------------------------------------------------------------------
@@ -960,6 +1086,20 @@ export interface RestoreRunState {
   acknowledged?: boolean;
   /** File name of the copy restored ('' in runs recorded before 2026-09-26). */
   image_file?: string;
+  /** Linux: identities the run gave the restored copy, when the person chose
+   *  to change the duplicates. */
+  identity_changes?: IdentityChange[];
+  /** Linux: files of the restored system edited to name the new identities,
+   *  as `<device>:<path>`. */
+  edited_files?: string[];
+}
+
+export interface IdentityChange {
+  kind: string;
+  old: string;
+  new: string;
+  device: string;
+  part_index?: number | null;
 }
 
 /** One row in the built-in file browser (see commands/files.rs). */
@@ -1061,6 +1201,102 @@ export interface MediaBuildReport {
   runtime_files_trimmed: number;
   temp_bytes_freed: number;
   warnings: string[];
+}
+
+/** A disk the Linux medium may be written onto (`MediaStickDto`). */
+export interface MediaStick {
+  device: string;
+  model: string;
+  size_bytes: number;
+  /** `usb`, `mmc` or `removable`. */
+  transport: string;
+  /** Mount points now; a mounted stick is not written. */
+  mounted: string[];
+  /** Serial number from sysfs; may be empty. */
+  serial: string;
+  /** Device number `major:minor`. */
+  dev: string;
+}
+
+/** Which stick a write means, as listed (`MediaStickIdentityDto`). */
+export interface MediaStickIdentity {
+  model: string;
+  serial: string;
+  size_bytes: number;
+  dev: string;
+}
+
+export interface MediaStickWrite {
+  iso_path: string;
+  device: string;
+  /** The service writes only if the opened device is still this stick. */
+  expect: MediaStickIdentity;
+}
+
+export interface MediaStickReport {
+  device: string;
+  iso_bytes: number;
+  volume_id: string;
+  /** The log partition's device, when one was made. */
+  log_partition: string | null;
+  /** Why there is none: the stick boots regardless. */
+  log_skipped: string | null;
+}
+
+/** Build the Linux medium (`LinuxMediaBuildDto`). */
+export interface LinuxMediaBuild {
+  /** An existing folder of the person's own. */
+  output_dir: string;
+  /** Also write it onto this stick; empty for none. */
+  stick_device: string;
+  stick_expect: MediaStickIdentity | null;
+  /** Development only: a .deb instead of the installed package. */
+  deb_path: string;
+}
+
+export interface LinuxMediaReport {
+  iso_path: string;
+  iso_bytes: number;
+  version: string;
+  from_installed: boolean;
+  warnings: string[];
+  stick: MediaStickReport | null;
+  cache_dir: string;
+  cache_bytes: number;
+}
+
+/** The ready Linux medium of the installed version on GitHub. */
+export interface LinuxMediaRelease {
+  version: string;
+  tag: string;
+  size: number;
+}
+
+/** A ready Linux medium downloaded from GitHub. */
+export interface LinuxMediaDownload {
+  iso_path: string;
+  iso_bytes: number;
+  version: string;
+  tag: string;
+}
+
+/** The `linux-media-download` event. */
+export interface LinuxMediaDownloadProgress {
+  stage: 'download' | 'verify';
+  received: number;
+  total: number;
+}
+
+/** Can the Linux medium be built now (`LinuxMediaStatusDto`). */
+export interface LinuxMediaStatus {
+  /** Empty when the package is not installed. */
+  installed_version: string;
+  cache_dir: string;
+  cache_bytes: number;
+  free_bytes: number;
+  need_bytes: number;
+  /** What stops a build now, in the person's words. */
+  problems: string[];
 }
 
 export interface MediaProgress {

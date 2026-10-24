@@ -1,0 +1,3 @@
+# Members of this group may reach the Own Backup engine's socket; the engine
+# still checks that the caller sits in an active local session (logind).
+g own-backup - -

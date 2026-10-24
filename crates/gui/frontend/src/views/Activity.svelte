@@ -158,12 +158,17 @@
             <div class="title">
               {r.operation === 'verify'
                 ? (r.status === 'success' ? m.act_verify_done() : r.status === 'cancelled' ? m.act_verify_cancelled() : m.act_verify_failed())
-                : (r.status === 'success' ? m.act_backup_done() : r.status === 'cancelled' ? m.act_backup_cancelled() : m.act_backup_failed())}
+                : (r.status === 'success' ? m.act_backup_done() : r.skipped ? m.act_backup_skipped() : r.interrupted ? m.act_backup_interrupted() : r.status === 'cancelled' ? m.act_backup_cancelled() : m.act_backup_failed())}
               — {r.job_name}
               <span class="time">{formatDate(r.finished_at || r.started_at)}</span>
             </div>
-            {#if r.status === 'error' && r.error}
+            {#if (r.status === 'error' || r.interrupted) && r.error}
               <div class="note">{r.error}</div>
+            {/if}
+            {#if r.status === 'error' && r.error_kind === 'key_protection'}
+              <div class="note">{m.run_error_key_protection()}</div>
+            {:else if r.status === 'error' && r.error_kind === 'archive_reauthorize'}
+              <div class="note">{m.run_error_reauthorize()}</div>
             {/if}
             {#if r.excluded_entries_kept}
               <div class="note">{r.excluded_entries_kept}</div>
@@ -171,6 +176,9 @@
             {#if r.layout_changed}
               <div class="note">{r.layout_changed}</div>
             {/if}
+            {#each r.notes ?? [] as note}
+              <div class="note">{note}</div>
+            {/each}
             {#if r.operation === 'verify'}
               <div class="stats">
                 <div><span class="k">{m.act_time()}</span><span class="v">{formatDuration(r.duration_secs)}</span></div>

@@ -3,47 +3,57 @@ use tauri::State;
 
 use crate::state::GuiState;
 
+// The settings are written by the service, on both systems: the window asks
+// (`GetSettings` / `SaveSettings`), and the service checks the one field that
+// is more than a preference — the log mirror folder, a place it creates a
+// file in as root or SYSTEM.
+//
+// Linux: the data folder is root's (0750 with the access group), so the
+// window's own write ended in «Permission denied».
+//
+// Windows: the window used to write `C:\ProgramData\OwnBackup\config.toml`
+// itself. Every user may create files there, so the file belonged to whoever
+// made it first, and any of them could have SYSTEM append its log wherever
+// they liked. The service now owns the file (`service/src/settings.rs`).
+
 #[tauri::command]
 pub async fn get_config(state: State<'_, GuiState>) -> Result<AppConfig, String> {
+    // The service's copy is the one that counts; the window's is what it read
+    // at start, kept for when the service cannot be asked. Not started and
+    // waited for: the page has an answer either way.
+    match state.link.connected().await {
+        Some(mut client) => match client.get_settings().await {
+            Ok(fresh) => {
+                *state.config.lock().map_err(|e| e.to_string())? = fresh.clone();
+                return Ok(fresh);
+            }
+            Err(error) => tracing::info!(%error, "settings: the service did not answer"),
+        },
+        None => tracing::debug!("settings: no service to ask"),
+    }
     Ok(state.config.lock().map_err(|e| e.to_string())?.clone())
 }
 
 #[tauri::command]
 pub async fn save_config(state: State<'_, GuiState>, config: AppConfig) -> Result<(), String> {
-    // The language is not a field of the settings form: it is switched on its
-    // own (`set_ui_language`), and a form loaded before the switch would
-    // otherwise save the old one back.
-    let mut current = state.config.lock().map_err(|e| e.to_string())?;
-    let before = current.clone();
-    let saved = AppConfig::update_file(&state.config_path, |fresh| {
-        if config.data_dir != before.data_dir {
-            fresh.data_dir = config.data_dir.clone();
-        }
-        if config.grpc_address != before.grpc_address {
-            fresh.grpc_address = config.grpc_address.clone();
-        }
-        if config.log_level != before.log_level {
-            fresh.log_level = config.log_level.clone();
-        }
-        if config.log_mirror_dir != before.log_mirror_dir {
-            fresh.log_mirror_dir = config.log_mirror_dir.clone();
-        }
-        if config.default_compression_level != before.default_compression_level {
-            fresh.default_compression_level = config.default_compression_level;
-        }
-        if config.remembered_backups != before.remembered_backups {
-            fresh.remembered_backups = config.remembered_backups.clone();
-        }
-    })
-    .map_err(|e| e.to_string())?;
-    // The in-memory copy has to move too. Writing only the file left
-    // `get_config` handing back what was loaded at startup, so anything saved
-    // came back missing as soon as the user navigated away and returned.
-    *current = saved;
+    // Only what the person changed travels, so a second window saving another
+    // field is not undone. The language is not a field of the settings form:
+    // it is switched on its own (`set_ui_language`), and a form loaded before
+    // the switch would otherwise save the old one back.
+    let before = state.config.lock().map_err(|e| e.to_string())?.clone();
+    let mut patch = own_backup_common::config::SettingsPatch::between(&before, &config);
+    patch.ui_language = None;
+    if patch.is_empty() {
+        return Ok(());
+    }
+    let saved = state.link.client().await?.save_settings(&patch).await?;
+    // The in-memory copy has to move too, or `get_config` without a service
+    // would hand back what was loaded at startup.
+    *state.config.lock().map_err(|e| e.to_string())? = saved;
     Ok(())
 }
 
-/// The window's language, already resolved («Как в Windows» → `ru`/`en`).
+/// The window's language, already resolved («Как в системе» → `ru`/`en`).
 /// This process's own messages switch at once; the config remembers it for
 /// the service, which follows the file (`own_backup_common::lang`). Written
 /// only when it changed — the window says it at every start.
@@ -54,31 +64,73 @@ pub async fn set_ui_language(state: State<'_, GuiState>, lang: String) -> Result
     } else {
         "ru"
     };
-    let mut config = state.config.lock().map_err(|e| e.to_string())?;
-    if config.ui_language == code {
-        own_backup_common::lang::set(code);
+    // Through the service, which switches its own messages the moment it has
+    // written the file.
+    own_backup_common::lang::set(code);
+    if state.config.lock().map_err(|e| e.to_string())?.ui_language == code {
         return Ok(());
     }
-    let saved = AppConfig::update_file(&state.config_path, |fresh| {
-        fresh.ui_language = code.to_string();
-    })
-    .map_err(|e| e.to_string())?;
-    *config = saved;
-    own_backup_common::lang::set(code);
+    let patch = own_backup_common::config::SettingsPatch {
+        ui_language: Some(code.to_string()),
+        ..Default::default()
+    };
+    let saved = state.link.client().await?.save_settings(&patch).await?;
+    *state.config.lock().map_err(|e| e.to_string())? = saved;
     Ok(())
 }
 
+/// Where the window runs, for the parts of the screen that differ by system.
+/// Decided here, from what this build is, rather than guessed in the page.
+#[derive(serde::Serialize)]
+pub struct PlatformInfo {
+    /// `windows` or `linux` (`std::env::consts::OS`).
+    pub os: &'static str,
+    /// How the window reaches the service in production: the named pipe on
+    /// Windows, the Unix socket elsewhere.
+    pub channel: String,
+    /// The folder this window logs to, when it could open one.
+    pub ui_log_dir: Option<String>,
+    /// The service's log folder where it is fixed (Linux: `/var/log/own-backup`).
+    /// `None` on Windows, where it is `Logs` beside the program.
+    pub service_log_dir: Option<String>,
+}
+
+#[tauri::command]
+pub fn platform_info() -> PlatformInfo {
+    #[cfg(target_os = "windows")]
+    let (channel, service_log_dir) = (own_backup_common::windows_pipe_path(), None);
+    #[cfg(target_os = "linux")]
+    let (channel, service_log_dir) = (
+        own_backup_common::unix_socket_path().display().to_string(),
+        Some(own_backup_common::log_files::LINUX_SYSTEM_LOG_DIR.to_string()),
+    );
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    let (channel, service_log_dir) = (
+        own_backup_common::unix_socket_path().display().to_string(),
+        None,
+    );
+    PlatformInfo {
+        os: std::env::consts::OS,
+        channel,
+        ui_log_dir: crate::ui_log_dir().map(|d| d.display().to_string()),
+        service_log_dir,
+    }
+}
+
 /// Whether this person keeps the icon in the notification area. `None` where
-/// there is no such thing to offer — the boot medium, and anything that is not
-/// Windows — so the settings page leaves the switch out instead of showing one
-/// that does nothing.
+/// there is no such thing to offer — the boot medium — so the settings page
+/// leaves the switch out instead of showing one that does nothing.
 #[tauri::command]
 pub fn tray_icon_enabled() -> Option<bool> {
     #[cfg(target_os = "windows")]
     {
         (!own_backup_common::media_mode::is_media_mode()).then(crate::tray::enabled)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        (!own_backup_common::media_mode::is_media_mode()).then(crate::tray_linux::enabled)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         None
     }
@@ -92,7 +144,11 @@ pub fn set_tray_icon_enabled(enabled: bool) -> Result<(), String> {
     {
         crate::tray::set_enabled(enabled)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        crate::tray_linux::set_enabled(enabled)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = enabled;
         Ok(())
@@ -110,6 +166,9 @@ pub struct ServiceStatusDto {
     // `total_backups_completed` was here, always 0 — nothing counted it. The
     // screen showed «Total Completed: 0» next to a job list full of copies.
     pub active_mounts: Vec<own_backup_common::engine_dto::ActiveMountDto>,
+    /// The service is there but refuses this window (`PermissionDenied`): the
+    /// card says that instead of «not running».
+    pub access_denied: bool,
 }
 
 /// Startup health of the backup service, so the GUI can warn the user when it
@@ -124,6 +183,14 @@ pub struct ServiceHealth {
     /// report but the design: WinPE's registry lives in RAM, so there is nowhere
     /// to install a service to, and a schedule would not outlive the session.
     pub media: bool,
+    /// Reachable, and refusing this window every call (`PermissionDenied`):
+    /// on Linux, a window outside the active local session. Without it the
+    /// screens showed an empty job list and «service not running».
+    pub access_denied: bool,
+    /// Not reachable because the access group keeps this user out: `ok`,
+    /// `not_member` or `relogin` (added, but this session predates it).
+    /// Always `ok` on Windows.
+    pub group_access: &'static str,
 }
 
 #[tauri::command]
@@ -139,33 +206,61 @@ pub async fn service_health(state: State<'_, GuiState>) -> Result<ServiceHealth,
             .await
             .unwrap_or(false)
     };
-    tracing::info!(reachable, installed, media, "service_health check");
+    // Unix only: Windows turns such a caller away at the pipe, before any
+    // call, and that reads as not reachable.
+    #[cfg(unix)]
+    let access_denied = reachable && state.link.access_refused().await;
+    #[cfg(not(unix))]
+    let access_denied = false;
+    #[cfg(unix)]
+    let group_access = if reachable {
+        "ok"
+    } else {
+        match state.link.group_access() {
+            crate::unix_group::GroupAccess::Ok => "ok",
+            crate::unix_group::GroupAccess::NotMember => "not_member",
+            crate::unix_group::GroupAccess::Relogin => "relogin",
+        }
+    };
+    #[cfg(not(unix))]
+    let group_access = "ok";
+    tracing::info!(
+        reachable,
+        installed,
+        media,
+        access_denied,
+        group_access,
+        "service_health check"
+    );
     Ok(ServiceHealth {
         reachable,
         installed,
         media,
+        access_denied,
+        group_access,
     })
 }
 
 #[tauri::command]
 pub async fn get_service_status(state: State<'_, GuiState>) -> Result<ServiceStatusDto, String> {
-    let disconnected = || ServiceStatusDto {
+    let disconnected = |access_denied: bool| ServiceStatusDto {
         connected: false,
         version: env!("CARGO_PKG_VERSION").into(),
         uptime_secs: 0,
         active_jobs: 0,
         active_mounts: Vec::new(),
+        access_denied,
     };
 
     // Ask the service directly (version / uptime / queue). Failure to reach it is
     // reported as "not connected" rather than an error, so the UI can show state.
     let mut client = match state.link.client().await {
         Ok(c) => c,
-        Err(_) => return Ok(disconnected()),
+        Err(_) => return Ok(disconnected(false)),
     };
-    let json = match client.service_status_json().await {
+    let json = match client.service_status_json_with_status().await {
         Ok(j) => j,
-        Err(_) => return Ok(disconnected()),
+        Err(status) => return Ok(disconnected(status.code() == tonic::Code::PermissionDenied)),
     };
     let v: serde_json::Value = serde_json::from_str(&json).unwrap_or_default();
     let version = v
@@ -191,5 +286,6 @@ pub async fn get_service_status(state: State<'_, GuiState>) -> Result<ServiceSta
         uptime_secs,
         active_jobs,
         active_mounts,
+        access_denied: false,
     })
 }

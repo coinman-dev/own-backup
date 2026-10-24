@@ -13,8 +13,50 @@
 //! (`attach_for_raw_write`), and images are READ without attaching at all.
 //! A new raw attach elsewhere fails this test instead of costing three minutes
 //! per backup and another week of bisecting.
+//!
+//! The engine is not one file any more: its platform-independent half (image
+//! targets among it) lives in `engine_core/`, and its Windows platform layer,
+//! once there is one, in `engine_platform_win.rs`. All of it is read here, so
+//! moving code out of `engine_win.rs` cannot move it out of this guard's sight.
 
-const ENGINE: &str = include_str!("../src/engine_win.rs");
+use std::path::{Path, PathBuf};
+
+/// Every source file of the backup engine, concatenated.
+fn engine_source() -> String {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = vec![src.join("engine_win.rs")];
+    let platform = src.join("engine_platform_win.rs");
+    if platform.exists() {
+        files.push(platform);
+    }
+    let core = rust_files_under(&src.join("engine_core"));
+    assert!(
+        !core.is_empty(),
+        "no sources under src/engine_core — the guard would not see the shared engine"
+    );
+    files.extend(core);
+    files
+        .iter()
+        .map(|f| std::fs::read_to_string(f).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn rust_files_under(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            out.extend(rust_files_under(&path));
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+    out
+}
 
 /// Occurrences of `needle` outside comment lines (the doc comments discuss
 /// these modes on purpose).
@@ -36,9 +78,9 @@ fn backup_engine_never_attaches_images_for_writing() {
     // Attaching images to the kernel during backup creation was the root cause
     // of the 180 s PnP detach stalls.
     assert_eq!(
-        code_occurrences(ENGINE, "AttachMode::RawWrite"),
+        code_occurrences(&engine_source(), "AttachMode::RawWrite"),
         0,
-        "engine_win.rs must NEVER attach images for writing — write with VhdxWriter in userspace"
+        "the backup engine must NEVER attach images for writing — write with VhdxWriter in userspace"
     );
 }
 
@@ -58,7 +100,7 @@ fn reading_an_image_never_attaches_it() {
          vhdx_bat::VhdxGuestReader instead of attaching them."
     );
     assert_eq!(
-        code_occurrences(ENGINE, "AttachMode::RawRead"),
+        code_occurrences(&engine_source(), "AttachMode::RawRead"),
         0,
         "a read path started attaching images again"
     );
@@ -68,7 +110,7 @@ fn reading_an_image_never_attaches_it() {
 fn image_target_uses_userspace_vhdx_writer() {
     // ImageTarget::Vhdx must hold VhdxWriter directly, with zero AttachedVhdx or WinRawDevice.
     assert!(
-        ENGINE.contains("writer: crate::vhdx_format::VhdxWriter"),
+        engine_source().contains("writer: crate::vhdx_format::VhdxWriter"),
         "ImageTarget::Vhdx must use user-space VhdxWriter"
     );
 }

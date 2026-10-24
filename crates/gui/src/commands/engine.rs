@@ -303,12 +303,71 @@ fn load_sidecar(
     }
 }
 
+/// The file is there and this process may not open it: on Linux the copies
+/// are the service's (root, 0600), and the window runs as the person. Only then
+/// is the service asked; everywhere else the file is read here, as before.
+fn not_ours_to_read(path: &std::path::Path) -> bool {
+    matches!(
+        std::fs::File::open(path),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied
+    )
+}
+
+/// The description of a copy this process may not open, from the service.
+///
+/// Without this the restore screen on Linux read nothing of a job's own
+/// copies: no versions, no layout — and no word of the LUKS header the copy
+/// keeps, so it warned that the encryption would not come back and planned
+/// the root's restore decrypted (owner, 24.10).
+async fn sidecar_from_service(
+    state: &GuiState,
+    path: &std::path::Path,
+    secret: &own_backup_client::ArchiveSecret,
+) -> Result<own_backup_backup::Sidecar, String> {
+    #[derive(serde::Deserialize)]
+    struct Parts {
+        info: own_backup_backup::sidecar::SidecarInfo,
+        manifest: own_backup_common::image::ImageManifest,
+        disk_manifest: Option<own_backup_common::gpt::DiskBackupManifest>,
+    }
+    let value = state
+        .link
+        .client()
+        .await?
+        .read_image_meta(&path.to_string_lossy(), "sidecar", secret)
+        .await?;
+    let parts: Parts = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    Ok(own_backup_backup::Sidecar {
+        info: parts.info,
+        manifest: parts.manifest,
+        checksums: Vec::new(),
+        disk_manifest: parts.disk_manifest,
+    })
+}
+
+/// [`read_image_info_at`], through the service when the file is not ours to
+/// read.
+async fn read_image_info_any(
+    state: &GuiState,
+    path: &std::path::Path,
+    secret: &own_backup_client::ArchiveSecret,
+) -> Result<ImageInfoDto, String> {
+    if not_ours_to_read(path) {
+        let sidecar = sidecar_from_service(state, path, secret).await?;
+        return Ok(image_info_from(path, sidecar));
+    }
+    read_image_info_at(path, secret)
+}
+
 fn read_image_info_at(
     path: &std::path::Path,
     secret: &own_backup_client::ArchiveSecret,
 ) -> Result<ImageInfoDto, String> {
-    let sidecar = load_sidecar(path, secret)?;
+    Ok(image_info_from(path, load_sidecar(path, secret)?))
+}
 
+/// What the screen shows of a copy, from its description.
+fn image_info_from(path: &std::path::Path, sidecar: own_backup_backup::Sidecar) -> ImageInfoDto {
     // Derived (compute before moving fields out of the sidecar): the archived
     // disk snapshot and which of its partitions are in this backup — whole-disk
     // images list them in the embedded disk manifest; a per-volume image holds
@@ -429,7 +488,7 @@ fn read_image_info_at(
             .collect(),
     };
 
-    Ok(ImageInfoDto {
+    ImageInfoDto {
         image_path: path.display().to_string(),
         job_id: sidecar.info.job_id.clone(),
         image_file_name: sidecar.info.image_file_name,
@@ -494,19 +553,22 @@ fn read_image_info_at(
                     .collect(),
             }
         }),
-    })
+    }
 }
 
 #[tauri::command]
 pub async fn read_image_info(
+    state: State<'_, GuiState>,
     image_path: String,
     password: Option<String>,
     recovery_key: Option<String>,
 ) -> Result<ImageInfoDto, String> {
-    read_image_info_at(
+    read_image_info_any(
+        &state,
         &std::path::PathBuf::from(&image_path),
         &secret_of(password, recovery_key),
     )
+    .await
 }
 
 /// Scan `folder` for backup IMAGES (per-volume AND whole-disk) and return each
@@ -514,7 +576,10 @@ pub async fn read_image_info(
 /// "Открыть папку с копиями" entry for a bare-system (Boot-CD) restore. Files
 /// without a readable sidecar are skipped; newest first.
 #[tauri::command]
-pub async fn list_image_backups(folder: String) -> Result<Vec<ImageInfoDto>, String> {
+pub async fn list_image_backups(
+    state: State<'_, GuiState>,
+    folder: String,
+) -> Result<Vec<ImageInfoDto>, String> {
     let dir = std::path::Path::new(&folder);
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -536,7 +601,8 @@ pub async fn list_image_backups(folder: String) -> Result<Vec<ImageInfoDto>, Str
         if !matches!(ext.as_str(), "vhdx" | "avhdx" | "qcow2") {
             continue;
         }
-        if let Ok(info) = read_image_info_at(&path, &own_backup_client::ArchiveSecret::none()) {
+        let none = own_backup_client::ArchiveSecret::none();
+        if let Ok(info) = read_image_info_any(&state, &path, &none).await {
             out.push(info);
         }
     }
@@ -572,7 +638,10 @@ pub struct LockedImageDto {
 /// "no copies with metadata found" — true of the DTO, and entirely wrong about
 /// the folder, which is the one thing the person could see for themselves.
 #[tauri::command]
-pub async fn list_locked_images(folder: String) -> Result<Vec<LockedImageDto>, String> {
+pub async fn list_locked_images(
+    state: State<'_, GuiState>,
+    folder: String,
+) -> Result<Vec<LockedImageDto>, String> {
     let dir = std::path::Path::new(&folder);
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Ok(Vec::new());
@@ -586,6 +655,13 @@ pub async fn list_locked_images(folder: String) -> Result<Vec<LockedImageDto>, S
             .unwrap_or_default()
             .to_lowercase();
         if ext != own_backup_backup::seal::obk::OBK_EXTENSION {
+            continue;
+        }
+        if not_ours_to_read(&path) {
+            // The service's copy (Linux): its open header, through the service.
+            if let Some(dto) = locked_from_service(&state, &path).await {
+                out.push(dto);
+            }
             continue;
         }
         let Ok(listing) = own_backup_backup::seal::obk::read_listing(&path) else {
@@ -608,6 +684,50 @@ pub async fn list_locked_images(folder: String) -> Result<Vec<LockedImageDto>, S
     }
     out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     Ok(out)
+}
+
+/// One encrypted copy this process may not open, from its open header as the
+/// service reads it. `None` when the service cannot say (not an `.obk`, not
+/// running): such a file is left out, as an unreadable one always was.
+async fn locked_from_service(state: &GuiState, path: &std::path::Path) -> Option<LockedImageDto> {
+    #[derive(serde::Deserialize)]
+    struct Listing {
+        job_id: String,
+        chain_id: String,
+        backup_id: String,
+        role: String,
+        created_at: String,
+        parent_file_name: Option<String>,
+        virtual_size: u64,
+    }
+    let value = state
+        .link
+        .client()
+        .await
+        .ok()?
+        .read_image_meta(
+            &path.to_string_lossy(),
+            "listing",
+            &own_backup_client::ArchiveSecret::none(),
+        )
+        .await
+        .map_err(|e| tracing::warn!(path = %path.display(), error = %e, "the service could not read a copy's open header"))
+        .ok()?;
+    let l: Listing = serde_json::from_value(value).ok()?;
+    Some(LockedImageDto {
+        image_path: path.to_string_lossy().into_owned(),
+        file_name: path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        job_id: l.job_id,
+        chain_id: l.chain_id,
+        backup_id: l.backup_id,
+        role: l.role,
+        created_at: l.created_at,
+        parent_file_name: l.parent_file_name,
+        virtual_size: l.virtual_size,
+    })
 }
 
 // --- Proxies to the service's privileged engine --------------------------
@@ -713,6 +833,9 @@ pub async fn verify_now(
         .await
 }
 
+/// A refusal that asks about duplicate identities (Linux) comes back as JSON
+/// — `{"identity_clashes": [...], "message": "..."}` — so the window decides
+/// from the list, not from the words.
 #[tauri::command]
 pub async fn mount_backup(
     state: State<'_, GuiState>,
@@ -720,17 +843,28 @@ pub async fn mount_backup(
     read_write: Option<bool>,
     password: Option<String>,
     recovery_key: Option<String>,
+    identity_choice: Option<own_backup_common::engine_dto::IdentityChoice>,
 ) -> Result<String, String> {
     state
         .link
         .client()
         .await?
-        .mount_image(
+        .mount_image_choosing(
             &image_path,
             read_write.unwrap_or(false),
+            identity_choice,
             &secret_of(password, recovery_key),
         )
         .await
+        .map_err(|s| {
+            let clashes = own_backup_client::identity_clashes_in(&s);
+            if clashes.is_empty() {
+                s.message().to_string()
+            } else {
+                serde_json::json!({ "identity_clashes": clashes, "message": s.message() })
+                    .to_string()
+            }
+        })
 }
 
 /// Base images the machine can build a boot medium on. Empty is not an error:
@@ -743,6 +877,16 @@ pub async fn find_base_images(
     let found = state.link.client().await?.find_base_images().await?;
     tracing::info!(count = found.len(), "base images offered");
     Ok(found)
+}
+
+/// A Winre.wim chosen in a file dialog, read by the service; the error is the
+/// reason the file will not do.
+#[tauri::command]
+pub async fn inspect_base_image(
+    state: State<'_, GuiState>,
+    path: String,
+) -> Result<own_backup_common::engine_dto::BaseImageDto, String> {
+    state.link.client().await?.inspect_base_image(&path).await
 }
 
 /// Driver packages this machine could put on the medium. Sizes included: a
@@ -797,6 +941,142 @@ pub async fn build_boot_media(
     Ok(report)
 }
 
+/// Linux: the disks the medium may be written onto (USB, card readers,
+/// removable), as the service sees them now.
+#[tauri::command]
+pub async fn list_media_sticks(
+    state: State<'_, GuiState>,
+) -> Result<Vec<own_backup_common::engine_dto::MediaStickDto>, String> {
+    state.link.client().await?.list_media_sticks().await
+}
+
+/// Linux: erase the stick and write the medium's ISO onto it. Progress comes
+/// back on the `media-progress` window event, as for a build.
+#[tauri::command]
+pub async fn write_media_stick(
+    state: State<'_, GuiState>,
+    options: own_backup_common::engine_dto::MediaStickWriteDto,
+) -> Result<own_backup_common::engine_dto::MediaStickReportDto, String> {
+    tracing::info!(iso = %options.iso_path, device = %options.device, "writing the medium onto a stick");
+    let report = state
+        .link
+        .client()
+        .await?
+        .write_media_stick(&options)
+        .await?;
+    tracing::info!(
+        device = %report.device,
+        log = ?report.log_partition,
+        "boot medium written onto a stick"
+    );
+    Ok(report)
+}
+
+/// Linux: can the boot medium be built now (the service's answer).
+#[tauri::command]
+pub async fn linux_media_status(
+    state: State<'_, GuiState>,
+) -> Result<own_backup_common::engine_dto::LinuxMediaStatusDto, String> {
+    state.link.client().await?.linux_media_status().await
+}
+
+/// Linux: build the boot medium from the installed package into the person's
+/// folder (and onto a stick). Minutes of work in the service; progress comes
+/// back on the `media-progress` window event.
+#[tauri::command]
+pub async fn build_linux_media(
+    state: State<'_, GuiState>,
+    options: own_backup_common::engine_dto::LinuxMediaBuildDto,
+) -> Result<own_backup_common::engine_dto::LinuxMediaReportDto, String> {
+    tracing::info!(folder = %options.output_dir, stick = %options.stick_device, "building the Linux boot medium");
+    let report = state
+        .link
+        .client()
+        .await?
+        .build_linux_media(&options)
+        .await?;
+    tracing::info!(iso = %report.iso_path, mb = report.iso_bytes >> 20, "Linux boot medium built");
+    Ok(report)
+}
+
+/// Linux: remove what medium builds left behind (a build interrupted by a
+/// killed service, the cache of older versions).
+#[tauri::command]
+pub async fn clear_linux_media_cache(
+    state: State<'_, GuiState>,
+) -> Result<own_backup_common::engine_dto::LinuxMediaCacheClearedDto, String> {
+    state.link.client().await?.clear_linux_media_cache().await
+}
+
+/// Where the Linux medium's ISO goes unless the person picks another folder:
+/// their downloads folder as the desktop names it (`~/Загрузки` on a Russian
+/// desktop), otherwise `~/Downloads`, otherwise home. Asked here, in the
+/// person's own process: the service is root and knows nobody's home.
+#[tauri::command]
+pub fn default_media_folder() -> String {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return String::new();
+    };
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| home.join(".config"));
+    let named = std::fs::read_to_string(config.join("user-dirs.dirs"))
+        .ok()
+        .and_then(|text| xdg_download_dir(&text, &home));
+    [named, Some(home.join("Downloads"))]
+        .into_iter()
+        .flatten()
+        .find(|p| p.is_dir())
+        .unwrap_or(home)
+        .display()
+        .to_string()
+}
+
+/// `XDG_DOWNLOAD_DIR="$HOME/Загрузки"` of a `user-dirs.dirs`, with `$HOME`
+/// expanded. Only `$HOME/…` and absolute paths are allowed there.
+fn xdg_download_dir(text: &str, home: &std::path::Path) -> Option<std::path::PathBuf> {
+    let value = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .find_map(|l| l.strip_prefix("XDG_DOWNLOAD_DIR="))?;
+    let value = value.trim().trim_matches('"');
+    if let Some(rest) = value.strip_prefix("$HOME") {
+        let rest = rest.trim_start_matches('/');
+        // "$HOME/" means the home folder itself: no downloads folder.
+        return (!rest.is_empty()).then(|| home.join(rest));
+    }
+    let p = std::path::PathBuf::from(value);
+    p.is_absolute().then_some(p)
+}
+
+#[cfg(test)]
+mod media_folder_tests {
+    use super::xdg_download_dir;
+    use std::path::Path;
+
+    #[test]
+    fn the_desktop_s_downloads_folder_is_read_with_home_expanded() {
+        let home = Path::new("/home/u");
+        let text = "# comment\nXDG_DESKTOP_DIR=\"$HOME/Рабочий стол\"\nXDG_DOWNLOAD_DIR=\"$HOME/Загрузки\"\n";
+        assert_eq!(
+            xdg_download_dir(text, home).unwrap(),
+            Path::new("/home/u/Загрузки")
+        );
+        assert_eq!(
+            xdg_download_dir("XDG_DOWNLOAD_DIR=\"/data/dl\"", home).unwrap(),
+            Path::new("/data/dl")
+        );
+        assert_eq!(xdg_download_dir("XDG_DOWNLOAD_DIR=\"$HOME/\"", home), None);
+        assert_eq!(xdg_download_dir("XDG_DOWNLOAD_DIR=\"dl\"", home), None);
+        assert_eq!(
+            xdg_download_dir("#XDG_DOWNLOAD_DIR=\"$HOME/x\"", home),
+            None
+        );
+    }
+}
+
 #[tauri::command]
 pub async fn unmount_backup(state: State<'_, GuiState>, image_path: String) -> Result<(), String> {
     state.link.client().await?.unmount_image(&image_path).await
@@ -811,8 +1091,12 @@ pub async fn unmount_backup(state: State<'_, GuiState>, image_path: String) -> R
 /// (`SeSystemEnvironmentPrivilege`) belongs to a process, and this one is not
 /// elevated.
 #[tauri::command]
-pub async fn boot_status(state: State<'_, GuiState>) -> Result<serde_json::Value, String> {
-    state.link.client().await?.boot_status().await
+pub async fn boot_status(
+    state: State<'_, GuiState>,
+) -> Result<serde_json::Value, super::CodedError> {
+    // Coded: on Linux the service does not read the entries yet and says so
+    // with `Unimplemented`, which the screen shows as a state of its own.
+    Ok(state.link.client().await?.boot_status_with_status().await?)
 }
 
 /// Change one thing about it. The service takes a copy of the whole
@@ -914,15 +1198,23 @@ pub async fn apply_restore_plan(
     // `passphrases`, which put a source volume's own container back.
     password: Option<String>,
     recovery_key: Option<String>,
+    // Linux: what to do about identities the restore would duplicate here,
+    // and with `change` whether the restored system's references are fixed.
+    identity_choice: Option<own_backup_common::engine_dto::IdentityChoice>,
+    fix_references: Option<bool>,
 ) -> Result<RestoreRunState, String> {
     state
         .link
         .client()
         .await?
-        .apply_restore_plan(
+        .apply_restore_plan_choosing(
             &plan,
             &passphrases.unwrap_or_default(),
             &secret_of(password, recovery_key),
+            own_backup_common::engine_dto::IdentityDecision {
+                choice: identity_choice,
+                fix_references: fix_references.unwrap_or(false),
+            },
         )
         .await
 }

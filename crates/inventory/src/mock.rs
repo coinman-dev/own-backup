@@ -41,6 +41,9 @@ impl MockInventory {
             unlockable: true,
             gpt_attributes: 0,
             mbr_type: 0,
+            kernel_device: String::new(),
+            mapper_kind: String::new(),
+            container_password: false,
         };
 
         let msr_partition = PartitionInfo {
@@ -65,6 +68,9 @@ impl MockInventory {
             unlockable: true,
             gpt_attributes: 0,
             mbr_type: 0,
+            kernel_device: String::new(),
+            mapper_kind: String::new(),
+            container_password: false,
         };
 
         let ntfs_partition = PartitionInfo {
@@ -89,10 +95,14 @@ impl MockInventory {
             unlockable: true,
             gpt_attributes: 0,
             mbr_type: 0,
+            kernel_device: String::new(),
+            mapper_kind: String::new(),
+            container_password: false,
         };
 
         DiskInfo {
             device_id: r"\\.\PhysicalDrive0".into(),
+            stable_device: String::new(),
             model: "Samsung SSD 970 EVO Plus 500GB".into(),
             serial: "S4EWNX0R123456".into(),
             size_bytes: 500_107_862_016, // ~500 GB

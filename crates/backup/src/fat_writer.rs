@@ -5,13 +5,16 @@
 //! as if it were the EFI System Partition, and runs `\EFI\BOOT\BOOTX64.EFI`
 //! from there. So a bootable ISO has to carry a real, if tiny, FAT filesystem.
 //!
-//! Deliberately narrow: FAT16, no long file names, a handful of files, sizes
-//! measured in megabytes. Everything the EFI boot chain needs fits — the loader
-//! and the boot configuration are a couple of megabytes together — and every
-//! feature left out is one that cannot be got wrong.
+//! Deliberately narrow: FAT16, a handful of files, sizes measured in
+//! megabytes. Everything the EFI boot chain needs fits — the loader and the
+//! boot configuration are a couple of megabytes together — and every feature
+//! left out is one that cannot be got wrong.
 //!
-//! 8.3 names are not a limitation here but a requirement: the firmware reads
-//! this volume with its own minimal driver, and `BOOTX64.EFI` is 8.3 already.
+//! A name that is not already an upper-case 8.3 one gets a VFAT long name
+//! beside a unique short alias (`MICROS~1`), as Windows writes it. Until
+//! 2026-10-17 names were cut to 8.3 instead: `EFI\Microsoft` was `EFI\MICROSOF`
+//! on the image, which a lookup by the real name does not find. The firmware's
+//! FAT driver (UEFI requires long names) and Windows both read the long name.
 
 use own_backup_common::{tr, OwnBackupError, Result};
 
@@ -56,9 +59,24 @@ pub fn build_fat16(files: &[FatFile], label: &str) -> Result<Vec<u8>> {
         }
     }
 
-    // Every subdirectory takes one cluster (its own entries: `.`, `..`, plus
-    // children — far below the 16 entries a 512-byte cluster holds).
-    let data_clusters_needed: u32 = dirs.len() as u32
+    // Each directory's entries: `.`, `..` (or the label in the root) and one
+    // short entry per child, plus that child's long-name entries.
+    let mut entries: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    entries.insert(String::new(), 1);
+    for d in &dirs {
+        entries.insert(d.clone(), 2);
+    }
+    for path in dirs.iter().chain(files.iter().map(|f| &f.path)) {
+        let (parent, name) = split_parent(path);
+        *entries.entry(parent).or_insert(0) += 1 + long_entries(&name);
+    }
+    if entries[""] > ROOT_ENTRIES as usize {
+        return Err(OwnBackupError::ImageFormat(
+            tr!("fat_writer.image_full").into_owned(),
+        ));
+    }
+    let dir_clusters = |d: &String| entries[d].div_ceil(SECTOR / 32) as u32;
+    let data_clusters_needed: u32 = dirs.iter().map(dir_clusters).sum::<u32>()
         + files
             .iter()
             .map(|f| {
@@ -137,7 +155,7 @@ pub fn build_fat16(files: &[FatFile], label: &str) -> Result<Vec<u8>> {
     // about when reading the image back.
     let mut dir_cluster: Vec<(String, u16)> = Vec::new();
     for d in &dirs {
-        dir_cluster.push((d.clone(), alloc(1, &mut fat)?));
+        dir_cluster.push((d.clone(), alloc(dir_clusters(d), &mut fat)?));
     }
     let mut file_cluster: Vec<(usize, u16)> = Vec::new();
     for (i, f) in files.iter().enumerate() {
@@ -161,8 +179,10 @@ pub fn build_fat16(files: &[FatFile], label: &str) -> Result<Vec<u8>> {
     let cluster_off = |c: u16| -> usize {
         (data_start as usize + (c as usize - 2) * SECTORS_PER_CLUSTER as usize) * SECTOR
     };
-    // How many entries each directory has written so far.
+    // How many entries each directory has written so far, and its short names.
     let mut used: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut taken: std::collections::HashMap<String, Vec<[u8; 11]>> =
+        std::collections::HashMap::new();
 
     // Volume label, first entry of the root — that is where a driver looks.
     write_entry(&mut img, root_off, label, 0x08, 0, 0);
@@ -181,8 +201,11 @@ pub fn build_fat16(files: &[FatFile], label: &str) -> Result<Vec<u8>> {
         } else {
             cluster_off(parent_cluster)
         };
-        write_entry(&mut img, base + *slot * 32, &name, 0x10, *cluster, 0);
-        *slot += 1;
+        let siblings = taken.entry(parent.clone()).or_default();
+        for e in named_entries(&name, 0x10, *cluster, 0, siblings) {
+            img[base + *slot * 32..base + *slot * 32 + 32].copy_from_slice(&e);
+            *slot += 1;
+        }
 
         // `.` and `..` — a directory without them is not a directory.
         let here = cluster_off(*cluster);
@@ -205,15 +228,11 @@ pub fn build_fat16(files: &[FatFile], label: &str) -> Result<Vec<u8>> {
         } else {
             cluster_off(parent_cluster)
         };
-        write_entry(
-            &mut img,
-            base + *slot * 32,
-            &name,
-            0x20,
-            *cluster,
-            f.data.len() as u32,
-        );
-        *slot += 1;
+        let siblings = taken.entry(parent.clone()).or_default();
+        for e in named_entries(&name, 0x20, *cluster, f.data.len() as u32, siblings) {
+            img[base + *slot * 32..base + *slot * 32 + 32].copy_from_slice(&e);
+            *slot += 1;
+        }
 
         let at = cluster_off(*cluster);
         img[at..at + f.data.len()].copy_from_slice(&f.data);
@@ -230,24 +249,127 @@ fn split_parent(path: &str) -> (String, String) {
     }
 }
 
-/// One 32-byte directory entry. Names are 8.3, upper-cased and space-padded —
-/// the form the firmware's own FAT driver expects.
+/// The label, `.` and `..`: written as they are, space-padded, never a long name.
 fn write_entry(img: &mut [u8], at: usize, name: &str, attr: u8, cluster: u16, size: u32) {
     if at + 32 > img.len() {
         return;
     }
-    let e = &mut img[at..at + 32];
-    let (stem, ext) = match name.rsplit_once('.') {
-        Some((s, x)) if name != "." && name != ".." => (s, x),
-        _ => (name, ""),
+    let mut short = [b' '; 11];
+    for (i, c) in name.bytes().take(11).enumerate() {
+        short[i] = c.to_ascii_uppercase();
+    }
+    img[at..at + 32].copy_from_slice(&short_entry(&short, attr, cluster, size));
+}
+
+/// Characters an 8.3 name may hold besides upper-case letters and digits.
+const SHORT_EXTRA: &[u8] = b"!#$%&'()-@^_`{}~";
+
+fn short_char(c: u8) -> bool {
+    c.is_ascii_uppercase() || c.is_ascii_digit() || SHORT_EXTRA.contains(&c)
+}
+
+/// The 11 bytes of `name` when it already is an upper-case 8.3 name.
+fn exact_short(name: &str) -> Option<[u8; 11]> {
+    let (stem, ext) = name.split_once('.').unwrap_or((name, ""));
+    let fits = (1..=8).contains(&stem.len())
+        && ext.len() <= 3
+        && !(name.ends_with('.'))
+        && stem.bytes().chain(ext.bytes()).all(short_char);
+    if !fits {
+        return None;
+    }
+    let mut short = [b' '; 11];
+    short[..stem.len()].copy_from_slice(stem.as_bytes());
+    short[8..8 + ext.len()].copy_from_slice(ext.as_bytes());
+    Some(short)
+}
+
+/// A short alias no sibling has: `Microsoft` → `MICROS~1`, `boot.stl` →
+/// `BOOT~1.STL`, as Windows makes them.
+fn short_alias(name: &str, taken: &[[u8; 11]]) -> [u8; 11] {
+    let clean = |s: &str| -> Vec<u8> {
+        s.bytes()
+            .filter(|&c| c != b' ' && c != b'.')
+            .map(|c| c.to_ascii_uppercase())
+            .map(|c| if short_char(c) { c } else { b'_' })
+            .collect()
     };
-    e[..11].fill(b' ');
-    for (i, c) in stem.bytes().take(8).enumerate() {
-        e[i] = c.to_ascii_uppercase();
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, x)) if !s.is_empty() => (clean(s), clean(x)),
+        _ => (clean(name), Vec::new()),
+    };
+    for n in 1u32.. {
+        let tail = format!("~{n}");
+        let keep = stem.len().min(8 - tail.len());
+        let mut short = [b' '; 11];
+        short[..keep].copy_from_slice(&stem[..keep]);
+        short[keep..keep + tail.len()].copy_from_slice(tail.as_bytes());
+        let x = ext.len().min(3);
+        short[8..8 + x].copy_from_slice(&ext[..x]);
+        if !taken.contains(&short) {
+            return short;
+        }
     }
-    for (i, c) in ext.bytes().take(3).enumerate() {
-        e[8 + i] = c.to_ascii_uppercase();
+    unreachable!("a directory holds fewer than 2^32 entries")
+}
+
+/// Long-name entries `name` needs before its short entry.
+fn long_entries(name: &str) -> usize {
+    if exact_short(name).is_some() {
+        0
+    } else {
+        name.encode_utf16().count().div_ceil(13)
     }
+}
+
+/// The entries a child takes in its directory, in order: its long-name
+/// entries (last part first), then the short entry they belong to.
+fn named_entries(
+    name: &str,
+    attr: u8,
+    cluster: u16,
+    size: u32,
+    taken: &mut Vec<[u8; 11]>,
+) -> Vec<[u8; 32]> {
+    if let Some(short) = exact_short(name) {
+        taken.push(short);
+        return vec![short_entry(&short, attr, cluster, size)];
+    }
+    let short = short_alias(name, taken);
+    taken.push(short);
+    let sum = short
+        .iter()
+        .fold(0u8, |s, &c| s.rotate_right(1).wrapping_add(c));
+    let units: Vec<u16> = name.encode_utf16().collect();
+    let parts = units.len().div_ceil(13);
+    let mut out = Vec::with_capacity(parts + 1);
+    for part in (0..parts).rev() {
+        let mut e = [0u8; 32];
+        e[0] = (part + 1) as u8 | if part + 1 == parts { 0x40 } else { 0 };
+        e[11] = 0x0F; // read-only | hidden | system | volume: a long-name entry
+        e[13] = sum;
+        // Thirteen UTF-16 units in three runs; after the name one 0x0000,
+        // then 0xFFFF padding.
+        const AT: [usize; 13] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30];
+        for (i, at) in AT.iter().enumerate() {
+            let k = part * 13 + i;
+            let unit = match k.cmp(&units.len()) {
+                std::cmp::Ordering::Less => units[k],
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 0xFFFF,
+            };
+            e[*at..*at + 2].copy_from_slice(&unit.to_le_bytes());
+        }
+        out.push(e);
+    }
+    out.push(short_entry(&short, attr, cluster, size));
+    out
+}
+
+/// One 32-byte short directory entry.
+fn short_entry(short: &[u8; 11], attr: u8, cluster: u16, size: u32) -> [u8; 32] {
+    let mut e = [0u8; 32];
+    e[..11].copy_from_slice(short);
     e[11] = attr;
     // A fixed timestamp: 2026-01-01 00:00. The alternative is the build clock,
     // which would make two builds of the same medium differ byte for byte for
@@ -256,6 +378,7 @@ fn write_entry(img: &mut [u8], at: usize, name: &str, attr: u8, cluster: u16, si
     e[24..26].copy_from_slice(&(((2026 - 1980) << 9) | (1 << 5) | 1u16).to_le_bytes());
     e[26..28].copy_from_slice(&cluster.to_le_bytes());
     e[28..32].copy_from_slice(&size.to_le_bytes());
+    e
 }
 
 #[cfg(test)]
@@ -340,5 +463,171 @@ mod tests {
         }
         // Not an error at this size — the point is that it builds cleanly.
         assert!(build_fat16(&files, "T").is_ok());
+    }
+
+    #[test]
+    fn short_names_and_their_aliases() {
+        assert_eq!(&exact_short("BOOTX64.EFI").unwrap(), b"BOOTX64 EFI");
+        assert_eq!(&exact_short("BCD").unwrap(), b"BCD        ");
+        for long in [
+            "Microsoft",
+            "boot.stl",
+            "a.b.c",
+            "NAME.TOOLONG",
+            "X.",
+            "has space",
+        ] {
+            assert!(exact_short(long).is_none(), "{long}");
+        }
+        let mut taken = Vec::new();
+        assert_eq!(&short_alias("Microsoft", &taken), b"MICROS~1   ");
+        taken.push(short_alias("Microsoft", &taken));
+        assert_eq!(&short_alias("Microsoft", &taken), b"MICROS~2   ");
+        assert_eq!(&short_alias("boot.stl", &[]), b"BOOT~1  STL");
+        assert_eq!(&short_alias("a+b.json", &[]), b"A_B~1   JSO");
+    }
+
+    /// Every name in the image as a reader sees it, long name first, with
+    /// the long-name checksum checked against the short entry it precedes.
+    fn listing(img: &[u8]) -> Vec<String> {
+        let reserved = u16::from_le_bytes([img[14], img[15]]) as usize;
+        let fat_sectors = u16::from_le_bytes([img[22], img[23]]) as usize;
+        let root_entries = u16::from_le_bytes([img[17], img[18]]) as usize;
+        let root_off = (reserved + img[16] as usize * fat_sectors) * SECTOR;
+        let data_start = root_off + root_entries * 32;
+        let fat = |c: u16| {
+            let at = reserved * SECTOR + c as usize * 2;
+            u16::from_le_bytes([img[at], img[at + 1]])
+        };
+        fn walk(
+            img: &[u8],
+            entries: Vec<&[u8]>,
+            prefix: &str,
+            data_start: usize,
+            fat: &dyn Fn(u16) -> u16,
+            out: &mut Vec<String>,
+        ) {
+            let mut long: Vec<(usize, Vec<u16>, u8)> = Vec::new();
+            for e in entries {
+                if e[0] == 0 {
+                    break;
+                }
+                if e[11] == 0x0F {
+                    let units = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30]
+                        .iter()
+                        .map(|&at| u16::from_le_bytes([e[at], e[at + 1]]))
+                        .take_while(|&u| u != 0 && u != 0xFFFF)
+                        .collect();
+                    long.push(((e[0] & 0x1F) as usize, units, e[13]));
+                    continue;
+                }
+                if e[11] & 0x08 != 0 || e[0] == b'.' {
+                    long.clear();
+                    continue;
+                }
+                let short: &[u8; 11] = e[..11].try_into().unwrap();
+                let name = if long.is_empty() {
+                    let stem = String::from_utf8_lossy(&short[..8]).trim_end().to_string();
+                    let ext = String::from_utf8_lossy(&short[8..]).trim_end().to_string();
+                    if ext.is_empty() {
+                        stem
+                    } else {
+                        format!("{stem}.{ext}")
+                    }
+                } else {
+                    let sum = short
+                        .iter()
+                        .fold(0u8, |s, &c| s.rotate_right(1).wrapping_add(c));
+                    assert!(long.iter().all(|(_, _, s)| *s == sum), "long-name checksum");
+                    long.sort_by_key(|(n, _, _)| *n);
+                    let units: Vec<u16> = long.iter().flat_map(|(_, u, _)| u.clone()).collect();
+                    String::from_utf16(&units).unwrap()
+                };
+                long.clear();
+                let path = format!("{prefix}/{name}");
+                if e[11] & 0x10 != 0 {
+                    let mut chunks = Vec::new();
+                    let mut c = u16::from_le_bytes([e[26], e[27]]);
+                    while (2..0xFFF8).contains(&c) {
+                        let at = data_start + (c as usize - 2) * SECTOR;
+                        chunks.extend(img[at..at + SECTOR].chunks(32));
+                        c = fat(c);
+                    }
+                    walk(img, chunks, &path, data_start, fat, out);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        let root = img[root_off..data_start].chunks(32).collect();
+        walk(img, root, "", data_start, &fat, &mut out);
+        out.sort();
+        out
+    }
+
+    fn boot_tree() -> Vec<FatFile> {
+        let mut files = efi_tree();
+        files.push(FatFile {
+            path: r"EFI\Microsoft\Boot\boot.stl".into(),
+            data: vec![0xCC; 4000],
+        });
+        files.push(FatFile {
+            path: r"boot\boot.sdi".into(),
+            data: vec![0xDD; 3_170_304],
+        });
+        // More than one cluster of entries in one directory.
+        for i in 0..20 {
+            files.push(FatFile {
+                path: format!(r"EFI\Microsoft\Boot\ru-RU\bootmgr.efi.mui.{i}"),
+                data: vec![i as u8; 100],
+            });
+        }
+        files
+    }
+
+    #[test]
+    fn long_names_are_read_back_whole() {
+        let img = build_fat16(&boot_tree(), "OWNBOOT").unwrap();
+        let names = listing(&img);
+        for want in [
+            "/EFI/BOOT/BOOTX64.EFI",
+            "/EFI/Microsoft/Boot/BCD",
+            "/EFI/Microsoft/Boot/boot.stl",
+            "/boot/boot.sdi",
+            "/EFI/Microsoft/Boot/ru-RU/bootmgr.efi.mui.19",
+        ] {
+            assert!(names.iter().any(|n| n == want), "{want} not in {names:?}");
+        }
+        assert_eq!(names.len(), 24, "{names:?}");
+    }
+
+    /// The image as dosfstools sees it, where it is installed (the Linux
+    /// build machine): clean, and every long name intact.
+    #[test]
+    fn fsck_fat_finds_the_image_clean() {
+        if std::process::Command::new("fsck.fat")
+            .arg("--help")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("efisys.bin");
+        std::fs::write(&path, build_fat16(&boot_tree(), "OWNBOOT").unwrap()).unwrap();
+        let out = std::process::Command::new("fsck.fat")
+            .args(["-n", "-l", "-v"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).into_owned()
+            + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{text}");
+        assert!(text.contains("/EFI/Microsoft/Boot/boot.stl"), "{text}");
+        assert!(
+            text.contains("/EFI/Microsoft/Boot/ru-RU/bootmgr.efi.mui.19"),
+            "{text}"
+        );
     }
 }

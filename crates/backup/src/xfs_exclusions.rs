@@ -25,7 +25,7 @@ use tracing::{info, warn};
 
 use own_backup_common::{tr, OwnBackupError, Result};
 
-use crate::exclusions::{parse_patterns, ByteRanges, CategorySizes};
+use crate::exclusions::{parse_patterns, ByteRanges, CategorySizes, LeftInCopy, LeftReason};
 use crate::fat_map::RawVolume;
 
 const SB_MAGIC: u32 = 0x5846_5342; // "XFSB"
@@ -115,6 +115,10 @@ pub struct XfsExclusionScan {
     /// Files matched but kept because their data is shared — a reflink/CoW
     /// extent, or a hard link (the other name is not excluded).
     pub files_kept_shared: u64,
+    /// Of [`Self::files_excluded`], those whose entries stay in the catalog
+    /// with their contents zeroed — the ones Stage 2 did not remove. The
+    /// result screen says how many (`engine.entries_kept_named`).
+    pub files_kept_named: u64,
     pub categories: CategorySizes,
     pub patches: Vec<(u64, Vec<u8>)>,
     /// Кого Stage 2 пощадил и почему: файл остался в каталоге нулевым
@@ -123,6 +127,9 @@ pub struct XfsExclusionScan {
     /// Файлы, чьи данные Stage 1 занулил — то есть кандидаты на НАСТОЯЩЕЕ
     /// удаление (этап D). Stage 1 сам их не трогает структурно.
     pub(crate) removable: Vec<RemovableFile>,
+    /// Matched files whose content is still in the copy, and directories the
+    /// walk could not enter (`exclusions::key_store_left_behind`).
+    pub left: Vec<LeftInCopy>,
 }
 
 impl XfsExclusionScan {
@@ -134,10 +141,12 @@ impl XfsExclusionScan {
             entries_scanned: 0,
             bytes_excluded: 0,
             files_kept_shared: 0,
+            files_kept_named: 0,
             categories: CategorySizes::default(),
             patches: Vec::new(),
             stage2_spared: Vec::new(),
             removable: Vec::new(),
+            left: Vec::new(),
         }
     }
 }
@@ -212,7 +221,9 @@ pub(crate) fn parse_sb(vol: &mut dyn RawVolume) -> Result<Sb> {
         return Err(bad("zero AG geometry"));
     }
     if incompat & !KNOWN_INCOMPAT != 0 {
-        return Err(bad(format!("unsupported incompatible features 0x{incompat:x}")));
+        return Err(bad(format!(
+            "unsupported incompatible features 0x{incompat:x}"
+        )));
     }
     if blocksize * agblocks * agcount > vol.len() {
         return Err(bad("filesystem larger than the device"));
@@ -320,6 +331,7 @@ pub(crate) struct RemovableFile {
     /// name, and the inode number alone does not identify one.
     pub(crate) name: String,
     pub(crate) extents: Vec<Extent>,
+    #[allow(dead_code)]
     pub(crate) size: u64,
 }
 
@@ -668,6 +680,33 @@ pub fn scan_xfs_exclusions(
     vol: &mut dyn RawVolume,
     patterns: &[String],
     stage2: bool,
+    tick: impl FnMut(u64) -> Result<()>,
+) -> Result<XfsExclusionScan> {
+    scan_xfs(vol, patterns, stage2, false, tick)
+}
+
+/// [`scan_xfs_exclusions`] for a filesystem captured while FROZEN (an LVM or
+/// device-mapper snapshot, a partition frozen for its copy): its log reads as
+/// dirty, but freezing wrote every logged buffer home and covered the log, so
+/// the btrees are the committed state (`xfs_map::build_xfs_used_map_frozen`).
+/// The files are found and their exclusive data zeroed (Stage 1) as on a
+/// clean filesystem. Stage 2 edits the metadata a replay of that log would
+/// meet on the first mount, so it runs only when the log is clean after all;
+/// otherwise the files stay in the catalog with zeroed contents, and the
+/// caller reports them.
+pub fn scan_xfs_exclusions_quiesced(
+    vol: &mut dyn RawVolume,
+    patterns: &[String],
+    tick: impl FnMut(u64) -> Result<()>,
+) -> Result<XfsExclusionScan> {
+    scan_xfs(vol, patterns, true, true, tick)
+}
+
+fn scan_xfs(
+    vol: &mut dyn RawVolume,
+    patterns: &[String],
+    stage2: bool,
+    quiesced: bool,
     mut tick: impl FnMut(u64) -> Result<()>,
 ) -> Result<XfsExclusionScan> {
     let mut scan = XfsExclusionScan::empty();
@@ -677,9 +716,11 @@ pub fn scan_xfs_exclusions(
         return Ok(scan);
     }
     let sb = parse_sb(vol)?;
-    if !log_is_clean(vol, &sb)? {
+    let clean = log_is_clean(vol, &sb)?;
+    if !clean && !quiesced {
         return Err(bad(tr!("xfs_exclusions.log_dirty")));
     }
+    let stage2 = stage2 && clean;
     // Shared block set (fs-block ranges) — empty when reflink is off.
     let shared = if sb.reflink {
         collect_shared(vol, &sb)?
@@ -693,6 +734,8 @@ pub fn scan_xfs_exclusions(
     // Per matched file: its extents (to zero if exclusive).
     // ino → (extents, size, parent dir ino)
     let mut matched_files: HashMap<u64, (Vec<Extent>, u64, u64, String)> = HashMap::new();
+    // ino → the path it was matched under, for `scan.left`.
+    let mut matched_paths: HashMap<u64, Vec<String>> = HashMap::new();
 
     while let Some((ino, rel, sub_excluded)) = stack.pop() {
         if !visited.insert(ino) {
@@ -702,6 +745,8 @@ pub fn scan_xfs_exclusions(
             Ok(i) => i,
             Err(e) => {
                 warn!(ino, error = %e, "xfs exclusions: unreadable inode — skipping");
+                scan.left
+                    .push(LeftInCopy::new(&rel, LeftReason::SubtreeNotWalked));
                 continue;
             }
         };
@@ -712,6 +757,8 @@ pub fn scan_xfs_exclusions(
             Ok(e) => e,
             Err(e) => {
                 warn!(ino, error = %e, "xfs exclusions: cannot read directory — keeping subtree");
+                scan.left
+                    .push(LeftInCopy::new(&rel, LeftReason::SubtreeNotWalked));
                 continue;
             }
         };
@@ -736,7 +783,12 @@ pub fn scan_xfs_exclusions(
             if e.is_dir {
                 stack.push((e.ino, crel, hit));
             } else if hit {
-                if let Ok(fi) = read_inode(vol, &sb, e.ino) {
+                let Ok(fi) = read_inode(vol, &sb, e.ino) else {
+                    scan.left
+                        .push(LeftInCopy::new(&crel, LeftReason::Unreadable));
+                    continue;
+                };
+                {
                     let mode = be16(&fi, 2) as u16;
                     if mode & S_IFMT != S_IFREG {
                         continue; // symlinks/devices: no data blocks to zero
@@ -748,13 +800,21 @@ pub fn scan_xfs_exclusions(
                     // ext4/btrfs/NTFS.
                     if be32(&fi, 0x10) > 1 {
                         scan.files_kept_shared += 1;
+                        scan.left.push(LeftInCopy::new(&crel, LeftReason::HardLink));
                         continue;
                     }
                     let size = be64(&fi, 0x38);
                     let format = fi[5];
                     let nextents = data_nextents(&fi);
-                    if let Ok(exts) = fork_extents(vol, &sb, &fi, format, nextents) {
-                        matched_files.insert(e.ino, (exts, size, ino, e.name.clone()));
+                    match fork_extents(vol, &sb, &fi, format, nextents) {
+                        Ok(exts) => {
+                            matched_files.insert(e.ino, (exts, size, ino, e.name.clone()));
+                            matched_paths.insert(e.ino, crel);
+                        }
+                        Err(_) => {
+                            scan.left
+                                .push(LeftInCopy::new(&crel, LeftReason::Unreadable));
+                        }
                     }
                 }
             } else if let Ok(fi) = read_inode(vol, &sb, e.ino) {
@@ -782,6 +842,10 @@ pub fn scan_xfs_exclusions(
         }
         if any_shared {
             scan.files_kept_shared += 1;
+            scan.left.push(LeftInCopy::new(
+                matched_paths.get(&fino).map_or(&[][..], |p| p),
+                LeftReason::Shared,
+            ));
             continue;
         }
         for (a, b) in ranges {
@@ -797,6 +861,8 @@ pub fn scan_xfs_exclusions(
         });
     }
     scan.ranges.finalize();
+    // Every zeroed file stays listed unless Stage 2 below removes it.
+    scan.files_kept_named = scan.removable.len() as u64;
 
     // Stage 2: настоящее удаление. Патчи появляются только если весь набор
     // прошёл все три шага; пощажённые файлы остаются нулевыми призраками, и их
@@ -816,6 +882,11 @@ pub fn scan_xfs_exclusions(
                     }
                 }
                 scan.droppable.finalize();
+                scan.files_kept_named = scan
+                    .removable
+                    .iter()
+                    .filter(|f| !removed.contains(&f.ino))
+                    .count() as u64;
                 // По одной строке на файл — это тысячи строк; журналу нужна
                 // сводка по причинам, а подробности лежат в самом результате.
                 let mut tally: std::collections::BTreeMap<&str, u64> = Default::default();
@@ -845,6 +916,7 @@ pub fn scan_xfs_exclusions(
 
     info!(
         files = scan.files_excluded,
+        kept_named = scan.files_kept_named,
         kept_shared = scan.files_kept_shared,
         bytes = scan.bytes_excluded,
         ranges = scan.ranges.iter().count(),
@@ -915,6 +987,8 @@ mod xfs_integration {
             "shared file not detected as shared"
         );
         assert!(!scan.ranges.is_empty(), "private file not zeroed");
+        assert!(scan.files_kept_named >= 1, "the zeroed file stays listed");
+        assert_eq!(scan.files_kept_named, scan.removable.len() as u64);
 
         // No zeroed byte may be the kept file's 0xCD; must cover the private 0xAB.
         let mut buf = vec![0u8; 65536];
@@ -1015,6 +1089,43 @@ mod xfs_integration {
         assert!(
             crate::xfs_map::build_xfs_used_map(&mut vol, 1 << 20).is_err(),
             "карта занятых блоков должна отказать на грязном логе"
+        );
+        // Captured while frozen: the same log state is the quiesced one, and
+        // the map is built — the same map the clean image gives.
+        let frozen = crate::xfs_map::build_xfs_used_map_frozen(&mut vol, 1 << 20)
+            .expect("замороженный источник: карта строится");
+        let clean = {
+            let f = std::fs::File::open(&img).unwrap();
+            let len = f.metadata().unwrap().len();
+            crate::xfs_map::build_xfs_used_map(&mut FileVol { f, len }, 1 << 20).unwrap()
+        };
+        use crate::used_sectors::UsedSectorMap;
+        assert_eq!(frozen.used_block_count(), clean.used_block_count());
+
+        // The exclusions of a frozen capture: the files are found and their
+        // data zeroed, exactly as on the clean image — but nothing a replay
+        // of that log could meet is edited (no Stage 2), and nothing is
+        // dropped from the copy: the names stay, with zeros behind them.
+        let pats = ["cache".to_string()];
+        let quiesced = scan_xfs_exclusions_quiesced(&mut vol, &pats, |_| Ok(())).unwrap();
+        let stage1 = run(&img, &["cache"]).0;
+        assert_eq!(quiesced.files_excluded, stage1.files_excluded);
+        assert_eq!(quiesced.bytes_excluded, stage1.bytes_excluded);
+        assert_eq!(
+            quiesced.ranges.iter().collect::<Vec<_>>(),
+            stage1.ranges.iter().collect::<Vec<_>>()
+        );
+        assert!(quiesced.patches.is_empty() && quiesced.droppable.is_empty());
+        // A clean log under the same call: Stage 2 as usual.
+        let f = std::fs::File::open(&img).unwrap();
+        let len = f.metadata().unwrap().len();
+        let on_clean =
+            scan_xfs_exclusions_quiesced(&mut FileVol { f, len }, &pats, |_| Ok(())).unwrap();
+        let stage2 = run2(&img, &["cache"]);
+        assert_eq!(on_clean.patches, stage2.patches);
+        assert_eq!(
+            on_clean.droppable.iter().collect::<Vec<_>>(),
+            stage2.droppable.iter().collect::<Vec<_>>()
         );
     }
 
@@ -1196,7 +1307,6 @@ mod xfs_integration {
     #[ignore = "needs root: loop-mounts the patched image and writes to it"]
     fn stage2_removes_the_files_and_repair_stays_clean() {
         use crate::exclusion_corpus as corpus;
-        use std::os::unix::fs::FileExt;
         if !corpus::is_root() {
             eprintln!("не root — пропускаю");
             return;

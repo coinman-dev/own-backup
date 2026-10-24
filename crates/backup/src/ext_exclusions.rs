@@ -101,6 +101,10 @@ pub struct ExtExclusionScan {
     /// file the filesystem still lists.
     pub droppable: ByteRanges,
     pub files_excluded: u64,
+    /// Of [`Self::files_excluded`], those whose entries stay in the catalog
+    /// with their contents zeroed — the ones Stage 2 did not remove. The
+    /// result screen says how many (`engine.entries_kept_named`).
+    pub files_kept_named: u64,
     pub entries_scanned: u64,
     pub bytes_excluded: u64,
     pub categories: CategorySizes,
@@ -108,6 +112,9 @@ pub struct ExtExclusionScan {
     /// coalesced directory entries, freed bitmaps, fixed counts, recomputed
     /// checksums. Empty when Stage 2 could not be produced safely.
     pub patches: Vec<(u64, Vec<u8>)>,
+    /// Matched files whose content is still in the copy, and directories the
+    /// walk could not enter (`exclusions::key_store_left_behind`).
+    pub left: Vec<crate::exclusions::LeftInCopy>,
 }
 
 impl ExtExclusionScan {
@@ -116,10 +123,12 @@ impl ExtExclusionScan {
             ranges: ByteRanges::new(),
             droppable: ByteRanges::new(),
             files_excluded: 0,
+            files_kept_named: 0,
             entries_scanned: 0,
             bytes_excluded: 0,
             categories: CategorySizes::default(),
             patches: Vec::new(),
+            left: Vec::new(),
         }
     }
 }
@@ -455,6 +464,8 @@ struct Collected {
     dirents: Vec<CDirEnt>,
     /// ino → how many of its names are excluded (≥ 1 ⇒ matched).
     hit_names: HashMap<u32, u32>,
+    /// ino → the path it was first matched under.
+    matched_paths: HashMap<u32, Vec<String>>,
 }
 
 /// One directory entry, with what Stage 2 needs to coalesce it away.
@@ -498,6 +509,17 @@ pub fn scan_ext_exclusions(
 
     // Phase 2 — decide: which matched inodes may ACTUALLY be removed.
     let (removable, zeroable) = decide_removable(vol, &sb, &col);
+    // A file kept whole keeps its content in the copy: said per file, so a
+    // match of the key directory among them is seen (decision 6/E4).
+    for (ino, inode) in &col.matched_inodes {
+        if u16at(inode, 0x00) as u16 & S_IFMT != S_IFDIR && !zeroable.contains(ino) {
+            let path = col.matched_paths.get(ino).cloned().unwrap_or_default();
+            scan.left.push(crate::exclusions::LeftInCopy::new(
+                &path,
+                crate::exclusions::LeftReason::HardLink,
+            ));
+        }
+    }
     let kept_whole = col
         .matched_inodes
         .keys()
@@ -656,9 +678,13 @@ pub fn scan_ext_exclusions(
         &dir_parents,
         &xattr_dec,
     );
+    // Without Stage 2 every excluded file keeps its entry; with it, all but
+    // the removed ones (a swap file keeps its entry and its header).
+    scan.files_kept_named = scan.files_excluded;
     match stage2 {
         Ok(patches) => {
             scan.patches = patches;
+            scan.files_kept_named -= freed_inodes.len() as u64;
             // Only what Stage 2 freed in the bitmaps: an emptied file still
             // owns its blocks and the filesystem still reads them, so those
             // stay in the image (as zeros).
@@ -681,6 +707,7 @@ pub fn scan_ext_exclusions(
         files = scan.files_excluded,
         bytes = scan.bytes_excluded,
         freed_inodes = freed_inodes.len(),
+        kept_named = scan.files_kept_named,
         freed_blocks = freed_blocks.len(),
         patches = scan.patches.len(),
         "ext exclusions: scan complete"
@@ -712,6 +739,10 @@ fn collect_tree(
             Ok(i) => i,
             Err(e) => {
                 warn!(ino = dir_ino, error = %e, "ext exclusions: unreadable directory inode — skipping subtree");
+                scan.left.push(crate::exclusions::LeftInCopy::new(
+                    &rel,
+                    crate::exclusions::LeftReason::SubtreeNotWalked,
+                ));
                 continue;
             }
         };
@@ -723,6 +754,10 @@ fn collect_tree(
             Ok(e) => e,
             Err(e) => {
                 warn!(ino = dir_ino, error = %e, "ext exclusions: cannot map directory blocks — skipping subtree");
+                scan.left.push(crate::exclusions::LeftInCopy::new(
+                    &rel,
+                    crate::exclusions::LeftReason::SubtreeNotWalked,
+                ));
                 continue;
             }
         };
@@ -785,9 +820,25 @@ fn collect_tree(
                                 block_off,
                                 rec_off: off,
                             });
+                            if inode.is_none() {
+                                // Matched: its content cannot be found to
+                                // empty. Not matched: it may be a directory
+                                // nobody will walk.
+                                scan.left.push(crate::exclusions::LeftInCopy::new(
+                                    &child_rel,
+                                    if hit {
+                                        crate::exclusions::LeftReason::Unreadable
+                                    } else {
+                                        crate::exclusions::LeftReason::SubtreeNotWalked
+                                    },
+                                ));
+                            }
                             if let Some(inode) = inode {
                                 if hit {
                                     *col.hit_names.entry(ino).or_default() += 1;
+                                    col.matched_paths
+                                        .entry(ino)
+                                        .or_insert_with(|| child_rel.clone());
                                     col.matched_inodes.entry(ino).or_insert(inode);
                                 } else if u16at(&inode, 0x00) as u16 & S_IFMT == S_IFREG {
                                     // Kept file — size for the dashboard.
@@ -1408,8 +1459,12 @@ mod ext_integration {
                         }
                         len += 1;
                     } else {
-                        if len >= min_len {
-                            out.push((start as u64, (start + len) as u64));
+                        // File data starts and ends on a block boundary; a
+                        // byte of metadata beside it may carry the fill value
+                        // by chance (~1/256 per edge) — trim to sectors.
+                        let (s, e) = (start.div_ceil(512) * 512, (start + len) / 512 * 512);
+                        if e >= s + min_len {
+                            out.push((s as u64, e as u64));
                         }
                         len = 0;
                     }
@@ -1488,6 +1543,10 @@ mod ext_integration {
             assert!(
                 !scan.patches.is_empty(),
                 "bs={bs}: Stage 2 produced no patches"
+            );
+            assert_eq!(
+                scan.files_kept_named, 0,
+                "bs={bs}: every excluded file removed"
             );
 
             // Apply the metadata patches to a copy of the image.
@@ -1853,6 +1912,37 @@ mod ext_integration {
             return None;
         }
         Some((img, dir))
+    }
+
+    /// Decision 6/E4 proof: a key file with a second name outside the key
+    /// directory keeps its content (the other name needs it), and the scan
+    /// says so — the engine then refuses instead of calling it excluded. A
+    /// key directory with nothing else pointing into it leaves nothing.
+    #[test]
+    fn a_key_file_linked_from_outside_is_reported_left_in_the_copy() {
+        let key = crate::seal::local::KEY_DIRECTORY_NAME;
+        let Some((img, _keep)) = make_ext4_from(4096, |src| {
+            std::fs::create_dir_all(src.join(key)).unwrap();
+            std::fs::write(src.join(key).join("a.key"), vec![0x5A; 8192]).unwrap();
+            std::fs::hard_link(src.join(key).join("a.key"), src.join("copy.bin")).unwrap();
+        }) else {
+            return;
+        };
+        let (scan, _) = run_scan(&img, &[]);
+        let left = crate::exclusions::key_store_left_behind(&scan.left).expect("reported");
+        assert_eq!(left.reason, crate::exclusions::LeftReason::HardLink);
+        assert_eq!(left.path, vec![key.to_lowercase(), "a.key".to_string()]);
+
+        let Some((img, _keep)) = make_ext4_from(4096, |src| {
+            std::fs::create_dir_all(src.join(key)).unwrap();
+            std::fs::write(src.join(key).join("a.key"), vec![0x5A; 8192]).unwrap();
+            std::fs::write(src.join("other.bin"), vec![0x11; 8192]).unwrap();
+        }) else {
+            return;
+        };
+        let (scan, _) = run_scan(&img, &[]);
+        assert_eq!(scan.files_excluded, 2, "the directory and its file");
+        assert!(scan.left.is_empty(), "{:?}", scan.left);
     }
 
     /// A hard link with a surviving name spares the whole file — and its parent

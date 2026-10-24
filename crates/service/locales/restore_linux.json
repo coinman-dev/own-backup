@@ -1,0 +1,27 @@
+{
+  "_version": 2,
+  "restore_linux.identity_choice_needed": {
+    "ru": "Копия содержит идентификаторы, которые уже есть на этой машине: %{clashes}. Выберите явно: оставить повторы как есть, сменить их у восстановленной копии (по желанию — с правкой её fstab, crypttab и загрузчика) или восстановить на другую машину.",
+    "en": "The copy carries identities this machine already has: %{clashes}. Choose explicitly: keep the duplicates as they are, change them on the restored copy (optionally fixing its fstab, crypttab and boot loader too), or restore on another machine."
+  },
+  "restore_linux.mount_cannot_change": {
+    "ru": "Подключённую копию нельзя переименовать: смена идентификаторов делается только при восстановлении. Смонтируйте, оставив повторы как есть.",
+    "en": "A mounted copy cannot be re-identified: identities are changed only by a restore. Mount it keeping the duplicates as they are."
+  },
+  "restore_linux.identity_change_failed": {
+    "ru": "Данные восстановлены и проверены, но смена идентификаторов не завершена: %{error}. Уже сменено: %{done}.",
+    "en": "The data is restored and checked, but changing the identities did not finish: %{error}. Already changed: %{done}."
+  },
+  "restore_exec_linux_service.no_device": {
+    "ru": "в плане не указано устройство диска назначения",
+    "en": "the plan does not name the target disk's device"
+  },
+  "restore_exec_linux_service.not_a_device": {
+    "ru": "%{device} — не блочное устройство.",
+    "en": "%{device} is not a block device."
+  },
+  "restore_exec_linux_service.identity_clash": {
+    "ru": "Восстановленные данные повторят идентификатор %{kind} %{value}, который уже есть у %{on} на этой машине. Перед запуском нужно явно выбрать: оставить повтор как есть, сменить его у восстановленной копии или восстановить на другую машину.",
+    "en": "The restored data will duplicate the %{kind} identity %{value}, which %{on} on this machine already has. Before the restore starts, choose explicitly: keep the duplicate, change it on the restored copy, or restore on another machine."
+  }
+}

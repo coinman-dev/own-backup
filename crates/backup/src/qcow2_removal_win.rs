@@ -17,7 +17,6 @@
 
 #![cfg(target_os = "windows")]
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -28,20 +27,12 @@ use tracing::{info, warn};
 use own_backup_common::{OwnBackupError, Result};
 
 use crate::block_source::BlockSource;
-use crate::checksum::compute_block_checksum;
 use crate::exclusions_win::ExcludedPath;
 use crate::overlay::WritableOverlaySource;
 use crate::qcow2::{Qcow2InPlaceMerge, Qcow2RandomReader};
+pub use crate::removal_types::Qcow2RemovalOutcome;
 use crate::sidecar::BlockChecksum;
 use crate::win_device::WinRawDevice;
-
-/// What the qcow2 removal pass did.
-pub struct Qcow2RemovalOutcome {
-    pub entries_deleted: u64,
-    pub entries_failed: u64,
-    pub clusters_merged: u64,
-    pub blocks_rehashed: u64,
-}
 
 fn dev(msg: impl std::fmt::Display) -> OwnBackupError {
     OwnBackupError::Device(format!("qcow2 true removal: {msg}"))
@@ -159,6 +150,8 @@ pub fn exclude_inside_qcow2(
     {
         let mut ov = overlay.lock().unwrap();
         let mut merge = Qcow2InPlaceMerge::open(image_path, zstd_level)?;
+        // The clusters being replaced hold what was removed.
+        merge.erase_replaced_on_commit();
         for &c in &touched {
             let data = ov.read_cluster(c)?;
             merge.write_cluster(c, &data)?;
@@ -319,6 +312,8 @@ pub fn remove_excluded_from_qcow2(
     {
         let mut ov = overlay.lock().unwrap();
         let mut merge = Qcow2InPlaceMerge::open(image_path, zstd_level)?;
+        // The clusters being replaced hold what was removed.
+        merge.erase_replaced_on_commit();
         for &c in &touched {
             let data = ov.read_cluster(c)?;
             merge.write_cluster(c, &data)?;
@@ -430,6 +425,8 @@ pub fn remove_excluded_from_disk_image_qcow2(
     {
         let mut ov = overlay.lock().unwrap();
         let mut merge = Qcow2InPlaceMerge::open(image_path, zstd_level)?;
+        // The clusters being replaced hold what was removed.
+        merge.erase_replaced_on_commit();
         for &c in &touched {
             let data = ov.read_cluster(c)?;
             merge.write_cluster(c, &data)?;
@@ -583,81 +580,5 @@ pub(crate) fn rehash_touched(
 }
 
 /// The same, over an already-open image — an encrypted one is read through its
-/// own reader, with the key.
-pub(crate) fn rehash_touched_through(
-    reader: &mut dyn crate::block_source::BlockSource,
-    touched: &[u64],
-    cluster_size: u64,
-    data_offset: u64,
-    volume_len: u64,
-    block_size: u32,
-    checksums: &mut Vec<BlockChecksum>,
-    tick: &mut dyn FnMut(u64, u64),
-) -> Result<u64> {
-    let bs = block_size as u64;
-    // Touched clusters are disk-image offsets; the sidecar checksums are per
-    // VOLUME block. Map through the volume window [data_offset, +volume_len);
-    // clusters in the GPT head/tail (not checksummed) are skipped.
-    let mut affected: BTreeSet<u64> = BTreeSet::new();
-    for &c in touched {
-        let start = (c * cluster_size).max(data_offset);
-        let end = (c * cluster_size + cluster_size).min(data_offset + volume_len);
-        if start >= end {
-            continue;
-        }
-        for n in (start - data_offset) / bs..=(end - 1 - data_offset) / bs {
-            affected.insert(n);
-        }
-    }
-    if affected.is_empty() {
-        return Ok(0);
-    }
-
-    let mut map: BTreeMap<u64, u64> = checksums
-        .iter()
-        .map(|c| (c.block_number, c.checksum))
-        .collect();
-    // Runs rather than single blocks: fewer, longer reads, and every one of
-    // them decompresses whole qcow2 clusters anyway (see
-    // `crate::checksum::coalesce_block_runs`).
-    const RUN_BLOCKS: u64 = 16;
-    let mut buf = vec![0u8; (RUN_BLOCKS * bs) as usize];
-    let mut done = 0u64;
-    for (first, count) in crate::checksum::coalesce_block_runs(affected.iter().copied(), RUN_BLOCKS)
-    {
-        let offset = first * bs; // volume-relative
-        let want = std::cmp::min(count * bs, volume_len - offset) as usize;
-        reader.read_at(data_offset + offset, &mut buf[..want])?;
-        for i in 0..count {
-            let at = (i * bs) as usize;
-            if at >= want {
-                break; // the last block ran past the end of the volume
-            }
-            let len = std::cmp::min(bs as usize, want - at);
-            let block = &buf[at..at + len];
-            let checksum = compute_block_checksum(block);
-            match map.entry(first + i) {
-                std::collections::btree_map::Entry::Occupied(mut e) => {
-                    e.insert(checksum);
-                }
-                std::collections::btree_map::Entry::Vacant(e) => {
-                    // A block the full backup did not store (all-zero) that the
-                    // driver wrote into: record it only if now non-zero.
-                    if block.iter().any(|&x| x != 0) {
-                        e.insert(checksum);
-                    }
-                }
-            }
-        }
-        done += count;
-        tick(done, affected.len() as u64);
-    }
-    *checksums = map
-        .into_iter()
-        .map(|(block_number, checksum)| BlockChecksum {
-            block_number,
-            checksum,
-        })
-        .collect();
-    Ok(affected.len() as u64)
-}
+/// own reader, with the key. Shared with the Linux fold.
+pub(crate) use crate::image_fold::rehash_touched_through;

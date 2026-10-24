@@ -45,6 +45,30 @@ service BackupService {
 
   rpc GetServiceStatus(Empty) returns (JsonReply);   // JSON: { version, uptime_secs, queue }
 
+  // --- What the backup engine of THIS service does ---
+  // The wizard offers only what a run will carry out: on Linux the engine
+  // refuses chains, exclusions, whole-disk copies, pacing and after-backup
+  // actions for now, and the scheduler has no logon/logoff events or wake
+  // timer. Asked of the service, not decided by the window's own platform.
+  rpc BackupCapabilities(Empty) returns (JsonReply);  // JSON: BackupCapabilities
+  // Where a destination folder sits relative to the sources, asked while the
+  // wizard is open — the same check SaveJob and RunJob make.
+  // JSON in: { "sources": [string], "dest_folder": string }
+  // JSON out: { "placement": "clear" | "on_source" | "cannot_tell",
+  //             "source": string, "reason": string,
+  //             "key_store_unknown": [{ "source": string, "reason": string }] }
+  // key_store_unknown (Linux): sources where it cannot be told whether the
+  // service's key directory lies on them; the engine treats them as holding it.
+  rpc CheckDestination(JsonRequest) returns (JsonReply);
+
+  // --- Settings (config.toml) ---
+  // On Linux the file is in root's data folder, so the window cannot write it
+  // and asks the service instead. The service checks what it is given: the
+  // log mirror folder is a place root will create a file in. Only the fields
+  // present in the request change; data_dir and grpc_address are not settable.
+  rpc GetSettings(Empty) returns (JsonReply);         // JSON: AppConfig
+  rpc SaveSettings(JsonRequest) returns (JsonReply);  // in: SettingsPatch -> AppConfig
+
   // --- Direct engine operations (run in the privileged service) ---
   // Long-running; progress is streamed on StreamEvents with kinds
   //   "restore" / "verify" -> EngineProgress, "restore-disk" -> DiskRestoreProgress.
@@ -96,6 +120,13 @@ service BackupService {
   // JSON out: { "container", "encrypted", "job_id", "fingerprint", "role",
   //             "created_at", "chain_id", "virtual_size" }
   rpc InspectImage(JsonRequest) returns (JsonReply);
+  // What a copy says about itself, for a window that cannot open the file
+  // (on Linux the copies are root's, 0600). JSON in: { "image_path", "part":
+  // "listing" | "sidecar", "password"?, "recovery_key"? }. "listing" — the
+  // open header of an .obk, no key. "sidecar" — the description (info,
+  // manifest, disk_manifest; no checksums, no LUKS header bytes); an
+  // encrypted copy needs the caller's secret, never the service's key (§7.4).
+  rpc ReadImageMeta(JsonRequest) returns (JsonReply);
 
   // --- Restore plans (the partition designer) ---
   // The GUI assembles a RestorePlan and sends it here. DryRun checks it and
@@ -125,12 +156,29 @@ service BackupService {
   // than from file names. BuildMedia does the work and streams progress as an
   // engine event of kind "media".
   rpc FindBaseImages(Empty) returns (JsonReply);        // JSON: [BaseImageDto]
+  // A Winre.wim the user chose by hand, read and judged like the found ones;
+  // a file that will not do is refused with the reason (FAILED_PRECONDITION).
+  rpc InspectBaseImage(JsonRequest) returns (JsonReply); // in: {"path"} -> BaseImageDto
   rpc ListDrivers(Empty) returns (JsonReply);           // JSON: [DriverPackageDto]
   // Third-party tools installed on THIS machine that the medium could carry —
   // a file manager and a text editor, copied from the user's own installation
   // and never distributed by us.
   rpc ListMediaTools(Empty) returns (JsonReply);        // JSON: [MediaToolDto]
   rpc BuildMedia(JsonRequest) returns (JsonReply);      // in: MediaBuildOptions -> MediaBuildReport
+  // Linux: the disks a medium may be written onto (USB, card readers,
+  // removable), and the write itself — the whole stick is erased, the ISO
+  // written and read back, a FAT32 log partition added behind it. Progress as
+  // `media` events; CancelEngineOp stops it.
+  rpc ListMediaSticks(Empty) returns (JsonReply);       // JSON: [MediaStickDto]
+  rpc WriteMediaStick(JsonRequest) returns (JsonReply); // in: MediaStickWriteDto -> MediaStickReportDto
+  // Linux: the medium built by the service from the INSTALLED package (Debian
+  // live-build in a debootstrap tree, as root, in a transient unit), the ISO
+  // saved into the caller's own folder and, when asked, written onto a stick.
+  // Progress as `media` events; CancelEngineOp stops it. The builder and the
+  // package cache stay in /var/cache/own-backup/media between builds.
+  rpc LinuxMediaStatus(Empty) returns (JsonReply);       // JSON: LinuxMediaStatusDto
+  rpc BuildLinuxMedia(JsonRequest) returns (JsonReply);  // in: LinuxMediaBuildDto -> LinuxMediaReportDto
+  rpc ClearLinuxMediaCache(Empty) returns (JsonReply);   // JSON: LinuxMediaCacheClearedDto
 
   // --- What mounting a backup image needs on this machine ---
   // No driver of ours is installed on either platform: Windows serves the

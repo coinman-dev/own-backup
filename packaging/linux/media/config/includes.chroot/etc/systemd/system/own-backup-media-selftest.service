@@ -1,0 +1,18 @@
+# The stand's check of a booted medium (scripts/lab/linux-media-scenario.sh):
+# reports, on the first serial port, whether the medium came up as it should.
+# Runs only when the virtual machine says so through QEMU's firmware config
+# (`-fw_cfg name=opt/own-backup/selftest,string=1`) — on real hardware the
+# condition is never met and nothing is written anywhere.
+[Unit]
+Description=Own Backup boot medium self-test (stand only)
+ConditionKernelCommandLine=own-backup.media
+ConditionVirtualization=vm
+After=own-backup-kiosk.service own-backup.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/own-backup-media/selftest
+TimeoutStartSec=600
+
+[Install]
+WantedBy=graphical.target

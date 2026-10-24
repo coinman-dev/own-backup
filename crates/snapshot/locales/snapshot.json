@@ -1,0 +1,183 @@
+{
+  "_version": 2,
+  "linux.in_use": {
+    "ru": "Том %{volume} сейчас используется (%{users}), а снимок в Linux есть только для логических томов LVM и для открытых томов device-mapper (например, LUKS), на которых файловая система смонтирована напрямую. Копия тома, в который идёт запись, может не открыться, поэтому она не сделана. Скопируйте его с загрузочного носителя или отключите (отмонтируйте) перед копированием.",
+    "en": "Volume %{volume} is in use (%{users}), and on Linux a snapshot is only available for LVM logical volumes and for opened device-mapper volumes (such as LUKS) with the filesystem mounted directly from them. A copy of a volume that is being written may not open, so none was made. Copy it from the bootable media, or unmount it before the backup."
+  },
+  "linux.usage_mounted": {
+    "ru": "смонтирован: %{mounts}",
+    "en": "mounted at %{mounts}"
+  },
+  "linux.usage_swap": {
+    "ru": "используется для подкачки",
+    "en": "used as swap"
+  },
+  "linux.usage_holders": {
+    "ru": "на нём открыт %{holders}",
+    "en": "opened as %{holders}"
+  },
+  "linux.lvm_failed": {
+    "ru": "Не удалось создать снимок LVM тома %{volume}: %{error}. Копия не сделана: без снимка том, в который идёт запись, не копируется. Проверьте свободное место в группе томов.",
+    "en": "Could not create an LVM snapshot of %{volume}: %{error}. No copy was made: a volume that is being written is not copied without a snapshot. Check the free space in the volume group."
+  },
+  "linux.snapshot_overflowed": {
+    "ru": "Снимок LVM тома %{volume} переполнился во время копирования (в том записали больше, чем вмещает его область изменений). Копия не согласована и не сохранена — повторите, когда на томе меньше записи.",
+    "en": "The LVM snapshot of %{volume} overflowed during the copy (more was written to the volume than its change area holds). The copy is not consistent and was not kept — try again when the volume is less busy."
+  },
+  "linux.dm_failed": {
+    "ru": "Не удалось создать снимок тома %{volume}: %{error}. Копия не сделана: без снимка том, в который идёт запись, не копируется. Том работает как прежде.",
+    "en": "Could not create a snapshot of %{volume}: %{error}. No copy was made: a volume that is being written is not copied without a snapshot. The volume works as before."
+  },
+  "linux.dm_no_cow_dir": {
+    "ru": "Для снимка тома %{volume} нужна папка, где хранить изменения, сделанные во время копирования, а она не указана. Копия не сделана.",
+    "en": "A snapshot of %{volume} needs a folder for the changes made during the copy, and none was given. No copy was made."
+  },
+  "linux.dm_cow_dir_unusable": {
+    "ru": "Папка %{dir} не подходит для области изменений снимка: %{error}. Копия не сделана.",
+    "en": "Folder %{dir} cannot hold the snapshot's change area: %{error}. No copy was made."
+  },
+  "linux.dm_cow_on_source": {
+    "ru": "Папка %{dir} находится на копируемом томе %{volume} (или на устройстве, из которого он собран). Область изменений снимка хранится в папке назначения и не может лежать на самом томе: выберите папку на другом диске. Копия не сделана.",
+    "en": "Folder %{dir} is on the volume being copied, %{volume} (or on a device it is built from). The snapshot keeps its change area in the destination folder, which cannot be on the volume itself: choose a folder on another disk. No copy was made."
+  },
+  "linux.dm_cow_dir_unknown": {
+    "ru": "Папка %{dir} находится на файловой системе %{fstype}, через которую область изменений снимка писать нельзя (не видно, на каком устройстве она хранит данные, или запись идёт через отдельную программу). Выберите папку на обычном диске (ext4, XFS, btrfs) или в сетевой папке. Копия не сделана.",
+    "en": "Folder %{dir} is on a %{fstype} filesystem, which cannot hold the snapshot's change area (where it keeps its data cannot be told, or its writes go through a separate program). Choose a folder on a regular disk (ext4, XFS, btrfs) or a network share. No copy was made."
+  },
+  "linux.dm_cow_failed": {
+    "ru": "Не удалось создать область изменений снимка в папке %{dir}: %{error}. Копия не сделана.",
+    "en": "Could not create the snapshot's change area in %{dir}: %{error}. No copy was made."
+  },
+  "linux.dm_leftover": {
+    "ru": "На томе %{volume} ещё стоит снимок прерванного копирования. Он снимается при запуске службы или командой own-backup-cli cleanup-snapshots; после этого повторите копирование.",
+    "en": "A snapshot of an interrupted backup is still on %{volume}. It is removed when the service starts, or by own-backup-cli cleanup-snapshots; then run the backup again."
+  },
+  "linux.dm_unsupported": {
+    "ru": "Том %{volume} устроен как %{kinds}; для такого тома device-mapper снимок не делается. Копия не сделана. Скопируйте его с загрузочного носителя или отключите перед копированием.",
+    "en": "Volume %{volume} is a %{kinds} device-mapper volume, which cannot be snapshotted. No copy was made. Copy it from the bootable media, or close it before the backup."
+  },
+  "linux.dm_key_needed": {
+    "ru": "Ключ открытого контейнера %{volume} хранится только в ядре, а для снимка нужна ещё одна его расшифровка. Укажите пароль этого контейнера (в задании или --password в командной строке) — по нему ключ берётся из заголовка контейнера. Копия не сделана.",
+    "en": "The key of the opened container %{volume} is held only by the kernel, and the snapshot needs a second decrypting view of it. Give the container's password (in the job, or --password on the command line): the key is then taken from the container's header. No copy was made."
+  },
+  "linux.dm_key_failed": {
+    "ru": "Не удалось получить ключ контейнера %{volume} для снимка: %{error}. Копия не сделана.",
+    "en": "Could not get the key of container %{volume} for the snapshot: %{error}. No copy was made."
+  },
+  "linux.dm_snapshot_invalid": {
+    "ru": "Снимок тома %{volume} перестал быть целым во время копирования (%{state}): его область изменений в папке назначения переполнилась — пока шла копия, на том записали больше, чем она вмещает, — или в неё не удалось записать. Копия не согласована и не сохранена. Повторите, когда на томе меньше записи (сборки, загрузки, виртуальные машины), и проверьте свободное место в папке назначения.",
+    "en": "The snapshot of %{volume} stopped being whole during the copy (%{state}): its change area in the destination folder filled up — more was written to the volume during the copy than it holds — or could not be written. The copy is not consistent and was not kept. Try again when the volume is less busy (builds, downloads, virtual machines), and check the free space in the destination folder."
+  },
+  "linux.in_use_partition": {
+    "ru": "Раздел %{volume} сейчас используется (%{users}). Снимка обычного раздела в Linux нет; на время своего копирования неизменным удерживается только небольшой раздел (не больше 4 ГиБ — например, /boot или ESP), на котором нет ни корня системы, ни данных и журналов программы, ни папки назначения. Этот раздел не подходит: %{reason}. Копия тома, в который идёт запись, может не открыться, поэтому она не сделана. Скопируйте его с загрузочного носителя или отключите (отмонтируйте) перед копированием.",
+    "en": "Partition %{volume} is in use (%{users}). Linux has no snapshot of a plain partition; only a small one (up to 4 GiB, such as /boot or the ESP) that holds neither the system root, nor the program's data and logs, nor the destination folder is held still for the length of its own copy. This one does not qualify: %{reason}. A copy of a volume that is being written may not open, so none was made. Copy it from the bootable media, or unmount it before the backup."
+  },
+  "linux.short_swap": {
+    "ru": "он используется для подкачки",
+    "en": "it is used as swap"
+  },
+  "linux.short_holders": {
+    "ru": "на нём открыт %{holders} — копируйте открытый том, а не раздел под ним",
+    "en": "%{holders} is opened on it — back up the opened volume rather than the partition under it"
+  },
+  "linux.short_no_mount": {
+    "ru": "не удалось найти, где он смонтирован",
+    "en": "where it is mounted could not be found"
+  },
+  "linux.short_root": {
+    "ru": "на нём корень системы (/)",
+    "en": "it holds the system root (/)"
+  },
+  "linux.short_no_destination": {
+    "ru": "неизвестна папка назначения копии",
+    "en": "the destination folder of the copy is not known"
+  },
+  "linux.short_holds": {
+    "ru": "в его точке монтирования %{mount} находится %{path}, куда программа пишет во время копирования",
+    "en": "its mount point %{mount} holds %{path}, which the program writes to during the copy"
+  },
+  "linux.short_too_big": {
+    "ru": "он больше %{limit} (%{size})",
+    "en": "it is larger than %{limit} (%{size})"
+  },
+  "linux.short_size_unknown": {
+    "ru": "не удалось узнать его размер",
+    "en": "its size could not be read"
+  },
+  "linux.short_filesystem": {
+    "ru": "файловую систему %{fstype} нельзя ни заморозить, ни на время перемонтировать только для чтения",
+    "en": "a %{fstype} filesystem can be neither frozen nor remounted read-only for a while"
+  },
+  "linux.hold_failed": {
+    "ru": "Не удалось удержать раздел %{volume} (%{mount}) неизменным на время копирования: %{error}. Копия не сделана; раздел работает как прежде.",
+    "en": "Could not hold partition %{volume} (%{mount}) still for its copy: %{error}. No copy was made; the partition works as before."
+  },
+  "linux.hold_marker_failed": {
+    "ru": "Не удалось записать отметку об удержании раздела %{volume} в %{dir}: %{error}. Без неё раздел нельзя было бы отпустить после аварийного завершения, поэтому он не заморожен и копия не сделана.",
+    "en": "Could not write the hold marker of partition %{volume} into %{dir}: %{error}. Without it the partition could not be released after a crash, so it was not frozen and no copy was made."
+  },
+  "linux.freeze_busy": {
+    "ru": "Файловая система раздела %{volume} (%{mount}) уже заморожена кем-то другим — другим копированием или командой fsfreeze. Копия не сделана: удержать её до конца копирования нельзя. Повторите, когда её разморозят.",
+    "en": "The filesystem of partition %{volume} (%{mount}) is already frozen by someone else — another backup, or fsfreeze. No copy was made: it cannot be held until the copy ends. Try again once it is thawed."
+  },
+  "linux.readonly_busy": {
+    "ru": "Файловую систему %{fstype} раздела %{volume} (%{mount}) нельзя заморозить, а перемонтировать её только для чтения на время копирования не удалось: на ней открыты файлы для записи. Копия не сделана: раздел не читается, пока в него пишут. Закройте программы, которые пишут на него, или отмонтируйте его и повторите.",
+    "en": "The %{fstype} filesystem of partition %{volume} (%{mount}) cannot be frozen, and it could not be remounted read-only for the copy: files on it are open for writing. No copy was made: a partition is not read while it is written. Close the programs writing to it, or unmount it, and try again."
+  },
+  "linux.freeze_lost": {
+    "ru": "Файловую систему раздела %{volume} (%{mount}) разморозили во время копирования — не эта программа. Копия не согласована и не сохранена; повторите.",
+    "en": "The filesystem of partition %{volume} (%{mount}) was thawed during the copy, not by this program. The copy is not consistent and was not kept; try again."
+  },
+  "linux.readonly_lost": {
+    "ru": "Раздел %{volume} (%{mount}) перемонтировали для записи во время копирования — не эта программа. Копия не согласована и не сохранена; повторите.",
+    "en": "Partition %{volume} (%{mount}) was remounted read-write during the copy, not by this program. The copy is not consistent and was not kept; try again."
+  },
+  "linux.pv_whole_disk_only": {
+    "ru": "Раздел %{volume} — физический том LVM, на нём работают логические тома (%{lvs}). Такой раздел копируется только вместе с диском целиком (копия диска); отдельно копируйте его логические тома как тома.",
+    "en": "Partition %{volume} is an LVM physical volume with logical volumes in use (%{lvs}). Such a partition is copied only as part of the whole disk (a disk copy); on their own, copy its logical volumes as volumes."
+  },
+  "linux.pv_on_luks": {
+    "ru": "Раздел %{volume} — контейнер LUKS (%{container}), внутри которого физический том LVM с логическими томами в работе. Копия диска с таким разделом пока не делается: снимки его логических томов есть, но восстановить контейнер вокруг них пока нельзя. Скопируйте логические тома по отдельности (как тома) или весь диск с загрузочного носителя.",
+    "en": "Partition %{volume} is a LUKS container (%{container}) holding an LVM physical volume whose logical volumes are in use. A disk copy with such a partition is not made yet: its logical volumes can be snapshotted, but the container around them cannot be restored yet. Copy the logical volumes on their own (as volumes), or the whole disk from the bootable media."
+  },
+  "linux.luks_detached_header": {
+    "ru": "На разделе %{volume} открыт контейнер LUKS (%{mapping}), но заголовок контейнера хранится не на разделе (--header): восстановление не смогло бы вернуть контейнер, поэтому копия диска с таким разделом не делается.",
+    "en": "A LUKS container (%{mapping}) is open on partition %{volume}, but its header is kept elsewhere (--header): a restore could not put the container back, so a disk copy with this partition is not made."
+  },
+  "linux.luks_odd_table": {
+    "ru": "Контейнер LUKS (%{mapping}) на разделе %{volume} открыт не одним шифрующим отображением на весь раздел (например, с проверкой целостности): копия диска с таким разделом не делается.",
+    "en": "The LUKS container (%{mapping}) on partition %{volume} is not opened as one crypt mapping over the whole partition (for example, with integrity protection): a disk copy with this partition is not made."
+  },
+  "linux.pv_lv_stacked": {
+    "ru": "На логическом томе %{lv} физического тома %{volume} открыто ещё одно устройство (%{holders}) — например, контейнер LUKS, пул тонких томов или классический снимок LVM. Снимок такого тома не удержит то, что над ним, поэтому копия диска не сделана. Скопируйте открытое устройство как том или весь диск с загрузочного носителя.",
+    "en": "Another device (%{holders}) is opened on the logical volume %{lv} of the physical volume %{volume} — a LUKS container, a thin pool or a classic LVM snapshot, for example. A snapshot of that volume would not hold what sits on it, so no disk copy was made. Copy the opened device as a volume, or the whole disk from the bootable media."
+  },
+  "linux.pv_lv_unsupported": {
+    "ru": "Логический том %{lv} физического тома %{volume} устроен как %{kinds}; на ходу копируются только обычные (линейные) логические тома. Копия диска не сделана — скопируйте его с загрузочного носителя.",
+    "en": "The logical volume %{lv} of the physical volume %{volume} is of kind %{kinds}; only plain (linear) logical volumes are copied while in use. No disk copy was made — copy it from the bootable media."
+  },
+  "linux.pv_foreign": {
+    "ru": "Раздел %{volume} — физический том LVM, но на нём открыто и другое устройство (%{holder}), не логический том. Копия диска не сделана — скопируйте его с загрузочного носителя.",
+    "en": "Partition %{volume} is an LVM physical volume, but another device (%{holder}) that is not a logical volume is opened on it too. No disk copy was made — copy it from the bootable media."
+  },
+  "linux.pv_mismatch": {
+    "ru": "Таблица логического тома %{lv} на физическом томе %{volume} не сходится с самим томом (части не покрывают его или пересекаются с другим томом). Копия диска не сделана.",
+    "en": "The table of the logical volume %{lv} on the physical volume %{volume} does not match the volume itself (its parts do not cover it, or overlap another volume). No disk copy was made."
+  },
+  "linux.pv_changed": {
+    "ru": "Физический том LVM %{volume} изменился во время копирования: %{reason}. Копия не согласована и не сохранена — повторите её, когда группа томов не перестраивается.",
+    "en": "The LVM physical volume %{volume} changed during the copy: %{reason}. The copy is not consistent and was not kept — run it again when the volume group is not being changed."
+  },
+  "linux.pv_changed_metadata": {
+    "ru": "метаданные группы томов переписаны (логический том создан, удалён, переименован или изменён)",
+    "en": "the volume group's metadata was rewritten (a logical volume was created, removed, renamed or changed)"
+  },
+  "linux.pv_changed_volumes": {
+    "ru": "на нём появились другие устройства (%{holders}) — например, активирован или создан логический том",
+    "en": "other devices appeared on it (%{holders}) — a logical volume was activated or created, for example"
+  },
+  "linux.pv_changed_table": {
+    "ru": "таблица логического тома %{lv} заменена (например, lvextend или lvchange --refresh)",
+    "en": "the table of the logical volume %{lv} was replaced (by lvextend or lvchange --refresh, for example)"
+  }
+}

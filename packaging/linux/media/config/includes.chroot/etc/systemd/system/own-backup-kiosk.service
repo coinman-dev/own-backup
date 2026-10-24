@@ -1,0 +1,47 @@
+# The desktop of the boot medium on tty1, no login: labwc with our strip
+# (own-backup-shell) and the window maximised — the counterpart of the WinPE
+# medium's desktop. kiosk-desktop falls back to cage with the window full
+# screen when labwc cannot start.
+#
+# As root, like the WinPE medium's window (SYSTEM there): on the medium the
+# engine's token and settings live in /run/own-backup-media, 0700, and the
+# person at the machine owns it anyway. The session comes from PAM
+# (pam_systemd), so logind sees an active local session on seat0 and cage
+# gets the seat and the DRM device through it.
+
+[Unit]
+Description=Own Backup window (boot medium)
+ConditionKernelCommandLine=own-backup.media
+After=systemd-user-sessions.service own-backup.service own-backup-media-log.service
+Wants=own-backup.service
+# tty1 is the window's; the other consoles keep their login prompt.
+Conflicts=getty@tty1.service
+After=getty@tty1.service
+
+[Service]
+Type=simple
+PAMName=own-backup-kiosk
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+UtmpIdentifier=tty1
+UtmpMode=user
+Environment=XDG_SESSION_TYPE=wayland
+EnvironmentFile=-/run/own-backup-media-log.env
+# Ctrl+Alt+F2… still reach the text consoles for repairs by hand, under labwc
+# and under cage (-s) alike.
+ExecStart=/usr/libexec/own-backup-media/kiosk-desktop
+# The session's processes are in logind's scope, not in this unit: ended here,
+# or a stopped session would leave its window holding the single-instance lock.
+ExecStopPost=/usr/libexec/own-backup-media/kiosk-desktop stop
+# A compositor that ends brings the session back. Under cage (the fallback)
+# that includes closing the window: there is nothing else on that screen.
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=graphical.target
