@@ -106,13 +106,46 @@ pub fn apply() {
 }
 
 fn start_icon() {
-    match std::env::current_exe() {
+    match program() {
         Ok(exe) => {
             if let Err(error) = std::process::Command::new(&exe).arg("--tray").spawn() {
                 tracing::warn!(%error, "tray: could not start the icon");
             }
         }
         Err(error) => tracing::warn!(%error, "tray: current_exe() failed"),
+    }
+}
+
+/// Where the program is installed, to start a window or an icon from.
+///
+/// Not simply this process's own file: after the package is updated, that
+/// one is gone, and Linux names it `/usr/bin/own-backup-gui (deleted)`. An
+/// icon started before the update then answered every «Открыть Own Backup»
+/// with «No such file or directory» and opened nothing — until the next
+/// login, which is why it worked only sometimes (owner, 24.10). The file now
+/// at the same path is the updated program, the one to start.
+fn program() -> std::io::Result<std::path::PathBuf> {
+    let exe = std::env::current_exe()?;
+    let installed = without_deleted_mark(&exe);
+    if installed.exists() {
+        return Ok(installed);
+    }
+    let packaged = std::path::Path::new("/usr/bin/own-backup-gui");
+    if packaged.exists() {
+        return Ok(packaged.to_path_buf());
+    }
+    Ok(exe)
+}
+
+/// `/usr/bin/own-backup-gui (deleted)` → `/usr/bin/own-backup-gui`: the mark
+/// the kernel adds to a running program whose file was replaced.
+fn without_deleted_mark(exe: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    const MARK: &[u8] = b" (deleted)";
+    let bytes = exe.as_os_str().as_bytes();
+    match bytes.strip_suffix(MARK) {
+        Some(path) => std::path::PathBuf::from(std::ffi::OsStr::from_bytes(path)),
+        None => exe.to_path_buf(),
     }
 }
 
@@ -318,7 +351,7 @@ fn open_window() {
     if started.is_some_and(|at| at.elapsed() < START_GRACE) {
         return;
     }
-    match std::env::current_exe() {
+    match program() {
         Ok(exe) => match std::process::Command::new(&exe).spawn() {
             Ok(_) => {
                 *started = Some(Instant::now());
@@ -335,6 +368,26 @@ fn open_window() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// After an update the icon's own file is gone; the window is started
+    /// from the file now at that path.
+    #[test]
+    fn a_replaced_program_is_started_from_its_installed_path() {
+        use std::path::Path;
+        assert_eq!(
+            without_deleted_mark(Path::new("/usr/bin/own-backup-gui (deleted)")),
+            Path::new("/usr/bin/own-backup-gui")
+        );
+        assert_eq!(
+            without_deleted_mark(Path::new("/usr/bin/own-backup-gui")),
+            Path::new("/usr/bin/own-backup-gui")
+        );
+        // Only the mark at the very end is the kernel's.
+        assert_eq!(
+            without_deleted_mark(Path::new("/opt/a (deleted)/own-backup-gui")),
+            Path::new("/opt/a (deleted)/own-backup-gui")
+        );
+    }
 
     #[test]
     fn an_override_switches_the_entry_off_only_when_it_says_so() {
