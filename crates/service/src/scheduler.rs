@@ -486,16 +486,45 @@ fn started_on_the_same_day<Tz: chrono::TimeZone>(job: &Job, now: chrono::DateTim
 /// True unless an encrypted source is missing its saved password (an unattended
 /// run cannot then decrypt the volume, so it must be skipped).
 fn has_passwords(job: &own_backup_core::Job, passwords: &PasswordStore) -> bool {
-    if job.requires_password
-        && job
-            .source_list()
-            .iter()
-            .any(|s| !passwords.has(&own_backup_core::source_token(s)))
-    {
-        warn!(job = %job.name, "Scheduler: skipping — encrypted source has no saved password");
+    let missing: Vec<String> = sources_needing_password(job)
+        .into_iter()
+        .filter(|s| !passwords.has(&own_backup_core::source_token(s)))
+        .collect();
+    if !missing.is_empty() {
+        warn!(
+            job = %job.name,
+            sources = ?missing,
+            "Scheduler: skipping — encrypted source has no saved password"
+        );
         return false;
     }
     true
+}
+
+/// The sources an unattended run has to decrypt.
+///
+/// `requires_password` is one flag for the whole job, and a whole-disk copy
+/// has unencrypted partitions beside the encrypted one: an ESP and a `/boot`
+/// never get a password, so asking it of every source skipped such a job at
+/// every scheduled time (owner's Kubuntu disk, 23–24.10), while the window
+/// had called its passwords saved — it asks only the encrypted ones. The
+/// partition snapshot the window saved with the job says which those are; a
+/// source it does not describe (a job saved before snapshots) is taken as
+/// encrypted, as before.
+fn sources_needing_password(job: &own_backup_core::Job) -> Vec<String> {
+    if !job.requires_password {
+        return Vec::new();
+    }
+    job.source_list()
+        .into_iter()
+        .filter(|s| {
+            job.source_disks
+                .iter()
+                .flat_map(|d| d.partitions.iter())
+                .find(|p| p.volume_device == *s)
+                .is_none_or(|p| p.is_encrypted)
+        })
+        .collect()
 }
 
 /// Enqueue a job unless it is already pending or running (mirrors `RunJob`).
@@ -565,6 +594,68 @@ mod tests {
         let _ = release.send(());
         let (_, handle) = probes.remove(&network.id).unwrap();
         handle.await.unwrap();
+    }
+
+    /// The owner's disk: ESP and `/boot` in the clear, the root in LUKS. The
+    /// snapshot as the window saves it, so through its JSON.
+    fn disk_job() -> Job {
+        let part = |index: u32, dev: &str, encrypted: bool| {
+            serde_json::json!({
+                "index": index, "offset_bytes": 0, "size_bytes": 0, "used_bytes": 0,
+                "gpt_type_guid": "", "gpt_partition_guid": "", "filesystem": "unknown",
+                "volume_letter": null, "volume_device": dev, "volume_label": "",
+                "fs_uuid": "", "is_system": false, "is_boot": false, "has_os": false,
+                "is_encrypted": encrypted, "gpt_attributes": 0, "mbr_type": 0
+            })
+        };
+        let job = serde_json::json!({
+            "name": "disk",
+            "dest_folder": "/mnt/backup",
+            "requires_password": true,
+            "sources": ["/dev/esp", "/dev/boot", "/dev/root"],
+            "source_disks": [{
+                "device_id": "/dev/nvme0n1", "model": "", "serial": "", "size_bytes": 0,
+                "sector_size_logical": 512, "sector_size_physical": 512, "media_type": "",
+                "partition_table": "gpt", "disk_guid": "",
+                "partitions": [
+                    part(1, "/dev/esp", false),
+                    part(2, "/dev/boot", false),
+                    part(3, "/dev/root", true),
+                    // Not in the copy: says nothing about it.
+                    part(4, "/dev/data", true),
+                ]
+            }]
+        });
+        serde_json::from_value(job).expect("a job from its JSON")
+    }
+
+    #[test]
+    fn a_whole_disk_job_needs_only_its_encrypted_partitions_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let passwords = PasswordStore::new(dir.path().join("metadata.db"));
+        let job = disk_job();
+        assert_eq!(sources_needing_password(&job), vec!["/dev/root".to_string()]);
+        assert!(!has_passwords(&job, &passwords), "the root's is not there yet");
+        passwords
+            .remember(
+                &own_backup_core::source_token("/dev/root"),
+                "secret".into(),
+                false,
+            )
+            .unwrap();
+        assert!(
+            has_passwords(&job, &passwords),
+            "the ESP and /boot need none"
+        );
+    }
+
+    #[test]
+    fn a_source_the_snapshot_does_not_describe_still_needs_a_password() {
+        let mut job = disk_job();
+        job.source_disks.clear();
+        assert_eq!(sources_needing_password(&job).len(), 3, "the old rule");
+        job.requires_password = false;
+        assert!(sources_needing_password(&job).is_empty());
     }
 
     fn job_started_at(utc: &str) -> Job {
