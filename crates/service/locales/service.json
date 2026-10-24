@@ -1,5 +1,7 @@
 {
   "_version": 2,
+  "scheduler.skipped_no_password": {"ru": "Копия по расписанию не запущена: для %{volumes} не сохранён пароль. Откройте задание, введите пароль и отметьте «Запомнить».", "en": "The scheduled backup did not start: no password is saved for %{volumes}. Open the job, enter the password and tick «Remember»."},
+  "scheduler.skipped_catch_up": {"ru": "Пропущенная копия начнётся сама вскоре после этого.", "en": "The missed backup then starts by itself shortly afterwards."},
   "grpc_server.busy_archive_reauthorize": {"ru": "Восстановление разрешения на автоматические копии", "en": "Restoring automatic backup authorization"},
   "scheduled_verification.panicked": {"ru": "Проверка прервана внутренней ошибкой. Подробности — в журнале службы.", "en": "Verification stopped due to an internal error. See the service log for details."},
   "grpc_server.target_disk_changed": {

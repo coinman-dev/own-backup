@@ -1165,6 +1165,7 @@
   "act_backup_done": "Резервное копирование выполнено",
   "act_backup_cancelled": "Копирование отменено",
   "act_backup_interrupted": "Копирование прервано",
+  "act_backup_skipped": "Копия по расписанию не запущена",
   "act_backup_failed": "Сбой резервного копирования",
   "act_target_disk": "диск {disk}",
   "act_disk": "Диск",

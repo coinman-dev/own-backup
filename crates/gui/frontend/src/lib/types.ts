@@ -527,6 +527,8 @@ export interface JobRun {
   status: 'success' | 'error' | 'cancelled' | string;
   /** Cancelled because the service stopped (shutdown, restart, update), not by a person. */
   interrupted?: boolean;
+  /** The scheduler did not start it: something it needed (a saved volume password) was missing. */
+  skipped?: boolean;
   image_path: string;
   source_bytes: number;
   bytes_copied: number;

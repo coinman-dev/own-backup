@@ -1133,6 +1133,7 @@
   "act_backup_done": "Backup completed",
   "act_backup_cancelled": "Backup cancelled",
   "act_backup_interrupted": "Backup interrupted",
+  "act_backup_skipped": "Scheduled backup not started",
   "act_backup_failed": "Backup failed",
   "act_target_disk": "disk {disk}",
   "act_disk": "Disk",

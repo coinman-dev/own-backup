@@ -24,7 +24,8 @@ use chrono::Duration as ChronoDuration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tracing::{debug, info, warn};
 
-use own_backup_core::{Job, JobStore, PasswordStore, RunQueue};
+use own_backup_common::tr;
+use own_backup_core::{Job, JobRun, JobStore, PasswordStore, RunQueue};
 
 use crate::shutdown::ShutdownSignal;
 
@@ -118,7 +119,7 @@ fn tick(
     for job in store.list() {
         // Event-triggered jobs take a separate path (not cron/time based).
         if job.schedule.kind == "event" {
-            handle_event(&job, uptime, fired_startup, queue, job_tx, passwords);
+            handle_event(&job, store, uptime, fired_startup, queue, job_tx, passwords);
             continue;
         }
 
@@ -149,7 +150,7 @@ fn tick(
             "scheduler evaluated job"
         );
         if due {
-            if !has_passwords(&job, passwords) {
+            if !ready_to_run(&job, store, passwords) {
                 continue;
             }
             enqueue(queue, job_tx, &job.id, &job.name);
@@ -163,7 +164,7 @@ fn tick(
 /// to a restart a second after it began).
 fn last_fired(job: &Job, store: &JobStore) -> Option<chrono::DateTime<chrono::FixedOffset>> {
     let started = match job.last_run.as_ref() {
-        Some(r) if r.interrupted => store.last_scheduled_start(&job.id),
+        Some(r) if r.interrupted || r.skipped => store.last_scheduled_start(&job.id),
         Some(r) => Some(r.started_at.clone()),
         None => None,
     };
@@ -178,6 +179,7 @@ fn last_fired(job: &Job, store: &JobStore) -> Option<chrono::DateTime<chrono::Fi
 /// triggers have their own paths ([`handle_os_event`], [`watch_destinations`]).
 fn handle_event(
     job: &own_backup_core::Job,
+    store: &JobStore,
     uptime: std::time::Duration,
     fired_startup: &mut HashSet<String>,
     queue: &RunQueue,
@@ -196,7 +198,7 @@ fn handle_event(
         fired_startup.insert(job.id.clone());
         return;
     }
-    if !has_passwords(job, passwords) {
+    if !ready_to_run(job, store, passwords) {
         return;
     }
     fired_startup.insert(job.id.clone());
@@ -227,7 +229,7 @@ fn handle_os_event(
         if job.schedule.event_once_per_day && ran_today(&job) {
             continue;
         }
-        if !has_passwords(&job, passwords) {
+        if !ready_to_run(&job, store, passwords) {
             continue;
         }
         info!(job = %job.name, trigger, "Scheduler: OS event fired");
@@ -314,7 +316,7 @@ async fn watch_destinations(
         if job.schedule.event_once_per_day && ran_today(&job) {
             continue;
         }
-        if !has_passwords(&job, passwords) {
+        if !ready_to_run(&job, store, passwords) {
             continue;
         }
         enqueue(queue, job_tx, &job.id, &job.name);
@@ -473,32 +475,84 @@ fn ran_today(job: &Job) -> bool {
 /// the calendar day is taken. Which zone that is does not matter; that it is
 /// one zone does.
 fn started_on_the_same_day<Tz: chrono::TimeZone>(job: &Job, now: chrono::DateTime<Tz>) -> bool {
-    // A run cut off by the service stopping is not today's run.
+    // A run cut off by the service stopping, or never started, is not
+    // today's run.
     job.last_run
         .as_ref()
-        .filter(|r| !r.interrupted)
+        .filter(|r| !r.interrupted && !r.skipped)
         .and_then(|r| chrono::DateTime::parse_from_rfc3339(&r.started_at).ok())
         .is_some_and(|started| {
             started.with_timezone(&now.timezone()).date_naive() == now.date_naive()
         })
 }
 
-/// True unless an encrypted source is missing its saved password (an unattended
-/// run cannot then decrypt the volume, so it must be skipped).
-fn has_passwords(job: &own_backup_core::Job, passwords: &PasswordStore) -> bool {
-    let missing: Vec<String> = sources_needing_password(job)
+/// The encrypted sources without a saved password: an unattended run cannot
+/// decrypt them, so it must be skipped.
+fn missing_passwords(job: &own_backup_core::Job, passwords: &PasswordStore) -> Vec<String> {
+    sources_needing_password(job)
         .into_iter()
         .filter(|s| !passwords.has(&own_backup_core::source_token(s)))
-        .collect();
-    if !missing.is_empty() {
-        warn!(
-            job = %job.name,
-            sources = ?missing,
-            "Scheduler: skipping — encrypted source has no saved password"
-        );
-        return false;
+        .collect()
+}
+
+/// Jobs whose skipped run is already in the history: one record for as long
+/// as the cause lasts, not one a minute. Forgotten when the job can run
+/// again, and with the process — after a restart the skip is said once more.
+static SKIP_RECORDED: std::sync::Mutex<Option<HashSet<String>>> = std::sync::Mutex::new(None);
+
+/// May the scheduler start `job` now? When a saved password is missing it may
+/// not, and the person is told in the history (once, see [`SKIP_RECORDED`]):
+/// before, the only trace was a line a minute in the service log, and a copy
+/// due at 14:00 simply did not happen (owner, 24.10).
+fn ready_to_run(job: &own_backup_core::Job, store: &JobStore, passwords: &PasswordStore) -> bool {
+    let missing = missing_passwords(job, passwords);
+    let mut recorded = SKIP_RECORDED.lock().unwrap_or_else(|e| e.into_inner());
+    let recorded = recorded.get_or_insert_with(HashSet::new);
+    if missing.is_empty() {
+        recorded.remove(&job.id);
+        return true;
     }
-    true
+    warn!(
+        job = %job.name,
+        sources = ?missing,
+        "Scheduler: skipping — encrypted source has no saved password"
+    );
+    if recorded.insert(job.id.clone()) {
+        record_skip(store, job, &missing);
+    }
+    false
+}
+
+/// The skipped run as the history shows it: an error that says which volumes
+/// and what to do. It does not serve the slot ([`JobRun::skipped`]).
+fn record_skip(store: &JobStore, job: &own_backup_core::Job, missing: &[String]) {
+    let volumes = missing
+        .iter()
+        .map(|s| format!("«{}»", job.label_for(s)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut error = tr!("scheduler.skipped_no_password", volumes = volumes).into_owned();
+    if job.schedule.run_missed {
+        error.push(' ');
+        error.push_str(&tr!("scheduler.skipped_catch_up"));
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let run = JobRun {
+        id: uuid::Uuid::new_v4().to_string(),
+        job_id: job.id.clone(),
+        job_name: job.name.clone(),
+        started_at: now.clone(),
+        finished_at: now,
+        status: "error".into(),
+        skipped: true,
+        error,
+        error_kind: "volume_password_missing".into(),
+        ..Default::default()
+    };
+    match store.record_run(run) {
+        Ok(()) => info!(job = %job.name, "Scheduler: the skipped run is in the history"),
+        Err(e) => warn!(job = %job.name, error = %e, "the skipped run could not be recorded"),
+    }
 }
 
 /// The sources an unattended run has to decrypt.
@@ -634,8 +688,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let passwords = PasswordStore::new(dir.path().join("metadata.db"));
         let job = disk_job();
-        assert_eq!(sources_needing_password(&job), vec!["/dev/root".to_string()]);
-        assert!(!has_passwords(&job, &passwords), "the root's is not there yet");
+        assert_eq!(
+            sources_needing_password(&job),
+            vec!["/dev/root".to_string()]
+        );
+        assert_eq!(
+            missing_passwords(&job, &passwords),
+            vec!["/dev/root".to_string()]
+        );
         passwords
             .remember(
                 &own_backup_core::source_token("/dev/root"),
@@ -644,8 +704,63 @@ mod tests {
             )
             .unwrap();
         assert!(
-            has_passwords(&job, &passwords),
+            missing_passwords(&job, &passwords).is_empty(),
             "the ESP and /boot need none"
+        );
+    }
+
+    /// A skipped scheduled run is in the history once, says what to do, and
+    /// does not count as the slot's run: when the password is saved, the
+    /// missed copy is still made.
+    #[test]
+    fn a_skipped_run_is_recorded_once_and_does_not_serve_its_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::load(dir.path());
+        let passwords = PasswordStore::new(dir.path().join("metadata.db"));
+        let mut job = disk_job();
+        job.schedule.run_missed = true;
+        let job = store.upsert(job).unwrap();
+
+        for _ in 0..3 {
+            assert!(!ready_to_run(&job, &store, &passwords));
+        }
+        let runs: Vec<JobRun> = store
+            .activity()
+            .into_iter()
+            .filter(|r| r.job_id == job.id)
+            .collect();
+        assert_eq!(runs.len(), 1, "one record, not one a minute");
+        let run = &runs[0];
+        assert!(run.skipped && run.status == "error");
+        assert_eq!(run.error_kind, "volume_password_missing");
+        assert!(run.error.contains("/dev/root"), "{}", run.error);
+        assert!(run.error.contains(&*tr!("scheduler.skipped_catch_up")));
+
+        let job = store.get(&job.id).unwrap();
+        assert!(job.last_run.as_ref().unwrap().skipped);
+        assert_eq!(last_fired(&job, &store), None, "the slot is still unserved");
+        assert!(!started_on_the_same_day(&job, chrono::Local::now()));
+
+        passwords
+            .remember(
+                &own_backup_core::source_token("/dev/root"),
+                "secret".into(),
+                false,
+            )
+            .unwrap();
+        assert!(ready_to_run(&job, &store, &passwords));
+        // Forgotten again: the next time a password goes missing is said anew.
+        passwords
+            .forget(&own_backup_core::source_token("/dev/root"))
+            .unwrap();
+        assert!(!ready_to_run(&job, &store, &passwords));
+        assert_eq!(
+            store
+                .activity()
+                .iter()
+                .filter(|r| r.job_id == job.id)
+                .count(),
+            2
         );
     }
 

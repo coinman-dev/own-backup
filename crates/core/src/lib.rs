@@ -609,6 +609,14 @@ pub struct JobRun {
     /// weekly copy cut off by a restart was taken as done and skipped).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub interrupted: bool,
+    /// The scheduler did not start this run: its time came, and something the
+    /// run needs was missing (a saved password of an encrypted source).
+    /// Recorded so the person sees it in the history instead of a schedule
+    /// that silently does nothing (owner, 24.10); like an interrupted run it
+    /// does not count as the slot's run, so a job that catches up missed runs
+    /// makes the copy as soon as the cause is gone.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skipped: bool,
     /// What kind of failure `error` is, for the window to act on — decided by
     /// the error's structure, never by its words. Empty for every failure
     /// without a kind of its own. `archive_reauthorize`: the job's local
@@ -1335,14 +1343,17 @@ impl JobStore {
     }
 
     /// When the job's schedule was last served: the start of its newest backup
-    /// run that was not [`JobRun::interrupted`]. A run cut off by the service
-    /// stopping did not serve its slot.
+    /// run that was neither [`JobRun::interrupted`] nor [`JobRun::skipped`]. A
+    /// run cut off by the service stopping, or never started, did not serve
+    /// its slot.
     pub fn last_scheduled_start(&self, job_id: &str) -> Option<String> {
         self.activity
             .lock()
             .unwrap()
             .iter()
-            .find(|r| r.job_id == job_id && r.operation != "verify" && !r.interrupted)
+            .find(|r| {
+                r.job_id == job_id && r.operation != "verify" && !r.interrupted && !r.skipped
+            })
             .map(|r| r.started_at.clone())
     }
 }
