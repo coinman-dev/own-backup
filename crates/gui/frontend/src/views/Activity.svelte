@@ -232,7 +232,9 @@
   .title { font-size: 14px; color: var(--head); }
   .time { color: var(--text-muted); margin-left: 6px; }
   /* Only ever a failure: the step that broke, or the copy's error. */
-  .note { font-size: 13px; color: var(--error-text); margin-top: 5px; word-break: break-all; }
+  /* A long path still wraps, but a sentence breaks between words: break-all cut
+     "does n|ot" in two (2026-10-24). */
+  .note { font-size: 13px; color: var(--error-text); margin-top: 5px; overflow-wrap: anywhere; }
   .stats { display: flex; gap: 40px; margin-top: 12px; flex-wrap: wrap; }
   .stats > div { display: flex; flex-direction: column; }
   .k { font-size: 12px; color: var(--accent-text); }
