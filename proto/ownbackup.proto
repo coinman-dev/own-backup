@@ -120,6 +120,13 @@ service BackupService {
   // JSON out: { "container", "encrypted", "job_id", "fingerprint", "role",
   //             "created_at", "chain_id", "virtual_size" }
   rpc InspectImage(JsonRequest) returns (JsonReply);
+  // What a copy says about itself, for a window that cannot open the file
+  // (on Linux the copies are root's, 0600). JSON in: { "image_path", "part":
+  // "listing" | "sidecar", "password"?, "recovery_key"? }. "listing" — the
+  // open header of an .obk, no key. "sidecar" — the description (info,
+  // manifest, disk_manifest; no checksums, no LUKS header bytes); an
+  // encrypted copy needs the caller's secret, never the service's key (§7.4).
+  rpc ReadImageMeta(JsonRequest) returns (JsonReply);
 
   // --- Restore plans (the partition designer) ---
   // The GUI assembles a RestorePlan and sends it here. DryRun checks it and

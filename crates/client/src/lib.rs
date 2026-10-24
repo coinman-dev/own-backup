@@ -1009,6 +1009,29 @@ impl BackupClient {
         parse(&reply.json)
     }
 
+    /// What a copy says about itself, read by the service — for a window
+    /// that cannot open the file (on Linux the copies are root's). `part`:
+    /// `"listing"` (the open header of an `.obk`, no key) or `"sidecar"` (the
+    /// description; an encrypted copy needs `secret`).
+    pub async fn read_image_meta(
+        &mut self,
+        image_path: &str,
+        part: &str,
+        secret: &ArchiveSecret,
+    ) -> Result<serde_json::Value> {
+        let mut body = serde_json::json!({ "image_path": image_path, "part": part });
+        secret.add_to(&mut body);
+        let reply = self
+            .inner
+            .read_image_meta(self.request(proto::JsonRequest {
+                json: body.to_string(),
+            }))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
     // --- Restore plans (the partition designer) ---------------------------
 
     /// Check a plan without writing anything (D5).

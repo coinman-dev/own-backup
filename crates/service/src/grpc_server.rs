@@ -705,6 +705,92 @@ struct ManualSecret {
     recovery_key: Option<String>,
 }
 
+/// A file `ReadImageMeta` may read as root for a caller: one of our copies,
+/// by an absolute path, a regular file and not a link to something else. The
+/// service runs as root; without this the call would read and parse any file
+/// the caller names.
+fn image_meta_target(path: &std::path::Path) -> Result<(), Status> {
+    let refuse = || {
+        Status::invalid_argument(format!(
+            "{} is not a backup copy (.obk, .vhdx, .avhdx, .qcow2)",
+            path.display()
+        ))
+    };
+    if !path.is_absolute() {
+        return Err(refuse());
+    }
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !matches!(ext.as_str(), "obk" | "vhdx" | "avhdx" | "qcow2") {
+        return Err(refuse());
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_file() => Ok(()),
+        Ok(_) => Err(refuse()),
+        Err(e) => Err(Status::not_found(format!("{}: {e}", path.display()))),
+    }
+}
+
+/// The open header of an `.obk`, as `ReadImageMeta` hands it out.
+#[derive(serde::Serialize)]
+struct ImageListingOut {
+    job_id: String,
+    chain_id: String,
+    backup_id: String,
+    role: String,
+    created_at: String,
+    parent_file_name: Option<String>,
+    virtual_size: u64,
+}
+
+impl From<own_backup_backup::seal::obk::ObkListing> for ImageListingOut {
+    fn from(l: own_backup_backup::seal::obk::ObkListing) -> Self {
+        Self {
+            job_id: l.job_id,
+            chain_id: l.chain_id.to_string(),
+            backup_id: l.backup_id.to_string(),
+            role: format!("{:?}", l.role).to_lowercase(),
+            created_at: l.created_at,
+            parent_file_name: l.parent_file_name,
+            virtual_size: l.virtual_size,
+        }
+    }
+}
+
+/// A copy's description, as `ReadImageMeta` hands it out: what a window shows
+/// and plans with. Not the block checksums (megabytes, and only a verify uses
+/// them) and not the LUKS headers' bytes — which partitions have one is what a
+/// window needs; the header itself stays in the copy for the restore.
+#[derive(serde::Serialize)]
+struct ImageSidecarOut {
+    info: own_backup_backup::sidecar::SidecarInfo,
+    manifest: own_backup_common::image::ImageManifest,
+    disk_manifest: Option<own_backup_common::gpt::DiskBackupManifest>,
+}
+
+impl From<own_backup_backup::Sidecar> for ImageSidecarOut {
+    fn from(mut s: own_backup_backup::Sidecar) -> Self {
+        hide_header_bytes(&mut s.info);
+        Self {
+            info: s.info,
+            manifest: s.manifest,
+            disk_manifest: s.disk_manifest,
+        }
+    }
+}
+
+/// Keep which partitions have a LUKS header, drop the header's bytes: a key
+/// slot is an offline password-guessing target, and the window only needs to
+/// know the header is there.
+fn hide_header_bytes(info: &mut own_backup_backup::sidecar::SidecarInfo) {
+    for h in &mut info.luks_headers {
+        h.header_b64.clear();
+    }
+}
+
 /// Keys for a MANUAL mount, restore or verify, from what the person typed.
 ///
 /// **Never the service's own key store**, and that is the line §7.4 draws: a
@@ -3259,6 +3345,49 @@ impl BackupService for BackupServiceImpl {
     /// failure. Everything here comes out of the open header, which is why it
     /// needs nothing: it is also why none of it is a fact about the contents
     /// (`seal/obk/listing.rs`).
+    async fn read_image_meta(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[derive(serde::Deserialize)]
+        struct In {
+            image_path: String,
+            part: String,
+            #[serde(flatten)]
+            secret: ManualSecret,
+        }
+        let p: In = serde_json::from_str(&req.into_inner().json)
+            .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+        let path = std::path::PathBuf::from(&p.image_path);
+        image_meta_target(&path)?;
+        match p.part.as_str() {
+            "listing" => {
+                let listing = tokio::task::spawn_blocking({
+                    let path = path.clone();
+                    move || own_backup_backup::seal::obk::read_listing(&path)
+                })
+                .await
+                .map_err(|e| Status::internal(format!("listing task panicked: {e}")))?
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                json_reply(&ImageListingOut::from(listing))
+            }
+            "sidecar" => {
+                let keys = manual_keys_off_thread(path.clone(), p.secret).await?;
+                let sidecar = tokio::task::spawn_blocking(move || {
+                    own_backup_backup::sidecar::read_sidecar_with_keys(&path, keys.as_ref())
+                })
+                .await
+                .map_err(|e| Status::internal(format!("sidecar task panicked: {e}")))?
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                json_reply(&ImageSidecarOut::from(sidecar))
+            }
+            other => Err(Status::invalid_argument(format!(
+                "part must be \"listing\" or \"sidecar\", not {other:?}"
+            ))),
+        }
+    }
+
     async fn inspect_image(
         &self,
         req: Request<JsonRequest>,
@@ -4224,6 +4353,49 @@ fn linux_esp_partition(
 
 #[cfg(test)]
 mod tests {
+    /// `ReadImageMeta` reads as root for its caller: only our copies, by an
+    /// absolute path, regular files — not a link to `/etc/shadow`.
+    #[cfg(unix)]
+    #[test]
+    fn the_service_reads_only_copies_for_a_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let copy = dir.path().join("job_full.obk");
+        std::fs::write(&copy, b"x").unwrap();
+        assert!(super::image_meta_target(&copy).is_ok());
+        let other = dir.path().join("notes.txt");
+        std::fs::write(&other, b"x").unwrap();
+        assert!(super::image_meta_target(&other).is_err(), "not a copy");
+        assert!(
+            super::image_meta_target(std::path::Path::new("job_full.obk")).is_err(),
+            "relative"
+        );
+        let link = dir.path().join("shadow.qcow2");
+        std::os::unix::fs::symlink("/etc/shadow", &link).unwrap();
+        assert!(super::image_meta_target(&link).is_err(), "a link");
+        let folder = dir.path().join("dir.vhdx");
+        std::fs::create_dir(&folder).unwrap();
+        assert!(super::image_meta_target(&folder).is_err(), "a folder");
+        assert!(super::image_meta_target(&dir.path().join("gone.obk")).is_err());
+    }
+
+    /// The window learns which partitions keep a header, not the header.
+    #[test]
+    fn a_window_gets_the_header_s_place_not_its_bytes() {
+        let mut info = own_backup_backup::sidecar::SidecarInfo::new_full("disk.obk", 0);
+        let header = own_backup_common::image::LuksHeaderBackup {
+            part_index: 3,
+            data_offset: 16 << 20,
+            sector_size: 512,
+            kind: own_backup_common::image::VolumeEncryptionKind::Luks2,
+            header_b64: "TFVLU7q+".into(),
+        };
+        info.luks_headers.push(header);
+        super::hide_header_bytes(&mut info);
+        assert_eq!(info.luks_headers.len(), 1);
+        assert_eq!(info.luks_headers[0].part_index, 3);
+        assert!(info.luks_headers[0].header_b64.is_empty());
+    }
+
     /// A command-line whole-disk copy has no live-disk snapshot; its own
     /// partition table still names every partition the plan restores.
     #[test]
