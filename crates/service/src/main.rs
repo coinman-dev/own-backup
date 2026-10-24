@@ -748,7 +748,10 @@ pub async fn run_main_loop(
     // cut) has no record of its own; it gets one now, as interrupted.
     match store.record_killed_runs() {
         0 => {}
-        n => info!(runs = n, "runs cut off by a dead service recorded as interrupted"),
+        n => info!(
+            runs = n,
+            "runs cut off by a dead service recorded as interrupted"
+        ),
     }
     // A local authorization whose job is gone opens an archive on this machine
     // with no password and is accounted for by nothing. Deleting a job retires
@@ -880,10 +883,13 @@ pub async fn run_main_loop(
         // removed (and the cache of older versions) before any build may
         // start: the slot is held until then.
         let slot = busy
-            .reserve(own_backup_core::busy::Doing::new(
-                tr!("main.busy_media_cleanup"),
-                own_backup_backup::media_linux_build::WORK_PARENTS[0],
-            ))
+            .reserve(
+                own_backup_core::busy::Doing::new(
+                    tr!("main.busy_media_cleanup"),
+                    own_backup_backup::media_linux_build::WORK_PARENTS[0],
+                )
+                .shared(["media-build"]),
+            )
             .ok();
         std::thread::spawn(move || {
             let _slot = slot;

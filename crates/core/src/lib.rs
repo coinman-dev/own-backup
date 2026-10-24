@@ -1351,9 +1351,7 @@ impl JobStore {
             .lock()
             .unwrap()
             .iter()
-            .find(|r| {
-                r.job_id == job_id && r.operation != "verify" && !r.interrupted && !r.skipped
-            })
+            .find(|r| r.job_id == job_id && r.operation != "verify" && !r.interrupted && !r.skipped)
             .map(|r| r.started_at.clone())
     }
 }
@@ -2190,13 +2188,23 @@ pub async fn run_queue_worker(
 
         // A copy is a destructive operation on the destination folder: it
         // writes images, merges them and runs retention over them. It takes
-        // the machine's one slot like everything else, and WAITS for it
-        // rather than failing — a scheduled copy that happens to collide
+        // that folder (and the machine beside other shared operations), and
+        // WAITS for it rather than failing — a scheduled copy that happens to collide
         // with a restore should run afterwards, not be dropped (audit
         // AUD-02). Released by Drop at the end of the iteration, including
         // if the engine panics.
         let _slot = tokio::select! {
-            slot = busy.acquire(crate::busy::Doing::new(tr!("lib.doing_backup"), job.name.clone())) => slot,
+            slot = busy.acquire(
+                crate::busy::Doing::new(tr!("lib.doing_backup"), job.name.clone())
+                    // Its destination folder, and the archive keys a copy
+                    // may write; everything else may go on beside it — a
+                    // verification of another job, a boot medium.
+                    .shared([
+                        crate::busy::chain_resource(std::path::Path::new(&job.dest_folder)),
+                        "archive-keys".to_string(),
+                    ])
+                    .backup(),
+            ) => slot,
             _ = stop.changed() => {
                 queue.finish();
                 sink.queue_changed(queue.snapshot());

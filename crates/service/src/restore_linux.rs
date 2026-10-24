@@ -31,8 +31,8 @@ use tracing::{info, warn};
 
 use super::proto::{JsonReply, JsonRequest};
 use super::{
-    emit_engine, json_reply, keep_awake, luks_needs, manual_keys_off_thread,
-    BackupServiceImpl, ManualSecret,
+    emit_engine, json_reply, keep_awake, luks_needs, manual_keys_off_thread, BackupServiceImpl,
+    ManualSecret,
 };
 use own_backup_backup::identity_check_linux;
 use own_backup_backup::seal::context::ArchiveKeys;
@@ -312,7 +312,9 @@ impl BackupServiceImpl {
         };
         let fix_references = p.fix_references;
 
-        let slot = self.reserve(&tr!("grpc_server.busy_volume_restore"), &p.target)?;
+        let slot = self
+            .reserve(&tr!("grpc_server.busy_volume_restore"), &p.target)
+            .await?;
         let cancel = slot.cancel();
         let events = self.state.events.clone();
         info!(image = %p.image_path, target = %p.target, "RestoreVolume RPC started");
@@ -775,7 +777,9 @@ impl BackupServiceImpl {
         };
         let fix_references = p.fix_references;
 
-        let slot = self.reserve(&tr!("grpc_server.busy_disk_restore"), &p.target_device)?;
+        let slot = self
+            .reserve(&tr!("grpc_server.busy_disk_restore"), &p.target_device)
+            .await?;
         let cancel = slot.cancel();
         let events = self.state.events.clone();
         info!(image = %p.manifest_path, target = %p.target_device, "RestoreDisk RPC started");

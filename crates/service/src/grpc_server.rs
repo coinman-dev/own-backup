@@ -67,40 +67,59 @@ impl BackupServiceImpl {
     /// `failed_precondition` and not `unavailable`: nothing is broken, the
     /// answer is simply "not now", and a client can retry when the thing that
     /// is running has ended.
-    fn reserve(
+    async fn reserve(
         &self,
         what: &str,
         which: &str,
     ) -> Result<own_backup_core::busy::Reservation, Status> {
-        if self.shutdown.is_shutdown_requested() {
-            return Err(Status::unavailable("service is stopping"));
-        }
-        let slot = self
-            .state
-            .busy
-            .reserve(own_backup_core::busy::Doing::new(what, which))
-            .map_err(|held| Status::failed_precondition(held.refusal()))?;
-        if self.shutdown.is_shutdown_requested() {
-            return Err(Status::unavailable("service is stopping"));
-        }
-        Ok(slot)
+        self.take(own_backup_core::busy::Doing::new(what, which))
+            .await
     }
 
     /// The same, for an operation the client already has an id for — a restore
     /// plan is cancelled by its plan id, and that is what the window knows.
-    fn reserve_with_id(
+    async fn reserve_with_id(
         &self,
         what: &str,
         which: &str,
         id: uuid::Uuid,
     ) -> Result<own_backup_core::busy::Reservation, Status> {
+        self.take(own_backup_core::busy::Doing::with_id(what, which, id))
+            .await
+    }
+
+    /// For an operation that may run beside others, holding only
+    /// `resources` (`own_backup_core::busy`): a chain's folder, the medium
+    /// builder, a stick.
+    async fn reserve_on<I, S>(
+        &self,
+        what: &str,
+        which: &str,
+        resources: I,
+    ) -> Result<own_backup_core::busy::Reservation, Status>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.take(own_backup_core::busy::Doing::new(what, which).shared(resources))
+            .await
+    }
+
+    /// Take what `doing` needs. These are operations a person started: a
+    /// scheduled verification in the way steps aside (it is cancelled, and
+    /// its end is waited for briefly); anything else in the way is said.
+    async fn take(
+        &self,
+        doing: own_backup_core::busy::Doing,
+    ) -> Result<own_backup_core::busy::Reservation, Status> {
         if self.shutdown.is_shutdown_requested() {
             return Err(Status::unavailable("service is stopping"));
         }
         let slot = self
             .state
             .busy
-            .reserve(own_backup_core::busy::Doing::with_id(what, which, id))
+            .reserve_soon(doing, std::time::Duration::from_secs(30))
+            .await
             .map_err(|held| Status::failed_precondition(held.refusal()))?;
         if self.shutdown.is_shutdown_requested() {
             return Err(Status::unavailable("service is stopping"));
@@ -1266,7 +1285,15 @@ impl BackupService for BackupServiceImpl {
                     // Deleting a job's images is destructive work on the same
                     // folders a backup writes and a restore reads, so it takes
                     // the machine's slot like the rest (audit AUD-02).
-                    let _slot = self.reserve(&tr!("grpc_server.busy_delete_copies"), &job.name)?;
+                    let _slot = self
+                        .reserve_on(
+                            &tr!("grpc_server.busy_delete_copies"),
+                            &job.name,
+                            [own_backup_core::busy::chain_resource(std::path::Path::new(
+                                &job.dest_folder,
+                            ))],
+                        )
+                        .await?;
                     own_backup_core::delete_job_files(&self.state.store, &job)
                 }
                 None => own_backup_core::JobFilesDeleted::default(),
@@ -1340,7 +1367,9 @@ impl BackupService for BackupServiceImpl {
         }
         let p: In = serde_json::from_str(&req.into_inner().json)
             .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
-        let _slot = self.reserve(&tr!("grpc_server.busy_volume_letter"), &p.device)?;
+        let _slot = self
+            .reserve(&tr!("grpc_server.busy_volume_letter"), &p.device)
+            .await?;
         let volumes = hidden_volumes_now().await?;
         let Some(volume) = volumes
             .iter()
@@ -1748,7 +1777,9 @@ impl BackupService for BackupServiceImpl {
             // machine with a backup, another restore or a verify (audit
             // AUD-02); the guard travels into the blocking closure so it is
             // released even if the engine panics there.
-            let slot = self.reserve(&tr!("grpc_server.busy_volume_restore"), &p.target)?;
+            let slot = self
+                .reserve(&tr!("grpc_server.busy_volume_restore"), &p.target)
+                .await?;
             let cancel = slot.cancel();
             let events = self.state.events.clone();
             let image_path = std::path::PathBuf::from(&p.image_path);
@@ -1835,7 +1866,15 @@ impl BackupService for BackupServiceImpl {
             // mid-change is how a good image gets reported as damaged.
             let path = std::path::PathBuf::from(&p.image_path);
             let keys = manual_keys_off_thread(path.clone(), p.secret).await?;
-            let slot = self.reserve(&tr!("grpc_server.busy_validation"), &p.image_path)?;
+            let slot = self
+                .reserve_on(
+                    &tr!("grpc_server.busy_validation"),
+                    &p.image_path,
+                    [own_backup_core::busy::image_chain_resource(
+                        std::path::Path::new(&p.image_path),
+                    )],
+                )
+                .await?;
             info!(image = %p.image_path, "VerifyImage RPC started");
             let cancel = slot.cancel();
             let events = self.state.events.clone();
@@ -1940,7 +1979,15 @@ impl BackupService for BackupServiceImpl {
         // already calls itself the current one, and it would start writing an
         // increment onto the very image this is about to delete the moment the
         // slot is let go.
-        let slot = self.reserve(&tr!("grpc_server.busy_delete_copies"), &job.name)?;
+        let slot = self
+            .reserve_on(
+                &tr!("grpc_server.busy_delete_copies"),
+                &job.name,
+                [own_backup_core::busy::chain_resource(std::path::Path::new(
+                    &job.dest_folder,
+                ))],
+            )
+            .await?;
         if self.state.queue.snapshot().current.as_deref() == Some(p.job_id.as_str()) {
             return Err(Status::failed_precondition(
                 tr!("grpc_server.job_running_cannot_delete").into_owned(),
@@ -2005,7 +2052,15 @@ impl BackupService for BackupServiceImpl {
             // One key opens every copy of a job, so it is derived once, from
             // the first — and before the slot is taken, like any manual verify.
             let keys = manual_keys_off_thread(first.0.clone(), p.secret).await?;
-            let slot = self.reserve(&tr!("grpc_server.busy_validation"), &job.name)?;
+            let slot = self
+                .reserve_on(
+                    &tr!("grpc_server.busy_validation"),
+                    &job.name,
+                    [own_backup_core::busy::chain_resource(std::path::Path::new(
+                        &job.dest_folder,
+                    ))],
+                )
+                .await?;
             info!(job = %p.job_id, images = targets.len(), all_versions = p.all_versions, "VerifyJob RPC started");
             let cancel = slot.cancel();
             let events = self.state.events.clone();
@@ -2133,7 +2188,15 @@ impl BackupService for BackupServiceImpl {
         }
 
         let keys = manual_keys_off_thread(image.clone(), p.secret).await?;
-        let slot = self.reserve(&tr!("grpc_server.busy_export"), &p.image_path)?;
+        let slot = self
+            .reserve_on(
+                &tr!("grpc_server.busy_export"),
+                &p.image_path,
+                [own_backup_core::busy::image_chain_resource(
+                    std::path::Path::new(&p.image_path),
+                )],
+            )
+            .await?;
         info!(image = %p.image_path, target = %p.target_path, "ExportImage RPC started");
         let cancel = slot.cancel();
         let events = self.state.events.clone();
@@ -2217,7 +2280,15 @@ impl BackupService for BackupServiceImpl {
             // What protects a live mount is the check consolidation already
             // makes: it refuses an image that has a mount beside it.
             let keys = manual_keys_off_thread(path.clone(), p.secret).await?;
-            let slot = self.reserve(&tr!("grpc_server.busy_mount"), &p.image_path)?;
+            let slot = self
+                .reserve_on(
+                    &tr!("grpc_server.busy_mount"),
+                    &p.image_path,
+                    [own_backup_core::busy::image_chain_resource(
+                        std::path::Path::new(&p.image_path),
+                    )],
+                )
+                .await?;
             let mount_point = tokio::task::spawn_blocking(move || {
                 let _slot = slot;
                 mount_image_with_keys(&path, rw, keys.as_ref())
@@ -2650,10 +2721,13 @@ impl BackupService for BackupServiceImpl {
             .await
             .map_err(|e| Status::internal(format!("stick check panicked: {e}")))?
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
-            let slot = self.reserve(
-                &tr!("grpc_server.busy_media_stick"),
-                &tr!("grpc_server.busy_which_stick", device = p.device.as_str()),
-            )?;
+            let slot = self
+                .reserve_on(
+                    &tr!("grpc_server.busy_media_stick"),
+                    &tr!("grpc_server.busy_which_stick", device = p.device.as_str()),
+                    [format!("disk:{}", p.device.trim())],
+                )
+                .await?;
             let cancel = slot.cancel();
             let events = self.state.events.clone();
             let stages: Vec<MediaStageDto> = StickStage::ALL
@@ -2849,10 +2923,18 @@ impl BackupService for BackupServiceImpl {
             .map_err(|e| Status::internal(format!("folder check panicked: {e}")))?
             .map_err(refused)?;
 
-            let slot = self.reserve(
-                &tr!("grpc_server.busy_media_build"),
-                &out.path.display().to_string(),
-            )?;
+            // The builder, and the stick it writes when there is one.
+            let mut needs = vec!["media-build".to_string()];
+            if with_stick {
+                needs.push(format!("disk:{}", p.stick_device.trim()));
+            }
+            let slot = self
+                .reserve_on(
+                    &tr!("grpc_server.busy_media_build"),
+                    &out.path.display().to_string(),
+                    needs,
+                )
+                .await?;
             let cancel = slot.cancel();
             let events = self.state.events.clone();
             let plan = LinuxStage::plan(with_stick);
@@ -2941,10 +3023,13 @@ impl BackupService for BackupServiceImpl {
         {
             use own_backup_common::engine_dto::LinuxMediaCacheClearedDto;
             crate::polkit::authorize(&req, crate::polkit::Action::BuildMedia).await?;
-            let slot = self.reserve(
-                &tr!("grpc_server.busy_media_cache"),
-                own_backup_backup::media_linux_build::WORK_PARENTS[0],
-            )?;
+            let slot = self
+                .reserve_on(
+                    &tr!("grpc_server.busy_media_cache"),
+                    own_backup_backup::media_linux_build::WORK_PARENTS[0],
+                    ["media-build"],
+                )
+                .await?;
             let freed = tokio::task::spawn_blocking(move || {
                 let _slot = slot;
                 own_backup_backup::media_linux_build::clear_cache()
@@ -3061,10 +3146,12 @@ impl BackupService for BackupServiceImpl {
                 known,
             } = luks_needs(manifest_path.clone(), keys, p.passphrases).await?;
 
-            let slot = self.reserve(
-                &tr!("grpc_server.busy_disk_restore"),
-                &tr!("grpc_server.busy_which_disk", disk = p.target_disk),
-            )?;
+            let slot = self
+                .reserve(
+                    &tr!("grpc_server.busy_disk_restore"),
+                    &tr!("grpc_server.busy_which_disk", disk = p.target_disk),
+                )
+                .await?;
             let cancel = slot.cancel();
             let events = self.state.events.clone();
             let request = DiskRestoreRequest {
@@ -3244,7 +3331,18 @@ impl BackupService for BackupServiceImpl {
         let prepared = setup
             .pending_job(&p.token)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        let slot = self.reserve(&tr!("grpc_server.busy_archive_setup"), &prepared.name)?;
+        let slot = self
+            .reserve_on(
+                &tr!("grpc_server.busy_archive_setup"),
+                &prepared.name,
+                [
+                    own_backup_core::busy::chain_resource(std::path::Path::new(
+                        &prepared.dest_folder,
+                    )),
+                    "archive-keys".to_string(),
+                ],
+            )
+            .await?;
         let queue = self.state.queue.snapshot();
         if queue.current.as_deref() == Some(prepared.id.as_str())
             || queue.pending.iter().any(|id| id == &prepared.id)
@@ -3291,7 +3389,16 @@ impl BackupService for BackupServiceImpl {
             .store
             .get(&p.job_id)
             .ok_or_else(|| Status::not_found(tr!("grpc_server.job_not_found").into_owned()))?;
-        let slot = self.reserve(&tr!("grpc_server.busy_archive_reauthorize"), &job.name)?;
+        let slot = self
+            .reserve_on(
+                &tr!("grpc_server.busy_archive_reauthorize"),
+                &job.name,
+                [
+                    own_backup_core::busy::chain_resource(std::path::Path::new(&job.dest_folder)),
+                    "archive-keys".to_string(),
+                ],
+            )
+            .await?;
         let queue = self.state.queue.snapshot();
         if queue.current.as_deref() == Some(job.id.as_str())
             || queue.pending.iter().any(|id| id == &job.id)
@@ -3675,11 +3782,13 @@ impl BackupService for BackupServiceImpl {
         //
         // The token comes with the slot, addressed by plan id, so a cancel
         // that arrives late cannot hit the run that started after it (D18).
-        let slot = self.reserve_with_id(
-            &tr!("grpc_server.busy_restore"),
-            &tr!("grpc_server.busy_which_disk", disk = plan_disk_name(&plan)),
-            plan.id,
-        )?;
+        let slot = self
+            .reserve_with_id(
+                &tr!("grpc_server.busy_restore"),
+                &tr!("grpc_server.busy_which_disk", disk = plan_disk_name(&plan)),
+                plan.id,
+            )
+            .await?;
         let cancel = slot.cancel();
         let initial = own_backup_core::restore_exec::initial_state(&plan);
         *self.state.restore_run.lock().unwrap() = Some(initial.clone());
@@ -4231,7 +4340,9 @@ impl BootActionIn {
     fn entry(&self) -> Result<u16, Status> {
         let s = self.entry.as_deref().unwrap_or_default();
         u16::from_str_radix(s.trim().trim_start_matches("0x"), 16).map_err(|_| {
-            Status::invalid_argument(tr!("grpc_server.boot_not_entry_number", value = s).into_owned())
+            Status::invalid_argument(
+                tr!("grpc_server.boot_not_entry_number", value = s).into_owned(),
+            )
         })
     }
 
@@ -4547,11 +4658,12 @@ mod tests {
         let svc = make_service_with_shutdown(dir.path(), shutdown);
         controller.trigger_shutdown();
         assert_eq!(
-            svc.reserve("verify", "image").unwrap_err().code(),
+            svc.reserve("verify", "image").await.unwrap_err().code(),
             tonic::Code::Unavailable
         );
         assert_eq!(
             svc.reserve_with_id("restore", "plan", uuid::Uuid::new_v4())
+                .await
                 .unwrap_err()
                 .code(),
             tonic::Code::Unavailable
