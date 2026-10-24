@@ -1104,6 +1104,14 @@ fn backup_disk_inner<P: DiskPlatform>(
         Vec::new()
     };
     target.finalize(&provisional, meta_size as usize)?;
+    // The snapshots are released next — a phase of its own, see the volume
+    // path (`volume.rs`).
+    let _ = progress(&BackupProgress {
+        backup_id: "release".into(),
+        status: BackupStatus::Running,
+        bytes_written: bytes_copied,
+        ..Default::default()
+    });
     for prep in &mut prepared {
         if let Some(Err(e)) = prep.session.complete() {
             warn!(error = %e, "VSS release failed (data is already safe)");
@@ -1148,6 +1156,14 @@ fn backup_disk_inner<P: DiskPlatform>(
     let mut excluded_entries_kept: Option<String> = None;
     let mut resident_in_journal = false;
     if !removal.is_empty() {
+        // Until the pass ticks, the image is being opened for it (on Windows
+        // attached as a disk, which waits for the device stack).
+        let _ = progress(&BackupProgress {
+            backup_id: "exclusions-open".into(),
+            status: BackupStatus::Running,
+            bytes_written: bytes_copied,
+            ..Default::default()
+        });
         // Каждый проход удаления называет свой итог сам: удаление — пути,
         // зануление — куски, пере-хеширование — блоки. Ноль значит «итог
         // неизвестен», и полоса тогда остаётся бегущей, как раньше.

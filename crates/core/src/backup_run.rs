@@ -111,6 +111,13 @@ impl<'a> CopyProgress<'a> {
             // work that used to hide under "сброс кэша" and read as a
             // hang.
             "exclusions" => "exclusions",
+            // The two waits between the finished image and those passes:
+            // the snapshot being released (VSS BackupComplete on Windows)
+            // and the image being opened for the removal (attached as a
+            // disk on Windows). Both once stood behind a hung device while
+            // the window said "сброс кэша" (2026-10-24).
+            "release" => "release",
+            "exclusions-open" => "exclusions-open",
             // Asked just before the image is published, so a run that
             // was cancelled or left behind never publishes.
             "publish" => "finalize",
@@ -133,6 +140,8 @@ impl<'a> CopyProgress<'a> {
         if has_categories
             || phase == "finalize"
             || phase == "exclusions"
+            || phase == "release"
+            || phase == "exclusions-open"
             || permille != self.last_permille
             || self.last_emit.elapsed().as_millis() >= 400
         {

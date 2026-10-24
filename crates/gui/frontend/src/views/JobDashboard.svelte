@@ -33,11 +33,16 @@
   // of real work that used to hide under the "сброс кэша" label and read as a
   // hang — 7 of the 26 minutes of a real run (2026-08-07).
   const excluding = $derived(progress?.phase === 'exclusions');
+  // The two waits between the finished image and the removal pass: the
+  // snapshot being released, and the image being opened for the pass. Both
+  // once stood behind a hung USB device under "сброс кэша" (2026-10-24).
+  const releasing = $derived(progress?.phase === 'release');
+  const opening = $derived(progress?.phase === 'exclusions-open');
   /* Бегущая полоса — только когда считать нечего. У удаления исключённых
      файлов итог есть (сколько путей велено удалить), поэтому там обычная
      шкала и честное «Осталось»; «сброс кэша» итога не имеет никогда. */
   const indetBar = $derived(
-    progress?.phase === 'finalize' || (excluding && (progress?.blocks_total ?? 0) === 0),
+    finalizing || releasing || opening || (excluding && (progress?.blocks_total ?? 0) === 0),
   );
   /** The job copies an encrypted container (BitLocker/LUKS) that it opens with
    *  a password: the copy then holds the volume DECRYPTED. Without archive
@@ -115,7 +120,7 @@
     const p = progress;
     if (!p || p.phase === 'prepare') return 0;
     if (p.phase === 'scheduled-verify') return p.percent;
-    if (p.phase === 'finalize' || p.phase === 'exclusions')
+    if (['finalize', 'release', 'exclusions-open', 'exclusions'].includes(p.phase))
       return job.advanced.validate_after ? 50 : 100;
     if (job.advanced.validate_after) {
       return Math.round(p.phase === 'verify' ? 50 + p.percent / 2 : p.percent / 2);
@@ -332,7 +337,8 @@
       <div class="progress-info">
         <span>
           {volTag}{#if preparing}{m.dash_phase_prepare()}
-          {:else if excluding}{m.dash_phase_exclusions()}
+          {:else if excluding || opening}{m.dash_phase_exclusions()}
+          {:else if releasing}{m.dash_phase_release()}
           {:else if finalizing}{m.dash_phase_finalize()}
           {:else if verifying}{verifyLabel}
           {:else}{m.dash_phase_backup()}{/if}
@@ -351,6 +357,10 @@
               {:else}
                 {m.dash_excluding_note()}
               {/if}
+            {:else if opening}
+              {m.dash_opening_note()}
+            {:else if releasing}
+              {m.dash_release_note()}
             {:else if finalizing}
               {m.dash_finalizing_note()}
             {:else}
@@ -375,7 +385,9 @@
            it fails, and a bar that merely stops reads as "still working". -->
       {#if progress?.stalled_secs}
         <div class="stall-note" role="status">
-          {m.dash_stalled({ min: Math.max(2, Math.floor(progress.stalled_secs / 60)) })}
+          {(releasing ? m.dash_stalled_release : opening ? m.dash_stalled_open : m.dash_stalled)({
+            min: Math.max(2, Math.floor(progress.stalled_secs / 60)),
+          })}
         </div>
       {/if}
     </div>

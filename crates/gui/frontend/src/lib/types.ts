@@ -835,6 +835,9 @@ export interface JobProgress {
    * 'prepare'    = exclusion scan (blocks_done counts scanned entries)
    * 'backup'     = copying blocks
    * 'finalize'   = flushing the image to disk / detaching (no granular progress)
+   * 'release'    = releasing the volume snapshot (VSS BackupComplete on Windows)
+   * 'exclusions-open' = opening the finished image for the pass below
+   *                (attached as a disk on Windows)
    * 'exclusions' = post-copy true-removal / in-image exclusion pass
    *                (blocks_done counts processed entries; minutes on big volumes)
    * 'verify'     = post-backup validation

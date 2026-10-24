@@ -456,7 +456,15 @@ fn backup_volume_inner<P: EnginePlatform>(
     )?;
 
     // Tell the snapshot the copy succeeded and release it: VSS writers'
-    // BackupComplete on Windows, the dm/LVM snapshot or freeze on Linux.
+    // BackupComplete on Windows, the dm/LVM snapshot or freeze on Linux. A
+    // phase of its own: it once stood for minutes behind a hung device while
+    // the window still said "flushing the cache" (2026-10-24).
+    let _ = progress(&BackupProgress {
+        backup_id: "release".into(),
+        status: BackupStatus::Running,
+        bytes_written: outcome.bytes_copied,
+        ..Default::default()
+    });
     let t = Instant::now();
     if let Some(Err(e)) = session.complete() {
         warn!(error = %e, "snapshot completion failed (backup data is already safe)");
@@ -511,6 +519,9 @@ fn backup_volume_inner<P: EnginePlatform>(
         volume_len,
     };
     if in_image_exclusions {
+        // Until the pass ticks, the image is being opened for it — on Windows
+        // attached as a disk, which waits for the device stack.
+        phase_tick("exclusions-open", 0, 0);
         let tick = &mut |n, total| phase_tick("exclusions", n, total);
         let done = platform.exclude_inside_image(
             &image,
@@ -544,6 +555,7 @@ fn backup_volume_inner<P: EnginePlatform>(
     let mut excluded_entries_kept: Option<String> = entries_kept;
     let mut resident_in_journal = false;
     if !removal_paths.is_empty() {
+        phase_tick("exclusions-open", 0, 0);
         let tick = &mut |n, total| phase_tick("exclusions", n, total);
         let removed =
             platform.remove_from_image(&image, span, &removal_paths, &mut checksums, tick)?;

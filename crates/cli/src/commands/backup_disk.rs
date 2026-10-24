@@ -300,6 +300,8 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
                 "finalize" | "publish" => {
                     "  завершение: сброс, отсоединение, удаление исключённых…".to_string()
                 }
+                "release" => "  освобождение снимка тома…".to_string(),
+                "exclusions-open" => "  открываем копию для удаления исключённых…".to_string(),
                 _ => format!(
                     "  {:3}%  {} / {} блоков  ({:.1} МБ/с)",
                     (p.blocks_done * 100)
