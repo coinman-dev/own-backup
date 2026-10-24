@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use own_backup_common::gpt::DiskBackupManifest;
+use own_backup_common::gpt::{DiskBackupManifest, DiskLayout};
 use own_backup_common::progress::{BackupProgress, RestoreProgress};
 use own_backup_common::types::BackupStatus;
 use own_backup_common::{tr, OwnBackupError, Result};
@@ -484,6 +484,26 @@ pub struct DiskRestoreSummary {
     pub containers: Vec<u32>,
 }
 
+/// The copy's layout with the target's other partitions kept: those the copy
+/// does not touch go back into the new table exactly as they are — another
+/// system, a data volume, a BitLocker drive beside the copied partitions
+/// (owner, 24.10) — instead of being dropped with it. The ones under a
+/// partition of the copy are overwritten, as the person confirmed; both are
+/// logged. A disk whose table cannot be read (blank, MBR) keeps nothing.
+fn layout_keeping_others(disk: u32, copy: &DiskLayout) -> DiskLayout {
+    let Ok(current) = crate::gpt_reader::read_disk_layout(disk) else {
+        return copy.clone();
+    };
+    let others = crate::table_merge::bystanders(copy, &current);
+    info!(
+        disk,
+        kept = ?others.kept.iter().map(|p| p.index).collect::<Vec<_>>(),
+        overwritten = ?others.overwritten.iter().map(|p| p.index).collect::<Vec<_>>(),
+        "whole-disk restore: the disk's other partitions"
+    );
+    crate::table_merge::with_bystanders(copy, &others.kept)
+}
+
 /// Recreate a disk from its `.obdm`: write the captured GPT, then restore each
 /// partition's image into its original offset. The target is taken offline for
 /// the duration so Windows does not auto-mount (and lock) partitions mid-write,
@@ -590,7 +610,8 @@ fn restore_disk_from_image(
         &sidecar.info.container,
         chain_key.as_ref(),
     )?);
-    let layout = &dm.layout; // real GUIDs
+    // Real GUIDs, and the disk's partitions the copy does not touch.
+    let layout = &layout_keeping_others(req.target_disk, &dm.layout);
 
     let target_path = format!(r"\\.\PhysicalDrive{}", req.target_disk);
     let (target_size, target_sector) = {
@@ -637,7 +658,7 @@ fn restore_disk_from_image(
     // A container's slot gets its header and its data re-encrypted instead;
     // the header is read back through a handle of its own (raw disk reads on
     // Windows are not cached).
-    let count = layout.partitions.len();
+    let count = dm.layout.partitions.len();
     let written = crate::luks_rebuild::write_disk_data(
         &crate::luks_rebuild::DiskData {
             image_path: &req.manifest_path,
@@ -742,7 +763,7 @@ fn restore_disk_legacy(
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_default();
-    let layout = &manifest.layout;
+    let layout = &layout_keeping_others(req.target_disk, &manifest.layout);
     let sector = layout.sector_size as u64;
 
     let target_path = format!(r"\\.\PhysicalDrive{}", req.target_disk);
