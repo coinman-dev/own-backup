@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { initEngine } from './lib/engineStore.svelte';
+  import { initEngine, refreshVolumes } from './lib/engineStore.svelte';
   import { initJobs } from './lib/jobStore.svelte';
   import { api } from './lib/api';
   import { setMediaMode } from './lib/mediaStore.svelte';
@@ -89,8 +89,20 @@
     // The service's messages (errors, restore checks, …) come in the window's
     // language: it is told now and at every switch. A config it cannot write
     // leaves them Russian, which is not worth a banner.
+    // What the window already holds was put into words by the service in the
+    // old language — the disk inventory's partition labels, «LUKS
+    // (зашифровано)» in an English window (2026-10-24). The service switches
+    // as it saves the setting, so once it has, the inventory is asked again.
+    let told = false;
     onLocale((l) => {
-      api.setUiLanguage(l).catch(() => {});
+      const switched = told;
+      told = true;
+      api
+        .setUiLanguage(l)
+        .then(() => {
+          if (switched) void refreshVolumes();
+        })
+        .catch(() => {});
     });
     checkService();
     initEngine();
