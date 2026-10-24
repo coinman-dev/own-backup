@@ -101,6 +101,39 @@ struct PvFacts {
     vg: Option<(String, Vec<String>)>,
 }
 
+/// The label UUID of the PV on an idle partition (no active volume, read as a
+/// plain partition), and — when its metadata reads — its volume group and the
+/// UUIDs of the group's other PVs. `None` when the partition is not a PV.
+///
+/// An inactive group across two disks, copied as one of them, restores just
+/// as incomplete as an active one; the summary has to say so too (stand
+/// 24.10: no word of it, because only an active group's metadata was read).
+pub(crate) fn idle_pv_group<D: SourceDevice>(
+    read_path: &str,
+    len: u64,
+) -> Option<(String, Option<(String, Vec<String>)>)> {
+    let mut dev = D::open_read(read_path).ok()?;
+    let mut head = vec![0u8; lvm_pv::LABEL_SCAN_BYTES.min(len as usize)];
+    dev.read_at(0, &mut head).ok()?;
+    let label = lvm_pv::parse_label(&head)?;
+    let mut areas = Vec::new();
+    for &(offset, size) in &label.metadata_areas {
+        let size = size.min(lvm_pv::MAX_METADATA_AREA);
+        if offset >= len || size == 0 {
+            continue;
+        }
+        let mut area = vec![0u8; size.min(len - offset) as usize];
+        if dev.read_at(offset, &mut area).is_ok() {
+            areas.push((offset, area));
+        }
+    }
+    let refs: Vec<(u64, &[u8])> = areas.iter().map(|(o, a)| (*o, a.as_slice())).collect();
+    let group = lvm_pv::allocation_of_areas(&refs, &label.uuid)
+        .ok()
+        .map(|a| (a.vg, a.other_pvs));
+    Some((label.uuid, group))
+}
+
 /// Read the PV's label and every metadata area of it — after dropping what
 /// the system cached of the partition: device-mapper writes the volumes on
 /// it past the partition's own page cache, and an inactive volume written

@@ -643,16 +643,12 @@ fn backup_disk_inner<P: DiskPlatform>(
     // alone, it is incomplete. Said in the run's summary, not just the log.
     {
         // Every PV in the copy, those copied as plain partitions included (a
-        // PV no active volume uses is idle and read as it is).
+        // PV no active volume uses is idle and read as it is) — and, for
+        // those, their group as their own metadata names it: an inactive
+        // group across disks is as incomplete restored alone as an active one.
         let mut in_copy: std::collections::HashSet<String> = std::collections::HashSet::new();
-        // Only worth reading labels when some group names PVs elsewhere —
-        // never on Windows, where no partition is held as a PV.
-        let any_others = prepared.iter().any(|p| {
-            p.pv.as_ref()
-                .and_then(|pv| pv.vg.as_ref())
-                .is_some_and(|(_, others)| !others.is_empty())
-        });
-        for p in prepared.iter().filter(|_| any_others) {
+        let mut idle_groups: Vec<(String, u32, Vec<String>)> = Vec::new();
+        for p in prepared.iter() {
             if let Some(pv) = &p.pv {
                 in_copy.insert(pv.uuid.clone());
                 continue;
@@ -660,29 +656,31 @@ fn backup_disk_inner<P: DiskPlatform>(
             if p.bitlocker.is_some() || p.locked_window.is_some() || p.luks.is_some() {
                 continue;
             }
-            let mut head = vec![0u8; own_backup_common::lvm_pv::LABEL_SCAN_BYTES];
-            let label = P::Dev::open_read(&p.read_path)
-                .and_then(|mut d| d.read_at(0, &mut head))
-                .ok()
-                .and_then(|()| own_backup_common::lvm_pv::parse_label(&head));
-            if let Some(l) = label {
-                in_copy.insert(l.uuid);
+            if let Some((uuid, group)) =
+                super::disk_pv::idle_pv_group::<P::Dev>(&p.read_path, p.volume_len)
+            {
+                in_copy.insert(uuid);
+                if let Some((vg, others)) = group {
+                    idle_groups.push((vg, p.part_index, others));
+                }
             }
         }
         // One note per volume group: the first partition of it, and every
         // PV of it the copy does not hold.
         let mut groups: Vec<(String, u32, std::collections::BTreeSet<String>)> = Vec::new();
-        for p in &prepared {
-            let Some((vg, others)) = p.pv.as_ref().and_then(|pv| pv.vg.as_ref()) else {
-                continue;
-            };
+        let active = prepared.iter().filter_map(|p| {
+            p.pv.as_ref()
+                .and_then(|pv| pv.vg.as_ref())
+                .map(|(vg, others)| (vg.clone(), p.part_index, others.clone()))
+        });
+        for (vg, index, others) in active.chain(idle_groups) {
             let missing = others
                 .iter()
                 .filter(|u| !u.is_empty() && !in_copy.contains(u.as_str()))
                 .cloned();
-            match groups.iter_mut().find(|g| &g.0 == vg) {
+            match groups.iter_mut().find(|g| g.0 == vg) {
                 Some(g) => g.2.extend(missing),
-                None => groups.push((vg.clone(), p.part_index, missing.collect())),
+                None => groups.push((vg, index, missing.collect())),
             }
         }
         for (vg, index, missing) in groups {
