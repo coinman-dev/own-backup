@@ -2,10 +2,35 @@
 
 # Changelog
 
-## Unreleased
+## 0.1.6-beta — 2026-10-24
 
 ### Added
 
+- **Linux version.** A `.deb` package for Ubuntu 24.04+ and Debian 13+
+  (amd64) with the same service, window and command line as on Windows. It
+  backs up volumes and whole disks with ext4, XFS, btrfs, NTFS, FAT32 and
+  exFAT, including LVM (every logical volume of a physical volume in one
+  snapshot) and open LUKS containers (read through a device-mapper
+  snapshot, the container header kept in the copy). Full, incremental and
+  differential chains in VHDX, qcow2 and encrypted OBK; exclusions that
+  really remove the files on ext4, XFS, btrfs and FAT, and on NTFS through
+  ntfs-3g. The service key store uses systemd-creds (with the TPM 2.0 when
+  there is one). A volume or a whole disk is restored through the service,
+  with the choice to give the restored file systems, LUKS containers and
+  volume groups new identities (UUIDs, labels, initramfs rebuilt) when the
+  originals are still on the machine. The **Boot** page edits UEFI boot
+  entries; the window has a tray icon and starts with the session. The
+  service runs under systemd, asks polkit before destructive actions and
+  logs to journald and a file.
+- Backups are interchangeable between Windows and Linux, VHDX chains
+  included: a copy made on one system opens, validates and restores on the
+  other.
+- **Linux boot medium.** A Debian 13 live ISO with the program on a labwc
+  desktop with our own taskbar; it boots with UEFI (Secure Boot through
+  Debian's signed shim) and BIOS, from a CD or a USB stick, and restores
+  Windows copies as well as Linux ones. The window builds it from the
+  installed package or downloads the ready one of the same version from the
+  release, and writes it onto a USB stick.
 - The boot medium card lets you choose a Winre.wim by hand (for example one
   taken from a Windows installation image). The service reads it first and
   refuses an installation image, a split or non-x64 image with the reason;
@@ -50,6 +75,42 @@
   is zeroed so the deleted names do not stay behind.
 - The service restarts by itself after a crash (in 10 s, then 1 and 5 min).
   It used to stay stopped until the next reboot, and scheduled copies with it.
+- A whole-disk restore keeps the partitions that are not in the backup, on
+  Windows and on Linux. It used to rewrite the partition table from the
+  backup alone.
+- Restoring a disk keeps the boot code in LBA 0 (MBR) when the partition
+  table is rewritten; on Linux the sectors after it (GRUB's core.img) stay
+  too.
+- NTFS exclusions cover named streams (Zone.Identifier and others) and
+  content stored inside the MFT record. A file with many names or streams,
+  whose record continues in extension records, no longer drops out of the
+  exclusions entirely.
+- qcow2: after consolidation the old bytes of replaced clusters are wiped,
+  so excluded content does not survive in dead clusters.
+- A backup interrupted because the service was stopped or killed is
+  recorded as interrupted, and the schedule runs it again.
+- The service no longer does one thing at a time for the whole machine:
+  a restore is still exclusive, but copies, checks and mounts of different
+  backup folders and the boot medium build run side by side; a scheduled
+  check gives way to an action of a person on the same folder.
+- A scheduled whole-disk backup with an encrypted partition needs the saved
+  password only for that partition (ESP and `/boot` next to LUKS used to
+  make every run skip), and a skipped run is shown under **Activity**.
+- The end of a backup no longer waits forever behind a hung device: each
+  VSS step has a time limit, and the window says "releasing the volume
+  snapshot" or "opening the finished backup" instead of "flushing the
+  cache".
+- The result says how many excluded files an ext4, XFS or btrfs volume
+  kept under their names with their contents zeroed.
+- Validating an image under **Tools** keeps its progress bar and result
+  when you leave the page and come back.
+- On Windows the service writes the settings and the service data folder
+  is open only to SYSTEM and administrators.
+- Error messages no longer start with an English prefix.
+- Dependencies: tokio past an I/O-safety flaw (RUSTSEC-2026-0386), Vite past
+  advisories of its development server, and zbus 6 instead of the
+  unmaintained zvariant crates; the Linux taskbar calls libgtk-layer-shell
+  directly instead of its archived Rust bindings.
 
 ## 0.1.5-beta — 2026-10-17
 
