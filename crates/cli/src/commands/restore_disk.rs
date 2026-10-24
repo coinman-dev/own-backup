@@ -272,7 +272,8 @@ pub async fn run(args: RestoreDiskArgs) -> own_backup_common::Result<()> {
     let _ = args.force;
     if !args.yes {
         println!("Восстановление {} → {}", args.manifest, target);
-        println!("!! ВСЕ ДАННЫЕ НА {target} БУДУТ УНИЧТОЖЕНЫ !!");
+        println!("!! ВСЁ, ЧТО СЕЙЧАС НА МЕСТЕ РАЗДЕЛОВ КОПИИ НА {target}, БУДЕТ УНИЧТОЖЕНО !!");
+        println!("Разделы диска, которых копия не касается, останутся как есть.");
         print!("Введите YES (заглавными), чтобы продолжить: ");
         std::io::stdout().flush().ok();
         let mut answer = String::new();
@@ -332,6 +333,13 @@ pub async fn run(args: RestoreDiskArgs) -> own_backup_common::Result<()> {
             }
             if let Some(notes) = reply.get("notes").and_then(|n| n.as_array()) {
                 for n in notes.iter().filter_map(|n| n.as_str()) {
+                    println!("  {n}");
+                }
+            }
+            // Which partitions of the disk were left as they were, and which
+            // stood where the copy's go — said, not only logged.
+            if let Some(w) = reply.get("warnings").and_then(|n| n.as_array()) {
+                for n in w.iter().filter_map(|n| n.as_str()) {
                     println!("  {n}");
                 }
             }

@@ -435,6 +435,29 @@ fn udev_property(name: &str, key: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+/// udev's `\xNN` escapes (`ID_FS_LABEL_ENC`, `ID_PART_ENTRY_NAME`) undone:
+/// `MODULATOR\x20WorkDisk-2` → `MODULATOR WorkDisk-2`.
+fn udev_unescape(s: &str) -> String {
+    let mut bytes = Vec::with_capacity(s.len());
+    let raw = s.as_bytes();
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == b'\\' && raw.get(i + 1) == Some(&b'x') {
+            if let Some(v) = s
+                .get(i + 2..i + 4)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+            {
+                bytes.push(v);
+                i += 4;
+                continue;
+            }
+        }
+        bytes.push(raw[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
 /// Who the disk the plan names is right now: serial and table GUID from the
 /// udev database, size from sysfs — the Linux answer to `live_disk_id`.
 pub(super) fn live_disk_id(plan: &RestorePlan) -> TargetDiskId {
@@ -489,7 +512,14 @@ pub(super) fn fill_context(plan: &RestorePlan, ctx: &mut CheckContext, keys: Opt
                         // "unknown" to the checks.
                         used_bytes: 0,
                         filesystem: own_backup_common::types::FileSystem::Unknown,
-                        label: String::new(),
+                        // What a message about this partition names it by —
+                        // its volume label as udev read it («MODULATOR
+                        // WorkDisk-2» on the owner's BitLocker partition),
+                        // else its GPT name.
+                        label: udev_property(&p, "ID_FS_LABEL_ENC")
+                            .or_else(|| udev_property(&p, "ID_PART_ENTRY_NAME"))
+                            .map(|l| udev_unescape(&l))
+                            .unwrap_or_default(),
                     })
                 })
                 .collect()
@@ -883,6 +913,19 @@ impl BackupServiceImpl {
 #[cfg(test)]
 mod tests {
     use super::super::luks_gate;
+
+    #[test]
+    fn a_udev_label_reads_as_it_was_written() {
+        assert_eq!(
+            super::udev_unescape(r"MODULATOR\x20WorkDisk-2\x2030.06.2025"),
+            "MODULATOR WorkDisk-2 30.06.2025"
+        );
+        assert_eq!(
+            super::udev_unescape(r"\xd0\x94\xd0\xb0\xd0\xbd\xd0\xbd\xd1\x8b\xd0\xb5"),
+            "Данные"
+        );
+        assert_eq!(super::udev_unescape(r"a\xZZb\"), r"a\xZZb\");
+    }
     use super::*;
 
     fn clash() -> IdentityClashDto {
