@@ -21,6 +21,13 @@ export interface VolumeOption {
   label: string;
 }
 
+/** How the last check of a copy ended. Facts, not text: the banner is written
+ *  from them in whatever language the window is in when it is shown. */
+export type VerifyOutcome =
+  | { kind: 'ok'; checked: number; secs: number }
+  | { kind: 'bad'; bad: number; checked: number }
+  | { kind: 'error'; text: string };
+
 export const engine = $state({
   // --- volume cache (shared by wizard source + restore target) ---
   volumes: [] as VolumeOption[],
@@ -38,6 +45,11 @@ export const engine = $state({
   restoreSummary: null as RestoreSummary | null,
   restoreError: null as string | null,
   verifyProgress: null as EngineProgress | null,
+  /** In the store, not in «Инструменты»: the page is unmounted the moment
+   *  the user walks through the menu, and on the way back a check still
+   *  running in the service had lost its progress bar and, once over, its
+   *  result (2026-10-23). */
+  verifyOutcome: null as VerifyOutcome | null,
 });
 
 /** When the running restore started and how fast it has been going lately.
@@ -239,12 +251,24 @@ export async function runVerify(
   secret?: ArchiveSecret,
   onStarted?: () => void,
 ): Promise<VerifySummary> {
-  if (engine.op) throw new Error(m.eng_busy());
+  if (engine.op) {
+    const text = m.eng_busy();
+    engine.verifyOutcome = { kind: 'error', text };
+    throw new Error(text);
+  }
   engine.op = 'verify';
   engine.verifyProgress = null;
+  engine.verifyOutcome = null;
   verifyStarted = onStarted ?? null;
   try {
-    return await api.verifyNow(imagePath, secret);
+    const v = await api.verifyNow(imagePath, secret);
+    engine.verifyOutcome = v.valid
+      ? { kind: 'ok', checked: v.blocks_checked, secs: v.duration_secs }
+      : { kind: 'bad', bad: v.mismatched_blocks.length, checked: v.blocks_checked };
+    return v;
+  } catch (e) {
+    engine.verifyOutcome = { kind: 'error', text: String(e) };
+    throw e;
   } finally {
     verifyStarted = null;
     engine.op = null;

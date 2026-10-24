@@ -97,10 +97,11 @@
 
   let activeMounts: ActiveMount[] = $state([]);
 
-  let verifyMsg: (() => string) | null = $state(null);
-  let verifyErr: (() => string) | null = $state(null);
-  let verifyBusy = $state(false);
+  // The check runs in the service and outlives this page; whether it is
+  // running and how it ended are the store's (engine.op, engine.verifyOutcome).
+  const verifyBusy = $derived(engine.op === 'verify');
   const verifyProgress = $derived(engine.verifyProgress);
+  const verifyOutcome = $derived(engine.verifyOutcome);
 
   let isRefreshingDisks = $state(false);
   let hasLoadedOnce = false;
@@ -258,30 +259,9 @@
   }
 
   async function verifyWith(secret?: ArchiveSecret, accepted?: () => void) {
-    verifyBusy = true;
-    verifyMsg = null;
-    verifyErr = null;
-    try {
-      const v = await runVerify(toolsState.verifyPath, secret, accepted);
-      // A damaged copy is a failure, not a result: it goes in the red banner.
-      // It used to share the green one with «Целостность подтверждена».
-      const checked = v.blocks_checked;
-      if (v.valid) {
-        const secs = v.duration_secs.toFixed(1);
-        verifyMsg = () =>
-          m.tools_verify_ok({ blocks: m.tools_blocks({ count: checked }), secs });
-      } else {
-        const bad = v.mismatched_blocks.length;
-        verifyErr = () =>
-          m.tools_verify_bad({ bad, blocks: m.tools_blocks_of({ count: checked }) });
-      }
-    } catch (e) {
-      const text = String(e);
-      verifyErr = () => text;
-      throw e; // see mountWith
-    } finally {
-      verifyBusy = false;
-    }
+    // The outcome, a failure included, is put in the store by runVerify; the
+    // failure is thrown on for the password dialog (see mountWith).
+    await runVerify(toolsState.verifyPath, secret, accepted);
   }
 </script>
 
@@ -400,8 +380,25 @@
     {#if verifyBusy && verifyProgress}
       <div class="bar"><div class="bar-fill" style="width:{verifyProgress.percent}%"></div></div>
     {/if}
-    {#if verifyMsg}<div class="banner ok">{verifyMsg()}</div>{/if}
-    {#if verifyErr}<div class="banner err">{verifyErr()}</div>{/if}
+    {#if verifyOutcome?.kind === 'ok'}
+      <div class="banner ok">
+        {m.tools_verify_ok({
+          blocks: m.tools_blocks({ count: verifyOutcome.checked }),
+          secs: verifyOutcome.secs.toFixed(1),
+        })}
+      </div>
+    {:else if verifyOutcome?.kind === 'bad'}
+      <!-- A damaged copy is a failure, not a result: the red banner. It used
+           to share the green one with «Целостность подтверждена». -->
+      <div class="banner err">
+        {m.tools_verify_bad({
+          bad: verifyOutcome.bad,
+          blocks: m.tools_blocks_of({ count: verifyOutcome.checked }),
+        })}
+      </div>
+    {:else if verifyOutcome?.kind === 'error'}
+      <div class="banner err">{verifyOutcome.text}</div>
+    {/if}
   </div>
 
   <!-- Drive letters are a Windows thing; elsewhere the service has no such
