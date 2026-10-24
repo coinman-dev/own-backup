@@ -23,6 +23,10 @@ exclude = ["vendor/glib", "vendor/glib-macros", "vendor/gtk3-macros"]
 glib = { path = "vendor/glib" }
 glib-macros = { path = "vendor/glib-macros" }
 gtk3-macros = { path = "vendor/gtk3-macros" }
+# ntfs 0.4.0 (the latest) needs binrw 0.11, whose `default_reader` helper
+# trips a future-incompatibility lint; the one function is written out
+# without the attribute. Checked by scripts/check-vendor.py.
+binrw = { path = "vendor/binrw" }
 
 [workspace.package]
 version = "0.1.5-beta"

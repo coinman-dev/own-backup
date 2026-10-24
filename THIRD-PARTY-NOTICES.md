@@ -33,6 +33,16 @@ changes recorded in each `OWN-BACKUP-PATCH.json` and validated by the same
 script. These local compatibility copies must be reviewed when the GUI
 stack can move to newer upstream GTK bindings.
 
+### Local binrw compatibility fix
+
+`vendor/binrw` is binrw 0.11.3 (MIT), which `ntfs` 0.4.0 — its latest
+release — needs. Two lines are changed so it keeps compiling on future Rust
+releases: the `default_reader` helper is written out with the signature its
+`#[binrw::parser]` attribute generates, and `extern crate self as binrw` is
+made `pub`. Its own warnings are silenced as in the GTK copies. The registry
+checksum and the changed-file hashes are in `vendor/binrw/OWN-BACKUP-PATCH.json`,
+checked by `scripts/check-vendor.py`.
+
 ## Linux: system libraries and the boot medium
 
 The `.deb` links against libraries of the system it is installed on — GTK 3,

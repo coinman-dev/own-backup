@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate local GTK3 compatibility copies against their original crate files."""
+"""Validate local compatibility copies (GTK3, binrw) against their original crate files."""
 import hashlib
 import json
 import argparse
@@ -16,7 +16,7 @@ manifests = []
 def sha(data):
     return hashlib.sha256(data).hexdigest()
 
-for name, version in [("glib", "0.18.5"), ("glib-macros", "0.18.5"), ("gtk3-macros", "0.18.2")]:
+for name, version in [("glib", "0.18.5"), ("glib-macros", "0.18.5"), ("gtk3-macros", "0.18.2"), ("binrw", "0.11.3")]:
     root = repo / "vendor" / name
     manifest = json.loads((root / "OWN-BACKUP-PATCH.json").read_text())
     manifests.append(manifest)
@@ -25,6 +25,8 @@ for name, version in [("glib", "0.18.5"), ("glib-macros", "0.18.5"), ("gtk3-macr
     changed = manifest["changed_files"]
     actual = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
     assert actual == set(originals) | {"OWN-BACKUP-PATCH.json"}, f"{name}: unexpected files"
+    if name == "binrw":
+        assert set(changed) == {"src/helpers.rs", "src/lib.rs"}
     if name == "glib":
         assert set(changed) == {"src/lib.rs", "src/variant_iter.rs"}
         assert manifest["fix_commit"] == "05dff0ee696f9bcd8617cd48c4b812d046d440cb"
@@ -40,6 +42,17 @@ for name, version in [("glib", "0.18.5"), ("glib-macros", "0.18.5"), ("gtk3-macr
             assert text.count("let mut p: *mut libc::c_char = std::ptr::null_mut();") == 1
             assert text.count("                &mut p,") == 1
             text = text.replace("let mut p: *mut libc::c_char", "let p: *mut libc::c_char").replace("                &mut p,", "                &p,")
+        elif name == "binrw" and file == "src/helpers.rs":
+            new = ("fn default_reader<'a, R: Read + Seek, T: BinRead>(\n    reader: &mut R,\n"
+                   "    endian: Endian,\n    args: T::Args<'a>,\n) -> BinResult<T>")
+            assert text.count(new) == 1
+            text = text.replace(new, "#[binrw::parser(reader, endian)]\n"
+                                "fn default_reader<'a, T: BinRead>(args: T::Args<'a>, ...) -> BinResult<T>")
+        elif name == "binrw" and file == "src/lib.rs":
+            assert text.startswith("#![allow(warnings)]\n")
+            assert text.count("pub extern crate self as binrw;") == 1
+            text = text.replace("#![allow(warnings)]\n", "", 1).replace(
+                "pub extern crate self as binrw;", "extern crate self as binrw;")
         elif name == "glib" and file == "src/lib.rs":
             assert text.count("#![allow(warnings)]\n") == 1
             text = text.replace("#![allow(warnings)]\n", "", 1)

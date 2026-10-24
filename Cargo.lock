@@ -471,8 +471,6 @@ checksum = "32637268377fc7b10a8c6d51de3e7fba1ce5dd371a96e342b34e6078db558e7f"
 [[package]]
 name = "binrw"
 version = "0.11.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "003da50fae3878bd26cc710742decd3412b8cfb396bc9b306e5e710106d207fb"
 dependencies = [
  "array-init",
  "binrw_derive",
