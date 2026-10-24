@@ -627,8 +627,26 @@ fn run_op(
             // Linux keeps the copy's GUIDs as they are: a PARTUUID may be
             // what `root=` names, and a duplicate on this machine was put to
             // the person before the run (`identity_check_linux`).
-            let (table, identity) =
+            let (mut table, identity) =
                 with_captured_gpt_fields(table, plan, sidecar, &IdentitiesInUse::default());
+            // A partition the plan does not act on keeps its entry exactly as
+            // the disk has it — type, GUID, attributes, name — whatever the
+            // designer put there (it writes the volume label as the name and
+            // no attributes): a BitLocker data partition beside the copy is
+            // the disk's, not the copy's (owner, 24.10). As on Windows.
+            match own_backup_backup::esp_scan_linux::read_layout(device) {
+                Ok(current) => {
+                    let adopted = own_backup_backup::table_merge::adopt_existing_entries(
+                        &mut table,
+                        &current,
+                        &plan.touched_partitions(),
+                    );
+                    info!(disk = %device, ?adopted, "entries of partitions left in place taken from the disk");
+                }
+                Err(e) => {
+                    warn!(disk = %device, error = %e, "the disk's own table could not be read: entries written as planned")
+                }
+            }
             let written = session.write_partition_table(&table)?;
             info!(
                 disk = %device,

@@ -301,10 +301,29 @@ pub fn restore_disk(
         chain_key.as_ref(),
     )?);
 
+    // The partitions the disk has now, before anything is written: those the
+    // copy does not touch stay, entry and all — written back into the new
+    // table as they are (owner, 24.10: a BitLocker data partition beside the
+    // copied ones was dropped from the table, its data left with no
+    // partition). Those under a partition of the copy go: the person
+    // confirmed the disk's data is destroyed, and the result names them.
+    let current = crate::esp_scan_linux::read_layout(&req.target_device).ok();
+    let others = current
+        .as_ref()
+        .map(|c| crate::table_merge::bystanders(&dm.layout, c))
+        .unwrap_or_default();
+    let layout = crate::table_merge::with_bystanders(&dm.layout, &others.kept);
+    info!(
+        target = %req.target_device,
+        kept = ?others.kept.iter().map(|p| p.index).collect::<Vec<_>>(),
+        overwritten = ?others.overwritten.iter().map(|p| p.index).collect::<Vec<_>>(),
+        "whole-disk restore: the disk's other partitions"
+    );
+
     let mut session = open_disk(&req.target_device)?;
     let target_size = session.length();
     // Validates every partition fits the target, and refuses a smaller disk.
-    crate::gpt_writer::disk_gpt_write_ops(&dm.layout, target_size)?;
+    crate::gpt_writer::disk_gpt_write_ops(&layout, target_size)?;
     if session.sector_size() != dm.layout.sector_size {
         return Err(OwnBackupError::RestoreIncompatible(
             tr!(
@@ -367,11 +386,42 @@ pub fn restore_disk(
         blocks_total: total,
         bytes_written: bytes,
     })?;
-    let written = session.write_partition_table(&spec_from_layout(&dm.layout, target_size))?;
+    let written = session.write_partition_table(&spec_from_layout(&layout, target_size))?;
     let mut warnings = decrypted_bitlocker(&sidecar)
         .into_iter()
         .map(|index| tr!("restore_disk_linux.bitlocker_decrypted", index = index).into_owned())
         .collect::<Vec<_>>();
+    let name = |p: &own_backup_common::gpt::GptPartitionEntry| {
+        let size = own_backup_common::units::human_bytes(p.size_bytes(dm.layout.sector_size));
+        if p.name.trim().is_empty() {
+            format!("{} ({size})", p.index)
+        } else {
+            format!("{} («{}», {size})", p.index, p.name.trim())
+        }
+    };
+    if !others.kept.is_empty() {
+        warnings.push(
+            tr!(
+                "restore_disk_linux.others_kept",
+                parts = others.kept.iter().map(name).collect::<Vec<_>>().join(", ")
+            )
+            .into_owned(),
+        );
+    }
+    if !others.overwritten.is_empty() {
+        warnings.push(
+            tr!(
+                "restore_disk_linux.others_overwritten",
+                parts = others
+                    .overwritten
+                    .iter()
+                    .map(name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+            .into_owned(),
+        );
+    }
     if let Err(e) = session.finish(Some(&written.expected), UDEV_TIMEOUT, std::thread::sleep) {
         tracing::warn!(error = %e, "the disk is written, but udev did not settle on it");
         warnings.push(tr!("restore_disk_linux.udev_not_settled", error = e).into_owned());

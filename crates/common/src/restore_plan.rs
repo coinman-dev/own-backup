@@ -614,6 +614,23 @@ pub struct RestorePlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_device: Option<String>,
     pub ops: Vec<RestoreOp>,
+    /// Partitions of the target disk, as it is now, that the person deleted
+    /// in the designer — by where they start and how big they are (an index
+    /// can be reused by the new table). A partition the new table drops or
+    /// covers without being listed here is refused
+    /// ([`crate::restore_check::CheckCode::ExistingPartitionLost`]): a restore
+    /// puts back what the copy holds, and loses nothing it does not hold by
+    /// accident (owner, 24.10: a 347 GB BitLocker partition beside the copied
+    /// ones on the same disk).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_parts: Vec<RemovedPart>,
+}
+
+/// A partition the person deleted in the designer, as it was on the disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemovedPart {
+    pub offset_bytes: u64,
+    pub size_bytes: u64,
 }
 
 /// Enough of a disk's identity to notice that it is a different disk.
@@ -670,6 +687,7 @@ impl RestorePlan {
             verify_after: false,
             target_disk_id: None,
             target_device: None,
+            removed_parts: Vec::new(),
             ops,
         }
     }
@@ -1135,6 +1153,7 @@ mod tests {
             verify_after: false,
             target_disk_id: None,
             target_device: None,
+            removed_parts: Vec::new(),
             ops: vec![
                 RestoreOp::RestoreBootEntries,
                 RestoreOp::RefreshDiskState,

@@ -954,6 +954,19 @@
     const i = slots.findIndex((s) => s.kind === 'free' && s.offset === offset);
     if (i < 0) return;
     const cell = slots[i] as { offset: number; size: number; share: number };
+    // Back where they were, sector for sector, when this free stretch holds
+    // the copy's own places: on the disk it came from (its partitions deleted
+    // first) or one laid out the same way. Then it always fits — and the
+    // partitions beside it, which the copy does not hold, stay exactly as
+    // they are. Moved to 1 MiB boundaries instead, the owner's copy (an ESP
+    // from LBA 34) came out 1 MiB too long for the room its own partitions
+    // left before a 347 GB BitLocker partition (24.10).
+    const first = Math.min(...srcBackupParts.map((p) => p.offset_bytes));
+    const last = Math.max(...srcBackupParts.map((p) => p.offset_bytes + p.size_bytes));
+    if (srcBackupParts.length > 0 && first >= cell.offset && last <= cell.offset + cell.size) {
+      placeAsWas(i, cell);
+      return;
+    }
     // Every partition starts on a 1 MiB boundary, so the copy needs a little
     // more room than the sum of its parts: the source's own sizes are not round
     // (this ESP is 1.28 GiB) and each one pushes the next start up to the next
@@ -1017,6 +1030,47 @@
     previewIdx = placed.map((s) => (s as { p: PartitionInfo }).p.index);
     if (rest > 0) placed.push({ kind: 'free', offset: cursor, size: rest, share: sub[sub.length - 1] });
     slots = normalize([...slots.slice(0, i), ...placed, ...slots.slice(i + 1)]);
+    fitMsg = null;
+  }
+
+  /** The copy's partitions at their own offsets inside free cell `i`, with the
+   *  gaps they had between them, and their own numbers where those are free. */
+  function placeAsWas(i: number, cell: { offset: number; size: number; share: number }) {
+    if (!slots) return;
+    pushHistory();
+    const parts = [...srcBackupParts].sort((a, b) => a.offset_bytes - b.offset_bytes);
+    const pieces: ({ part: PartitionInfo } | { free: number; size: number })[] = [];
+    let cursor = cell.offset;
+    for (const sp of parts) {
+      if (sp.offset_bytes > cursor) pieces.push({ free: cursor, size: sp.offset_bytes - cursor });
+      pieces.push({ part: sp });
+      cursor = sp.offset_bytes + sp.size_bytes;
+    }
+    const cellEnd = cell.offset + cell.size;
+    if (cellEnd > cursor) pieces.push({ free: cursor, size: cellEnd - cursor });
+    const sizes = pieces.map((x) => ('part' in x ? x.part.size_bytes : x.size));
+    const sub = allocateShares(sizes, (minShare * 100) / cell.share).map(
+      (s) => (s * cell.share) / 100,
+    );
+    const taken = new Set(curParts.map((p) => p.index));
+    let next = Math.max(0, ...curParts.map((p) => p.index), ...parts.map((p) => p.index)) + 1;
+    const placed: MapSlot[] = pieces.map((x, k) => {
+      if (!('part' in x)) return { kind: 'free' as const, offset: x.free, size: x.size, share: sub[k] };
+      const index = taken.has(x.part.index) ? next++ : x.part.index;
+      taken.add(index);
+      return {
+        kind: 'part' as const,
+        p: { ...x.part, index, volume_device: '', volume_letter: null },
+        share: sub[k],
+      };
+    });
+    // In the order of the copy's partitions, which is what pairs them up.
+    previewIdx = srcBackupParts.map((sp) => {
+      const k = pieces.findIndex((x) => 'part' in x && x.part.index === sp.index);
+      return (placed[k] as { p: PartitionInfo }).p.index;
+    });
+    const before = slots;
+    slots = normalize([...before.slice(0, i), ...placed, ...before.slice(i + 1)]);
     fitMsg = null;
   }
 
@@ -1539,6 +1593,14 @@
       image_path: activeInfo?.image_path || currentPath,
       verify_after: verifyAfter,
       ops,
+      // What the person deleted from the disk as it is now: a partition the
+      // new table no longer has where it was. The service refuses to lose
+      // any other (ExistingPartitionLost).
+      removed_parts: (targetDisk?.partitions ?? [])
+        .filter(
+          (o) => !curParts.some((c) => c.offset_bytes === o.offset_bytes && c.size_bytes === o.size_bytes),
+        )
+        .map((o) => ({ offset_bytes: o.offset_bytes, size_bytes: o.size_bytes })),
     };
   }
 

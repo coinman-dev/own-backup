@@ -44,6 +44,14 @@
     "ru": "Раздел %{index}: контейнер LUKS",
     "en": "Partition %{index}: LUKS container"
   },
+  "restore_disk_linux.others_kept": {
+    "ru": "Разделы, которых нет в копии, оставлены как были: %{parts}.",
+    "en": "Partitions the backup does not hold were left as they were: %{parts}."
+  },
+  "restore_disk_linux.others_overwritten": {
+    "ru": "Разделы, которые были на месте разделов копии, перезаписаны: %{parts}.",
+    "en": "Partitions that stood where the backup's partitions go were overwritten: %{parts}."
+  },
   "restore_disk_linux.bitlocker_decrypted": {
     "ru": "Раздел %{index} был зашифрован BitLocker и восстановлен расшифрованным: включите BitLocker в Windows заново.",
     "en": "Partition %{index} was encrypted with BitLocker and is restored decrypted: turn BitLocker on again in Windows."

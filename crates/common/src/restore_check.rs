@@ -131,6 +131,12 @@ pub enum CheckCode {
     /// The restored data carries an identity a device of this machine already
     /// has (a filesystem, LUKS, LVM or md UUID, a PARTUUID).
     IdentityClash,
+    /// A partition the target disk has now would be gone after the restore —
+    /// dropped from the new table or covered by it — and the person did not
+    /// delete it: refused.
+    ExistingPartitionLost,
+    /// A partition the person deleted in the designer goes for good.
+    ExistingPartitionRemoved,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -395,8 +401,69 @@ pub fn check_plan(plan: &RestorePlan, ctx: &CheckContext) -> Vec<CheckResult> {
         check_sector_size(t, ctx, &mut out);
     }
     check_ops(plan, table, ctx, &mut out);
+    if let Some(t) = table {
+        check_existing_partitions(plan, t, ctx, &mut out);
+    }
 
     out
+}
+
+/// What becomes of each partition the target disk has now, under the new
+/// table: kept where it is, deleted by the person, or lost.
+///
+/// A restore writes what the copy holds. A partition that is not in the copy
+/// — another system, a data volume, a BitLocker drive next to the copied ones
+/// (owner, 24.10) — must come through untouched, or be deleted by the person
+/// on purpose. Kept means an entry of the new table starts and ends exactly
+/// where it does: then no operation can reach it except a restore aimed at
+/// it, which the destination checks already speak about — as they do for a
+/// restore into it that grows or shrinks it. Everything else
+/// that is not in [`RestorePlan::removed_parts`] is refused. On Linux how
+/// full a partition is stays unknown without mounting it, so every existing
+/// partition counts as holding data.
+fn check_existing_partitions(
+    plan: &RestorePlan,
+    t: &PartitionTableSpec,
+    ctx: &CheckContext,
+    out: &mut Vec<CheckResult>,
+) {
+    for cur in &ctx.targets {
+        if cur.size_bytes == 0 || cur.offset_bytes == 0 {
+            continue;
+        }
+        let kept = t.entries.iter().any(|e| {
+            e.offset_bytes(t.sector_size) == cur.offset_bytes
+                && e.size_bytes(t.sector_size) == cur.size_bytes
+        });
+        // A restore aimed at it (grown or shrunk to fit, same start): the
+        // destination checks say what is overwritten.
+        let restored_into = plan.ops.iter().any(|op| {
+            matches!(op, RestoreOp::RestorePartition { dst, .. } if dst.offset == cur.offset_bytes)
+        });
+        if kept || restored_into {
+            continue;
+        }
+        let what = describe(cur.index, &cur.label, cur.size_bytes, Some(cur.filesystem));
+        let removed = plan
+            .removed_parts
+            .iter()
+            .any(|r| r.offset_bytes == cur.offset_bytes && r.size_bytes == cur.size_bytes);
+        if removed {
+            out.push(CheckResult::new(
+                CheckLevel::Warning,
+                CheckCode::ExistingPartitionRemoved,
+                None,
+                crate::tr!("restore_check.existing_partition_removed", part = what).into_owned(),
+            ));
+        } else {
+            out.push(CheckResult::new(
+                CheckLevel::Error,
+                CheckCode::ExistingPartitionLost,
+                None,
+                crate::tr!("restore_check.existing_partition_lost", part = what).into_owned(),
+            ));
+        }
+    }
 }
 
 /// Geometry of the table itself: bounds, overlaps, alignment, MBR limits.
@@ -1579,6 +1646,138 @@ mod tests {
         );
     }
 
+    /// The owner's system disk (24.10): ESP from LBA 34, /boot, the LUKS root
+    /// — the copy — and a 347 GB BitLocker partition the copy leaves out.
+    fn owners_disk() -> (Vec<PartitionSpec>, Vec<TargetPartition>) {
+        let spec = |index: u32, first_lba: u64, sectors: u64| PartitionSpec {
+            index,
+            first_lba,
+            last_lba: first_lba + sectors - 1,
+            kind: PartitionKind::Gpt {
+                type_guid: crate::gpt::GPT_TYPE_EFI_SYSTEM.into(),
+                part_guid: String::new(),
+                attributes: 0,
+                name: String::new(),
+            },
+        };
+        let parts = vec![
+            spec(1, 34, 2_686_942),
+            spec(2, 2_686_976, 2_097_152),
+            spec(3, 4_784_128, 268_435_456),
+            spec(4, 273_219_584, 726_994_944),
+        ];
+        let now = parts
+            .iter()
+            .map(|e| TargetPartition {
+                index: e.index,
+                offset_bytes: e.offset_bytes(512),
+                size_bytes: e.size_bytes(512),
+                used_bytes: 0,
+                filesystem: FileSystem::Unknown,
+                label: if e.index == 4 {
+                    "MODULATOR WorkDisk-2".into()
+                } else {
+                    String::new()
+                },
+            })
+            .collect();
+        (parts, now)
+    }
+
+    fn owners_table(entries: Vec<PartitionSpec>) -> PartitionTableSpec {
+        PartitionTableSpec {
+            disk_size_bytes: 1_000_215_216 * 512,
+            ..table(entries)
+        }
+    }
+
+    /// The copy back in place, the fourth partition kept as it is: nothing
+    /// is lost and nothing is said about it.
+    #[test]
+    fn a_partition_the_new_table_keeps_in_place_is_not_lost() {
+        let (parts, now) = owners_disk();
+        let mut c = ctx(vec![]);
+        c.targets = now;
+        let results = check_plan(&plan_with(owners_table(parts), vec![]), &c);
+        assert!(
+            !codes(&results).contains(&CheckCode::ExistingPartitionLost)
+                && !codes(&results).contains(&CheckCode::ExistingPartitionRemoved),
+            "{results:#?}"
+        );
+    }
+
+    /// The table of the copy alone, written over the disk: the BitLocker
+    /// partition would vanish. Refused, and named.
+    #[test]
+    fn a_partition_the_copy_does_not_hold_is_not_dropped_silently() {
+        let (parts, now) = owners_disk();
+        let mut c = ctx(vec![]);
+        c.targets = now;
+        let copy_only = owners_table(parts[..3].to_vec());
+        let results = check_plan(&plan_with(copy_only.clone(), vec![]), &c);
+        let lost: Vec<&CheckResult> = results
+            .iter()
+            .filter(|r| r.code == CheckCode::ExistingPartitionLost)
+            .collect();
+        assert_eq!(lost.len(), 1, "{results:#?}");
+        assert_eq!(lost[0].level, CheckLevel::Error);
+        assert!(
+            lost[0].message.contains("WorkDisk-2"),
+            "{}",
+            lost[0].message
+        );
+
+        // Deleted in the designer on purpose: said, not refused.
+        let mut plan = plan_with(copy_only, vec![]);
+        plan.removed_parts.push(crate::restore_plan::RemovedPart {
+            offset_bytes: 273_219_584 * 512,
+            size_bytes: 726_994_944 * 512,
+        });
+        let results = check_plan(&plan, &c);
+        assert!(!errors(&results).contains(&CheckCode::ExistingPartitionLost));
+        assert!(codes(&results).contains(&CheckCode::ExistingPartitionRemoved));
+    }
+
+    /// Placed somewhere else than where they were — moved by alignment — the
+    /// copy's own partitions are replaced only when the person deleted them;
+    /// a table that just covers them is refused too.
+    #[test]
+    fn a_partition_covered_by_the_new_table_needs_the_person_s_word() {
+        let (parts, now) = owners_disk();
+        let mut c = ctx(vec![]);
+        c.targets = now.clone();
+        let moved: Vec<PartitionSpec> = vec![
+            entry(1, 1, 1312),
+            entry(2, 1313, 1024),
+            entry(3, 2337, 131_072),
+        ]
+        .into_iter()
+        .chain(std::iter::once(parts[3].clone()))
+        .collect();
+        let results = check_plan(&plan_with(owners_table(moved.clone()), vec![]), &c);
+        assert_eq!(
+            errors(&results)
+                .iter()
+                .filter(|c| **c == CheckCode::ExistingPartitionLost)
+                .count(),
+            3,
+            "{results:#?}"
+        );
+        let mut plan = plan_with(owners_table(moved), vec![]);
+        plan.removed_parts = now[..3]
+            .iter()
+            .map(|t| crate::restore_plan::RemovedPart {
+                offset_bytes: t.offset_bytes,
+                size_bytes: t.size_bytes,
+            })
+            .collect();
+        let results = check_plan(&plan, &c);
+        assert!(
+            !errors(&results).contains(&CheckCode::ExistingPartitionLost),
+            "{results:#?}"
+        );
+    }
+
     fn target(index: u32, fs: FileSystem, used: u64, label: &str) -> TargetPartition {
         TargetPartition {
             index,
@@ -2506,6 +2705,7 @@ mod tests {
             verify_after: false,
             target_disk_id: None,
             target_device: None,
+            removed_parts: Vec::new(),
             ops: vec![RestoreOp::RestorePartition {
                 src_index: 1,
                 dst: wrong,
@@ -2544,6 +2744,7 @@ mod tests {
             verify_after: false,
             target_disk_id: None,
             target_device: None,
+            removed_parts: Vec::new(),
             ops: vec![RestoreOp::RestorePartition {
                 src_index: 2,
                 dst: right,
@@ -2572,6 +2773,7 @@ mod tests {
             verify_after: false,
             target_disk_id: None,
             target_device: None,
+            removed_parts: Vec::new(),
             ops: vec![RestoreOp::RestorePartition {
                 src_index: 1,
                 dst: PartRef {
@@ -2620,6 +2822,7 @@ mod tests {
                 verify_after: false,
                 target_disk_id: None,
                 target_device: None,
+                removed_parts: Vec::new(),
                 ops: vec![RestoreOp::RestorePartition {
                     src_index: 1,
                     dst: bad,

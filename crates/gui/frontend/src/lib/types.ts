@@ -968,6 +968,9 @@ export interface RestorePlan {
   image_path: string;
   verify_after: boolean;
   ops: RestoreOp[];
+  /** Partitions of the target disk the person deleted in the designer, as
+   *  they are now; any other the new table drops is refused by the service. */
+  removed_parts?: { offset_bytes: number; size_bytes: number }[];
 }
 
 export type CheckLevel = 'info' | 'warning' | 'error';

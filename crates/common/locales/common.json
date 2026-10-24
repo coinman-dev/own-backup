@@ -128,6 +128,14 @@
     "ru": ", занято %{size}",
     "en": ", %{size} used"
   },
+  "restore_check.existing_partition_lost": {
+    "ru": "Раздел %{part} есть на диске сейчас, но в копии его нет, и после восстановления его бы не стало. Восстановление его не трогает: поставьте разделы копии так, чтобы он остался на месте, или, если он правда не нужен, удалите его в конструкторе сами.",
+    "en": "Partition %{part} is on the disk now, but not in the backup, and after the restore it would be gone. The restore leaves it alone: place the backup's partitions so that it stays where it is, or, if it really is not needed, delete it in the designer yourself."
+  },
+  "restore_check.existing_partition_removed": {
+    "ru": "Раздел %{part} удалён в конструкторе: его данные пропадут.",
+    "en": "Partition %{part} was deleted in the designer: its data will be gone."
+  },
   "restore_check.destination_will_be_erased": {
     "ru": "На разделе %{part} сейчас %{fs}%{label}%{used}. Восстановление перезапишет его целиком — вернуть то, что там лежит, будет нельзя.",
     "en": "Currently on partition %{part}: %{fs}%{label}%{used}. The restore will overwrite it completely — what is there now cannot be brought back."
