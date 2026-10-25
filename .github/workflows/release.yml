@@ -137,6 +137,17 @@ jobs:
         run: |
           set -euo pipefail
           (cd dist && sha256sum --check SHA256SUMS.txt)
+          # One checksum list per release: the lines it already has for other
+          # files (the Linux medium and package, put in by
+          # scripts/upload-linux-media.sh or by hand) are kept; ours replace
+          # the lines of their own names.
+          if gh release download "$RELEASE_TAG" --pattern SHA256SUMS.txt --dir old 2>/dev/null; then
+            awk 'NR == FNR { n = $2; sub(/^\*/, "", n); ours[n] = 1; next }
+                 { n = $2; sub(/^\*/, "", n); if (!(n in ours)) print }' \
+              dist/SHA256SUMS.txt old/SHA256SUMS.txt > merged.txt
+            cat dist/SHA256SUMS.txt >> merged.txt
+            mv merged.txt dist/SHA256SUMS.txt
+          fi
           prerelease=false
           [[ "$RELEASE_TAG" == *-* ]] && prerelease=true
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
