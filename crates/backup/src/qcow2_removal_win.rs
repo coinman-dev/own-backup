@@ -197,6 +197,22 @@ pub fn exclude_inside_qcow2(
     }))
 }
 
+/// Detach within [`crate::attach_win::DETACH_LIMIT`]. A teardown still
+/// running may let Windows write into the scratch overlay yet, so what the pass
+/// left there is not folded into the image: an error, and the caller keeps the
+/// image as it was (zero-filled entries, reported).
+fn detach_in_time(attached: crate::attach_win::Attached) -> Result<()> {
+    if crate::attach_win::detach_within(attached, crate::attach_win::DETACH_LIMIT) {
+        Ok(())
+    } else {
+        Err(OwnBackupError::Device(format!(
+            "Windows did not detach the image within {} min; what was deleted inside it is \
+             not used",
+            crate::attach_win::DETACH_LIMIT.as_secs() / 60
+        )))
+    }
+}
+
 /// Attach RW → scan + delete + zero (shared with the VHDX path) → teardown.
 /// The session is logged out and the target stopped before returning, whatever
 /// happened in between.
@@ -215,10 +231,11 @@ fn mount_scan_delete(
     tick: &mut dyn FnMut(u64, u64),
 ) -> Result<crate::true_removal_win::ScannedInside> {
     let _automount = crate::automount::AutoMountGuard::enable_if_disabled();
-    let attached = crate::attach_win::attach_rw(
+    let attached = crate::attach_win::attach_rw_within(
         Box::new(overlay),
         virtual_size,
         &crate::iscsi::serial_for_image(image_path),
+        crate::attach_win::ATTACH_LIMIT,
     )?;
     let result = (|| -> Result<crate::true_removal_win::ScannedInside> {
         let mut d = open_write_retry(&attached.physical)?;
@@ -235,8 +252,11 @@ fn mount_scan_delete(
         drop(d);
         Ok(scanned)
     })();
-    attached.detach();
-    result
+    // Torn down whatever happened; the pass's own error, if any, comes first.
+    let detached = detach_in_time(attached);
+    let value = result?;
+    detached?;
+    Ok(value)
 }
 
 /// Delete `paths` from the finished qcow2 image, in place.
@@ -482,10 +502,11 @@ pub(crate) fn mount_delete<S: crate::overlay::SlotStore + 'static>(
     // as it appears (strip_drive_letters, via delete_paths_on_disk). If the
     // machine has auto-mount off, it is turned on for the mount window only.
     let _automount = crate::automount::AutoMountGuard::enable_if_disabled();
-    let attached = crate::attach_win::attach_rw(
+    let attached = crate::attach_win::attach_rw_within(
         Box::new(overlay),
         virtual_size,
         &crate::iscsi::serial_for_image(image_path),
+        crate::attach_win::ATTACH_LIMIT,
     )?;
     let result = (|| -> Result<(u64, u64)> {
         let d = open_write_retry(&attached.physical)?;
@@ -496,8 +517,11 @@ pub(crate) fn mount_delete<S: crate::overlay::SlotStore + 'static>(
         drop(d);
         Ok(counts)
     })();
-    attached.detach();
-    result
+    // Torn down whatever happened; the pass's own error, if any, comes first.
+    let detached = detach_in_time(attached);
+    let value = result?;
+    detached?;
+    Ok(value)
 }
 
 /// Multi-volume twin of [`mount_delete`]: attach RW → per-partition delete on
@@ -517,10 +541,11 @@ pub(crate) fn mount_delete_multi<S: crate::overlay::SlotStore + 'static>(
     // nothing to delete. Letters are stripped after the mount instead
     // (strip_letters_on_disk, via delete_paths_on_disk_multi).
     let _automount = crate::automount::AutoMountGuard::enable_if_disabled();
-    let attached = crate::attach_win::attach_rw(
+    let attached = crate::attach_win::attach_rw_within(
         Box::new(overlay),
         virtual_size,
         &crate::iscsi::serial_for_image(image_path),
+        crate::attach_win::ATTACH_LIMIT,
     )?;
     let result = (|| -> Result<(u64, u64)> {
         let d = open_write_retry(&attached.physical)?;
@@ -535,8 +560,11 @@ pub(crate) fn mount_delete_multi<S: crate::overlay::SlotStore + 'static>(
         drop(d);
         Ok(counts)
     })();
-    attached.detach();
-    result
+    // Torn down whatever happened; the pass's own error, if any, comes first.
+    let detached = detach_in_time(attached);
+    let value = result?;
+    detached?;
+    Ok(value)
 }
 
 fn open_write_retry(path: &str) -> Result<WinRawDevice> {

@@ -27,6 +27,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Duration;
 use zeroize::Zeroizing;
 
 use own_backup_common::{OwnBackupError, Result};
@@ -137,6 +138,67 @@ fn log_out_unused(target: AttachedTarget, physical: &str) {
              image clears it"
         );
     }
+}
+
+/// How long the end of a backup waits for its image to be attached, and later
+/// detached, before it goes on without (normally 4 s each). The calls inside
+/// block in the kernel and cannot be interrupted: a device PnP is stuck on
+/// held the whole machine's PnP for hours (2026-10-24), and the backup with it.
+pub const ATTACH_LIMIT: Duration = Duration::from_secs(5 * 60);
+pub const DETACH_LIMIT: Duration = Duration::from_secs(5 * 60);
+
+/// [`attach_rw`] with a deadline, for the exclusion pass at the end of a
+/// backup. On time it is exactly `attach_rw`. Past `limit` the caller gets an
+/// error and goes on as after any failed attach (the image keeps zero-filled
+/// entries, reported as such); the attach goes on in its thread, and if the
+/// session comes up after all, that thread takes it down — volumes, logout,
+/// target, in that order and once — since nobody else will.
+pub fn attach_rw_within(
+    source: Box<dyn WritableBlockSource>,
+    virtual_size: u64,
+    serial: &str,
+    limit: Duration,
+) -> Result<Attached> {
+    let serial_bg = serial.to_string();
+    crate::deadline::run_within(
+        "iscsi-attach",
+        limit,
+        move || attach_rw(source, virtual_size, &serial_bg),
+        |late| {
+            if let Ok(late) = late {
+                warn!(physical = %late.physical,
+                      "attached image: came up after the backup stopped waiting — taking it down");
+                late.detach();
+            }
+        },
+    )
+    .unwrap_or_else(|_| {
+        warn!(
+            serial,
+            limit_s = limit.as_secs(),
+            "attached image: Windows did not attach the image in time — going on without it"
+        );
+        Err(dev(format!(
+            "Windows did not attach the image within {} min (the iSCSI login or the disk's \
+             arrival did not finish; a stuck device may be holding Plug and Play)",
+            limit.as_secs() / 60
+        )))
+    })
+}
+
+/// [`Attached::detach`] with a deadline. `false` when the teardown did not end
+/// in time: it goes on in its thread, and until it ends Windows may still write
+/// through the session into whatever the source writes to — the caller must
+/// not use that (a scratch overlay) as the image's new content.
+pub fn detach_within(attached: Attached, limit: Duration) -> bool {
+    let physical = attached.physical.clone();
+    let done =
+        crate::deadline::run_within("iscsi-detach", limit, move || attached.detach(), |()| {});
+    if done.is_err() {
+        warn!(physical = %physical, limit_s = limit.as_secs(),
+              "attached image: detaching did not finish in time — its writes are not used");
+    }
+    done.is_ok()
 }
 
 /// Serve `source` read-write and attach it. Writes go wherever the source puts

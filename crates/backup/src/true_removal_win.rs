@@ -43,7 +43,9 @@ use crate::checksum::compute_block_checksum;
 use crate::exclusions_win::{list_dir_backup, list_dir_backup_ids, ExcludedPath};
 pub use crate::removal_types::{InsideRemoval, RemovalOutcome};
 use crate::sidecar::BlockChecksum;
-use crate::vhdx::{attach_vhdx, create_differencing_vhdx, merge_into_parent, AttachMode};
+use crate::vhdx::{
+    attach_vhdx, create_differencing_vhdx, merge_into_parent, AttachMode, AttachedVhdx,
+};
 use crate::vhdx_bat::allocated_payload_blocks;
 use crate::volume_win::{
     all_volume_roots_on_disk, flush_lock_dismount_volume, strip_drive_letters,
@@ -391,22 +393,86 @@ fn scan_delete_and_zero(
 ) -> Result<ScannedInside> {
     let _automount = crate::automount::AutoMountGuard::enable_if_disabled();
     create_differencing_vhdx(temp, image_path)?;
-    let attached = attach_vhdx(temp, AttachMode::RawWrite)?;
-    let mut dev = open_write_retry(attached.physical_path())?;
-    let _ = dev.update_properties();
-    dev.set_online_this_session()?;
-    let disk_number = disk_number_of(attached.physical_path())?;
-    let scanned = scan_delete_zero_on_disk(
-        disk_number,
-        &mut dev,
-        patterns,
-        data_offset,
-        volume_len,
-        tick,
-    )?;
-    drop(dev);
-    drop(attached); // detaches the child
+    let attached = attach_child_in_time(temp)?;
+    let result = (|| -> Result<ScannedInside> {
+        let mut dev = open_write_retry(attached.physical_path())?;
+        let _ = dev.update_properties();
+        dev.set_online_this_session()?;
+        let disk_number = disk_number_of(attached.physical_path())?;
+        let scanned = scan_delete_zero_on_disk(
+            disk_number,
+            &mut dev,
+            patterns,
+            data_offset,
+            volume_len,
+            tick,
+        )?;
+        drop(dev);
+        Ok(scanned)
+    })();
+    // Detached whatever happened; the pass's own error, if any, comes first.
+    let detached = detach_child_in_time(attached);
+    let scanned = result?;
+    detached?;
     Ok(scanned)
+}
+
+/// [`attach_vhdx`] of the temporary child within
+/// [`crate::attach_win::ATTACH_LIMIT`]. `AttachVirtualDisk` waits on Plug and
+/// Play like an iSCSI login does; past the limit the caller goes on as after a
+/// failed attach, and a child that attaches after all is detached in the
+/// attach's own thread.
+fn attach_child_in_time(temp: &Path) -> Result<AttachedVhdx> {
+    let limit = crate::attach_win::ATTACH_LIMIT;
+    let path = temp.to_path_buf();
+    crate::deadline::run_within(
+        "vhdx-attach",
+        limit,
+        move || attach_vhdx(&path, AttachMode::RawWrite),
+        |late| {
+            if let Ok(late) = late {
+                warn!(physical = %late.physical_path(),
+                      "true removal: the child attached after the backup stopped waiting — detaching it");
+                drop(late);
+            }
+        },
+    )
+    .unwrap_or_else(|_| {
+        warn!(child = %temp.display(), limit_s = limit.as_secs(),
+              "true removal: Windows did not attach the child in time — going on without it");
+        Err(OwnBackupError::Device(format!(
+            "Windows did not attach the image within {} min (a stuck device may be holding \
+             Plug and Play)",
+            limit.as_secs() / 60
+        )))
+    })
+}
+
+/// Detach the temporary child within [`crate::attach_win::DETACH_LIMIT`].
+/// Still attached past it, the child may yet be written: an error, so that
+/// nothing in it is merged into the image.
+fn detach_child_in_time(attached: AttachedVhdx) -> Result<()> {
+    let limit = crate::attach_win::DETACH_LIMIT;
+    let physical = attached.physical_path().to_string();
+    let t_detach = Instant::now();
+    match crate::deadline::run_within("vhdx-detach", limit, move || drop(attached), |()| {}) {
+        Ok(()) => {
+            info!(
+                detach_ms = t_detach.elapsed().as_millis(),
+                "true removal: temp child detached"
+            );
+            Ok(())
+        }
+        Err(_) => {
+            warn!(physical = %physical, limit_s = limit.as_secs(),
+                  "true removal: detaching the child did not finish in time — nothing is merged");
+            Err(OwnBackupError::Device(format!(
+                "Windows did not detach the image within {} min; what was deleted inside it \
+                 is not used",
+                limit.as_secs() / 60
+            )))
+        }
+    }
 }
 
 /// Scan the filesystem inside an already-attached, online image disk, delete
@@ -599,22 +665,21 @@ fn mount_and_delete(
 
     // The image's GPT GUID carries a persisted "offline" attribute, so the
     // child arrives offline (no automount race); we bring it online on purpose.
-    let attached = attach_vhdx(temp, AttachMode::RawWrite)?;
-    let dev = open_write_retry(attached.physical_path())?;
-    let _ = dev.update_properties();
-    dev.set_online_this_session()?;
-    debug!(physical = %attached.physical_path(), "true removal: child attached RW and brought online");
+    let attached = attach_child_in_time(temp)?;
+    let result = (|| -> Result<(u64, u64)> {
+        let dev = open_write_retry(attached.physical_path())?;
+        let _ = dev.update_properties();
+        dev.set_online_this_session()?;
+        debug!(physical = %attached.physical_path(), "true removal: child attached RW and brought online");
 
-    let disk_number = disk_number_of(attached.physical_path())?;
-    let (deleted, failed) = delete_paths_on_disk(disk_number, &dev, paths, tick)?;
-    drop(dev);
-    let t_detach = Instant::now();
-    drop(attached); // detaches the child
-    info!(
-        detach_ms = t_detach.elapsed().as_millis(),
-        "true removal: temp child detached"
-    );
-
+        let disk_number = disk_number_of(attached.physical_path())?;
+        let counts = delete_paths_on_disk(disk_number, &dev, paths, tick)?;
+        drop(dev);
+        Ok(counts)
+    })();
+    let detached = detach_child_in_time(attached);
+    let (deleted, failed) = result?;
+    detached?;
     Ok((deleted, failed))
 }
 
