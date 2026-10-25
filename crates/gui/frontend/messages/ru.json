@@ -47,6 +47,7 @@
   "nav_theme_group": "Тема",
   "nav_theme_light": "Светлая тема",
   "nav_theme_dark": "Тёмная тема",
+  "app_waiting": "В очереди: {what} — начнётся, когда закончится {behind}.",
   "app_engine_down": "Движок не отвечает. Запустите его: own-backup-service.exe --run --media, затем нажмите «Повторить».",
   "app_engine_down_linux": "Движок не отвечает. Запустите его: own-backup-service --run --media, затем нажмите «Повторить».",
   "app_not_installed_temp": "Служба «Own Backup» не установлена (сейчас отвечает временный экземпляр). Установите её: own-backup-service.exe /install — иначе не будет работать расписание.",

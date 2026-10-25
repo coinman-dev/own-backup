@@ -18,6 +18,13 @@
   import { m } from './lib/paraglide/messages';
   import { onLocale } from './lib/i18n.svelte';
   import { ensurePlatform, isWindows } from './lib/platformStore.svelte';
+  import { waiting, initWaiting } from './lib/waitingStore.svelte';
+
+  async function stopWaiting() {
+    // The stop button of what the person started — it reaches an operation
+    // that still waits its turn as well as one that runs.
+    await api.cancelEngineOp().catch(() => {});
+  }
 
   let currentView: ViewName = $state('backup');
   // Warning shown when the backup service isn't running/installed. Everything
@@ -107,6 +114,7 @@
     checkService();
     initEngine();
     initJobs();
+    initWaiting();
   });
 </script>
 
@@ -128,6 +136,17 @@
         </button>
       </div>
     {/if}
+
+    {#each waiting.ops as op (op.id)}
+      <div class="waiting-strip" role="status">
+        <svg class="sw-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="8.5" />
+          <path d="M12 7.5V12l3 2" />
+        </svg>
+        <span class="sw-text">{m.app_waiting({ what: op.what, behind: op.behind })}</span>
+        <button class="sw-retry" onclick={stopWaiting}>{m.common_cancel()}</button>
+      </div>
+    {/each}
 
     <div class="view-host">
       {#if currentView === 'backup'}
@@ -186,6 +205,26 @@
   .sw-icon {
     flex: 0 0 auto;
     color: var(--error);
+  }
+
+  .waiting-strip {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 16px;
+    background: var(--warning-soft);
+    color: var(--text);
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+
+  .waiting-strip .sw-icon {
+    color: var(--warning);
+  }
+
+  .waiting-strip .sw-retry {
+    border-color: var(--border);
+    color: var(--text);
   }
 
   .sw-text {

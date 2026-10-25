@@ -35,6 +35,12 @@
 //! now". Nothing ever waits while holding anything, so there is no order of
 //! acquisition to get wrong.
 //!
+//! An operation a person started that needs only shared resources waits its
+//! turn behind what holds them ([`Busy::reserve_queued`]) instead of being
+//! turned away (owner, 24.10): a verification asked for while that chain's
+//! copy is being written runs when the copy ends. While it waits it is in
+//! [`Busy::waiting`], and the stop button reaches it there too.
+//!
 //! A reservation is released by [`Reservation`]'s `Drop`, which covers the
 //! three endings that matter equally: success, an early `return` on error, and
 //! a panic unwinding out of a `spawn_blocking` closure.
@@ -74,6 +80,9 @@ pub struct Doing {
 #[derive(Debug)]
 pub struct Busy {
     held: Mutex<Vec<HeldEntry>>,
+    /// Waiting their turn ([`Self::reserve_queued`]): each with what it is
+    /// behind.
+    waiting: Mutex<Vec<(Doing, Doing)>>,
     /// Woken whenever a reservation ends.
     released: tokio::sync::Notify,
     next: AtomicU64,
@@ -101,6 +110,7 @@ impl Busy {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             held: Mutex::new(Vec::new()),
+            waiting: Mutex::new(Vec::new()),
             released: tokio::sync::Notify::new(),
             next: AtomicU64::new(1),
             stopping: AtomicBool::new(false),
@@ -113,6 +123,9 @@ impl Busy {
     /// person's cancel, and its slot is caught up after the next start.
     pub fn cancel_for_stop(&self) -> bool {
         self.stopping.store(true, Ordering::SeqCst);
+        for (w, _) in self.waiting.lock().unwrap().iter() {
+            w.cancel.cancel();
+        }
         let held = self.held.lock().unwrap();
         for h in held.iter() {
             h.doing.cancel.cancel();
@@ -160,6 +173,95 @@ impl Busy {
                 }
             }
         }
+    }
+
+    /// [`Self::reserve_soon`] that waits its turn instead of refusing, for
+    /// an operation a person started on shared resources, behind other
+    /// operations on those resources, however long that takes. `on_wait` is
+    /// told what it waits behind when it starts waiting (`Some`) and that it
+    /// stopped (`None`) — the window says «В очереди…» meanwhile.
+    ///
+    /// `Err(Some(d))`: refused at once, as [`Self::reserve_soon`] would, when
+    /// `d` holds the whole machine — a deletion does not line up behind a
+    /// restore of the system disk to start whenever that ends. `Err(None)`:
+    /// cancelled while waiting (the stop button, [`Self::cancel_run`], the
+    /// service stopping).
+    pub async fn reserve_queued(
+        self: &Arc<Self>,
+        doing: Doing,
+        mut on_wait: impl FnMut(Option<&Doing>),
+    ) -> Result<Reservation, Option<Doing>> {
+        // Out of the list however the wait ends — taken, cancelled, or this
+        // future dropped because the client went away.
+        struct InLine<'a> {
+            busy: &'a Busy,
+            id: uuid::Uuid,
+        }
+        impl Drop for InLine<'_> {
+            fn drop(&mut self) {
+                let id = self.id;
+                self.busy
+                    .waiting
+                    .lock()
+                    .unwrap()
+                    .retain(|(w, _)| w.cancel.id() != id);
+            }
+        }
+        let mut in_line: Option<InLine<'_>> = None;
+        loop {
+            let released = self.released.notified();
+            tokio::pin!(released);
+            released.as_mut().enable();
+            if doing.cancel.is_cancelled() || self.stopping() {
+                if in_line.take().is_some() {
+                    on_wait(None);
+                }
+                return Err(None);
+            }
+            match self.try_take(doing.clone(), true) {
+                Ok(r) => {
+                    if in_line.take().is_some() {
+                        on_wait(None);
+                    }
+                    return Ok(r);
+                }
+                // A scheduled verification in the way: cancelled, about to end.
+                Err(Refused::Yielding) => {}
+                Err(Refused::Busy(behind)) => {
+                    if in_line.is_none() {
+                        if let Some(machine) = self.machine_holder() {
+                            return Err(Some(machine));
+                        }
+                        self.waiting
+                            .lock()
+                            .unwrap()
+                            .push((doing.clone(), behind.clone()));
+                        in_line = Some(InLine {
+                            busy: self,
+                            id: doing.cancel.id(),
+                        });
+                        on_wait(Some(&behind));
+                    }
+                }
+            }
+            // A release wakes it; a cancel is noticed within half a second.
+            let _ = tokio::time::timeout(Duration::from_millis(500), released).await;
+        }
+    }
+
+    /// What holds the whole machine, if anything does.
+    fn machine_holder(&self) -> Option<Doing> {
+        self.held
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|h| h.doing.shared.is_none())
+            .map(|h| h.doing.clone())
+    }
+
+    /// What waits its turn now, each with what it is behind.
+    pub fn waiting(&self) -> Vec<(Doing, Doing)> {
+        self.waiting.lock().unwrap().clone()
     }
 
     /// Take what `doing` needs, waiting for it to be free. For the backup
@@ -241,18 +343,33 @@ impl Busy {
     /// is worth telling the user: it means the run they were looking at has
     /// already ended, not that cancelling failed.
     pub fn cancel_run(&self, id: uuid::Uuid) -> bool {
-        self.held
+        let waiting = self
+            .waiting
             .lock()
             .unwrap()
             .iter()
-            .any(|h| h.doing.cancel.cancel_run(id))
+            .any(|(w, _)| w.cancel.cancel_run(id));
+        waiting
+            || self
+                .held
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|h| h.doing.cancel.cancel_run(id))
     }
 
     /// Cancel what the engine's stop button means: every operation running
     /// that is not a backup (a backup is stopped by its queue's own cancel).
     pub fn cancel_whatever_is_running(&self) -> bool {
-        let held = self.held.lock().unwrap();
+        // What waits its turn is what the person sees as running too.
         let mut any = false;
+        for (w, _) in self.waiting.lock().unwrap().iter() {
+            if !w.backup {
+                w.cancel.cancel();
+                any = true;
+            }
+        }
+        let held = self.held.lock().unwrap();
         for h in held.iter().filter(|h| !h.doing.backup) {
             h.doing.cancel.cancel();
             any = true;
@@ -369,6 +486,20 @@ impl Doing {
         self.yields
     }
 
+    /// Whether this one takes only its own resources, beside others.
+    pub fn is_shared(&self) -> bool {
+        self.shared.is_some()
+    }
+
+    /// What it is, for a line that names it: `what (which)`.
+    pub fn named(&self) -> String {
+        if self.which.is_empty() {
+            self.what.clone()
+        } else {
+            format!("{} ({})", self.what, self.which)
+        }
+    }
+
     /// The sentence a second caller is shown.
     pub fn refusal(&self) -> String {
         if self.which.is_empty() {
@@ -410,6 +541,78 @@ pub fn since(started: Instant) -> std::time::Duration {
 mod tests {
     use super::*;
     use std::sync::Barrier;
+
+    #[tokio::test]
+    async fn a_shared_operation_waits_its_turn_and_can_be_cancelled_while_waiting() {
+        let busy = Busy::new();
+        let copy = busy
+            .reserve(Doing::new("копия", "job").shared(["chain:F"]))
+            .unwrap();
+        let seen = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+
+        // Behind the copy: waits, says so, starts when the copy ends.
+        let (b, s) = (busy.clone(), seen.clone());
+        let verify = tokio::spawn(async move {
+            b.reserve_queued(
+                Doing::new("проверка", "F").shared(["chain:F"]),
+                |behind| {
+                    s.lock().unwrap().push(behind.map(|d| d.what.clone()));
+                },
+            )
+            .await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!verify.is_finished(), "it waits");
+        assert_eq!(busy.waiting().len(), 1);
+        assert_eq!(*seen.lock().unwrap(), [Some("копия".to_string())]);
+        drop(copy);
+        let got = tokio::time::timeout(Duration::from_secs(5), verify)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(got.is_ok(), "it ran once the copy ended");
+        assert!(busy.waiting().is_empty());
+        assert_eq!(seen.lock().unwrap().last(), Some(&None));
+        drop(got);
+
+        // Behind an operation on the whole machine it is refused at once.
+        let restore = busy
+            .reserve(Doing::new("восстановление", "диск 1"))
+            .unwrap();
+        let refused = busy
+            .reserve_queued(
+                Doing::new("удаление", "F").shared(["chain:F"]),
+                |_| panic!("not queued"),
+            )
+            .await
+            .expect_err("refused");
+        assert_eq!(refused.map(|d| d.what), Some("восстановление".to_string()));
+        drop(restore);
+
+        // The stop button reaches one that waits, not only what runs.
+        let _copy = busy
+            .reserve(Doing::new("копия", "job").shared(["chain:F"]).backup())
+            .unwrap();
+        let b = busy.clone();
+        let delete = tokio::spawn(async move {
+            b.reserve_queued(Doing::new("удаление", "F").shared(["chain:F"]), |_| {})
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            busy.cancel_whatever_is_running(),
+            "the waiting one was cancelled"
+        );
+        let got = tokio::time::timeout(Duration::from_secs(5), delete)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(got, Err(None)),
+            "cancelled while waiting: never started"
+        );
+        assert!(busy.waiting().is_empty());
+    }
 
     #[tokio::test]
     async fn only_one_operation_can_hold_the_machine() {

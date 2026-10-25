@@ -47,6 +47,7 @@
   "nav_theme_group": "Theme",
   "nav_theme_light": "Light theme",
   "nav_theme_dark": "Dark theme",
+  "app_waiting": "Queued: {what} — it starts when {behind} ends.",
   "app_engine_down": "The engine is not responding. Start it: own-backup-service.exe --run --media, then click “Retry”.",
   "app_engine_down_linux": "The engine is not responding. Start it: own-backup-service --run --media, then click “Retry”.",
   "app_not_installed_temp": "The “Own Backup” service is not installed (a temporary instance is answering now). Install it: own-backup-service.exe /install — otherwise schedules will not run.",

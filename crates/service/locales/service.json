@@ -260,6 +260,10 @@
     "ru": "Этот запуск уже завершён.",
     "en": "This run has already finished."
   },
+  "grpc_server.cancelled_waiting": {
+    "ru": "Отменено, пока ждало очереди.",
+    "en": "Cancelled while waiting its turn."
+  },
   "grpc_server.boot_bios_machine": {
     "ru": "эта машина загружается через обычный BIOS — записей UEFI у неё нет",
     "en": "this machine boots through legacy BIOS — it has no UEFI boot entries"
