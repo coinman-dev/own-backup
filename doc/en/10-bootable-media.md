@@ -75,8 +75,11 @@ restores Windows backups as well (NTFS, BitLocker, boot configuration).
     an administrator password.
 
   With **Write onto a USB stick** the ISO goes onto the chosen stick right away.
-- On Windows the Linux medium cannot be built yet — download it from the
-  release page.
+- **On Windows, from the window:** **Tools → Bootable media → Based on Linux
+  (Debian) x64 → Click to download →**. The medium is built on Linux only, so
+  Windows downloads the ready ISO of the installed program's version from
+  GitHub and checks it against the release's checksum; writing it to a stick
+  is not offered there yet.
 
 ### Writing it to a USB stick
 

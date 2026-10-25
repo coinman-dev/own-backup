@@ -1012,8 +1012,45 @@ pub async fn clear_linux_media_cache(
 /// their downloads folder as the desktop names it (`~/Загрузки` on a Russian
 /// desktop), otherwise `~/Downloads`, otherwise home. Asked here, in the
 /// person's own process: the service is root and knows nobody's home.
+///
+/// Windows: the Downloads known folder (moved wherever the person moved it),
+/// otherwise the profile.
 #[tauri::command]
 pub fn default_media_folder() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        known_downloads_folder()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        xdg_downloads_folder()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn known_downloads_folder() -> String {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{FOLDERID_Downloads, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+    // SAFETY: the returned string is read once and freed with the allocator
+    // the shell documents for it.
+    let downloads = unsafe {
+        SHGetKnownFolderPath(&FOLDERID_Downloads, KF_FLAG_DEFAULT, None)
+            .ok()
+            .and_then(|p| {
+                let s = p.to_string().ok();
+                CoTaskMemFree(Some(p.0 as *const _));
+                s
+            })
+    };
+    [downloads, std::env::var("USERPROFILE").ok()]
+        .into_iter()
+        .flatten()
+        .find(|p| std::path::Path::new(p).is_dir())
+        .unwrap_or_default()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn xdg_downloads_folder() -> String {
     let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
         return String::new();
     };
@@ -1035,6 +1072,7 @@ pub fn default_media_folder() -> String {
 
 /// `XDG_DOWNLOAD_DIR="$HOME/Загрузки"` of a `user-dirs.dirs`, with `$HOME`
 /// expanded. Only `$HOME/…` and absolute paths are allowed there.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn xdg_download_dir(text: &str, home: &std::path::Path) -> Option<std::path::PathBuf> {
     let value = text
         .lines()

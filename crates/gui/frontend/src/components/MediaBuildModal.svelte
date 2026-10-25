@@ -1,10 +1,7 @@
 <script lang="ts">
-  // The build dialog: what goes on the medium, which drivers, where the ISO
-  // lands — and then the queue of stages while it happens.
-  //
-  // One dialog serves both bases. The Linux one has no engine behind it yet, so
-  // its button is disabled and says so; everything above the button is the same
-  // conversation, which is the point of writing it once.
+  // The build dialog of the Windows medium: what goes on it, which drivers,
+  // where the ISO lands — and then the queue of stages while it happens. The
+  // Linux medium has its own dialog (LinuxMediaBuildModal).
   import { onMount } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
   import { api } from '../lib/api';
@@ -21,14 +18,11 @@
   import { examplePath, joinPath } from '../lib/paths';
 
   interface Props {
-    kind: 'windows' | 'linux';
-    /** Chosen base image; null for Linux, which has none yet. */
+    /** Chosen base image. */
     base: BaseImage | null;
     onClose: () => void;
   }
-  let { kind, base, onClose }: Props = $props();
-
-  const isWindows = $derived(kind === 'windows');
+  let { base, onClose }: Props = $props();
 
   let drivers: DriverPackage[] = $state([]);
   let selected = $state(new Set<string>());
@@ -93,17 +87,15 @@
   // what "Начать" would act on, and starting without it would quietly build a
   // medium with no drivers at all.
   const canStart = $derived(
-    isWindows && !building && !!base && outputDir.trim().length > 0 &&
+    !building && !!base && outputDir.trim().length > 0 &&
     !(includeDrivers && loadingDrivers),
   );
 
   onMount(() => {
-    if (isWindows) {
-      loadDrivers();
-      // Quietly: a machine with neither installed is the ordinary case, and an
-      // empty section says so without an error.
-      api.listMediaTools().then((t) => (tools = t)).catch(() => {});
-    }
+    loadDrivers();
+    // Quietly: a machine with neither installed is the ordinary case, and an
+    // empty section says so without an error.
+    api.listMediaTools().then((t) => (tools = t)).catch(() => {});
     // Default destination: where the program itself is, which is the folder the
     // user already knows how to find.
     // `getConfig` hands back the whole config as unknown values; this one is a
@@ -173,7 +165,7 @@
 <div class="backdrop" onclick={() => !building && onClose()}>
   <div class="dialog" onclick={(e) => e.stopPropagation()}>
     <div class="head">
-      {isWindows ? m.mb_head_windows() : m.mb_head_linux()}
+      {m.mb_head_windows()}
       <button class="x" onclick={onClose} disabled={building} title={m.common_close()}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
       </button>
@@ -182,23 +174,15 @@
     <div class="body">
       <!-- What goes in -->
       <div class="intro">
-        {#if isWindows}
-          {base
-            ? m.mb_intro_win_build({ build: base.build, language: base.language })
-            : m.mb_intro_win()}
-          {m.mb_intro_win_boot()}
-        {:else}
-          {m.mb_intro_linux()}
-        {/if}
+        {base
+          ? m.mb_intro_win_build({ build: base.build, language: base.language })
+          : m.mb_intro_win()}
+        {m.mb_intro_win_boot()}
       </div>
-
-      {#if !isWindows}
-        <div class="soon">{m.mb_linux_soon()}</div>
-      {/if}
 
       <!-- Options. Hidden once the build starts: a set of checkboxes that can no
            longer be changed is only in the way of the thing being watched. -->
-      {#if isWindows && !building && !finished}
+      {#if !building && !finished}
         <label class="opt">
           <input type="checkbox" bind:checked={runtimeInImage} disabled={building} />
           <span>
@@ -410,11 +394,7 @@
         <button class="btn primary" onclick={onClose}>{m.mb_done()}</button>
       {:else}
         <button class="btn primary" onclick={start} disabled={!canStart}
-                title={!isWindows
-                  ? m.mb_linux_not_impl()
-                  : includeDrivers && loadingDrivers
-                    ? m.mb_polling_title()
-                    : ''}>
+                title={includeDrivers && loadingDrivers ? m.mb_polling_title() : ''}>
           {building ? m.mb_building() : includeDrivers && loadingDrivers ? m.mb_polling_btn() : m.mb_start()}
         </button>
       {/if}
@@ -431,7 +411,6 @@
   .x:hover:not(:disabled) { color: var(--head); background: var(--track); }
   .body { padding: 16px 18px; overflow: auto; flex: 1; min-height: 0; }
   .intro { font-size: 13px; color: var(--text); line-height: 1.6; }
-  .soon { margin-top: 10px; font-size: 13px; color: var(--warning-text); line-height: 1.5; }
   .opt { display: flex; align-items: flex-start; gap: 9px; font-size: 13px; color: var(--head); margin-top: 16px; cursor: pointer; }
   .opt input { margin-top: 2px; flex-shrink: 0; }
   .opt-note { display: block; font-size: 12px; color: var(--text-muted); line-height: 1.4; margin-top: 2px; }

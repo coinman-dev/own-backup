@@ -563,6 +563,49 @@ pub fn find_release_iso(releases: &serde_json::Value, version: &str) -> Option<R
     })
 }
 
+/// The Debian upstream version of a program version: `0.1.6-beta` →
+/// `0.1.6~beta`, as `scripts/build-deb.sh` makes it (the first `-` only).
+pub fn deb_upstream(version: &str) -> String {
+    version.replacen('-', "~", 1)
+}
+
+/// Windows: the medium of the program version `upstream` (`0.1.6~beta`),
+/// whose package revision the Windows program does not know. The newest
+/// release with a medium of that version is taken, and in it the highest
+/// revision; the answer is the whole Debian version (`0.1.6~beta-1`) and
+/// the release, as [`find_release_iso`] finds it.
+pub fn find_release_iso_of_upstream(
+    releases: &serde_json::Value,
+    upstream: &str,
+) -> Option<(String, ReleaseIso)> {
+    let bare = release_asset_name(upstream);
+    let prefix = format!("{}-", bare.strip_suffix("_amd64.iso")?);
+    let revision = releases.as_array()?.iter().find_map(|r| {
+        if r.get("draft").and_then(|d| d.as_bool()) == Some(true) {
+            return None;
+        }
+        r.get("assets")?
+            .as_array()?
+            .iter()
+            .filter_map(|a| a.get("name")?.as_str())
+            .filter_map(|n| n.strip_prefix(prefix.as_str())?.strip_suffix("_amd64.iso"))
+            .filter(|rev| {
+                rev.starts_with(|c: char| c.is_ascii_digit())
+                    && rev.chars().all(|c| c.is_ascii_alphanumeric() || c == '.')
+            })
+            .max_by_key(|rev| revision_key(rev))
+            .map(str::to_string)
+    })?;
+    let version = format!("{upstream}-{revision}");
+    find_release_iso(releases, &version).map(|r| (version, r))
+}
+
+/// Revisions compared by their leading number: `10` after `9`.
+fn revision_key(rev: &str) -> (u64, String) {
+    let digits: String = rev.chars().take_while(|c| c.is_ascii_digit()).collect();
+    (digits.parse().unwrap_or(0), rev.to_string())
+}
+
 /// The SHA-256 a checksum list (`sha256sum`'s lines, text or binary mode)
 /// gives for `name`, in lower case.
 pub fn sha256_listed(sums: &str, name: &str) -> Option<String> {
@@ -577,6 +620,44 @@ pub fn sha256_listed(sums: &str, name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_takes_the_highest_revision_of_its_version_in_the_newest_release() {
+        assert_eq!(deb_upstream("0.1.6-beta"), "0.1.6~beta");
+        assert_eq!(deb_upstream("0.2.0"), "0.2.0");
+        let asset = |name: &str, size: u64| {
+            serde_json::json!({
+                "name": name,
+                "size": size,
+                "browser_download_url": format!("https://github.com/x/releases/download/t/{name}"),
+            })
+        };
+        let releases = serde_json::json!([
+            { "tag_name": "draft", "draft": true,
+              "assets": [asset("OwnBackup-Linux-0.1.6.beta-12_amd64.iso", 1)] },
+            { "tag_name": "v0.1.7-beta", "draft": false,
+              "assets": [asset("OwnBackup-Linux-0.1.7.beta-1_amd64.iso", 2)] },
+            { "tag_name": "v0.1.6-beta", "draft": false,
+              "assets": [asset("OwnBackup-Linux-0.1.6.beta-2_amd64.iso", 3),
+                         asset("OwnBackup-Linux-0.1.6.beta-10_amd64.iso", 4),
+                         asset("OwnBackup-Linux-0.1.6.beta-9_amd64.iso", 5),
+                         asset("OwnBackup-Linux-0.1.6.beta-x_amd64.iso", 6),
+                         asset("own-backup_0.1.6.beta-11_amd64.deb", 7),
+                         asset("SHA256SUMS.txt", 90)] },
+            { "tag_name": "older", "draft": false,
+              "assets": [asset("OwnBackup-Linux-0.1.6.beta-11_amd64.iso", 8)] },
+        ]);
+        let (version, found) = find_release_iso_of_upstream(&releases, "0.1.6~beta").unwrap();
+        assert_eq!(version, "0.1.6~beta-10");
+        assert_eq!(found.tag, "v0.1.6-beta");
+        assert_eq!(found.size, 4);
+        assert_eq!(found.sums_urls.len(), 1);
+        // Not a prefix match: 0.1.6~beta is not 0.1.6~beta2.
+        let other = serde_json::json!([{ "tag_name": "t", "draft": false,
+            "assets": [asset("OwnBackup-Linux-0.1.6.beta2-1_amd64.iso", 1)] }]);
+        assert!(find_release_iso_of_upstream(&other, "0.1.6~beta").is_none());
+        assert!(find_release_iso_of_upstream(&releases, "0.1.8~beta").is_none());
+    }
 
     #[test]
     fn a_ready_medium_is_the_exact_build_in_the_newest_release_that_has_it() {

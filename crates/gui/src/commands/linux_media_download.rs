@@ -1,9 +1,13 @@
-//! Linux: the ready boot medium from GitHub instead of a build. The release
+//! The ready Linux boot medium from GitHub instead of a build. The release
 //! of the installed package (`OwnBackup-Linux-<version>_amd64.iso`, see
 //! `media_linux::release_asset_name`) is looked up and downloaded here, in
 //! the person's own process, straight into their folder: no root, no
 //! password, nothing for the service to do. `curl` (a dependency of the
 //! package) does the HTTPS, with the system's certificates.
+//!
+//! Windows, which cannot build that medium, downloads it the same way: the
+//! medium of this program's version (the package revision is unknown here,
+//! so the highest one the release has), with Windows' own `curl.exe`.
 //!
 //! The file is written under a hidden temporary name beside the result,
 //! checked against the size GitHub lists and the release's SHA256SUMS, and
@@ -44,7 +48,7 @@ pub struct LinuxMediaDownloadProgress {
 /// release has it (or the repository cannot be seen).
 #[tauri::command]
 pub async fn linux_media_release() -> Result<Option<LinuxMediaReleaseDto>, String> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
         tokio::task::spawn_blocking(|| {
             imp::find().map(|found| {
@@ -58,7 +62,7 @@ pub async fn linux_media_release() -> Result<Option<LinuxMediaReleaseDto>, Strin
         .await
         .map_err(|e| e.to_string())?
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         Err(own_backup_common::tr!("linux_media_dl.linux_only").into_owned())
     }
@@ -71,13 +75,13 @@ pub async fn download_linux_media(
     app: tauri::AppHandle,
     output_dir: String,
 ) -> Result<LinuxMediaDownloadDto, String> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
         tokio::task::spawn_blocking(move || imp::download(&app, &output_dir))
             .await
             .map_err(|e| e.to_string())?
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         let _ = (app, output_dir);
         Err(own_backup_common::tr!("linux_media_dl.linux_only").into_owned())
@@ -88,24 +92,21 @@ pub async fn download_linux_media(
 /// leaves nothing behind.
 #[tauri::command]
 pub fn cancel_linux_media_download() {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     imp::CANCEL.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod imp {
-    use std::ffi::CString;
     use std::io::Read;
-    use std::os::unix::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
     use own_backup_backup::media_linux::{
-        find_release_iso, github_releases_url, iso_file_name, sha256_listed, ReleaseIso,
+        github_releases_url, iso_file_name, sha256_listed, ReleaseIso,
     };
-    use own_backup_backup::media_linux_build::{installed, PACKAGE};
     use own_backup_common::tr;
     use sha2::{Digest, Sha256};
     use tauri::Emitter;
@@ -113,6 +114,41 @@ mod imp {
     use super::{LinuxMediaDownloadDto, LinuxMediaDownloadProgress};
 
     pub static CANCEL: AtomicBool = AtomicBool::new(false);
+
+    // Messages whose Linux text ends by suggesting a build of the medium,
+    // which Windows cannot do: there their `_win` text, without that advice.
+
+    fn rate_limited() -> String {
+        if cfg!(target_os = "windows") {
+            tr!("linux_media_dl.rate_limited_win").into_owned()
+        } else {
+            tr!("linux_media_dl.rate_limited").into_owned()
+        }
+    }
+
+    fn bad_answer() -> String {
+        if cfg!(target_os = "windows") {
+            tr!("linux_media_dl.bad_answer_win").into_owned()
+        } else {
+            tr!("linux_media_dl.bad_answer").into_owned()
+        }
+    }
+
+    fn none_released() -> String {
+        if cfg!(target_os = "windows") {
+            tr!("linux_media_dl.none_win").into_owned()
+        } else {
+            tr!("linux_media_dl.none").into_owned()
+        }
+    }
+
+    fn no_sums(tag: &str) -> String {
+        if cfg!(target_os = "windows") {
+            tr!("linux_media_dl.no_sums_win", tag = tag).into_owned()
+        } else {
+            tr!("linux_media_dl.no_sums", tag = tag).into_owned()
+        }
+    }
 
     /// GitHub's list of releases is a few hundred KiB; the checksum list a
     /// few lines.
@@ -122,7 +158,22 @@ mod imp {
     /// assets are served from another host), failing on an HTTP error, the
     /// C locale for the messages read below.
     fn curl() -> Command {
+        #[cfg(target_os = "linux")]
         let mut c = Command::new("curl");
+        // Windows' own, by its full path: a `curl.exe` in the current folder
+        // or on PATH is not run in its place. No console window; Schannel
+        // checks revocation only as far as it can, the way the browser does —
+        // a revocation server it cannot reach is not a failed download.
+        #[cfg(target_os = "windows")]
+        let mut c = {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+            let mut c = Command::new(Path::new(&root).join("System32").join("curl.exe"));
+            c.creation_flags(CREATE_NO_WINDOW)
+                .arg("--ssl-revoke-best-effort");
+            c
+        };
         c.env("LC_ALL", "C")
             .args([
                 "--proto",
@@ -149,7 +200,11 @@ mod imp {
 
     fn not_started(e: std::io::Error) -> String {
         if e.kind() == std::io::ErrorKind::NotFound {
-            tr!("linux_media_dl.no_curl").into_owned()
+            if cfg!(target_os = "windows") {
+                tr!("linux_media_dl.no_curl_win").into_owned()
+            } else {
+                tr!("linux_media_dl.no_curl").into_owned()
+            }
         } else {
             tr!("linux_media_dl.no_curl_start", error = e).into_owned()
         }
@@ -161,7 +216,7 @@ mod imp {
         match code {
             Some(22) if stderr.contains(" 404") => Fetch::NotFound,
             Some(22) if stderr.contains(" 403") || stderr.contains(" 429") => {
-                Fetch::Failed(tr!("linux_media_dl.rate_limited").into_owned())
+                Fetch::Failed(rate_limited())
             }
             Some(5 | 6 | 7 | 28 | 35 | 52 | 55 | 56) => {
                 Fetch::Failed(tr!("linux_media_dl.no_network").into_owned())
@@ -183,24 +238,36 @@ mod imp {
                 &String::from_utf8_lossy(&out.stderr),
             ));
         }
-        String::from_utf8(out.stdout)
-            .map_err(|_| Fetch::Failed(tr!("linux_media_dl.bad_answer").into_owned()))
+        String::from_utf8(out.stdout).map_err(|_| Fetch::Failed(bad_answer()))
     }
 
     /// The installed version and the release with its medium.
+    /// On Windows the version is this program's, in Debian's spelling
+    /// (`0.1.6-beta` → `0.1.6~beta`), and the revision comes from the release.
     pub fn find() -> Result<Option<(String, ReleaseIso)>, String> {
-        let version = installed(Path::new("/"), PACKAGE)
-            .map_err(|_| tr!("linux_media_dl.not_installed").into_owned())?
-            .version;
+        #[cfg(target_os = "linux")]
+        let version = {
+            use own_backup_backup::media_linux_build::{installed, PACKAGE};
+            installed(Path::new("/"), PACKAGE)
+                .map_err(|_| tr!("linux_media_dl.not_installed").into_owned())?
+                .version
+        };
         let text = match fetch_text(&github_releases_url(), "application/vnd.github+json") {
             Ok(t) => t,
             // A private repository answers 404 too: nothing to download.
             Err(Fetch::NotFound) => return Ok(None),
             Err(Fetch::Failed(m)) => return Err(m),
         };
-        let releases: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|_| tr!("linux_media_dl.bad_answer").into_owned())?;
-        Ok(find_release_iso(&releases, &version).map(|r| (version, r)))
+        let releases: serde_json::Value = serde_json::from_str(&text).map_err(|_| bad_answer())?;
+        #[cfg(target_os = "linux")]
+        let found = own_backup_backup::media_linux::find_release_iso(&releases, &version)
+            .map(|r| (version, r));
+        #[cfg(target_os = "windows")]
+        let found = own_backup_backup::media_linux::find_release_iso_of_upstream(
+            &releases,
+            &own_backup_backup::media_linux::deb_upstream(env!("CARGO_PKG_VERSION")),
+        );
+        Ok(found)
     }
 
     /// Removes the temporary file unless it was given its name.
@@ -229,7 +296,7 @@ mod imp {
                 Err(Fetch::Failed(m)) => failed = Some(m),
             }
         }
-        Err(failed.unwrap_or_else(|| tr!("linux_media_dl.no_sums", tag = release.tag).into_owned()))
+        Err(failed.unwrap_or_else(|| no_sums(&release.tag)))
     }
 
     /// Hidden temporary files an earlier download left in `dir` (the window
@@ -240,7 +307,7 @@ mod imp {
         };
         for e in entries.flatten() {
             let name = e.file_name();
-            let name = name.as_bytes();
+            let name = name.as_encoded_bytes();
             if name.starts_with(b".OwnBackup-Linux-")
                 && name.ends_with(b".part")
                 && e.file_type().is_ok_and(|t| t.is_file())
@@ -282,7 +349,7 @@ mod imp {
         if !dir.is_absolute() || !dir.is_dir() {
             return Err(tr!("linux_media_dl.no_folder", path = output_dir).into_owned());
         }
-        let (version, release) = find()?.ok_or_else(|| tr!("linux_media_dl.none").into_owned())?;
+        let (version, release) = find()?.ok_or_else(none_released)?;
         // The checksum first: a release that cannot be checked is refused
         // before a gigabyte is downloaded.
         let expected = expected_sha256(&release)?;
@@ -369,7 +436,7 @@ mod imp {
         let err_text = stderr_reader.join().unwrap_or_default();
         if !status.success() {
             return Err(match failure(status.code(), &err_text) {
-                Fetch::NotFound => tr!("linux_media_dl.none").into_owned(),
+                Fetch::NotFound => none_released(),
                 Fetch::Failed(m) => m,
             });
         }
@@ -390,7 +457,10 @@ mod imp {
         if CANCEL.load(Ordering::SeqCst) {
             return Err(cancelled());
         }
-        std::fs::File::open(&part_path)
+        // Opened for writing: Windows flushes only a file it may write.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&part_path)
             .and_then(|f| f.sync_all())
             .map_err(write_failed)?;
 
@@ -407,7 +477,10 @@ mod imp {
 
     /// Rename the finished file to `OwnBackup-Linux-<version>.iso`, or
     /// ` (2)` and on when that exists — never replacing anything.
+    #[cfg(target_os = "linux")]
     fn give_name(part: &Path, dir: &Path, version: &str) -> std::io::Result<PathBuf> {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
         let c = |p: &Path| {
             CString::new(p.as_os_str().as_bytes())
                 .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
@@ -449,6 +522,40 @@ mod imp {
                     }
                 }
                 _ => return Err(e),
+            }
+        }
+        Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
+    }
+
+    /// Windows: `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` refuses an
+    /// existing name on every file system (`std::fs::rename` would replace).
+    #[cfg(target_os = "windows")]
+    fn give_name(part: &Path, dir: &Path, version: &str) -> std::io::Result<PathBuf> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS};
+        use windows::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+        let wide = |p: &Path| -> Vec<u16> { p.as_os_str().encode_wide().chain([0]).collect() };
+        let from = wide(part);
+        for n in 1..1000 {
+            let target = dir.join(iso_file_name(version, n));
+            let to = wide(&target);
+            // SAFETY: two NUL-terminated wide strings that outlive the call.
+            match unsafe {
+                MoveFileExW(
+                    PCWSTR(from.as_ptr()),
+                    PCWSTR(to.as_ptr()),
+                    MOVEFILE_WRITE_THROUGH,
+                )
+            } {
+                Ok(()) => return Ok(target),
+                Err(e)
+                    if e.code() == ERROR_ALREADY_EXISTS.to_hresult()
+                        || e.code() == ERROR_FILE_EXISTS.to_hresult() =>
+                {
+                    continue
+                }
+                Err(e) => return Err(std::io::Error::from_raw_os_error(e.code().0 & 0xFFFF)),
             }
         }
         Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists))
