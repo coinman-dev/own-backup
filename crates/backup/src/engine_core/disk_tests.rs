@@ -388,7 +388,7 @@ fn exclusions_apply_per_partition_by_filesystem_family() {
     );
     // The FAT16 partition has no parser here: named in the result.
     let skipped = summary.file_scan_skipped.unwrap_or_default();
-    assert!(skipped.contains('1'), "{skipped}");
+    assert!(skipped.contains('1'), "{skipped:?}");
     assert!(verify_image(&image, |_, _| Ok(())).unwrap().valid());
 }
 
@@ -415,7 +415,7 @@ fn a_partition_not_held_still_is_copied_whole() {
     let skipped = summary.file_scan_skipped.unwrap();
     assert!(
         skipped.contains(&*own_backup_common::tr!("engine.skip_not_frozen")),
-        "{skipped}"
+        "{skipped:?}"
     );
     let sidecar = load_sidecar_of(&image).unwrap();
     let fs: Vec<_> = sidecar
@@ -792,7 +792,7 @@ mod physical_volume {
         let skipped = summary.file_scan_skipped.unwrap();
         assert!(
             skipped.contains("vg0/root") && skipped.contains("vg0/data"),
-            "{skipped}"
+            "{skipped:?}"
         );
         assert!(verify_image(&image, |_, _| Ok(())).unwrap().valid());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
@@ -997,7 +997,7 @@ mod physical_volume {
         let image = dir.path().join("spread.qcow2");
         let sum = run(&disk.platform(disk.pv(None)), &disk.request(&image)).unwrap();
         assert_eq!(sum.notes.len(), 1, "{:?}", sum.notes);
-        assert!(sum.notes[0].contains("vg0"), "{}", sum.notes[0]);
+        assert!(sum.notes[0].contains("vg0"), "{:?}", sum.notes[0]);
         assert!(
             !disk.stored(&image, extent(2), extent(3)),
             "its metadata believed"

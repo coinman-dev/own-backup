@@ -14,6 +14,7 @@ use own_backup_common::progress::BackupProgress;
 use own_backup_common::types::{
     BackupMode, BackupStatus, BackupType, BootMode, CompressionAlgo, ImageFormat, PartitionTable,
 };
+use own_backup_common::{lang::Localized, tr_both};
 use own_backup_common::{tr, OwnBackupError, Result};
 
 use super::disk_image::DiskBackupRequest;
@@ -24,16 +25,16 @@ pub const DEFAULT_BLOCK_SIZE: u32 = 1024 * 1024;
 
 /// Why there is no by-type breakdown behind the most ordinary copy of all: the
 /// file walk is the exclusion walk, and with no rules to apply nobody walks.
-pub(crate) fn no_patterns() -> String {
-    tr!("engine_win.no_patterns").into_owned()
+pub(crate) fn no_patterns() -> Localized {
+    tr_both!("engine_win.no_patterns")
 }
 
 /// The result screen's sentence for a removal pass that did not happen: the
 /// pass itself logged why, in detail.
 // The Windows platform's answer; Linux has its own words.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub(crate) fn entries_kept_reason() -> String {
-    tr!("engine_win.entries_kept").into_owned()
+pub(crate) fn entries_kept_reason() -> Localized {
+    tr_both!("engine_win.entries_kept")
 }
 
 /// Write target behind the format switch. VHDX goes through the kernel

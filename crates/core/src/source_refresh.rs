@@ -48,7 +48,7 @@ pub struct SourceRefresh {
     /// The partitions the job copies were moved, resized or recreated — said
     /// to the user, because their copy chain starts again with a full. Empty
     /// when only names changed (a renumbered disk, a new volume path).
-    pub layout_note: String,
+    pub layout_note: own_backup_common::lang::Localized,
     /// Old device → new device, for the log.
     pub renamed: Vec<(String, String)>,
 }
@@ -306,14 +306,13 @@ pub fn reconcile_sources(job: &Job, live: &[DiskInfo]) -> Refreshed {
         return Refreshed::Unchanged;
     }
     let layout_note = if changed_parts.is_empty() {
-        String::new()
+        own_backup_common::lang::Localized::default()
     } else {
-        tr!(
+        own_backup_common::tr_both!(
             "source_refresh.layout_changed",
             disk = changed_disk_model,
             parts = changed_parts.join(", ")
         )
-        .into_owned()
     };
     Refreshed::Updated(Box::new(SourceRefresh {
         job: next,
@@ -508,7 +507,7 @@ mod tests {
         assert_eq!(r.job.source_disks[0].partitions[3].volume_device, RE_NEW);
         assert_eq!(r.renamed, vec![(RE_OLD.to_string(), RE_NEW.to_string())]);
         // C: kept its name but not its size; WinRE moved — both are said.
-        assert!(r.layout_note.contains("C:"), "{}", r.layout_note);
+        assert!(r.layout_note.contains("C:"), "{:?}", r.layout_note);
         assert!(!r.layout_note.is_empty());
         // Applied once, the job is current.
         assert!(matches!(

@@ -23,6 +23,7 @@ use own_backup_backup::engine_win::{
     verify_image_scoped, DiskBackupSummary, VerifyScope, VolumeBackupSummary,
 };
 use own_backup_backup::seal::context::ArchiveKeys;
+use own_backup_common::lang::Localized;
 use own_backup_common::progress::BackupProgress;
 use own_backup_common::{tr, OwnBackupError};
 
@@ -318,40 +319,28 @@ impl VolumeTotals {
         if summary.resident_in_journal {
             note_resident_in_journal(run);
         }
-        for note in summary.notes {
-            let line = if self.volume_count > 1 {
-                format!("{device}: {note}")
+        // With more than one volume, each line names its own.
+        let several = self.volume_count > 1;
+        let named = |text: Localized| {
+            if several {
+                Localized {
+                    ru: format!("{device}: {}", text.ru),
+                    en: format!("{device}: {}", text.en),
+                }
             } else {
-                note
-            };
-            if !run.notes.contains(&line) {
-                run.notes.push(line);
+                text
             }
+        };
+        for note in summary.notes {
+            run.add_note(named(note));
         }
         // One line per volume that went unwalked; a run over three
         // volumes must not report the reason of whichever came last.
-
         if let Some(why) = summary.file_scan_skipped {
-            let line = if self.volume_count > 1 {
-                format!("{device}: {why}")
-            } else {
-                why
-            };
-            if !run.file_scan_skipped.is_empty() {
-                run.file_scan_skipped.push_str("; ");
-            }
-            run.file_scan_skipped.push_str(&line);
+            run.add_file_scan_skipped(named(why));
         }
         if let Some(why) = summary.excluded_entries_kept {
-            let line = if self.volume_count > 1 {
-                format!("{device}: {why}")
-            } else {
-                why
-            };
-            if !run.excluded_entries_kept.is_empty() {
-                run.excluded_entries_kept.push_str("; ");
-            }
-            run.excluded_entries_kept.push_str(&line);
+            run.add_excluded_entries_kept(named(why));
         }
 
         let actual_kind = match summary.backup_kind {
@@ -439,10 +428,7 @@ impl VolumeTotals {
 /// Resident content of excluded files may remain in the copy's NTFS journal
 /// — erased incompletely, and said so (CLAUDE.md). Once per run.
 fn note_resident_in_journal(run: &mut JobRun) {
-    let note = own_backup_common::tr!("lib.resident_in_journal").into_owned();
-    if !run.notes.contains(&note) {
-        run.notes.push(note);
-    }
+    run.add_note(own_backup_common::tr_both!("lib.resident_in_journal"));
 }
 
 /// Record a finished whole-disk copy in its run; returns the image the
@@ -471,9 +457,15 @@ pub(crate) fn record_disk(
     run.excluded_files = summary.excluded_files;
     run.excluded_bytes = summary.excluded_bytes;
     run.categories = summary.categories;
-    run.file_scan_skipped = summary.file_scan_skipped.unwrap_or_default();
-    run.excluded_entries_kept = summary.excluded_entries_kept.unwrap_or_default();
-    run.notes.extend(summary.notes);
+    if let Some(why) = summary.file_scan_skipped {
+        run.add_file_scan_skipped(why);
+    }
+    if let Some(why) = summary.excluded_entries_kept {
+        run.add_excluded_entries_kept(why);
+    }
+    for note in summary.notes {
+        run.add_note(note);
+    }
     if summary.resident_in_journal {
         note_resident_in_journal(run);
     }

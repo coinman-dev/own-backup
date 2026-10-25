@@ -340,10 +340,13 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
         summary.excluded_bytes as f64 / 1e9
     );
     if let Some(skipped) = &summary.file_scan_skipped {
-        println!("  Без разбора файлов: {skipped}");
+        println!("  Без разбора файлов: {}", skipped.current());
     }
     if let Some(kept) = &summary.excluded_entries_kept {
-        println!("  Исключённые остались в каталоге копии: {kept}");
+        println!(
+            "  Исключённые остались в каталоге копии: {}",
+            kept.current()
+        );
     }
     if summary.resident_in_journal {
         println!("  Журнал NTFS копии ($LogFile) не очищен: резидентное содержимое исключённых файлов может остаться в нём.");
@@ -586,13 +589,13 @@ pub async fn run(args: BackupDiskArgs) -> own_backup_common::Result<()> {
         );
     }
     if let Some(why) = &summary.file_scan_skipped {
-        println!("Exclusions not applied: {why}");
+        println!("Exclusions not applied: {}", why.current());
     }
     if let Some(why) = &summary.excluded_entries_kept {
-        println!("Excluded names kept: {why}");
+        println!("Excluded names kept: {}", why.current());
     }
     for note in &summary.notes {
-        println!("Note: {note}");
+        println!("Note: {}", note.current());
     }
     if summary.resident_in_journal {
         println!(

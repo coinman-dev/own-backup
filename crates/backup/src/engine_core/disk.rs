@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use own_backup_common::progress::BackupProgress;
 use own_backup_common::types::{BackupStatus, BackupType, ImageFormat};
+use own_backup_common::{lang::Localized, tr_both};
 use own_backup_common::{tr, OwnBackupError, Result};
 
 use super::chain::{child_refusal, validate_disk_parent};
@@ -174,15 +175,15 @@ fn backup_disk_inner<P: DiskPlatform>(
     let mut categories: Option<crate::exclusions::CategorySizes> = None;
     // Partitions whose files nobody walked, each with its reason (see
     // `PreparedMap::skipped`).
-    let mut scan_skips: Vec<String> = Vec::new();
+    let mut scan_skips: Vec<Localized> = Vec::new();
     // What the partitions' exclusions have to say besides that (see
     // `PreparedMap::notes`), one line per partition.
-    let mut prepare_notes: Vec<String> = Vec::new();
+    let mut prepare_notes: Vec<Localized> = Vec::new();
     // The service key directory was on one of the partitions and is not in
     // the copy (decision 6/E4).
     let mut key_store_excluded = false;
     // Excluded NTFS names on logical volumes no removal pass can reach.
-    let mut pv_names_kept: Vec<String> = Vec::new();
+    let mut pv_names_kept: Vec<Localized> = Vec::new();
     // Excluded files the Linux filesystems still list, over all partitions.
     let mut kept_named = super::partition_prep::KeptNamed::default();
     // Logical volumes already scanned for an earlier partition (a volume
@@ -531,7 +532,7 @@ fn backup_disk_inner<P: DiskPlatform>(
                 kept_named: 0,
                 excluded_bytes: 0,
                 categories: None,
-                skipped: Some(tr!("engine_win.skip_bitlocker_no_password").into_owned()),
+                skipped: Some(tr_both!("engine_win.skip_bitlocker_no_password")),
                 left: Vec::new(),
                 notes: Vec::new(),
             }),
@@ -560,7 +561,7 @@ fn backup_disk_inner<P: DiskPlatform>(
                 let why = pm
                     .skipped
                     .clone()
-                    .unwrap_or_else(|| tr!("engine.key_store_not_walked").into_owned());
+                    .unwrap_or_else(|| tr_both!("engine.key_store_not_walked"));
                 return Err(super::volume_exclusions::key_store_refusal(&source, &why));
             }
             // …and the walk must account for every match of it having left
@@ -587,24 +588,20 @@ fn backup_disk_inner<P: DiskPlatform>(
             categories.get_or_insert_with(Default::default).merge(c);
         }
         prepare_notes.extend(pm.notes.iter().map(|n| {
-            tr!(
+            tr_both!(
                 "engine_win.skip_partition_line",
                 index = p.part_index,
                 fs = pm.filesystem,
                 why = n
             )
-            .into_owned()
         }));
         if let Some(why) = &pm.skipped {
-            scan_skips.push(
-                tr!(
-                    "engine_win.skip_partition_line",
-                    index = p.part_index,
-                    fs = pm.filesystem,
-                    why = why
-                )
-                .into_owned(),
-            );
+            scan_skips.push(tr_both!(
+                "engine_win.skip_partition_line",
+                index = p.part_index,
+                fs = pm.filesystem,
+                why = why
+            ));
         }
         info!(
             part = p.part_index,
@@ -638,7 +635,7 @@ fn backup_disk_inner<P: DiskPlatform>(
     }
 
     // What the partitions' exclusions had to say comes first.
-    let mut notes: Vec<String> = std::mem::take(&mut prepare_notes);
+    let mut notes: Vec<Localized> = std::mem::take(&mut prepare_notes);
     // A volume group with physical volumes this copy does not hold: restored
     // alone, it is incomplete. Said in the run's summary, not just the log.
     {
@@ -689,15 +686,12 @@ fn backup_disk_inner<P: DiskPlatform>(
             }
             warn!(part = index, vg = %vg, missing = missing.len(),
                   "the volume group has physical volumes outside this copy");
-            notes.push(
-                tr!(
-                    "engine.pv_outside_copy",
-                    vg = vg,
-                    index = index,
-                    count = missing.len()
-                )
-                .into_owned(),
-            );
+            notes.push(tr_both!(
+                "engine.pv_outside_copy",
+                vg = vg,
+                index = index,
+                count = missing.len()
+            ));
         }
     }
 
@@ -1153,7 +1147,7 @@ fn backup_disk_inner<P: DiskPlatform>(
             );
         }
     }
-    let mut excluded_entries_kept: Option<String> = None;
+    let mut excluded_entries_kept: Option<Localized> = None;
     let mut resident_in_journal = false;
     if !removal.is_empty() {
         // Until the pass ticks, the image is being opened for it (on Windows
@@ -1203,16 +1197,14 @@ fn backup_disk_inner<P: DiskPlatform>(
         excluded_entries_kept = match removed {
             None => Some(platform.entries_kept_reason()),
             Some(0) => None,
-            Some(failed) => {
-                Some(tr!("engine_win.entries_partly_kept", count = failed).into_owned())
-            }
+            Some(failed) => Some(tr_both!("engine_win.entries_partly_kept", count = failed)),
         };
     }
     pv_names_kept.extend(kept_named.line(excluded_files));
     if !pv_names_kept.is_empty() {
-        let mut all: Vec<String> = excluded_entries_kept.take().into_iter().collect();
+        let mut all: Vec<Localized> = excluded_entries_kept.take().into_iter().collect();
         all.append(&mut pv_names_kept);
-        excluded_entries_kept = Some(all.join("; "));
+        excluded_entries_kept = Some(Localized::join(&all, "; "));
     }
 
     // 7. Build the embedded manifest + sidecar and write it into the meta region.
@@ -1407,7 +1399,7 @@ fn backup_disk_inner<P: DiskPlatform>(
         file_scan_skipped: if scan_skips.is_empty() {
             None
         } else {
-            Some(scan_skips.join("; "))
+            Some(Localized::join(&scan_skips, "; "))
         },
         excluded_entries_kept,
         key_store_excluded,

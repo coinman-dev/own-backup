@@ -16,7 +16,8 @@ use std::path::Path;
 
 use own_backup_common::gpt::DiskLayout;
 use own_backup_common::types::ImageFormat;
-use own_backup_common::{tr, Result};
+use own_backup_common::Result;
+use own_backup_common::{lang::Localized, tr_both};
 
 use crate::block_reader::BlockReader;
 use crate::efivars::BootBackup;
@@ -306,7 +307,7 @@ pub(crate) trait EnginePlatform {
 
     /// The result screen's sentence for catalog entries the removal pass did
     /// not delete.
-    fn entries_kept_reason(&self) -> String;
+    fn entries_kept_reason(&self) -> Localized;
 
     /// Whether the removal pass leaves the image's NTFS journal (`$LogFile`)
     /// as the driver kept it — with the old bytes of the records the pass
@@ -323,10 +324,10 @@ pub(crate) trait EnginePlatform {
 /// would lose what only the scan knows (the content it leaves behind, the
 /// records whose resident content is cleared, the key-directory proof), and
 /// an encrypted volume has no walk to fall back to at all.
-pub(crate) fn unreachable_note(scan: &crate::ntfs_scan::MftScan) -> Option<String> {
+pub(crate) fn unreachable_note(scan: &crate::ntfs_scan::MftScan) -> Option<Localized> {
     let count = scan.records_unreachable;
 
-    (count > 0).then(|| tr!("engine.mft_records_unreachable", count = count).into_owned())
+    (count > 0).then(|| tr_both!("engine.mft_records_unreachable", count = count))
 }
 
 /// Whether a removal pass that ran over `paths` on `platform` leaves resident

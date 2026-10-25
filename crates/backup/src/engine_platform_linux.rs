@@ -419,8 +419,8 @@ impl EnginePlatform for LinuxPlatform {
         )
     }
 
-    fn entries_kept_reason(&self) -> String {
-        tr!("engine.entries_kept_linux").into_owned()
+    fn entries_kept_reason(&self) -> own_backup_common::lang::Localized {
+        own_backup_common::tr_both!("engine.entries_kept_linux")
     }
 }
 
@@ -807,6 +807,6 @@ mod tests {
             .is_none());
         // Honest about the names left behind, and no promise about the next run.
         let reason = p.entries_kept_reason();
-        assert!(!reason.is_empty() && reason != "engine.entries_kept_linux");
+        assert!(!reason.is_empty() && reason.current() != "engine.entries_kept_linux");
     }
 }

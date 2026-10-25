@@ -14,6 +14,7 @@
 use tracing::{info, warn};
 
 use own_backup_common::image::{LuksHeaderBackup, VolumeEncryptionKind};
+use own_backup_common::{lang::Localized, tr_both};
 use own_backup_common::{tr, OwnBackupError, Result};
 
 use super::platform::{OpenedContainer, SourceDevice};
@@ -24,7 +25,7 @@ pub(crate) struct CapturedContainer {
     pub(crate) header: LuksHeaderBackup,
     /// Why a restore will not be able to put this container back, when it
     /// will not (said in the run's summary; the copy itself is fine).
-    pub(crate) note: Option<String>,
+    pub(crate) note: Option<Localized>,
 }
 
 /// Read the header of the container `c` is the mapping of; the mapping
@@ -189,20 +190,17 @@ pub(crate) fn recheck<D: SourceDevice>(
 
 /// [`CapturedContainer::note`] for the header area `area` of partition
 /// `part_index`: why a restore cannot put it back, when it cannot.
-fn rebuild_note(part_index: u32, area: &[u8]) -> Result<Option<String>> {
+fn rebuild_note(part_index: u32, area: &[u8]) -> Result<Option<Localized>> {
     Ok(match crate::luks::restore_obstacles(area)? {
         why if why.is_empty() => None,
         why => {
             warn!(part = part_index, why = ?why,
                   "the container's header is kept, but a restore cannot put it back");
-            Some(
-                tr!(
-                    "engine.luks_not_rebuildable",
-                    index = part_index,
-                    why = why.join("; ")
-                )
-                .into_owned(),
-            )
+            Some(tr_both!(
+                "engine.luks_not_rebuildable",
+                index = part_index,
+                why = why.join("; ")
+            ))
         }
     })
 }

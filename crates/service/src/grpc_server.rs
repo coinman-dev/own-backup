@@ -567,7 +567,8 @@ impl own_backup_core::EventSink for GrpcEventSink {
             json: serde_json::to_string(&snapshot).unwrap_or_default(),
         });
     }
-    fn job_finished(&self, run: own_backup_core::JobRun) {
+    fn job_finished(&self, mut run: own_backup_core::JobRun) {
+        run.in_language(own_backup_common::lang::code());
         let _ = self.tx.send(Event {
             kind: "finished".into(),
             json: serde_json::to_string(&run).unwrap_or_default(),
@@ -1219,12 +1220,21 @@ impl BackupService for BackupServiceImpl {
 
     async fn list_jobs(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
-        json_reply(&self.state.store.list())
+        // Runs' notes in the window's language now, not the one they were
+        // made in (`JobRun::texts`).
+        let lang = own_backup_common::lang::code();
+        let mut jobs = self.state.store.list();
+        jobs.iter_mut().for_each(|j| j.in_language(lang));
+        json_reply(&jobs)
     }
 
     async fn get_job(&self, req: Request<IdRequest>) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
-        json_reply(&self.state.store.get(&req.into_inner().id))
+        let mut job = self.state.store.get(&req.into_inner().id);
+        if let Some(j) = &mut job {
+            j.in_language(own_backup_common::lang::code());
+        }
+        json_reply(&job)
     }
 
     async fn save_job(&self, req: Request<JsonRequest>) -> Result<Response<JsonReply>, Status> {
@@ -1466,7 +1476,10 @@ impl BackupService for BackupServiceImpl {
 
     async fn list_activity(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
-        json_reply(&self.state.store.activity())
+        let lang = own_backup_common::lang::code();
+        let mut runs = self.state.store.activity();
+        runs.iter_mut().for_each(|r| r.in_language(lang));
+        json_reply(&runs)
     }
 
     type StreamEventsStream = Pin<Box<dyn Stream<Item = Result<Event, Status>> + Send>>;

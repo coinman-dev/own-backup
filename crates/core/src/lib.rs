@@ -85,6 +85,7 @@ impl VerifyRate {
     }
 }
 
+use own_backup_common::lang::Localized;
 use own_backup_common::tr;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -630,6 +631,114 @@ pub struct JobRun {
     /// written to those files itself (`JobStore::unrecorded`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub record_error: String,
+    /// `file_scan_skipped`, `excluded_entries_kept`, `layout_changed` and
+    /// `notes` in both languages. The fields above hold them in the language
+    /// the service spoke when the run was made; the window is handed them in
+    /// its language now ([`JobRun::in_language`]). Empty in runs recorded
+    /// before 2026-10-25: those are shown as they were written.
+    #[serde(default, skip_serializing_if = "RunTexts::is_empty")]
+    pub texts: RunTexts,
+}
+
+/// [`JobRun::texts`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct RunTexts {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_scan_skipped: Option<Localized>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub excluded_entries_kept: Option<Localized>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout_changed: Option<Localized>,
+    /// One for one with [`JobRun::notes`]; a note that came only as text is
+    /// here as it is in both languages.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<Localized>,
+}
+
+impl RunTexts {
+    pub fn is_empty(&self) -> bool {
+        self.file_scan_skipped.is_none()
+            && self.excluded_entries_kept.is_none()
+            && self.layout_changed.is_none()
+            && self.notes.is_empty()
+    }
+}
+
+/// `a; b`, each language on its own.
+fn join_texts(first: Option<Localized>, next: Localized) -> Localized {
+    match first {
+        Some(first) => Localized::join(&[first, next], "; "),
+        None => next,
+    }
+}
+
+impl JobRun {
+    /// A note for the run's summary, once.
+    pub fn add_note(&mut self, note: Localized) {
+        if self.texts.notes.contains(&note) || self.notes.iter().any(|n| n == note.current()) {
+            return;
+        }
+        // Notes pushed as plain text earlier keep their place.
+        while self.texts.notes.len() < self.notes.len() {
+            let plain = Localized::plain(self.notes[self.texts.notes.len()].clone());
+            self.texts.notes.push(plain);
+        }
+        self.notes.push(note.current().to_string());
+        self.texts.notes.push(note);
+    }
+
+    /// One more reason the file walk did not run, after any already given.
+    pub fn add_file_scan_skipped(&mut self, why: Localized) {
+        let joined = join_texts(self.texts.file_scan_skipped.take(), why);
+        self.file_scan_skipped = joined.current().to_string();
+        self.texts.file_scan_skipped = Some(joined);
+    }
+
+    /// One more reason excluded entries stayed in the image.
+    pub fn add_excluded_entries_kept(&mut self, why: Localized) {
+        let joined = join_texts(self.texts.excluded_entries_kept.take(), why);
+        self.excluded_entries_kept = joined.current().to_string();
+        self.texts.excluded_entries_kept = Some(joined);
+    }
+
+    /// What moved on the source disk since the previous run; nothing when
+    /// `note` is empty.
+    pub fn set_layout_changed(&mut self, note: Localized) {
+        if note.ru.is_empty() && note.en.is_empty() {
+            return;
+        }
+        self.layout_changed = note.current().to_string();
+        self.texts.layout_changed = Some(note);
+    }
+
+    /// The run's kept texts in the language `code` (`ru`/`en`) — what the
+    /// window is handed. A run recorded before both languages were kept is
+    /// left as it was written.
+    pub fn in_language(&mut self, code: &str) {
+        let t = &self.texts;
+        if let Some(why) = &t.file_scan_skipped {
+            self.file_scan_skipped = why.pick(code).to_string();
+        }
+        if let Some(why) = &t.excluded_entries_kept {
+            self.excluded_entries_kept = why.pick(code).to_string();
+        }
+        if let Some(note) = &t.layout_changed {
+            self.layout_changed = note.pick(code).to_string();
+        }
+        if !t.notes.is_empty() && t.notes.len() == self.notes.len() {
+            self.notes = t.notes.iter().map(|n| n.pick(code).to_string()).collect();
+        }
+    }
+}
+
+impl Job {
+    /// [`JobRun::in_language`] for the job's last run.
+    pub fn in_language(&mut self, code: &str) {
+        if let Some(run) = &mut self.last_run {
+            run.in_language(code);
+        }
+    }
 }
 
 /// A persisted backup job (task).
@@ -2104,17 +2213,17 @@ fn after_backup(action: &str, job_name: &str, queue: &RunQueue) {
 /// [`source_refresh`]): the job to run, the note for the run record when its
 /// partitions moved, and why it cannot run when one of them is gone.
 #[cfg(target_os = "windows")]
-async fn refresh_job_sources(store: &JobStore, job: Job) -> (Job, String, Option<String>) {
+async fn refresh_job_sources(store: &JobStore, job: Job) -> (Job, Localized, Option<String>) {
     use source_refresh::Refreshed;
     match source_refresh::reconcile_with_live_disks(&job).await {
-        Refreshed::Unchanged => (job, String::new(), None),
-        Refreshed::Missing(why) => (job, String::new(), Some(why)),
+        Refreshed::Unchanged => (job, Localized::default(), None),
+        Refreshed::Missing(why) => (job, Localized::default(), Some(why)),
         Refreshed::Updated(r) => {
             for (old, new) in &r.renamed {
                 info!(job = %job.name, old = %old, new = %new, "a source partition has a new device");
             }
             if !r.layout_note.is_empty() {
-                warn!(job = %job.name, note = %r.layout_note, "the source disk was re-partitioned");
+                warn!(job = %job.name, note = %r.layout_note.current(), "the source disk was re-partitioned");
             }
             // Saved, so the screen and the next run see the disk as it is.
             // Not saved, the run still goes ahead with what was found: the
@@ -2132,8 +2241,8 @@ async fn refresh_job_sources(store: &JobStore, job: Job) -> (Job, String, Option
 }
 
 #[cfg(not(target_os = "windows"))]
-async fn refresh_job_sources(_store: &JobStore, job: Job) -> (Job, String, Option<String>) {
-    (job, String::new(), None)
+async fn refresh_job_sources(_store: &JobStore, job: Job) -> (Job, Localized, Option<String>) {
+    (job, Localized::default(), None)
 }
 
 /// Background worker: pulls job ids off the channel and runs them one at a
@@ -2281,7 +2390,7 @@ pub async fn run_queue_worker(
             }
         };
         let mut run = run;
-        run.layout_changed = layout_note;
+        run.set_layout_changed(layout_note);
         // Cancelled because the service is stopping, not by a person: said
         // so, and not counted as the schedule's run (`interrupted`).
         if run.status == "cancelled" && busy.stopping() {
@@ -4346,15 +4455,12 @@ fn note_dense_store(run: &mut JobRun, snapshot: &own_backup_snapshot::Snapshot, 
     else {
         return;
     };
-    run.notes.push(
-        tr!(
-            "lib.snapshot_store_dense",
-            volume = snapshot.source_device,
-            folder = folder.display(),
-            size = own_backup_common::units::human_bytes(bytes)
-        )
-        .into_owned(),
-    );
+    run.add_note(own_backup_common::tr_both!(
+        "lib.snapshot_store_dense",
+        volume = snapshot.source_device,
+        folder = folder.display(),
+        size = own_backup_common::units::human_bytes(bytes)
+    ));
 }
 
 /// Linux whole-disk driver: every partition is held first — an LVM or
@@ -4790,6 +4896,46 @@ mod tests {
 
     use super::*;
     use std::path::Path;
+
+    /// A run made while the window spoke Russian is handed to an English
+    /// window in English (2026-10-24: «не удалось удалить 16 записей…» in an
+    /// English window); a note that came only as text keeps its place.
+    #[test]
+    fn a_runs_texts_are_handed_out_in_the_windows_language_now() {
+        let both = |ru: &str, en: &str| Localized {
+            ru: ru.into(),
+            en: en.into(),
+        };
+        let mut run = JobRun::default();
+        run.notes.push("plain".into());
+        run.add_note(both("заметка", "note"));
+        run.add_note(both("заметка", "note"));
+        run.add_file_scan_skipped(both("нет правил", "no rules"));
+        run.add_file_scan_skipped(both("ещё", "more"));
+        run.add_excluded_entries_kept(both("16 записей", "16 entries"));
+        run.set_layout_changed(Localized::default());
+        assert!(run.texts.layout_changed.is_none(), "nothing moved");
+        // Kept on disk with both, read back the same.
+        let mut run: JobRun = serde_json::from_str(&serde_json::to_string(&run).unwrap()).unwrap();
+
+        run.in_language("en");
+        assert_eq!(run.notes, ["plain", "note"]);
+        assert_eq!(run.file_scan_skipped, "no rules; more");
+        assert_eq!(run.excluded_entries_kept, "16 entries");
+        run.in_language("ru");
+        assert_eq!(run.notes, ["plain", "заметка"]);
+        assert_eq!(run.excluded_entries_kept, "16 записей");
+
+        // A run from before both were kept is shown as it was written.
+        let mut old = JobRun {
+            excluded_entries_kept: "как было".into(),
+            notes: vec!["старая".into()],
+            ..Default::default()
+        };
+        old.in_language("en");
+        assert_eq!(old.excluded_entries_kept, "как было");
+        assert_eq!(old.notes, ["старая"]);
+    }
 
     /// A save that cannot reach the disk must not be reported as done. It
     /// used to be: memory changed, the job came back as stored, and the

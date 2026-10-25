@@ -380,13 +380,13 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
         );
     }
     if let Some(why) = &summary.file_scan_skipped {
-        println!("Exclusions not applied: {why}");
+        println!("Exclusions not applied: {}", why.current());
     }
     if let Some(why) = &summary.excluded_entries_kept {
-        println!("Excluded names kept: {why}");
+        println!("Excluded names kept: {}", why.current());
     }
     for note in &summary.notes {
-        println!("Note: {note}");
+        println!("Note: {}", note.current());
     }
     if summary.resident_in_journal {
         println!(

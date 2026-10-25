@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use tracing::info;
 
+use own_backup_common::lang::Localized;
 use own_backup_common::types::{BackupType, ImageFormat};
 use own_backup_common::{OwnBackupError, Result};
 
@@ -75,7 +76,7 @@ pub struct DiskBackupSummary {
     /// whole-disk copy "исключения не применялись" without saying to WHICH
     /// partition is barely better than silence. `None` when every partition
     /// was walked.
-    pub file_scan_skipped: Option<String>,
+    pub file_scan_skipped: Option<Localized>,
     /// Why the excluded files' catalog entries were NOT deleted from the
     /// image, in words for the result screen — `None` when they were, or when
     /// there was nothing to delete.
@@ -86,14 +87,14 @@ pub struct DiskBackupSummary {
     /// 2026-07-28). On 2026-09-25 the pass failed over an iSCSI session left
     /// behind, 746 paths stayed in that night's copy — and the run was a plain
     /// success, with the reason in the service log only.
-    pub excluded_entries_kept: Option<String>,
+    pub excluded_entries_kept: Option<Localized>,
     /// The service's key directory was on one of the partitions and is not in
     /// the copy (decision 6/E4).
     pub key_store_excluded: bool,
     /// What the person should know about this copy besides its figures —
     /// a volume group with physical volumes outside it, for one. Shown in
     /// the run's summary.
-    pub notes: Vec<String>,
+    pub notes: Vec<Localized>,
     /// As `VolumeBackupSummary::resident_in_journal`, for any partition.
     pub resident_in_journal: bool,
 }

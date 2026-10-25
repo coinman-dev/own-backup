@@ -1693,10 +1693,10 @@ mod tests {
             .next()
             .and_then(|n| n.parse().ok())
             .unwrap_or_else(|| panic!("no count in {said:?}"));
-        assert!((1..=sum.excluded_files).contains(&kept), "{said}");
+        assert!((1..=sum.excluded_files).contains(&kept), "{said:?}");
         assert_eq!(
             said,
-            own_backup_common::tr!(
+            own_backup_common::tr_both!(
                 "engine.entries_kept_named",
                 kept = kept,
                 total = sum.excluded_files,

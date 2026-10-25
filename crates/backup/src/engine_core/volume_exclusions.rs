@@ -7,6 +7,7 @@ use tracing::{debug, info, warn};
 
 use own_backup_common::progress::BackupProgress;
 use own_backup_common::types::BackupStatus;
+use own_backup_common::{lang::Localized, tr_both};
 use own_backup_common::{tr, OwnBackupError, Result};
 
 use super::platform::{EnginePlatform, NativeUsedMap, SourceDevice, SourceSession};
@@ -31,7 +32,7 @@ pub(crate) struct VolumeExclusions {
     /// them.
     pub(crate) categories: Option<crate::exclusions::CategorySizes>,
     /// Why the file walk did not run, in words for the result screen.
-    pub(crate) file_scan_skipped: Option<String>,
+    pub(crate) file_scan_skipped: Option<Localized>,
     /// Excluded paths whose catalog entries the post-copy pass deletes from
     /// the image.
     pub(crate) removal_paths: Vec<crate::exclusions::ExcludedPath>,
@@ -41,13 +42,13 @@ pub(crate) struct VolumeExclusions {
     /// Why some excluded files are still listed in the copy's catalog (with
     /// their contents zeroed), in words for the result screen; `None` when
     /// every one of them was removed or none was left behind.
-    pub(crate) entries_kept: Option<String>,
+    pub(crate) entries_kept: Option<Localized>,
     /// The service's key directory was on this source and is left out of
     /// the copy (decision 6/E4).
     pub(crate) key_store_excluded: bool,
     /// Other things the result screen says about this copy's exclusions —
     /// files the `$MFT` scan could not reach, for one.
-    pub(crate) notes: Vec<String>,
+    pub(crate) notes: Vec<Localized>,
 }
 
 /// Apply `req`'s exclusion rules to the source before the copy: the matched
@@ -133,7 +134,7 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
     // skips it, and carried all the way to the result screen. The walk is what
     // produces BOTH the exclusions and the by-type breakdown, so one sentence
     // accounts for both being missing.
-    let mut file_scan_skipped: Option<String> = None;
+    let mut file_scan_skipped: Option<Localized> = None;
     let fat_exclusions = maps
         .fat_map
         .as_ref()
@@ -146,8 +147,8 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
     // Исключения решены ДО копии по $MFT — проход внутри образа не нужен:
     // исключённых данных в образе нет, осталось убрать записи из каталога.
     let mut pre_copy_exclusions = false;
-    let mut entries_kept: Option<String> = None;
-    let mut notes: Vec<String> = Vec::new();
+    let mut entries_kept: Option<Localized> = None;
+    let mut notes: Vec<Localized> = Vec::new();
     // Matched content the scan left in the copy, and directories it could not
     // walk — what the key-directory proof below is checked against.
     let mut left: Vec<crate::exclusions::LeftInCopy> = Vec::new();
@@ -251,8 +252,7 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
                                 reason = %e,
                                 "file exclusions were NOT applied on the source"
                             );
-                            file_scan_skipped =
-                                Some(tr!("engine.skip_no_walk", error = e).into_owned());
+                            file_scan_skipped = Some(tr_both!("engine.skip_no_walk", error = e));
                         }
                     }
                 }
@@ -400,8 +400,7 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
                 Err(OwnBackupError::Cancelled) => return Err(OwnBackupError::Cancelled),
                 Err(e) => {
                     warn!(error = %e, "FAT exclusion scan failed — keeping all files");
-                    file_scan_skipped =
-                        Some(tr!("engine_win.skip_fat_failed", error = e).into_owned());
+                    file_scan_skipped = Some(tr_both!("engine_win.skip_fat_failed", error = e));
                 }
             }
         }
@@ -502,39 +501,40 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
             Err(e) => {
                 let fs = maps.detected_fs.clone().unwrap_or_default();
                 warn!(fs = %fs, error = %e, "exclusion scan failed — keeping all files");
-                file_scan_skipped = Some(tr!("engine_win.skip_list_failed", fs = fs).into_owned());
+                file_scan_skipped = Some(tr_both!("engine_win.skip_list_failed", fs = fs));
             }
         }
     } else {
         // Nothing walked the files here. Say which of the reasons it was, in
         // the words the result screen will repeat back to the user.
         let reason = if req.all_sectors {
-            tr!("engine_win.skip_sector_mode").into_owned()
+            tr_both!("engine_win.skip_sector_mode")
         } else if P::METADATA_NEEDS_FROZEN && !session.frozen() {
             // No map was built either (`VolumeMaps::build`): the same reason
             // the copy is sector by sector.
-            tr!("engine.skip_not_frozen").into_owned()
+            tr_both!("engine.skip_not_frozen")
         } else if bitlocker.is_some() {
             // `FSCTL_GET_RETRIEVAL_POINTERS` needs a mounted filesystem, and a
             // locked volume has none. Copying the data and deleting only the
             // catalog entries afterwards would leave those bytes in the image's
             // free space — exactly what "true removal" promises not to do.
-            tr!("engine_win.skip_bitlocker_locked").into_owned()
+            tr_both!("engine_win.skip_bitlocker_locked")
         } else if luks.is_some() {
-            tr!("engine_win.skip_luks").into_owned()
+            tr_both!("engine_win.skip_luks")
         } else if patterns.is_empty() {
             no_patterns()
         } else {
             let fs = maps
                 .detected_fs
                 .clone()
-                .unwrap_or_else(|| tr!("engine_win.other_filesystem").into_owned());
-            tr!("engine_win.skip_fs_unsupported", fs = fs).into_owned()
+                .map(Localized::plain)
+                .unwrap_or_else(|| tr_both!("engine_win.other_filesystem"));
+            tr_both!("engine_win.skip_fs_unsupported", fs = fs)
         };
         if !patterns.is_empty() {
             warn!(
                 patterns = patterns.len(),
-                reason = %reason,
+                reason = %reason.current(),
                 "file exclusions were NOT applied on the source"
             );
         }
@@ -565,7 +565,8 @@ pub(crate) fn resolve_exclusions<P: EnginePlatform>(
 
     if key_store {
         let unapplied = file_scan_skipped
-            .clone()
+            .as_ref()
+            .map(|why| why.current().to_string())
             .or_else(|| {
                 in_image_exclusions.then(|| tr!("engine.key_store_after_copy_only").into_owned())
             })

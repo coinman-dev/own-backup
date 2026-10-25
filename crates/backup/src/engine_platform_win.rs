@@ -279,7 +279,7 @@ impl EnginePlatform for WinPlatform {
         })
     }
 
-    fn entries_kept_reason(&self) -> String {
+    fn entries_kept_reason(&self) -> own_backup_common::lang::Localized {
         entries_kept_reason()
     }
 
