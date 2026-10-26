@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { initEngine, refreshVolumes } from './lib/engineStore.svelte';
-  import { initJobs } from './lib/jobStore.svelte';
+  import { initJobs, reloadActivity, reloadJobs } from './lib/jobStore.svelte';
   import { api } from './lib/api';
   import { setMediaMode } from './lib/mediaStore.svelte';
   import { nav } from './lib/navStore.svelte';
@@ -98,8 +98,10 @@
     // leaves them Russian, which is not worth a banner.
     // What the window already holds was put into words by the service in the
     // old language — the disk inventory's partition labels, «LUKS
-    // (зашифровано)» in an English window (2026-10-24). The service switches
-    // as it saves the setting, so once it has, the inventory is asked again.
+    // (зашифровано)» in an English window (2026-10-24), and the notes of the
+    // runs in the jobs and the activity list (2026-10-26). The service
+    // switches as it saves the setting, so once it has, all three are asked
+    // again.
     let told = false;
     onLocale((l) => {
       const switched = told;
@@ -107,7 +109,11 @@
       api
         .setUiLanguage(l)
         .then(() => {
-          if (switched) void refreshVolumes();
+          if (switched) {
+            void refreshVolumes();
+            void reloadJobs();
+            void reloadActivity();
+          }
         })
         .catch(() => {});
     });
