@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Linux guest for the Linux stand: an Ubuntu 26.04 cloud image under QEMU/KVM.
 
-    python3 -I scripts/lab/linux-vm.py prepare      # download + verify the base once
-    python3 -I scripts/lab/linux-vm.py up [--disks N] [--size G] [--bios] [--tpm] [--stick G]
+    python3 -I scripts/lab/linux-vm.py prepare [--distro D]  # download + verify the base once
+    python3 -I scripts/lab/linux-vm.py up [--distro D] [--disks N] [--size G] [--bios] [--tpm]
+                                          [--stick G]
     python3 -I scripts/lab/linux-vm.py media (--iso PATH | --stick) [--firmware uefi-sb|uefi|bios]
                                              [--attach cdrom|usb]   # boot the boot medium
     python3 -I scripts/lab/linux-vm.py ssh -- <command...>   # exit code is the guest's
@@ -16,6 +17,9 @@
 Layout (`~/lab/linux/`):
 - `base/` — the read-only (0444) cloud image and the SHA256SUMS it was checked
   against. Never written: every run boots a qcow2 overlay backed by it.
+  `base-noble/`, `base-trixie/` — the same for `--distro noble` (Ubuntu 24.04)
+  and `--distro trixie` (Debian 13, SHA512SUMS): clean systems the release
+  `.deb` must install on. A run remembers its distro.
 - `run/` — the one run: root overlay, data disks `data-N.qcow2` (virtio, serial
   `ob-data-N`, so `/dev/disk/by-id/virtio-ob-data-N` in the guest), a private
   OVMF VARS copy, the per-run ed25519 key and known_hosts, the cloud-init seed,
@@ -33,8 +37,8 @@ CA), OVMF without Secure Boot, or SeaBIOS. The medium's self-test is asked for
 through QEMU's firmware config and reports on the serial port; `media` waits
 for it and takes a screenshot (`evidence/media-<label>.png`). No SSH there.
 
-The guest is Ubuntu 26.04 on purpose: binaries built on this host need its
-glibc. User `lab` (passwordless sudo) gets the run key through a NoCloud seed
+The default guest is Ubuntu 26.04 on purpose: binaries built on this host need
+its glibc (noble/trixie take packages built on the 24.04 baseline). User `lab` (passwordless sudo) gets the run key through a NoCloud seed
 served over HTTP from this process to the guest at 10.0.2.2 (`-smbios
 type=1,serial=ds=nocloud;s=...`); the seed is only needed while `up` waits for
 the first boot. `ssh -- one-argument` hands that string to the guest shell as it
@@ -70,8 +74,19 @@ LAB = LAB_ROOT / 'linux'
 BASE_DIR = LAB / 'base'
 RUN = LAB / 'run'
 ARCHIVE = LAB / 'evidence'
-IMAGE_URL = 'https://cloud-images.ubuntu.com/resolute/current/'
-IMAGE_NAME = 'resolute-server-cloudimg-amd64.img'
+# distro -> (base directory, image URL, image name, sums file)
+DISTROS = {
+    'resolute': ('base', 'https://cloud-images.ubuntu.com/resolute/current/',
+                 'resolute-server-cloudimg-amd64.img', 'SHA256SUMS'),
+    'noble': ('base-noble', 'https://cloud-images.ubuntu.com/noble/current/',
+              'noble-server-cloudimg-amd64.img', 'SHA256SUMS'),
+    'trixie': ('base-trixie', 'https://cloud.debian.org/images/cloud/trixie/latest/',
+               'debian-13-genericcloud-amd64.qcow2', 'SHA512SUMS'),
+}
+DISTRO = 'resolute'
+IMAGE_URL = DISTROS[DISTRO][1]
+IMAGE_NAME = DISTROS[DISTRO][2]
+SUMS = DISTROS[DISTRO][3]
 BASE = BASE_DIR / IMAGE_NAME
 GIB = 1 << 30
 MIN_FREE = 30 * GIB
@@ -81,6 +96,14 @@ MAX_TARGET = 30 * GIB
 PACKAGES = ['lvm2', 'thin-provisioning-tools', 'cryptsetup', 'btrfs-progs', 'xfsprogs',
             'dosfstools', 'ntfs-3g', 'qemu-utils']
 USER = 'lab'
+
+
+def use_distro(name: str) -> None:
+    global DISTRO, BASE_DIR, IMAGE_URL, IMAGE_NAME, SUMS, BASE
+    DISTRO = name
+    folder, IMAGE_URL, IMAGE_NAME, SUMS = DISTROS[name]
+    BASE_DIR = LAB / folder
+    BASE = BASE_DIR / IMAGE_NAME
 
 
 def say(*parts) -> None:
@@ -388,8 +411,8 @@ def seed_files(cfg: dict) -> dict:
 # Commands
 # ---------------------------------------------------------------------------
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
+def sum_file(path: Path) -> str:
+    digest = hashlib.new(SUMS[:-4].lower())
     with path.open('rb') as f:
         for chunk in iter(lambda: f.read(8 << 20), b''):
             digest.update(chunk)
@@ -411,27 +434,27 @@ def fetch(url: str) -> bytes:
 
 def cmd_prepare(args) -> int:
     BASE_DIR.mkdir(parents=True, exist_ok=True)
-    recorded = BASE_DIR / 'SHA256SUMS'
+    recorded = BASE_DIR / SUMS
     if BASE.exists():
         want = expected_sum(recorded.read_text()) if recorded.exists() else None
-        have = sha256_file(BASE)
+        have = sum_file(BASE)
         if want is None or have != want:
-            fail(f'{BASE} does not match the SHA256SUMS it was downloaded with; '
+            fail(f'{BASE} does not match the {SUMS} it was downloaded with; '
                  'inspect it and remove it by hand to download again')
         os.chmod(BASE, 0o444)
-        say(f'base present and verified: {BASE} sha256 {have}')
+        say(f'base present and verified: {BASE} {SUMS[:-4].lower()} {have}')
         try:
-            upstream = expected_sum(fetch(IMAGE_URL + 'SHA256SUMS').decode())
+            upstream = expected_sum(fetch(IMAGE_URL + SUMS).decode())
             if upstream and upstream != have:
                 say('note: the current upstream build differs; the verified base is kept')
         except OSError as error:
-            say(f'note: upstream SHA256SUMS not reachable ({error}); local check only')
+            say(f'note: upstream {SUMS} not reachable ({error}); local check only')
         return 0
 
-    sums = fetch(IMAGE_URL + 'SHA256SUMS').decode()
+    sums = fetch(IMAGE_URL + SUMS).decode()
     want = expected_sum(sums)
     if not want:
-        fail(f'{IMAGE_NAME} is not listed in {IMAGE_URL}SHA256SUMS')
+        fail(f'{IMAGE_NAME} is not listed in {IMAGE_URL}{SUMS}')
     with urllib.request.urlopen(IMAGE_URL + IMAGE_NAME, timeout=60) as response:
         total = int(response.headers.get('Content-Length') or 0)
         row = measure('prepare', total)
@@ -440,7 +463,7 @@ def cmd_prepare(args) -> int:
         if problems:
             fail('space budget: ' + '; '.join(problems))
         part = BASE_DIR / (IMAGE_NAME + '.part')
-        digest = hashlib.sha256()
+        digest = hashlib.new(SUMS[:-4].lower())
         done = 0
         last = 0.0
         with part.open('wb') as out:
@@ -458,12 +481,12 @@ def cmd_prepare(args) -> int:
             os.fsync(out.fileno())
     if digest.hexdigest() != want:
         part.unlink()
-        fail(f'checksum mismatch: got {digest.hexdigest()}, SHA256SUMS says {want}')
+        fail(f'checksum mismatch: got {digest.hexdigest()}, {SUMS} says {want}')
     part.replace(BASE)
     os.chmod(BASE, 0o444)
     recorded.write_text(sums)
     os.chmod(recorded, 0o444)
-    say(f'base downloaded and verified: {BASE} sha256 {want}')
+    say(f'base downloaded and verified: {BASE} {SUMS[:-4].lower()} {want}')
     info = Qemu().info(BASE)
     say(f"format {info['format']}, virtual size {gib(info['virtual-size'])}")
     return 0
@@ -476,7 +499,8 @@ def create_run(args, q: Qemu) -> dict:
            'instance_id': 'obk-lab-' + uuid.uuid4().hex[:12],
            'disks': args.disks, 'size_gib': args.size, 'root_gib': args.root_size,
            'bios': args.bios, 'mem_mib': args.mem, 'cpus': args.cpus,
-           'base': str(BASE), 'base_sha256': expected_sum((BASE_DIR / 'SHA256SUMS').read_text())}
+           'distro': DISTRO, 'base': str(BASE),
+           'base_sum': f'{SUMS[:-4].lower()}:{expected_sum((BASE_DIR / SUMS).read_text())}'}
     save_config(cfg)
     subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', 'obk-lab-run',
                     '-f', str(RUN / 'id_ed25519')], check=True)
@@ -652,6 +676,8 @@ def cmd_up(args) -> int:
         cfg = config()
         if cfg.get('kind') == 'media':
             fail('this run only boots the medium (`media`); `clean` it for an Ubuntu guest')
+        if cfg.get('distro', 'resolute') != DISTRO:
+            fail(f"the run is {cfg.get('distro', 'resolute')}, not {DISTRO}; `clean` it first")
         say(f"booting the existing run {cfg['run_id']} again (its disks and firmware kept; "
             'use `clean` for a fresh one)')
         growth = worst_growth(cfg, q)
@@ -1074,8 +1100,11 @@ def screen_size(text):
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     sub = parser.add_subparsers(dest='cmd', required=True)
-    sub.add_parser('prepare', help='download and verify the base image once')
+    prepare = sub.add_parser('prepare', help='download and verify the base image once')
+    prepare.add_argument('--distro', choices=sorted(DISTROS), default='resolute')
     up = sub.add_parser('up', help='boot the run (create it first if needed)')
+    up.add_argument('--distro', choices=sorted(DISTROS), default='resolute',
+                    help='guest system (default resolute = Ubuntu 26.04)')
     up.add_argument('--disks', type=int, default=3, help='extra empty data disks (default 3)')
     up.add_argument('--size', type=int, default=4, help='GiB per data disk (default 4)')
     up.add_argument('--root-size', type=int, default=6, help='GiB of the root overlay (default 6)')
@@ -1122,6 +1151,10 @@ def main() -> int:
     budget.add_argument('--step', default='manual')
     sub.add_parser('clean', help='archive the evidence and remove the run (never the base)')
     args = parser.parse_args()
+    if getattr(args, 'distro', None):
+        use_distro(args.distro)
+    elif (RUN / 'config.json').exists():
+        use_distro(config().get('distro', 'resolute'))
     return {'prepare': cmd_prepare, 'up': cmd_up, 'media': cmd_media, 'ssh': cmd_ssh,
             'put': cmd_put,
             'get': cmd_get, 'down': cmd_down, 'status': cmd_status, 'budget': cmd_budget,
