@@ -120,8 +120,14 @@ fn file_verification_detects_directory_acl_change() {
         .arg(target.join("nested/file.txt"))
         .output()
         .unwrap();
+    // icacls re-applies inheritance below the folder it changed: the file's
+    // own entries may come back marked inherited — `SYSTEM:(F)` as
+    // `SYSTEM:(I)(F)` (windows-2025 runner, 2026-10-26). The rights are what
+    // must not change.
+    let rights = |out: &[u8]| String::from_utf8_lossy(out).replace("(I)", "");
     assert_eq!(
-        file_acl_before.stdout, file_acl_after.stdout,
+        rights(&file_acl_before.stdout),
+        rights(&file_acl_after.stdout),
         "child file ACL changed"
     );
     assert!(
