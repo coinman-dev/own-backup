@@ -42,6 +42,9 @@
 - The boot medium card on Windows 11 compared the medium with Windows build
   9200: the real build is now read (RtlGetVersion).
 - Run notes in Activity wrap between words, not inside them.
+- Windows: when the log mirror on a USB stick (or another disk) grew past
+  4 MB, the previous log was moved into the service's own folder
+  (System32) instead of staying beside the new one as `.log.old`.
 - A release has one checksum list, SHA256SUMS.txt, for all its files.
 - The zstd compression library (qcow2 and OBK) is updated to 0.14.3, which
   fixes the security advisories RUSTSEC-2026-0391, -0398, -0403 and -0410
