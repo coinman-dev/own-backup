@@ -11,6 +11,10 @@
   //
   // Writing an ISO that already exists stays available as a link: that is
   // MediaStickModal, opened by the card.
+  //
+  // On Windows (`downloadOnly`) the medium cannot be built — live-build is
+  // Linux's — nor written to a stick yet: only the ready ISO of this
+  // program's version is downloaded, the same way.
   import { onMount } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
   import { api, errorText } from '../lib/api';
@@ -33,11 +37,14 @@
     onClose: () => void;
     /** Open the writer of a ready ISO instead. */
     onWriteReady: () => void;
+    /** Windows: no build and no stick, the download only. */
+    downloadOnly?: boolean;
   }
-  let { onClose, onWriteReady }: Props = $props();
+  let { onClose, onWriteReady, downloadOnly = false }: Props = $props();
 
-  // How the medium is got: asked first.
-  let way = $state<'ask' | 'download' | 'build'>('ask');
+  // How the medium is got: asked first, where there is a choice.
+  // svelte-ignore state_referenced_locally
+  let way = $state<'ask' | 'download' | 'build'>(downloadOnly ? 'download' : 'ask');
 
   let status = $state<LinuxMediaStatus | null>(null);
   let statusError: string | null = $state(null);
@@ -92,7 +99,7 @@
   const clock = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 
   onMount(() => {
-    check();
+    if (!downloadOnly) check();
     findRelease();
     api
       .defaultMediaFolder()
@@ -279,9 +286,13 @@
 
     <div class="body">
       <div class="intro">
-        {m.lmb_intro()}
-        {#if status?.installed_version}
-          {m.lmb_intro_version({ version: status.installed_version })}
+        {#if downloadOnly}
+          {m.lmb_intro_win()}
+        {:else}
+          {m.lmb_intro()}
+          {#if status?.installed_version}
+            {m.lmb_intro_version({ version: status.installed_version })}
+          {/if}
         {/if}
       </div>
       {#if way === 'ask'}
@@ -310,14 +321,23 @@
       {:else if way === 'download'}
         {#if release}
           <div class="needs">
-            {m.lmb_dl_intro({ version: release.version, tag: release.tag, size: formatBytes(release.size) })}
+            {downloadOnly
+              ? m.lmb_dl_intro_win({ version: release.version, tag: release.tag, size: formatBytes(release.size) })
+              : m.lmb_dl_intro({ version: release.version, tag: release.tag, size: formatBytes(release.size) })}
           </div>
+        {:else if downloadOnly && release === undefined}
+          <div class="needs">{m.lmb_way_download_looking()}</div>
+        {:else if downloadOnly}
+          <div class="warn-box">
+            {@render warnIcon()}<span>{releaseError ?? m.lmb_way_download_none_win()}</span>
+          </div>
+          <button class="lnk again" onclick={findRelease}>{m.lmb_check_again()}</button>
         {/if}
       {:else}
         <div class="needs">{m.lmb_needs({ dir: status?.cache_dir ?? '/var/tmp' })}</div>
       {/if}
 
-      {#if way !== 'ask' && !building && !finished}
+      {#if way !== 'ask' && !downloadOnly && !building && !finished}
         <button class="lnk again" onclick={() => { way = 'ask'; error = null; progress = null; }}>
           {m.lmb_other_way()}
         </button>
@@ -460,8 +480,12 @@
             <span>{m.lmb_rep_program()}</span>
             <span>{downloaded.version} · {m.lmb_rep_downloaded({ tag: downloaded.tag })}</span>
           </div>
-          <div class="rep-note">{m.lmb_rep_note()}</div>
-          <button class="lnk ready" onclick={onWriteReady}>{m.lmb_write_ready()}</button>
+          {#if downloadOnly}
+            <div class="rep-note">{m.lmb_rep_note_win()}</div>
+          {:else}
+            <div class="rep-note">{m.lmb_rep_note()}</div>
+            <button class="lnk ready" onclick={onWriteReady}>{m.lmb_write_ready()}</button>
+          {/if}
         </div>
       {/if}
     </div>

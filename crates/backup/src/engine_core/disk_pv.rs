@@ -24,6 +24,7 @@ use std::rc::Rc;
 use tracing::{info, warn};
 
 use own_backup_common::lvm_pv;
+use own_backup_common::{lang::Localized, tr_both};
 use own_backup_common::{tr, OwnBackupError, Result};
 
 use super::disk_prepare::prepare_partition_map;
@@ -74,14 +75,14 @@ pub(crate) struct PvPrepared {
     /// partition, length of the volume, paths) — volumes in one piece only.
     pub(crate) removals: Vec<(u64, u64, Vec<ExcludedPath>)>,
     /// Why some excluded NTFS names stay in the copy.
-    pub(crate) names_kept: Vec<String>,
+    pub(crate) names_kept: Vec<Localized>,
     /// Excluded files the volumes' Linux filesystems still list by name.
     pub(crate) kept_named: super::partition_prep::KeptNamed,
     pub(crate) excluded_files: u64,
     pub(crate) excluded_bytes: u64,
     pub(crate) categories: Option<CategorySizes>,
     /// One line per volume whose files nobody walked.
-    pub(crate) skips: Vec<String>,
+    pub(crate) skips: Vec<Localized>,
     pub(crate) key_store_excluded: bool,
     /// The PV's UUID, and its volume group with the UUIDs of its other PVs
     /// when the metadata was read: the copy says when some are not in it.
@@ -433,7 +434,7 @@ pub(crate) fn prepare_pv<P: EnginePlatform>(
                 let why = pm
                     .skipped
                     .clone()
-                    .unwrap_or_else(|| tr!("engine.key_store_not_walked").into_owned());
+                    .unwrap_or_else(|| tr_both!("engine.key_store_not_walked"));
                 return Err(super::volume_exclusions::key_store_refusal(&shown, &why));
             }
             if let Some(l) = crate::exclusions::key_store_left_behind(&pm.left) {
@@ -465,16 +466,13 @@ pub(crate) fn prepare_pv<P: EnginePlatform>(
             out.categories.get_or_insert_with(Default::default).merge(c);
         }
         if let Some(why) = &pm.skipped {
-            out.skips.push(
-                tr!(
-                    "engine.skip_pv_volume_line",
-                    index = part_index,
-                    volume = v.name,
-                    fs = pm.filesystem,
-                    why = why
-                )
-                .into_owned(),
-            );
+            out.skips.push(tr_both!(
+                "engine.skip_pv_volume_line",
+                index = part_index,
+                volume = v.name,
+                fs = pm.filesystem,
+                why = why
+            ));
         }
         if !pm.removal_paths.is_empty() {
             match v.segments.as_slice() {
@@ -482,14 +480,11 @@ pub(crate) fn prepare_pv<P: EnginePlatform>(
                     out.removals
                         .push((s.pv_offset, v.len, pm.removal_paths.clone()));
                 }
-                _ => out.names_kept.push(
-                    tr!(
-                        "engine.pv_names_kept",
-                        volume = v.name,
-                        count = pm.removal_paths.len()
-                    )
-                    .into_owned(),
-                ),
+                _ => out.names_kept.push(tr_both!(
+                    "engine.pv_names_kept",
+                    volume = v.name,
+                    count = pm.removal_paths.len()
+                )),
             }
         }
         scanned.insert(

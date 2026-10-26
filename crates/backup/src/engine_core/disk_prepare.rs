@@ -4,6 +4,7 @@
 
 use tracing::{info, warn};
 
+use own_backup_common::{lang::Localized, tr_both};
 use own_backup_common::{tr, OwnBackupError, Result};
 
 use super::partition_prep::{linux_fs_exclusions, PreparedMap};
@@ -107,10 +108,11 @@ pub(crate) fn prepare_partition_map<P: EnginePlatform>(
         notes: Vec::new(),
     };
     // The same, with the reason nobody walked this partition's files.
-    let none_because = |fs: &str, map: Option<Box<dyn UsedSectorMap>>, why: &str| PreparedMap {
-        skipped: Some(why.into()),
-        ..none(fs, map)
-    };
+    let none_because =
+        |fs: &str, map: Option<Box<dyn UsedSectorMap>>, why: Localized| PreparedMap {
+            skipped: Some(why),
+            ..none(fs, map)
+        };
     // Every exclusion scanner reads through this. The alignment wrapper is not
     // a nicety: a raw Windows device refuses reads that do not start on a
     // sector boundary, and ext inodes are 256 bytes — the root inode among the
@@ -135,7 +137,7 @@ pub(crate) fn prepare_partition_map<P: EnginePlatform>(
         return Ok(none_because(
             "unknown",
             None,
-            &tr!("engine.skip_not_frozen"),
+            tr_both!("engine.skip_not_frozen"),
         ));
     }
     // NTFS first (only on a plain, non-decrypted volume), then FAT/ext/btrfs/xfs.
@@ -214,11 +216,11 @@ pub(crate) fn prepare_partition_map<P: EnginePlatform>(
                         } else if let Ok(None) = walked {
                             // No walk on this platform: the MFT was the only
                             // way to the files.
-                            out.skipped = Some(tr!("engine.skip_no_walk", error = e).into_owned());
+                            out.skipped = Some(tr_both!("engine.skip_no_walk", error = e));
                         } else {
                             warn!(part = %read_path, "whole-disk: NTFS exclusion scan failed — keeping all files");
                             out.skipped =
-                                Some(tr!("engine_win.skip_list_failed", fs = "NTFS").into_owned());
+                                Some(tr_both!("engine_win.skip_list_failed", fs = "NTFS"));
                         }
                     }
                 }
@@ -234,7 +236,7 @@ pub(crate) fn prepare_partition_map<P: EnginePlatform>(
         return Ok(none_because(
             "unknown",
             None,
-            &tr!("engine_win.skip_partition_unreadable"),
+            tr_both!("engine_win.skip_partition_unreadable"),
         ));
     };
     if let Ok(m) = crate::fat_map::build_fat_used_map(src.as_mut(), block_size) {
@@ -283,10 +285,10 @@ pub(crate) fn prepare_partition_map<P: EnginePlatform>(
         return Ok(none_because(
             &fs,
             Some(Box::new(m)),
-            &if patterns.is_empty() {
+            if patterns.is_empty() {
                 no_patterns()
             } else {
-                tr!("engine_win.skip_fat_only").into_owned()
+                tr_both!("engine_win.skip_fat_only")
             },
         ));
     }
@@ -304,6 +306,6 @@ pub(crate) fn prepare_partition_map<P: EnginePlatform>(
     Ok(none_because(
         "unknown",
         None,
-        &tr!("engine_win.skip_fs_unknown"),
+        tr_both!("engine_win.skip_fs_unknown"),
     ))
 }

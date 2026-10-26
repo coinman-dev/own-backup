@@ -2,6 +2,51 @@
 
 # Changelog
 
+## 0.1.7-beta — 2026-10-26
+
+### Added
+
+- **Windows: the ready Linux boot medium.** The "Based on Linux (Debian)
+  x64" card is no longer "in development": the window downloads the boot
+  medium ISO of its own version from the GitHub release, checks it against
+  SHA256SUMS.txt and saves it without replacing an existing file (to
+  Downloads by default). Writing it onto a USB stick is not in the Windows
+  window yet — use Rufus in DD mode.
+- **Queued instead of refused.** An action that needs only its own
+  resources — verifying, exporting or deleting backups, building the boot
+  medium, writing a stick — now waits its turn when they are busy (for
+  example, verifying a backup while another job writes into the same
+  folder). The window shows "Queued: … — starts when … ends" with a Cancel
+  button. An action on the whole machine (restore, a drive letter) is still
+  refused with the reason.
+- **History in the window's language.** The notes of a run (why files were
+  not listed, why excluded entries stayed in the image, what moved in the
+  partition layout) are stored in both languages, and the window shows them
+  in its current language. Runs recorded earlier are shown as recorded.
+- User documentation in English and Russian (`doc/`).
+
+### Fixed
+
+- The end of a backup no longer hangs on a stuck device: attaching and
+  detaching the image to delete excluded entries now gives up after 5
+  minutes each. The image then keeps the excluded entries zeroed, and the
+  result says so.
+- When Windows cannot give memory for the disk read buffer, the service
+  says that the system ran out of memory and how much was asked for, instead
+  of "aligned buffer allocation failed".
+- After a language switch the window asks the service again for the disks,
+  the jobs and the history, so partition labels and run notes no longer stay
+  in the old language until the window is reopened.
+- Linux: a backup read from an LVM or device-mapper snapshot is no longer
+  called a "VSS snapshot" (the window, the Activity page, the command line).
+- The boot medium card on Windows 11 compared the medium with Windows build
+  9200: the real build is now read (RtlGetVersion).
+- Run notes in Activity wrap between words, not inside them.
+- A release has one checksum list, SHA256SUMS.txt, for all its files.
+- The zstd compression library (qcow2 and OBK) is updated to 0.14.3, which
+  fixes the security advisories RUSTSEC-2026-0391, -0398, -0403 and -0410
+  and the unsound APIs reported with them.
+
 ## 0.1.6-beta — 2026-10-24
 
 ### Added

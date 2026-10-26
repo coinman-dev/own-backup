@@ -1,5 +1,9 @@
 {
   "_version": 2,
+  "misc.out_of_memory": {
+    "ru": "Не хватило памяти системы: Windows не выделила %{mib} МиБ для обмена с диском. Закройте программы, занимающие много памяти (в том числе WSL и виртуальные машины), или увеличьте файл подкачки, затем повторите.",
+    "en": "The system ran out of memory: Windows did not grant %{mib} MiB for disk input/output. Close programs that use a lot of memory (WSL and virtual machines included) or enlarge the page file, then try again."
+  },
   "bcd.bad_store": {
     "ru": "хранилище загрузки Windows (BCD) не распознано: %{reason}",
     "en": "the Windows boot configuration store (BCD) was not recognised: %{reason}"

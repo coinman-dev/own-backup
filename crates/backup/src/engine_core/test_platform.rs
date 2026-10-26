@@ -385,8 +385,8 @@ impl EnginePlatform for TestPlatform {
         Ok(None)
     }
 
-    fn entries_kept_reason(&self) -> String {
-        "test platform: entries kept".into()
+    fn entries_kept_reason(&self) -> own_backup_common::lang::Localized {
+        own_backup_common::lang::Localized::plain("test platform: entries kept")
     }
 }
 
@@ -464,7 +464,7 @@ mod tests {
             ..Default::default()
         };
         let note = crate::engine_core::platform::unreachable_note(&partial).expect("a note");
-        assert!(note.contains('7'), "{note}");
+        assert!(note.contains('7'), "{note:?}");
         assert_eq!(
             crate::engine_core::platform::unreachable_note(&crate::ntfs_scan::MftScan::default()),
             None

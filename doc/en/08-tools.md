@@ -54,8 +54,8 @@ start. Two kinds:
 - **Based on Linux (Debian) x64** — a small Debian system with the program; it
   reads ext4, btrfs, XFS and LUKS directly and restores Windows backups too.
   On Linux it is built from the installed package or downloaded ready from the
-  release; on Windows, for now, only a description is shown (download the
-  ISO from the release page).
+  release; on Windows the ready ISO of this version is downloaded from the
+  release.
 
 Details, writing to a USB stick and working from the medium are in
 [Bootable media](10-bootable-media.md).

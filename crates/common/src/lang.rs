@@ -178,9 +178,139 @@ macro_rules! tr {
     };
 }
 
+/// A message in both languages at once: for what is kept and read later, by
+/// someone whose window may by then speak the other one — a run's notes in
+/// the history (2026-10-24: an English window showed «не удалось удалить 16
+/// записей…» from a copy made while it was Russian). Made by [`tr_both!`];
+/// shown with [`Localized::current`] or [`Localized::pick`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct Localized {
+    pub ru: String,
+    pub en: String,
+}
+
+impl Localized {
+    /// A text that is the same in both — an error from the system, a path.
+    pub fn plain(text: impl Into<String>) -> Self {
+        let text = text.into();
+        Self {
+            ru: text.clone(),
+            en: text,
+        }
+    }
+
+    /// In the language `code` (`en` is English, anything else Russian).
+    pub fn pick(&self, code: &str) -> &str {
+        if parse(code) == EN {
+            &self.en
+        } else {
+            &self.ru
+        }
+    }
+
+    /// In this process's language now ([`code`]).
+    pub fn current(&self) -> &str {
+        self.pick(code())
+    }
+
+    /// The parts one after another, `sep` between them, in each language.
+    pub fn join(parts: &[Localized], sep: &str) -> Self {
+        Self {
+            ru: parts
+                .iter()
+                .map(|p| p.ru.as_str())
+                .collect::<Vec<_>>()
+                .join(sep),
+            en: parts
+                .iter()
+                .map(|p| p.en.as_str())
+                .collect::<Vec<_>>()
+                .join(sep),
+        }
+    }
+}
+
+/// Read as text, a `Localized` is in this process's language now — what a
+/// log line, the CLI or a test wants. What is kept for later keeps both.
+impl std::ops::Deref for Localized {
+    type Target = str;
+    fn deref(&self) -> &str {
+        self.current()
+    }
+}
+
+/// An argument of [`tr_both!`]: a [`Localized`] gives its text in the
+/// language being made, anything else is shown as it is in both.
+pub trait LocalArg {
+    fn in_lang(&self, code: &str) -> String;
+}
+
+impl LocalArg for Localized {
+    fn in_lang(&self, code: &str) -> String {
+        self.pick(code).to_string()
+    }
+}
+
+impl LocalArg for &Localized {
+    fn in_lang(&self, code: &str) -> String {
+        self.pick(code).to_string()
+    }
+}
+
+impl<T: std::fmt::Display + ?Sized> LocalArg for T {
+    fn in_lang(&self, _code: &str) -> String {
+        self.to_string()
+    }
+}
+
+/// [`tr!`] in both languages at once — a [`Localized`]. Arguments are named
+/// as in `tr!`; one that is itself `Localized` (a reason made by another
+/// `tr_both!`) goes in in the matching language:
+///
+/// ```ignore
+/// tr_both!("engine.partition_skipped", part = n, why = reason)
+/// ```
+#[macro_export]
+macro_rules! tr_both {
+    ($key:literal $(, $name:ident = $value:expr)* $(,)?) => {{
+        $( let $name = &$value; )*
+        $crate::lang::Localized {
+            ru: $crate::rust_i18n::t!(
+                $key, locale = "ru"
+                $(, $name = $crate::lang::LocalArg::in_lang($name, "ru"))*
+            ).into_owned(),
+            en: $crate::rust_i18n::t!(
+                $key, locale = "en"
+                $(, $name = $crate::lang::LocalArg::in_lang($name, "en"))*
+            ).into_owned(),
+        }
+    }};
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_text_kept_for_later_is_made_in_both_languages() {
+        let inner = Localized {
+            ru: "внутри".into(),
+            en: "inside".into(),
+        };
+        // A Localized argument goes in in the matching language, anything
+        // else as it is.
+        let quoted = crate::tr_both!("restore_check.label_quoted", label = inner);
+        assert_eq!(quoted.ru, "«внутри»");
+        assert_eq!(quoted.en, "“inside”");
+        let plain = crate::tr_both!("restore_check.label_quoted", label = 5);
+        assert_eq!(plain.pick("en"), "“5”");
+        assert_eq!(plain.pick("ru"), "«5»");
+        assert_eq!(plain.current(), plain.pick(code()));
+        assert_eq!(
+            Localized::join(&[quoted, Localized::plain("x")], "; ").en,
+            "“inside”; x"
+        );
+    }
 
     // The global itself is never switched in a test: tests run in parallel,
     // and every other one expects the Russian texts.

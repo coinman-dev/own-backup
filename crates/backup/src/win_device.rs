@@ -95,8 +95,12 @@ impl AlignedBuf {
         // SAFETY: layout has non-zero size (callers guarantee size > 0).
         let ptr = unsafe { alloc(layout) };
         if ptr.is_null() {
+            // The buffers are a few MiB: what failed is the system's memory
+            // as a whole (2026-10-25: WSL held 17 GiB beside a 128 MiB page
+            // file), not ours — said so, in the person's language.
             return Err(OwnBackupError::Device(
-                "aligned buffer allocation failed".into(),
+                own_backup_common::tr!("misc.out_of_memory", mib = size.div_ceil(1 << 20))
+                    .into_owned(),
             ));
         }
         Ok(Self { ptr, layout })

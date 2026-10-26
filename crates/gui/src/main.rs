@@ -882,6 +882,7 @@ async fn bridge_service_events(app: tauri::AppHandle, link: Arc<ServiceLink>) {
                                 "restore-disk" => "restore-disk-progress",
                                 "restore-plan" => "restore-plan-progress",
                                 "media" => "media-progress",
+                                "waiting" => "busy-waiting",
                                 _ => continue,
                             };
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {

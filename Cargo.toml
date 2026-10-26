@@ -29,7 +29,7 @@ gtk3-macros = { path = "vendor/gtk3-macros" }
 binrw = { path = "vendor/binrw" }
 
 [workspace.package]
-version = "0.1.6-beta"
+version = "0.1.7-beta"
 edition = "2021"
 # Source-available, free for noncommercial use (PolyForm Noncommercial 1.0.0);
 # commercial use requires a separate license — see LICENSE / COMMERCIAL-LICENSE.md.
@@ -66,7 +66,7 @@ prost = "0.13"
 prost-types = "0.13"
 
 # Compression
-zstd = "0.13"
+zstd = "0.14.3"
 aes-gcm = "0.10"
 argon2 = "0.5"
 

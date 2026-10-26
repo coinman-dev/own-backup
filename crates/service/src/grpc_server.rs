@@ -6,6 +6,7 @@
 //! broadcast channel fed by [`GrpcEventSink`].
 
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use own_backup_common::tr;
@@ -40,6 +41,31 @@ pub struct BackupServiceImpl {
     shutdown: crate::shutdown::ShutdownSignal,
     /// Expected bearer token. Empty string means auth is disabled (dev/TCP mode).
     service_token: String,
+}
+
+/// Tells the window an operation no longer waits its turn — once, whether
+/// the wait ended by taking its slot, by a cancel, or by the request being
+/// dropped while it waited (the window closed).
+struct WaitingEnds {
+    events: broadcast::Sender<Event>,
+    id: String,
+    /// The window was told it waits.
+    told: Arc<AtomicBool>,
+}
+
+impl Drop for WaitingEnds {
+    fn drop(&mut self) {
+        waiting_ended(&self.events, &self.id, &self.told);
+    }
+}
+
+fn waiting_ended(events: &broadcast::Sender<Event>, id: &str, told: &AtomicBool) {
+    if told.swap(false, Ordering::SeqCst) {
+        let _ = events.send(Event {
+            kind: "waiting".into(),
+            json: serde_json::json!({ "id": id, "waiting": false }).to_string(),
+        });
+    }
 }
 
 impl BackupServiceImpl {
@@ -107,7 +133,9 @@ impl BackupServiceImpl {
 
     /// Take what `doing` needs. These are operations a person started: a
     /// scheduled verification in the way steps aside (it is cancelled, and
-    /// its end is waited for briefly); anything else in the way is said.
+    /// its end is waited for briefly). One that needs only its own resources
+    /// waits its turn behind anything else in the way; one that needs the
+    /// whole machine is told who has it.
     async fn take(
         &self,
         doing: own_backup_core::busy::Doing,
@@ -115,12 +143,46 @@ impl BackupServiceImpl {
         if self.shutdown.is_shutdown_requested() {
             return Err(Status::unavailable("service is stopping"));
         }
-        let slot = self
-            .state
-            .busy
-            .reserve_soon(doing, std::time::Duration::from_secs(30))
-            .await
-            .map_err(|held| Status::failed_precondition(held.refusal()))?;
+        let slot = if doing.is_shared() {
+            // A chain's folder, the medium builder, a stick: queued behind
+            // what holds them, and the window is told («В очереди…»,
+            // `waiting` events). The stop button reaches it while it waits;
+            // a client that goes away drops this future, and the wait with it.
+            let ends = WaitingEnds {
+                events: self.state.events.clone(),
+                id: doing.cancel.id().to_string(),
+                told: Arc::new(AtomicBool::new(false)),
+            };
+            let (events, id, told) = (ends.events.clone(), ends.id.clone(), ends.told.clone());
+            let what = doing.named();
+            self.state
+                .busy
+                .reserve_queued(doing, move |behind| match behind {
+                    Some(b) => {
+                        told.store(true, Ordering::SeqCst);
+                        let _ = events.send(Event {
+                            kind: "waiting".into(),
+                            json: serde_json::json!({
+                                "id": id, "waiting": true, "what": what, "behind": b.named(),
+                            })
+                            .to_string(),
+                        });
+                    }
+                    None => waiting_ended(&events, &id, &told),
+                })
+                .await
+                .map_err(|refused| match refused {
+                    // The whole machine is taken: said, as before.
+                    Some(held) => Status::failed_precondition(held.refusal()),
+                    None => Status::cancelled(tr!("grpc_server.cancelled_waiting").into_owned()),
+                })?
+        } else {
+            self.state
+                .busy
+                .reserve_soon(doing, std::time::Duration::from_secs(30))
+                .await
+                .map_err(|held| Status::failed_precondition(held.refusal()))?
+        };
         if self.shutdown.is_shutdown_requested() {
             return Err(Status::unavailable("service is stopping"));
         }
@@ -567,7 +629,8 @@ impl own_backup_core::EventSink for GrpcEventSink {
             json: serde_json::to_string(&snapshot).unwrap_or_default(),
         });
     }
-    fn job_finished(&self, run: own_backup_core::JobRun) {
+    fn job_finished(&self, mut run: own_backup_core::JobRun) {
+        run.in_language(own_backup_common::lang::code());
         let _ = self.tx.send(Event {
             kind: "finished".into(),
             json: serde_json::to_string(&run).unwrap_or_default(),
@@ -1219,12 +1282,21 @@ impl BackupService for BackupServiceImpl {
 
     async fn list_jobs(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
-        json_reply(&self.state.store.list())
+        // Runs' notes in the window's language now, not the one they were
+        // made in (`JobRun::texts`).
+        let lang = own_backup_common::lang::code();
+        let mut jobs = self.state.store.list();
+        jobs.iter_mut().for_each(|j| j.in_language(lang));
+        json_reply(&jobs)
     }
 
     async fn get_job(&self, req: Request<IdRequest>) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
-        json_reply(&self.state.store.get(&req.into_inner().id))
+        let mut job = self.state.store.get(&req.into_inner().id);
+        if let Some(j) = &mut job {
+            j.in_language(own_backup_common::lang::code());
+        }
+        json_reply(&job)
     }
 
     async fn save_job(&self, req: Request<JsonRequest>) -> Result<Response<JsonReply>, Status> {
@@ -1466,7 +1538,10 @@ impl BackupService for BackupServiceImpl {
 
     async fn list_activity(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
-        json_reply(&self.state.store.activity())
+        let lang = own_backup_common::lang::code();
+        let mut runs = self.state.store.activity();
+        runs.iter_mut().for_each(|r| r.in_language(lang));
+        json_reply(&runs)
     }
 
     type StreamEventsStream = Pin<Box<dyn Stream<Item = Result<Event, Status>> + Send>>;

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { initEngine, refreshVolumes } from './lib/engineStore.svelte';
-  import { initJobs } from './lib/jobStore.svelte';
+  import { initJobs, reloadActivity, reloadJobs } from './lib/jobStore.svelte';
   import { api } from './lib/api';
   import { setMediaMode } from './lib/mediaStore.svelte';
   import { nav } from './lib/navStore.svelte';
@@ -18,6 +18,13 @@
   import { m } from './lib/paraglide/messages';
   import { onLocale } from './lib/i18n.svelte';
   import { ensurePlatform, isWindows } from './lib/platformStore.svelte';
+  import { waiting, initWaiting } from './lib/waitingStore.svelte';
+
+  async function stopWaiting() {
+    // The stop button of what the person started — it reaches an operation
+    // that still waits its turn as well as one that runs.
+    await api.cancelEngineOp().catch(() => {});
+  }
 
   let currentView: ViewName = $state('backup');
   // Warning shown when the backup service isn't running/installed. Everything
@@ -91,8 +98,10 @@
     // leaves them Russian, which is not worth a banner.
     // What the window already holds was put into words by the service in the
     // old language — the disk inventory's partition labels, «LUKS
-    // (зашифровано)» in an English window (2026-10-24). The service switches
-    // as it saves the setting, so once it has, the inventory is asked again.
+    // (зашифровано)» in an English window (2026-10-24), and the notes of the
+    // runs in the jobs and the activity list (2026-10-26). The service
+    // switches as it saves the setting, so once it has, all three are asked
+    // again.
     let told = false;
     onLocale((l) => {
       const switched = told;
@@ -100,13 +109,18 @@
       api
         .setUiLanguage(l)
         .then(() => {
-          if (switched) void refreshVolumes();
+          if (switched) {
+            void refreshVolumes();
+            void reloadJobs();
+            void reloadActivity();
+          }
         })
         .catch(() => {});
     });
     checkService();
     initEngine();
     initJobs();
+    initWaiting();
   });
 </script>
 
@@ -128,6 +142,17 @@
         </button>
       </div>
     {/if}
+
+    {#each waiting.ops as op (op.id)}
+      <div class="waiting-strip" role="status">
+        <svg class="sw-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="8.5" />
+          <path d="M12 7.5V12l3 2" />
+        </svg>
+        <span class="sw-text">{m.app_waiting({ what: op.what, behind: op.behind })}</span>
+        <button class="sw-retry" onclick={stopWaiting}>{m.common_cancel()}</button>
+      </div>
+    {/each}
 
     <div class="view-host">
       {#if currentView === 'backup'}
@@ -186,6 +211,26 @@
   .sw-icon {
     flex: 0 0 auto;
     color: var(--error);
+  }
+
+  .waiting-strip {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 16px;
+    background: var(--warning-soft);
+    color: var(--text);
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+
+  .waiting-strip .sw-icon {
+    color: var(--warning);
+  }
+
+  .waiting-strip .sw-retry {
+    border-color: var(--border);
+    color: var(--text);
   }
 
   .sw-text {

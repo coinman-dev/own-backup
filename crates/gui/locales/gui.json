@@ -147,5 +147,25 @@
   "linux_media_dl.bad_checksum": {
     "ru": "Контрольная сумма скачанного ISO не совпала; файл удалён. Повторите загрузку.",
     "en": "The downloaded ISO's checksum does not match; the file was removed. Try the download again."
+  },
+  "linux_media_dl.no_curl_win": {
+    "ru": "Не найден curl.exe в папке System32 — он входит в Windows 10 версии 1803 и новее.",
+    "en": "curl.exe was not found in System32; it comes with Windows 10 version 1803 and later."
+  },
+  "linux_media_dl.rate_limited_win": {
+    "ru": "GitHub временно ограничил запросы с этого адреса. Повторите через несколько минут.",
+    "en": "GitHub is limiting requests from this address for now. Try again in a few minutes."
+  },
+  "linux_media_dl.bad_answer_win": {
+    "ru": "GitHub ответил непонятно. Повторите позже.",
+    "en": "GitHub's answer could not be read. Try again later."
+  },
+  "linux_media_dl.none_win": {
+    "ru": "Для этой версии программы готового ISO на GitHub нет. Носитель Linux собирается только в Linux.",
+    "en": "There is no ready ISO for this version of the program on GitHub. The Linux medium is built on Linux only."
+  },
+  "linux_media_dl.no_sums_win": {
+    "ru": "В релизе %{tag} нет контрольной суммы ISO — скачанный файл не проверить.",
+    "en": "The release %{tag} has no checksum for the ISO, so the download cannot be checked."
   }
 }

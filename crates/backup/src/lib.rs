@@ -115,6 +115,7 @@ pub mod attach_win;
 pub mod automount;
 #[cfg(target_os = "windows")]
 pub mod block_reader_win;
+pub mod deadline;
 #[cfg(target_os = "windows")]
 pub mod disk_session_win;
 #[cfg(target_os = "windows")]

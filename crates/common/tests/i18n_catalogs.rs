@@ -255,11 +255,11 @@ fn calls_in(path: &Path, errors: &mut Vec<String>) -> Vec<Call> {
                     .count();
                 i = end;
             }
-            b't' if s[i..].starts_with(b"tr!(")
+            b't' if (s[i..].starts_with(b"tr!(") || s[i..].starts_with(b"tr_both!("))
                 && (i == 0 || !(s[i - 1].is_ascii_alphanumeric() || s[i - 1] == b'_')) =>
             {
                 // Split the argument list at top-level commas.
-                let start = i + 4;
+                let start = i + if s[i..].starts_with(b"tr!(") { 4 } else { 9 };
                 let mut j = start;
                 let mut depth = 0i32;
                 let mut args = Vec::new();

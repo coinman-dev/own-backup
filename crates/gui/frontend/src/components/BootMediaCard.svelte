@@ -24,8 +24,10 @@
   let tab: 'windows' | 'linux' = $state(isWindows() ? 'windows' : 'linux');
   /** The Windows medium can be built here at all. */
   const canBuildWindows = $derived(isWindows());
-  let open: 'windows' | 'linux' | null = $state(null);
-  /** Linux: the build dialog, and the writer of a ready ISO it links to. */
+  /** The Windows medium's build dialog. */
+  let windowsOpen = $state(false);
+  /** The Linux medium's dialog (on Windows: the download of the ready ISO
+   *  only), and the writer of a ready ISO it links to (Linux). */
   let linuxOpen = $state(false);
   let stickOpen = $state(false);
   // A Winre.wim the user pointed at — taken from an installation ISO, say —
@@ -77,11 +79,8 @@
   function openDialog() {
     if (media.active) return;
     if (tab === 'windows' && (!canBuildWindows || !windowsBase)) return; // nothing to build on
-    if (tab === 'linux' && !isWindows()) {
-      linuxOpen = true;
-      return;
-    }
-    open = tab;
+    if (tab === 'linux') linuxOpen = true;
+    else windowsOpen = true;
   }
 </script>
 
@@ -175,15 +174,17 @@
       <div class="p-meta">{m.bmc_linux_build()}</div>
       <div class="p-go">{m.bmc_click_to_build_linux()}</div>
     {:else}
+      <!-- Built on Linux only (live-build); here the release's ready ISO. -->
       <div class="p-desc">{m.bmc_linux_desc()}</div>
-      <div class="p-meta soon">{m.bmc_linux_soon()}</div>
-      <div class="p-go">{m.bmc_click_to_see()}</div>
+      <div class="p-meta">{m.bmc_linux_download_win()}</div>
+      <div class="p-go">{m.bmc_click_to_download()}</div>
     {/if}
   </div>
 </div>
 
 {#if linuxOpen}
   <LinuxMediaBuildModal
+    downloadOnly={isWindows()}
     onClose={() => (linuxOpen = false)}
     onWriteReady={() => { linuxOpen = false; stickOpen = true; }}
   />
@@ -193,11 +194,10 @@
   <MediaStickModal onClose={() => (stickOpen = false)} />
 {/if}
 
-{#if open}
+{#if windowsOpen}
   <MediaBuildModal
-    kind={open}
-    base={open === 'windows' ? windowsBase : null}
-    onClose={() => (open = null)}
+    base={windowsBase}
+    onClose={() => (windowsOpen = false)}
   />
 {/if}
 

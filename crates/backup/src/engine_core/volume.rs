@@ -22,6 +22,7 @@ use own_backup_common::progress::BackupProgress;
 use own_backup_common::types::{
     BackupMode, BackupStatus, BackupType, BootMode, CompressionAlgo, ImageFormat, PartitionTable,
 };
+use own_backup_common::{lang::Localized, tr_both};
 use own_backup_common::{tr, OwnBackupError, Result};
 
 use super::chain::{child_refusal, validate_parent};
@@ -143,11 +144,11 @@ pub struct VolumeBackupSummary {
     /// ignored twelve exclusion rules and then reported "Исключено файлов: 0"
     /// tells the user the rules matched nothing — when in fact they were never
     /// applied. That difference is the whole point of having the rules.
-    pub file_scan_skipped: Option<String>,
+    pub file_scan_skipped: Option<Localized>,
     /// Why the excluded files' catalog entries were NOT deleted from the
     /// image, in words for the result screen — `None` when they were, or when
     /// there was nothing to delete. See `engine_win::DiskBackupSummary::excluded_entries_kept`.
-    pub excluded_entries_kept: Option<String>,
+    pub excluded_entries_kept: Option<Localized>,
     /// The service's key directory was on this volume and is not in the copy
     /// (decision 6/E4) — said in the summary, since it is not one of the
     /// job's own rules.
@@ -159,7 +160,7 @@ pub struct VolumeBackupSummary {
     /// What the person should know about this copy besides its figures —
     /// files an `$MFT` scan could not reach, for one. Shown in the run's
     /// summary.
-    pub notes: Vec<String>,
+    pub notes: Vec<Localized>,
 }
 
 /// Back up a volume into a fresh image, on `platform`.
@@ -547,12 +548,12 @@ fn backup_volume_inner<P: EnginePlatform>(
             }
             None => {
                 // Already logged in detail; the result screen must still say it.
-                file_scan_skipped = Some(tr!("engine_win.skip_in_image_failed").into_owned());
+                file_scan_skipped = Some(tr_both!("engine_win.skip_in_image_failed"));
             }
         }
     }
 
-    let mut excluded_entries_kept: Option<String> = entries_kept;
+    let mut excluded_entries_kept: Option<Localized> = entries_kept;
     let mut resident_in_journal = false;
     if !removal_paths.is_empty() {
         phase_tick("exclusions-open", 0, 0);
@@ -565,7 +566,7 @@ fn backup_volume_inner<P: EnginePlatform>(
                 super::platform::resident_content_may_remain_in_journal(platform, &removal_paths);
             if failed > 0 {
                 excluded_entries_kept =
-                    Some(tr!("engine_win.entries_partly_kept", count = failed).into_owned());
+                    Some(tr_both!("engine_win.entries_partly_kept", count = failed));
             }
         } else {
             excluded_entries_kept = Some(platform.entries_kept_reason());

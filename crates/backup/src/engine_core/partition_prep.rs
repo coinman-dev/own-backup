@@ -2,7 +2,8 @@
 
 use tracing::{info, warn};
 
-use own_backup_common::{tr, OwnBackupError, Result};
+use own_backup_common::{lang::Localized, tr_both};
+use own_backup_common::{OwnBackupError, Result};
 
 use super::target::no_patterns;
 use crate::exclusions::ByteRanges;
@@ -37,13 +38,13 @@ pub(crate) struct PreparedMap {
     pub(crate) categories: Option<crate::exclusions::CategorySizes>,
     /// Why no walk ran over this partition, for the result screen. `None` when
     /// one did.
-    pub(crate) skipped: Option<String>,
+    pub(crate) skipped: Option<Localized>,
     /// Matched content the walk left in the copy, and directories it could
     /// not walk (`exclusions::key_store_left_behind`).
     pub(crate) left: Vec<crate::exclusions::LeftInCopy>,
     /// What the result screen says about this partition's exclusions besides
     /// the figures — files its `$MFT` scan could not reach, for one.
-    pub(crate) notes: Vec<String>,
+    pub(crate) notes: Vec<Localized>,
 }
 
 /// Excluded files a Linux filesystem still lists by name, added up over the
@@ -74,16 +75,15 @@ impl KeptNamed {
     /// The result screen's sentence, `None` when every excluded file left the
     /// catalog. `total` is the copy's excluded-file count, the figure next to
     /// which the sentence is read.
-    pub(crate) fn line(&self, total: u64) -> Option<String> {
+    pub(crate) fn line(&self, total: u64) -> Option<Localized> {
         (self.files > 0).then(|| {
             let fs: Vec<&str> = self.filesystems.iter().map(String::as_str).collect();
-            tr!(
+            tr_both!(
                 "engine.entries_kept_named",
                 kept = self.files,
                 total = total.max(self.files),
                 fs = fs.join(", ")
             )
-            .into_owned()
         })
     }
 }
@@ -139,7 +139,7 @@ pub(crate) fn prepare_encrypted_partition_map(
                 // Грязный том, не NTFS внутри, битая запись — копия делается
                 // целиком, и об этом сказано вслух.
                 warn!(error = %e, "MFT scan failed — this partition keeps every file");
-                out.skipped = Some(tr!("engine_win.skip_mft_failed", error = e).into_owned());
+                out.skipped = Some(tr_both!("engine_win.skip_mft_failed", error = e));
                 None
             }
         }
@@ -150,9 +150,8 @@ pub(crate) fn prepare_encrypted_partition_map(
         Ok(map) => out.map = Some(Box::new(map)),
         Err(e) => {
             warn!(error = %e, "no NTFS map over the decrypted partition — copying every block");
-            out.skipped.get_or_insert_with(|| {
-                tr!("engine_win.skip_ntfs_map_failed", error = e).into_owned()
-            });
+            out.skipped
+                .get_or_insert_with(|| tr_both!("engine_win.skip_ntfs_map_failed", error = e));
             return Ok(out);
         }
     }
@@ -247,8 +246,7 @@ pub(crate) fn linux_fs_exclusions(
                     Err(OwnBackupError::Cancelled) => return Err(OwnBackupError::Cancelled),
                     Err(e) => {
                         warn!(part = %read_path, error = %e, "ext exclusions failed — keeping all files");
-                        out.skipped =
-                            Some(tr!("engine_win.skip_list_failed", fs = "ext").into_owned());
+                        out.skipped = Some(tr_both!("engine_win.skip_list_failed", fs = "ext"));
                     }
                 }
             }
@@ -312,8 +310,7 @@ pub(crate) fn linux_fs_exclusions(
                     Err(OwnBackupError::Cancelled) => return Err(OwnBackupError::Cancelled),
                     Err(e) => {
                         warn!(part = %read_path, error = %e, "btrfs exclusions failed — keeping all files");
-                        out.skipped =
-                            Some(tr!("engine_win.skip_list_failed", fs = "btrfs").into_owned());
+                        out.skipped = Some(tr_both!("engine_win.skip_list_failed", fs = "btrfs"));
                     }
                 }
             }
@@ -372,8 +369,7 @@ pub(crate) fn linux_fs_exclusions(
                     Err(OwnBackupError::Cancelled) => return Err(OwnBackupError::Cancelled),
                     Err(e) => {
                         warn!(part = %read_path, error = %e, "xfs exclusions failed — keeping all files");
-                        out.skipped =
-                            Some(tr!("engine_win.skip_list_failed", fs = "xfs").into_owned());
+                        out.skipped = Some(tr_both!("engine_win.skip_list_failed", fs = "xfs"));
                     }
                 }
             }
@@ -638,13 +634,12 @@ mod tests {
         pv.add("btrfs", 2);
         disk.merge(&pv);
         let said = |kept: u64, total: u64| {
-            tr!(
+            tr_both!(
                 "engine.entries_kept_named",
                 kept = kept,
                 total = total,
                 fs = "btrfs, xfs"
             )
-            .into_owned()
         };
         assert_eq!(disk.line(24_475), Some(said(20, 24_475)));
         // Never fewer in total than kept, whatever the caller added up.

@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { api } from '../lib/api';
   import { media } from '../lib/mediaStore.svelte';
+  import { isWindows } from '../lib/platformStore.svelte';
   import { jobs, reloadActivity } from '../lib/jobStore.svelte';
   import { formatBytes, formatDate, formatDuration } from '../lib/format';
   import type { JobRun, RestoreRunState } from '../lib/types';
@@ -203,8 +204,9 @@
                 <div>
                   <span class="k">{m.act_snapshot()}</span>
                   <!-- "нет" would read as a shortcoming; on the medium the volume
-                       is offline, so no snapshot was needed in the first place. -->
-                  <span class="v">{r.vss_used ? 'VSS' : media.active ? m.act_snapshot_not_needed() : m.act_snapshot_none()}</span>
+                       is offline, so no snapshot was needed in the first place.
+                       `vss_used` is a snapshot on Linux too: LVM or device-mapper. -->
+                  <span class="v">{r.vss_used ? (isWindows() ? 'VSS' : 'LVM/dm') : media.active ? m.act_snapshot_not_needed() : m.act_snapshot_none()}</span>
                 </div>
               </div>
             {/if}

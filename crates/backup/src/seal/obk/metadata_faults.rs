@@ -1,6 +1,9 @@
 //! Test-only published metadata/parent-link updates at actual commit edges.
 use std::io::BufWriter;
 use std::path::Path;
+// The Windows-only stand entries below write to COM1 and to files.
+#[cfg(windows)]
+use std::io::Write;
 
 use sha2::{Digest, Sha256};
 use uuid::Uuid;

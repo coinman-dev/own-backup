@@ -137,7 +137,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -148,7 +148,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1004,7 +1004,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1195,7 +1195,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1933,7 +1933,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "tokio",
  "tower-service",
  "tracing",
@@ -2541,7 +2541,7 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "thiserror 2.0.18",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2646,7 +2646,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2936,12 +2936,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.45.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "own-backup-backup"
-version = "0.1.6-beta"
+version = "0.1.7-beta"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2983,7 +2983,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-cli"
-version = "0.1.6-beta"
+version = "0.1.7-beta"
 dependencies = [
  "chrono",
  "clap",
@@ -3012,7 +3012,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-client"
-version = "0.1.6-beta"
+version = "0.1.7-beta"
 dependencies = [
  "hyper-util",
  "own-backup-backup",
@@ -3034,7 +3034,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-common"
-version = "0.1.6-beta"
+version = "0.1.7-beta"
 dependencies = [
  "chrono",
  "libc",
@@ -3050,7 +3050,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-core"
-version = "0.1.6-beta"
+version = "0.1.7-beta"
 dependencies = [
  "chrono",
  "own-backup-backup",
@@ -3071,7 +3071,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-gui"
-version = "0.1.6-beta"
+version = "0.1.7-beta"
 dependencies = [
  "chrono",
  "glib",
@@ -3112,7 +3112,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-inventory"
-version = "0.1.6-beta"
+version = "0.1.7-beta"
 dependencies = [
  "async-trait",
  "own-backup-common",
@@ -3126,7 +3126,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-metadata"
-version = "0.1.6-beta"
+version = "0.1.7-beta"
 dependencies = [
  "chrono",
  "own-backup-common",
@@ -3141,7 +3141,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-restore"
-version = "0.1.6-beta"
+version = "0.1.7-beta"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3161,7 +3161,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-scheduler"
-version = "0.1.6-beta"
+version = "0.1.7-beta"
 dependencies = [
  "chrono",
  "cron",
@@ -3177,7 +3177,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-service"
-version = "0.1.6-beta"
+version = "0.1.7-beta"
 dependencies = [
  "async-stream",
  "chrono",
@@ -3214,7 +3214,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-shell"
-version = "0.1.6-beta"
+version = "0.1.7-beta"
 dependencies = [
  "gtk",
  "own-backup-common",
@@ -3227,7 +3227,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-snapshot"
-version = "0.1.6-beta"
+version = "0.1.7-beta"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3935,7 +3935,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4322,7 +4322,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4864,7 +4864,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5362,7 +5362,7 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "thiserror 2.0.18",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5402,7 +5402,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5891,7 +5891,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5912,7 +5912,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-quartz-core",
  "raw-window-handle",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
  "windows-version",
 ]
 
@@ -6767,27 +6767,27 @@ dependencies = [
 
 [[package]]
 name = "zstd"
-version = "0.13.3"
+version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+checksum = "db3ae9bf90af6e40197bef767eeefc46ad6397420fe873830bd85e5fbbfb3c70"
 dependencies = [
  "zstd-safe",
 ]
 
 [[package]]
 name = "zstd-safe"
-version = "7.2.4"
+version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f49c4d5f0abb602a93fb8736af2a4f4dd9512e36f7f570d66e65ff867ed3b9d"
+checksum = "ded520f16b29e1a9b771c722221b2b0a0398c2316d9bb3c42b458a5414d7434b"
 dependencies = [
  "zstd-sys",
 ]
 
 [[package]]
 name = "zstd-sys"
-version = "2.0.16+zstd.1.5.7"
+version = "2.1.2+zstd.1.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
+checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
 dependencies = [
  "cc",
  "pkg-config",

@@ -32,7 +32,7 @@ async fn main() {
                 for (old, new) in &r.renamed {
                     println!("   renamed {old} -> {new}");
                 }
-                println!("   note: {}", r.layout_note);
+                println!("   note: {}", &*r.layout_note);
                 r.job
             }
         };
