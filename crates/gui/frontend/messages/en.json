@@ -142,6 +142,7 @@
   "dash_created": "Backup created — {kind}.",
   "dash_created_vss": "Backup created — {kind}, VSS snapshot.",
   "dash_created_cold": "Backup created — {kind}, cold backup (system offline).",
+  "dash_created_snapshot": "Backup created — {kind}, from a volume snapshot (LVM/dm).",
   "dash_used_only": "Used sectors only.",
   "dash_sector_by_sector": "Sector by sector.",
   "dash_changed_only": "Only changes written: {size}.",

@@ -183,12 +183,23 @@ pub async fn run(args: BackupArgs) -> own_backup_common::Result<()> {
             "sector-by-sector (requested or non-NTFS volume)"
         }
     );
+    // `vss_used` is "read from a snapshot": VSS here, LVM/device-mapper on Linux.
+    #[cfg(target_os = "windows")]
     println!(
         "  VSS:         {}",
         if summary.vss_used {
             "shadow copy"
         } else {
             "live volume (crash-consistent)"
+        }
+    );
+    #[cfg(not(target_os = "windows"))]
+    println!(
+        "  Snapshot:    {}",
+        if summary.vss_used {
+            "LVM/device-mapper snapshot"
+        } else {
+            "none (the source held still or read live)"
         }
     );
     println!("  Image:       {}", summary.image_path.display());

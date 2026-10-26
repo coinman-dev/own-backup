@@ -142,6 +142,7 @@
   "dash_created": "Копия создана — {kind}.",
   "dash_created_vss": "Копия создана — {kind}, снимок VSS.",
   "dash_created_cold": "Копия создана — {kind}, холодная копия (система офлайн).",
+  "dash_created_snapshot": "Копия создана — {kind}, со снимка тома (LVM/dm).",
   "dash_used_only": "Только занятые секторы.",
   "dash_sector_by_sector": "Посекторно.",
   "dash_changed_only": "Записано только изменённое: {size}.",

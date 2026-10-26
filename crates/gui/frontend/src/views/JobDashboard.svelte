@@ -1,5 +1,6 @@
 <script lang="ts">
   import { media } from '../lib/mediaStore.svelte';
+  import { isWindows } from '../lib/platformStore.svelte';
   import { api } from '../lib/api';
   import { formatBytes, formatDate, formatClock } from '../lib/format';
   import {
@@ -476,8 +477,12 @@
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
           </span>
           <span>
+            <!-- `vss_used` is "read from a snapshot" on both systems: VSS on
+                 Windows, an LVM or device-mapper snapshot on Linux. -->
             {lastRun.vss_used
-              ? m.dash_created_vss({ kind: kindLabel(lastRun.backup_kind) })
+              ? isWindows()
+                ? m.dash_created_vss({ kind: kindLabel(lastRun.backup_kind) })
+                : m.dash_created_snapshot({ kind: kindLabel(lastRun.backup_kind) })
               : media.active
                 ? m.dash_created_cold({ kind: kindLabel(lastRun.backup_kind) })
                 : m.dash_created({ kind: kindLabel(lastRun.backup_kind) })}
