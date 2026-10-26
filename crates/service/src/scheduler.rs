@@ -716,7 +716,9 @@ mod tests {
     fn a_skipped_run_is_recorded_once_and_does_not_serve_its_slot() {
         let dir = tempfile::tempdir().unwrap();
         let store = JobStore::load(dir.path());
-        let passwords = PasswordStore::new(dir.path().join("metadata.db"));
+        // For the run only (nothing here is persisted): on Windows a store
+        // outside the installed service refuses `forget`.
+        let passwords = PasswordStore::memory_only(dir.path().join("metadata.db"));
         let mut job = disk_job();
         job.schedule.run_missed = true;
         let job = store.upsert(job).unwrap();

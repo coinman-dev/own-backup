@@ -4835,9 +4835,16 @@ mod tests {
             own_backup_client::BackupClient::connect_tcp_only(format!("http://{addr}"), "")
                 .await
                 .unwrap();
+        // Not the drive of the temporary folder: a destination on the source
+        // volume is refused (on Windows that folder is on C:).
+        let source = if dir.path().to_string_lossy().to_ascii_uppercase().starts_with("C:") {
+            "D:"
+        } else {
+            "C:"
+        };
         let mut big = own_backup_core::Job {
             name: "big".into(),
-            source: "C:".into(),
+            source: source.into(),
             dest_folder: dir.path().display().to_string(),
             ..Default::default()
         };

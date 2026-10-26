@@ -25,13 +25,24 @@ fn crates_dir() -> PathBuf {
         .to_path_buf()
 }
 
+/// The `.rs` files under `dir`. Links and junctions are not followed, and
+/// what holds no source of ours is not entered: the frontend's
+/// `node_modules` (tens of thousands of entries after `npm ci`, which the
+/// Windows release runner walked for over an hour), build output, hidden
+/// folders.
 fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(rd) = fs::read_dir(dir) else { return };
     for e in rd.flatten() {
+        let Ok(kind) = e.file_type() else { continue };
         let p = e.path();
-        if p.is_dir() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if kind.is_dir() {
+            if name.starts_with('.') || matches!(&*name, "node_modules" | "target" | "dist") {
+                continue;
+            }
             rs_files(&p, out);
-        } else if p.extension().is_some_and(|x| x == "rs") {
+        } else if kind.is_file() && p.extension().is_some_and(|x| x == "rs") {
             out.push(p);
         }
     }
