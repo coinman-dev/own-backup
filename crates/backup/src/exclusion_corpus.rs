@@ -480,6 +480,20 @@ impl Corpus {
     /// Called after mounting the patched image — and again after filling the
     /// free space, because a block freed twice only shows up once it is reused.
     pub fn verify_kept(&self, tag: &str) {
+        self.verify_kept_with(tag, true);
+    }
+
+    /// The same through the kernel's ntfs3, which knows none of what ntfs-3g
+    /// stores its own way: device nodes, FIFOs, sockets and symlinks come out
+    /// as regular files, named streams not as `user.*` attributes — on a
+    /// volume nothing was done to as well (checked 2026-10-26). Contents and
+    /// the presence of every kept name are still its to judge; types, link
+    /// targets and streams are ntfs-3g's.
+    pub fn verify_kept_by_kernel_ntfs3(&self, tag: &str) {
+        self.verify_kept_with(tag, false);
+    }
+
+    fn verify_kept_with(&self, tag: &str, ntfs3g_extras: bool) {
         for (p, want) in &self.kept {
             let got =
                 std::fs::read(p).unwrap_or_else(|e| panic!("{tag}: {} нечитаем: {e}", p.display()));
@@ -494,6 +508,9 @@ impl Corpus {
         for (p, ifmt) in &self.kept_specials {
             let md = std::fs::symlink_metadata(p)
                 .unwrap_or_else(|e| panic!("{tag}: {} пропал: {e}", p.display()));
+            if !ntfs3g_extras {
+                continue;
+            }
             assert_eq!(
                 md.mode() & libc::S_IFMT,
                 *ifmt,
@@ -501,7 +518,7 @@ impl Corpus {
                 p.display()
             );
         }
-        for (p, name, want) in &self.kept_streams {
+        for (p, name, want) in self.kept_streams.iter().filter(|_| ntfs3g_extras) {
             assert!(
                 getxattr(p, name) == *want,
                 "{tag}: поток {name} файла {} повреждён",
@@ -509,6 +526,11 @@ impl Corpus {
             );
         }
         for (p, target) in &self.kept_links {
+            if !ntfs3g_extras {
+                std::fs::symlink_metadata(p)
+                    .unwrap_or_else(|e| panic!("{tag}: {} пропал: {e}", p.display()));
+                continue;
+            }
             let got = std::fs::read_link(p)
                 .unwrap_or_else(|e| panic!("{tag}: {} пропал: {e}", p.display()));
             assert_eq!(

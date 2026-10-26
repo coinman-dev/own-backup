@@ -331,7 +331,7 @@ fn kernel_ntfs3_reads(file: &Path, corpus: &Corpus, mnt: &Path, tag: &str) {
         String::from_utf8_lossy(&out.stderr)
     );
     let _m = crate::exclusion_corpus::Mounted(mnt.to_path_buf());
-    corpus.verify_kept(&format!("{tag} via ntfs3"));
+    corpus.verify_kept_by_kernel_ntfs3(&format!("{tag} via ntfs3"));
 }
 
 fn restore(image: &Path, size: u64, keys: Option<&crate::seal::context::ArchiveKeys>) -> PathBuf {
