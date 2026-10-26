@@ -13,7 +13,7 @@
 
 use std::fs::File;
 use std::io;
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::{Path, PathBuf};
 
@@ -179,6 +179,25 @@ fn final_path(file: &File) -> Option<String> {
     Some(plain(Path::new(&String::from_utf16_lossy(&buf[..n]))))
 }
 
+/// Where the handle really is, spelled as the system gives it (`\\?\C:\…`):
+/// a path to build another name in that folder from, unlike [`final_path`],
+/// which is only for comparing.
+fn final_path_as_is(file: &File) -> Option<PathBuf> {
+    let mut buf = vec![0u16; 1024];
+    // SAFETY: a live handle and a buffer of the length passed.
+    let n = unsafe {
+        GetFinalPathNameByHandleW(
+            HANDLE(file.as_raw_handle()),
+            &mut buf,
+            GETFINALPATHNAMEBYHANDLE_FLAGS(FILE_NAME_NORMALIZED.0 | VOLUME_NAME_DOS.0),
+        )
+    } as usize;
+    if n == 0 || n >= buf.len() {
+        return None;
+    }
+    Some(PathBuf::from(std::ffi::OsString::from_wide(&buf[..n])))
+}
+
 fn info(file: &File) -> Option<BY_HANDLE_FILE_INFORMATION> {
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
     // SAFETY: a live handle and a writable structure.
@@ -259,13 +278,23 @@ pub fn delete_by_handle(file: &File) -> io::Result<()> {
 }
 
 /// Rename an open file to `new_name` in the folder it is in, replacing a file
-/// of that name there. A bare name makes it a rename in place: no path is
-/// resolved, so nothing on the way can redirect it.
+/// of that name there.
+///
+/// The new name goes in as the full path of that folder — where the handle
+/// really is (`GetFinalPathNameByHandleW`) — plus `new_name`. A bare name
+/// does not do it: with no root directory, `SetFileInformationByHandle`
+/// takes the name as a DOS path relative to the CURRENT directory, so the
+/// service (in `System32`) moved a rotated log out of its folder (found
+/// 2026-10-26: the rotation test under Wine, which does what KernelBase does).
 pub fn rename_in_place(file: &File, new_name: &str) -> io::Result<()> {
     if new_name.contains(['\\', '/', ':']) || matches!(new_name, "" | "." | "..") {
         return Err(io::Error::from(io::ErrorKind::InvalidInput));
     }
-    let name: Vec<u16> = new_name.encode_utf16().collect();
+    let folder = final_path_as_is(file)
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+        .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+    let target = folder.join(new_name);
+    let name: Vec<u16> = target.as_os_str().encode_wide().collect();
     let header = std::mem::size_of::<FILE_RENAME_INFO>();
     let size = header + name.len() * 2;
     // u64 storage keeps the structure's alignment.
