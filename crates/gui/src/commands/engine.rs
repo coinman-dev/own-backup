@@ -1089,7 +1089,9 @@ fn xdg_download_dir(text: &str, home: &std::path::Path) -> Option<std::path::Pat
     p.is_absolute().then_some(p)
 }
 
-#[cfg(test)]
+// Unix paths and the XDG file: the function only runs on Linux, and on
+// Windows `/home/u` is not even absolute.
+#[cfg(all(test, not(target_os = "windows")))]
 mod media_folder_tests {
     use super::xdg_download_dir;
     use std::path::Path;

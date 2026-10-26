@@ -5540,6 +5540,9 @@ mod tests {
     fn a_memory_only_store_persists_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let db = dir.path().join("metadata.db");
+        // On Windows only the installed service persists a password, so there
+        // is no "earlier" one to set up here.
+        #[cfg(not(target_os = "windows"))]
         PasswordStore::new(db.clone())
             .remember("OLD", "earlier".into(), true)
             .unwrap();
@@ -5555,6 +5558,7 @@ mod tests {
         store.forget("V2").unwrap();
         assert!(!store.has("V2"));
         assert!(!PasswordStore::new(db.clone()).has("V1"));
+        #[cfg(not(target_os = "windows"))]
         assert!(PasswordStore::new(db).has("OLD"));
     }
 
