@@ -111,10 +111,20 @@ impl Record {
     }
 }
 
+/// Release the lock before the descriptor goes. A process another thread is
+/// starting at this moment shares the open file until its `exec`; closing
+/// ours alone would leave the record locked for that while, and the next look
+/// would take it for a live run. `flock` released by any holder is released.
+fn release(file: File) {
+    let _ = file.unlock();
+}
+
 impl Drop for Record {
     fn drop(&mut self) {
         // The image is gone or published by now; release, then forget it.
-        drop(self.file.take());
+        if let Some(file) = self.file.take() {
+            release(file);
+        }
         let _ = std::fs::remove_file(&self.path);
     }
 }
@@ -158,6 +168,7 @@ fn reclaim_in(ledger: &Path) -> Reclaimed {
         }
         let mut body = Vec::new();
         if (&mut file).take(64 * 1024).read_to_end(&mut body).is_err() {
+            release(file);
             continue;
         }
         let image = serde_json::from_slice::<serde_json::Value>(&body)
@@ -171,12 +182,13 @@ fn reclaim_in(ledger: &Path) -> Reclaimed {
             Some(Err(e)) => {
                 warn!(record = %record.display(), error = %e, "unfinished image of a killed run kept for now");
                 done.kept += 1;
+                release(file);
                 continue;
             }
             // Torn while being written: its image did not exist yet.
             None => {}
         }
-        drop(file);
+        release(file);
         let _ = std::fs::remove_file(&record);
     }
     if done.files > 0 {
@@ -371,7 +383,9 @@ mod tests {
         let PendingImage { path, _record } = pending;
         path.keep().unwrap();
         let mut record = _record.unwrap();
-        drop(record.file.take());
+        // As the kernel does for a killed process — even while another
+        // test's child, not yet exec'd, still shares the open file.
+        release(record.file.take().unwrap());
         std::mem::forget(record);
         image
     }
