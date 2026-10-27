@@ -315,6 +315,8 @@ Section "!${NAME}" SecMain
     Rename "$INSTDIR\${TC_DIR}\${TC_PLUGIN}" "$INSTDIR\${TC_DIR}\${TC_PLUGIN}.old"
     File "${TC_DIR}\${TC_PLUGIN}"
     File "${TC_DIR}\pluginst.inf"
+    ; Opened in Total Commander, the ZIP installs the plugin by itself.
+    File "${TC_DIR}\OwnBackup-TC-plugin.zip"
     Delete /REBOOTOK "$INSTDIR\${TC_DIR}\${TC_PLUGIN}.old"
     SetOutPath "$INSTDIR"
 
@@ -510,6 +512,7 @@ Section "Uninstall"
     Delete /REBOOTOK "$INSTDIR\${TC_DIR}\${TC_PLUGIN}"
     Delete /REBOOTOK "$INSTDIR\${TC_DIR}\${TC_PLUGIN}.old"
     Delete "$INSTDIR\${TC_DIR}\pluginst.inf"
+    Delete "$INSTDIR\${TC_DIR}\OwnBackup-TC-plugin.zip"
     RMDir "$INSTDIR\${TC_DIR}"
     RMDir /r "$INSTDIR\Logs"
 

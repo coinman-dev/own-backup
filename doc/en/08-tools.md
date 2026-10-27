@@ -69,9 +69,17 @@ mounted or taken offline, and the other partitions of the same disk (a Windows
 data drive, say) keep working. The Own Backup service does the reading, so it
 must be installed and running.
 
-**Add the plugin** (once): in Total Commander 64-bit — **Configuration →
-Options → Plugins → File system plugins (.WFX) → Configure → Add**, and choose
-`C:\Program Files\OwnBackup\TotalCommander\OwnBackup.wfx64`.
+**Add the plugin** (once), in Total Commander 64-bit:
+
+- simplest — open the archive
+  `C:\Program Files\OwnBackup\TotalCommander\OwnBackup-TC-plugin.zip` in it
+  (Enter on the file): Total Commander offers to install the plugin and copies
+  it into its own plugin folder. If the plugin stops opening after an Own
+  Backup update, install it the same way again;
+- or by hand: **Configuration → Options → Plugins → File system plugins
+  (.WFX) → Configure → Add**, and choose
+  `C:\Program Files\OwnBackup\TotalCommander\OwnBackup.wfx64` — that one is
+  updated with the program.
 
 **Use it:** open **Network Neighborhood** (`\\\`) → **Own Backup Linux**. It
 lists partitions such as "Disk 3 · partition 3 · 128 GB · LUKS". For an

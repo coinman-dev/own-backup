@@ -24,7 +24,7 @@ $serviceKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\OwnBackup'
 $uninstallKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\OwnBackup'
 $files = 'own-backup-gui.exe', 'own-backup-service.exe', 'own-backup-cli.exe', 'own-backup-shell.exe',
     'LICENSE.txt', 'NOTICE.txt', 'COMMERCIAL-LICENSE.txt', 'THIRD-PARTY-NOTICES.txt', 'uninstall.exe',
-    'TotalCommander\OwnBackup.wfx64', 'TotalCommander\pluginst.inf'
+    'TotalCommander\OwnBackup.wfx64', 'TotalCommander\pluginst.inf', 'TotalCommander\OwnBackup-TC-plugin.zip'
 
 if (Test-Path -LiteralPath $dir) { throw "The program folder already exists: $dir" }
 if (Get-Service OwnBackup -ErrorAction SilentlyContinue) { throw 'The service is already registered on this machine.' }

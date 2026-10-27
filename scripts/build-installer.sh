@@ -110,6 +110,15 @@ fi
 mkdir -p "$stage/TotalCommander"
 cp "$exe_dir/own_backup_tc.dll" "$stage/TotalCommander/OwnBackup.wfx64"
 sed 's/\r$//; s/$/\r/' crates/tc-plugin/pluginst.inf >"$stage/TotalCommander/pluginst.inf"
+# The same two files in a ZIP: opened in Total Commander, it offers to
+# install the plugin itself.
+python3 - "$stage/TotalCommander" <<'PY'
+import sys, zipfile
+d = sys.argv[1]
+with zipfile.ZipFile(f"{d}/OwnBackup-TC-plugin.zip", "w", zipfile.ZIP_DEFLATED) as z:
+    for name in ("OwnBackup.wfx64", "pluginst.inf"):
+        z.write(f"{d}/{name}", name)
+PY
 cp crates/gui/icons/icon.ico "$stage/icon.ico"
 cp "$script" "$stage/own-backup.nsi"
 
