@@ -9,9 +9,24 @@ small desktop on tty1, no login. Plan §6, stage 6, decision 11.
   (`shell-loop`) and the window, which labwc maximises above the strip. The
   strip is the WinPE one on GTK/layer-shell: Start menu (Backup, Terminal —
   `foot`, Restart, Shut down, both asked first), a button per open window
-  (wlr foreign-toplevel: click brings it forward or folds it away), the clock,
-  the window's language. The keyboard is `us,ru`, Alt+Shift switches (from
-  `/etc/default/keyboard`, written by live-config). When labwc is missing or
+  (wlr foreign-toplevel: click brings it forward or folds it away), the
+  keyboard layout (EN/RU; a click switches it), the clock. The keyboard is
+  `us,ru`, Alt+Shift switches (from `/etc/default/keyboard`, written by
+  live-config). labwc tells no client its layout, so the strip reads the same
+  keyboards (`/dev/input`, never grabbed) through the same keymap with
+  libxkbcommon, and a click presses Alt+Shift on a `uinput` keyboard of its
+  own (`crates/shell/src/linux/keyboard.rs`); the layout it shows is in
+  `$XDG_RUNTIME_DIR/own-backup-shell.layout` for the self-test.
+- **Tools just in case:** the window's checkbox (or `media build-linux
+  --tools krusader,featherpad`) adds Krusader and FeatherPad — Debian packages
+  (`crates/common/src/media_tools.rs`), written by `build-media.sh --packages`
+  into `config/package-lists/tools.list.chroot`. The Start menu shows a line
+  for each one present. Kate is not offered: it refuses to run as root, and
+  everything on the medium is root. `/etc/xdg/krusaderrc` skips Krusader's
+  first-run welcome, tool search and settings dialog (every start on a
+  medium is a first one) and makes F4 open FeatherPad; `/etc/xdg/kdeglobals`
+  names Breeze, drawn through `qt6-svg-plugins`. Both run on a D-Bus session
+  of their own (`dbus-run-session`), as the medium has no session bus. When labwc is missing or
   dies within 10 s, or `own-backup.kiosk=cage` is on the kernel command line,
   the session is cage with the window full screen, as before the strip;
   `/run/own-backup-kiosk.desktop` says which it is.

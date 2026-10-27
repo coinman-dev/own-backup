@@ -54,8 +54,10 @@ open it again from **Start**.
 ## Based on Linux (Debian 13)
 
 A Debian 13 live system with the program on a small desktop (labwc) with its
-own taskbar: a **Start** menu (**Backup**, **Terminal**, **Restart**, **Shut
-down**), buttons of the open windows and a clock. It boots with **UEFI —
+own taskbar: a **Start** menu (**Backup**, **Terminal**, the added tools,
+**Restart**, **Shut down**), buttons of the open windows, the keyboard layout
+and a clock. Alt+Shift or a click on the layout indicator (EN/RU) switches the
+layout. It boots with **UEFI —
 Secure Boot does not need to be turned off** (Debian's signed boot loader) —
 and with legacy **BIOS**. It reads ext4, XFS, btrfs, LVM and LUKS directly, and
 restores Windows backups as well (NTFS, BitLocker, boot configuration).
@@ -74,7 +76,11 @@ restores Windows backups as well (NTFS, BitLocker, boot configuration).
     packages is downloaded and about 10 GiB of temporary space is used; needs
     an administrator password.
 
-  With **Write onto a USB stick** the ISO goes onto the chosen stick right away.
+  With **Just-in-case tools** the medium gets the **Krusader** file manager
+  and the **FeatherPad** text editor (Debian packages, installed during the
+  build); they appear in the **Start** menu. With **Write onto a USB stick**
+  the ISO goes onto the chosen stick right away. The ready ISO from GitHub
+  does not carry these tools.
 - **On Windows, from the window:** **Tools → Bootable media → Based on Linux
   (Debian) x64 → Click to download →**. The medium is built on Linux only, so
   Windows downloads the ready ISO of the installed program's version from

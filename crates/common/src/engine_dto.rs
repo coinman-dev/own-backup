@@ -399,6 +399,10 @@ pub struct LinuxMediaBuildDto {
     /// installed package. Empty — the installed package, as the window sends.
     #[serde(default)]
     pub deb_path: String,
+    /// Ids from [`crate::media_tools::LINUX_MEDIA_TOOLS`] to put on the
+    /// medium (Krusader, FeatherPad); empty for none.
+    #[serde(default)]
+    pub tools: Vec<String>,
 }
 
 /// What the build did.
@@ -410,6 +414,9 @@ pub struct LinuxMediaReportDto {
     pub version: String,
     /// Made from the installed package (not from a given .deb).
     pub from_installed: bool,
+    /// Names of the tools the medium carries (Krusader, FeatherPad).
+    #[serde(default)]
+    pub tools: Vec<String>,
     #[serde(default)]
     pub warnings: Vec<String>,
     #[serde(default)]

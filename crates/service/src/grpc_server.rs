@@ -2941,6 +2941,13 @@ impl BackupService for BackupServiceImpl {
             let p: LinuxMediaBuildDto = serde_json::from_str(&req.get_ref().json)
                 .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
             let with_stick = !p.stick_device.trim().is_empty();
+            // The tools become package names a root build installs: only
+            // ours, and refused before any password is asked.
+            if let Err(id) = own_backup_common::media_tools::linux_tool_packages(&p.tools) {
+                return Err(Status::invalid_argument(
+                    tr!("grpc_server.media_unknown_tool", tool = id).into_owned(),
+                ));
+            }
             // A .deb of the caller's runs its maintainer scripts as root in
             // the build: root's (the CLI under sudo) or a foreground
             // development run's only, and refused before any password is asked.
@@ -3025,8 +3032,10 @@ impl BackupService for BackupServiceImpl {
                 uid,
                 stick = %p.stick_device,
                 given_deb = !p.deb_path.trim().is_empty(),
+                tools = %p.tools.join(","),
                 "building the Linux boot medium"
             );
+            let tools = p.tools.clone();
             let report = tokio::task::spawn_blocking(move || {
                 let _slot = slot;
                 let _awake = keep_awake(&tr!("grpc_server.busy_media_build"));
@@ -3044,7 +3053,16 @@ impl BackupService for BackupServiceImpl {
                         },
                     );
                 };
-                build(BuildRequest { out, deb, stick }, &cancel, &mut emit)
+                build(
+                    BuildRequest {
+                        out,
+                        deb,
+                        stick,
+                        tools,
+                    },
+                    &cancel,
+                    &mut emit,
+                )
             })
             .await
             .map_err(|e| Status::internal(format!("medium build panicked: {e}")))?
@@ -3065,6 +3083,7 @@ impl BackupService for BackupServiceImpl {
                 iso_bytes: report.iso_bytes,
                 version: report.version,
                 from_installed: report.from_installed,
+                tools: report.tools,
                 warnings: report.warnings,
                 stick: report.stick.map(|s| MediaStickReportDto {
                     device,

@@ -93,16 +93,21 @@ pub fn items(on_medium: bool, tools_found: &[bool]) -> Vec<Item> {
     out
 }
 
-/// The Linux medium's menu: the product, a terminal, and the two ways of
-/// ending the session — the same rule about them as in [`items`].
+/// The Linux medium's programs besides the product (Krusader, FeatherPad):
+/// Debian packages the build installs when asked; tool *n* is
+/// `TOOL_BASE + n` here as in [`TOOLS`].
+#[cfg_attr(windows, allow(unused_imports))]
+pub use own_backup_common::media_tools::LINUX_MEDIA_TOOLS as LINUX_TOOLS;
+
+/// The Linux medium's menu: the product, a terminal, the tools the build put
+/// there, and the two ways of ending the session — the same rule about them
+/// as in [`items`].
 ///
-/// No tools: [`TOOLS`] are Windows programs the WinPE build copies from the
-/// machine that made it, and the Linux medium has none of them. The product
-/// comes first here because a terminal is the rarer need on a medium whose
-/// window does the work; on WinPE the console is first because for years it
-/// was the medium.
+/// The product comes first here because a terminal is the rarer need on a
+/// medium whose window does the work; on WinPE the console is first because
+/// for years it was the medium.
 #[cfg_attr(windows, allow(dead_code))]
-pub fn items_linux(on_medium: bool) -> Vec<Item> {
+pub fn items_linux(on_medium: bool, tools_found: &[bool]) -> Vec<Item> {
     let mut out = vec![
         Item {
             id: INTERFACE,
@@ -115,6 +120,17 @@ pub fn items_linux(on_medium: bool) -> Vec<Item> {
             separator_above: false,
         },
     ];
+    let mut first_tool = true;
+    for (n, tool) in LINUX_TOOLS.iter().enumerate() {
+        if !tools_found.get(n).copied().unwrap_or(false) {
+            continue;
+        }
+        out.push(Item {
+            id: TOOL_BASE + n as u32,
+            text: tool.name.into(),
+            separator_above: std::mem::take(&mut first_tool),
+        });
+    }
     if on_medium {
         out.push(Item {
             id: REBOOT,
@@ -143,16 +159,49 @@ mod tests {
     #[test]
     fn the_linux_menu_has_the_product_a_terminal_and_the_way_out() {
         assert_eq!(
-            ids(&items_linux(true)),
+            ids(&items_linux(true, &[])),
             vec![INTERFACE, TERMINAL, REBOOT, SHUTDOWN]
         );
-        assert_eq!(ids(&items_linux(false)), vec![INTERFACE, TERMINAL, CLOSE]);
-        let separators: Vec<u32> = items_linux(true)
+        assert_eq!(
+            ids(&items_linux(false, &[false, false])),
+            vec![INTERFACE, TERMINAL, CLOSE]
+        );
+        let separators: Vec<u32> = items_linux(true, &[])
             .iter()
             .filter(|i| i.separator_above)
             .map(|i| i.id)
             .collect();
         assert_eq!(separators, vec![REBOOT], "one line above the way out");
+    }
+
+    /// Krusader and FeatherPad are there only when the build was asked for
+    /// them; each under its own number, the group set off by one line.
+    #[test]
+    fn the_linux_menu_shows_the_tools_the_medium_has() {
+        let both = items_linux(true, &[true, true]);
+        assert_eq!(
+            ids(&both),
+            vec![
+                INTERFACE,
+                TERMINAL,
+                TOOL_BASE,
+                TOOL_BASE + 1,
+                REBOOT,
+                SHUTDOWN
+            ]
+        );
+        assert_eq!(both[2].text, "Krusader");
+        assert_eq!(both[3].text, "FeatherPad");
+        let separators: Vec<u32> = both
+            .iter()
+            .filter(|i| i.separator_above)
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(separators, vec![TOOL_BASE, REBOOT]);
+        assert_eq!(
+            ids(&items_linux(true, &[false, true])),
+            vec![INTERFACE, TERMINAL, TOOL_BASE + 1, REBOOT, SHUTDOWN]
+        );
     }
 
     fn ids(items: &[Item]) -> Vec<u32> {

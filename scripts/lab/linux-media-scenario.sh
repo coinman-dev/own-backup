@@ -91,6 +91,22 @@ judge() {
     expect "$label:strip-terminal" "$txt" '^OBK-SELFTEST terminal_listed=yes terminal_gone=yes$' \
         "a terminal gets a button and loses it when closed"
     expect "$label:strip-restart" "$txt" '^OBK-SELFTEST shell_restart=yes$' "a killed strip comes back"
+    expect "$label:layout" "$txt" '^OBK-SELFTEST layout=EN layout_at=[0-9]+,[0-9]+$' \
+        "the strip shows the layout (EN at boot) and where its indicator is"
+    expect "$label:layout-keys" "$txt" '^OBK-SELFTEST typed_after_keys=d0b0 layout=RU$' \
+        "Alt+Shift on the keyboard: labwc types Cyrillic and the indicator says RU"
+    expect "$label:layout-click" "$txt" '^OBK-SELFTEST typed_after_click=66 layout=EN$' \
+        "a click on the indicator: labwc types Latin again and the indicator says EN"
+    expect "$label:layout-restart" "$txt" '^OBK-SELFTEST layout_after_restart=RU$' \
+        "a restarted strip keeps the layout labwc has"
+    expect "$label:layout-restart-typed" "$txt" '^OBK-SELFTEST typed_after_restart=d0b0 layout=RU$' \
+        "and labwc still types Cyrillic: the strip's new keyboard reset nothing"
+    if grep -q '^OBK-SELFTEST tool_' "$txt"; then
+        expect "$label:tool-krusader" "$txt" '^OBK-SELFTEST tool_krusader=window caption=Krusader' \
+            "Krusader starts as the Start menu starts it, straight to its main window (no first-run dialogs)"
+        expect "$label:tool-featherpad" "$txt" '^OBK-SELFTEST tool_featherpad=window ' \
+            "FeatherPad starts as the Start menu starts it and shows a window"
+    fi
     expect "$label:fallback" "$txt" '^OBK-SELFTEST fallback=cage,active,cage=1,window=1$' \
         "a labwc that cannot start: the window comes up in cage"
     expect "$label:fallback-back" "$txt" '^OBK-SELFTEST fallback_back=labwc,active,cage=0,window=1 shell=running$' \

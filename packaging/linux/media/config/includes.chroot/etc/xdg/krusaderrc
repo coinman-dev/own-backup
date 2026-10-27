@@ -1,0 +1,18 @@
+# Krusader on the boot medium, when the build was asked for the tools
+# (crates/common/src/media_tools.rs). KConfig reads /etc/xdg for defaults, so
+# this is only what a first start uses; nothing here is read without Krusader.
+#
+# Not a first start: every start on a medium would otherwise be one (the
+# settings live in RAM), each greeting the person with a welcome box, a
+# search for diff tools and mail clients, and the settings dialog.
+First Time=false
+
+# F4 opens FeatherPad, the medium's editor, rather than Krusader's own, which
+# needs KDE's text editor component the medium does not carry.
+[General]
+Editor=featherpad
+
+# The viewer's own first start looks for that component and, not finding it,
+# says "install Kate". F3 views text without it, and F4 is FeatherPad.
+[ViewerModule]
+FirstRun=false

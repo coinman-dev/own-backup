@@ -3217,6 +3217,7 @@ name = "own-backup-shell"
 version = "0.1.7-beta"
 dependencies = [
  "gtk",
+ "libc",
  "own-backup-common",
  "pangocairo",
  "rust-i18n",

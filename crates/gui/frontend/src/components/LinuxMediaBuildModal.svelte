@@ -56,6 +56,12 @@
   let downloaded = $state<LinuxMediaDownload | null>(null);
 
   let outputDir = $state('');
+  // Krusader and FeatherPad from Debian's packages: unlike on Windows nothing
+  // is looked for on this machine, so the offer is always there.
+  let includeTools = $state(false);
+  // How much bigger the ISO gets with them: Qt 6 and the KDE Frameworks
+  // Krusader needs are most of it (measured 27.10: 712 MiB with, 625 without).
+  const TOOLS_BYTES = 87 * 1024 * 1024;
   let toStick = $state(false);
   let sticks: MediaStick[] = $state([]);
   let loadingSticks = $state(false);
@@ -228,6 +234,7 @@
         stick_device: toStick && chosen ? chosen.device : '',
         stick_expect: toStick && chosen ? identity(chosen) : null,
         deb_path: '',
+        tools: includeTools ? ['krusader', 'featherpad'] : [],
       });
     } catch (e) {
       error = errorText(e);
@@ -358,6 +365,14 @@
 
       {#if way === 'build' && !building && !finished}
         <label class="opt">
+          <input type="checkbox" bind:checked={includeTools} />
+          <span>
+            {m.mb_tools()}
+            <span class="opt-note">{m.lmb_tools_note({ size: formatBytes(TOOLS_BYTES) })}</span>
+          </span>
+        </label>
+
+        <label class="opt">
           <input type="checkbox" checked={toStick}
                  onchange={(e) => setToStick((e.currentTarget as HTMLInputElement).checked)} />
           <span>
@@ -450,6 +465,9 @@
             <span>{m.lmb_rep_program()}</span>
             <span>{report.version} · {report.from_installed ? m.lmb_rep_installed() : m.lmb_rep_given()}</span>
           </div>
+          {#if report.tools.length > 0}
+            <div class="rep-row"><span>{m.mb_rep_tools()}</span><span>{report.tools.join(', ')}</span></div>
+          {/if}
           {#if report.stick}
             <div class="rep-row">
               <span>{m.ms_stick()}</span>

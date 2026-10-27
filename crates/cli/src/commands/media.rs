@@ -66,6 +66,11 @@ pub struct BuildLinuxArgs {
     #[arg(long)]
     pub deb: Option<String>,
 
+    /// Средства на всякий случай: krusader, featherpad (через запятую;
+    /// список — `media tools`). Ставятся из пакетов Debian при сборке
+    #[arg(long, value_delimiter = ',')]
+    pub tools: Vec<String>,
+
     /// Не печатать ход сборки, только итог
     #[arg(long)]
     pub quiet: bool,
@@ -239,6 +244,7 @@ pub async fn run(args: MediaArgs) -> Result<()> {
             let mut options = own_backup_common::engine_dto::LinuxMediaBuildDto {
                 output_dir: out.clone(),
                 deb_path: deb,
+                tools: b.tools.iter().map(|t| t.trim().to_lowercase()).collect(),
                 ..Default::default()
             };
             if let Some(wanted) = &b.stick {
@@ -272,6 +278,9 @@ pub async fn run(args: MediaArgs) -> Result<()> {
                     " (указанный .deb)"
                 }
             );
+            if !report.tools.is_empty() {
+                println!("  средства: {}", report.tools.join(", "));
+            }
             if let Some(stick) = &report.stick {
                 println!(
                     "Записано и проверено: {} МиБ ({}) на {}",

@@ -1252,6 +1252,8 @@ export interface LinuxMediaBuild {
   stick_expect: MediaStickIdentity | null;
   /** Development only: a .deb instead of the installed package. */
   deb_path: string;
+  /** Tools just in case (`krusader`, `featherpad`); empty for none. */
+  tools: string[];
 }
 
 export interface LinuxMediaReport {
@@ -1259,6 +1261,8 @@ export interface LinuxMediaReport {
   iso_bytes: number;
   version: string;
   from_installed: boolean;
+  /** Names of the tools the medium carries. */
+  tools: string[];
   warnings: string[];
   stick: MediaStickReport | null;
   cache_dir: string;

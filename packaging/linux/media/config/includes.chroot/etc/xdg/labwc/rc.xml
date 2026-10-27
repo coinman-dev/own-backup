@@ -19,8 +19,16 @@
     </font>
   </theme>
   <windowSwitcher show="yes" preview="no" outlines="no"/>
+  <!--
+    One layout for the whole session, not one per window: the strip's
+    indicator follows labwc's layout by reading the same keyboards through
+    the same keymap (crates/shell/src/linux/keyboard.rs), and a layout that
+    changed with the focus would leave it behind. Global is labwc's default;
+    said here so that it stays so.
+  -->
   <keyboard>
     <default/>
+    <layoutScope>global</layoutScope>
   </keyboard>
   <mouse>
     <default/>

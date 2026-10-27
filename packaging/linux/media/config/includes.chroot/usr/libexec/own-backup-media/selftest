@@ -134,6 +134,60 @@ if [ "$shell" = running ]; then
         report "terminal_listed=unknown terminal_gone=unknown"
     fi
 
+    # The layout indicator (crates/shell/src/linux/keyboard.rs). The strip
+    # writes what it shows: "<labwc pid> <layout> <label>", then "at X Y",
+    # the indicator's middle on the screen. The host takes part through
+    # QMP, on the lines below: on layout_typing_ready it presses Alt+Shift,
+    # then F and Enter, into a terminal that keeps what was typed — the
+    # Cyrillic "а" (d0b0) only if labwc switched as the strip says it did;
+    # on layout_click_ready it clicks at X Y, then types F and Enter again
+    # ("f", 66: the click switched labwc back); on layout_keys_ready it
+    # presses Alt+Shift alone, for the restart below; on
+    # layout_restart_ready it types F and Enter once more — still "а": the
+    # restarted strip's new uinput keyboard did not reset labwc's layout.
+    lf=/run/user/0/own-backup-shell.layout
+    label_now() { awk 'NR == 1 {print $3}' "$lf" 2>/dev/null; }
+    wait_label() { # label seconds
+        i=0
+        while [ "$i" -lt "$2" ] && [ "$(label_now)" != "$1" ]; do
+            i=$((i + 1))
+            sleep 1
+        done
+    }
+    # Type one line into a terminal of its own, in front, and report it.
+    type_line() { # report-key ready-line
+        typed=/run/own-backup-selftest.typed
+        rm -f "$typed"
+        XDG_RUNTIME_DIR=/run/user/0 WAYLAND_DISPLAY=$(basename "$sock") \
+            foot -T obk-selftest-typing sh -c "IFS= read -r line; printf '%s' \"\$line\" >$typed" &
+        typing=$!
+        i=0
+        while [ "$i" -lt 20 ] &&
+            ! awk -F'\t' '$1 == "front" && $3 == "obk-selftest-typing" {f = 1} END {exit !f}' "$list" 2>/dev/null; do
+            i=$((i + 1))
+            sleep 1
+        done
+        report "$2"
+        i=0
+        while [ "$i" -lt 40 ] && ! [ -e "$typed" ]; do
+            i=$((i + 1))
+            sleep 1
+        done
+        kill "$typing" 2>/dev/null
+        report "$1=$(od -An -tx1 "$typed" 2>/dev/null | tr -d ' \n') layout=$(label_now)"
+    }
+    wait_label EN 20
+    report "layout=$(label_now) layout_at=$(sed -n 's/^at //p' "$lf" 2>/dev/null | tr ' ' ',')"
+    if [ -n "$sock" ] && command -v foot >/dev/null; then
+        type_line typed_after_keys layout_typing_ready
+        type_line typed_after_click layout_click_ready
+        report "layout_keys_ready"
+        wait_label RU 30
+        report "layout_before_restart=$(label_now)"
+    else
+        report "typed_after_keys=unknown"
+    fi
+
     # A strip that dies comes back (shell-loop).
     old=$(pgrep -xf "$strip")
     pkill -xf "$strip"
@@ -149,6 +203,45 @@ if [ "$shell" = running ]; then
         sleep 1
     done
     report "shell_restart=$back"
+    # The new strip takes the layout this labwc has, not the first one, and
+    # labwc keeps it.
+    sleep 3
+    report "layout_after_restart=$(label_now)"
+    if [ -n "$sock" ] && command -v foot >/dev/null; then
+        type_line typed_after_restart layout_restart_ready
+    fi
+
+    # The tools a build may add (Krusader, FeatherPad): started as the Start
+    # menu starts them — root, Qt on Wayland, a D-Bus session of their own —
+    # each must put a window on the desktop (a line more in the strip's list).
+    for tool in krusader featherpad; do
+        [ -x "/usr/bin/$tool" ] || continue
+        before=$(grep -c . "$list" 2>/dev/null)
+        XDG_RUNTIME_DIR=/run/user/0 WAYLAND_DISPLAY=$(basename "$sock") \
+            QT_QPA_PLATFORM=wayland dbus-run-session -- "/usr/bin/$tool" \
+            >"/run/own-backup-selftest.$tool.log" 2>&1 &
+        pid=$!
+        result=no-window
+        i=0
+        while [ "$i" -lt 45 ]; do
+            if [ "$(grep -c . "$list" 2>/dev/null)" -gt "${before:-0}" ]; then
+                result=window
+                break
+            fi
+            kill -0 "$pid" 2>/dev/null || { result=exited; break; }
+            i=$((i + 1))
+            sleep 1
+        done
+        caption=$(tail -n1 "$list" 2>/dev/null | cut -f3 | tr ' ' '_')
+        report "tool_$tool=$result caption=$caption"
+        if [ "$result" != window ]; then
+            tail -n 15 "/run/own-backup-selftest.$tool.log" |
+                while IFS= read -r line; do report "journal $line"; done
+        fi
+        pkill -f "/usr/bin/$tool" 2>/dev/null
+        kill "$pid" 2>/dev/null
+        sleep 2
+    done
 
     # The fallback: a labwc that cannot start must leave the window on the
     # screen through cage, not a black one. labwc is swapped for one that

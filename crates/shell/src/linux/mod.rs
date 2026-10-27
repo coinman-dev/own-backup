@@ -7,13 +7,14 @@
 //! zone, so a maximised window stops above it, and the backdrop on the
 //! background layer, so a click on the empty desktop lands on us and not on
 //! the compositor's own menu. The open windows come from
-//! [`toplevels::Tracker`].
+//! [`toplevels::Tracker`], the keyboard layout from [`keyboard::Mirror`].
 //!
 //! As on WinPE it launches things and draws, nothing else. It is not the
 //! session: `kiosk-desktop` runs labwc, labwc's autostart runs this program in
 //! a loop with a pause, and a crash here costs the strip for two seconds and
 //! nothing on the screen behind it.
 
+mod keyboard;
 mod layer;
 mod toplevels;
 
@@ -43,6 +44,8 @@ const BAR_BUTTON: Rgb = rgb(222, 222, 222);
 const BAR_BUTTON_FRONT: Rgb = rgb(198, 208, 220);
 
 const CLOCK_SAMPLE: &str = "00:00";
+/// The widest the layout indicator gets ("EN", "RU", "UK"...).
+const LAYOUT_SAMPLE: &str = "WW";
 const CLOSE_TEXT: &str = "\u{2715}";
 const FONT_FAMILY: &str = "Sans";
 
@@ -71,7 +74,14 @@ struct Bar {
     buttons: Vec<Button>,
     clock: String,
     tracker: Option<toplevels::Tracker>,
+    /// The layout indicator's text; empty while there is no indicator.
+    layout: String,
+    /// What was last written for the self-test and a restarted strip: the
+    /// label and where the indicator is on the screen.
+    saved: (String, (i32, i32)),
 }
+
+type Keyboard = Rc<RefCell<keyboard::Mirror>>;
 
 pub fn log(message: &str) {
     // stderr is labwc's, and labwc's is the kiosk unit's journal — which the
@@ -97,8 +107,29 @@ pub fn run() -> Result<(), String> {
         ..Default::default()
     }));
 
+    // The layout only on the medium: there the session is root and labwc's
+    // keymap is the medium's own. A strip run to look at on someone's desktop
+    // could neither read the keyboards nor know that desktop's layouts.
+    let keyboard: Option<Keyboard> = if on_medium {
+        match keyboard::Mirror::start() {
+            Ok(m) => Some(Rc::new(RefCell::new(m))),
+            Err(e) => {
+                log(&format!("no layout indicator: {e}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if let Some(kb) = &keyboard {
+        state.borrow_mut().layout = layout_label(&kb.borrow());
+    }
+
     let back = backdrop();
-    let (strip, area) = strip(&state);
+    let (strip, area) = strip(&state, keyboard.clone());
+    if let Some(kb) = &keyboard {
+        watch_keyboards(kb, &state, &area);
+    }
 
     match toplevels::Tracker::connect() {
         Ok(tracker) => {
@@ -134,9 +165,16 @@ pub fn run() -> Result<(), String> {
 
     {
         let (st, ar, sw) = (state.clone(), area.clone(), strip.clone());
+        let kb = keyboard.clone();
         tick(&st, &ar, &sw);
         glib::timeout_add_seconds_local(1, move || {
             tick(&st, &ar, &sw);
+            if let Some(kb) = &kb {
+                // A keyboard plugged in, a console switched back to.
+                watch_keyboards(kb, &st, &ar);
+                kb.borrow_mut().ours_in_front();
+                show_layout(kb, &st, &ar);
+            }
             glib::ControlFlow::Continue
         });
     }
@@ -190,7 +228,54 @@ fn backdrop() -> gtk::Window {
     window
 }
 
-fn strip(state: &Rc<RefCell<Bar>>) -> (gtk::Window, gtk::DrawingArea) {
+/// The indicator's text for the layout the mirror is in.
+fn layout_label(kb: &keyboard::Mirror) -> String {
+    layout::xkb_label_at(&kb.codes, kb.xkb.layout())
+}
+
+/// The mirror's layout onto the strip, when it changed.
+fn show_layout(kb: &Keyboard, state: &Rc<RefCell<Bar>>, area: &gtk::DrawingArea) {
+    let kb = kb.borrow();
+    let label = layout_label(&kb);
+    let mut bar = state.borrow_mut();
+    if bar.layout != label {
+        log(&format!("keyboard: layout {label}"));
+        bar.layout = label;
+        area.queue_draw();
+    }
+    // Where the indicator is, in screen pixels: the strip is along the
+    // bottom, its height the bar's.
+    let s = bar.slots.layout;
+    let at = screen_height()
+        .map(|h| (s.x + s.w / 2, h - bar.bar_h + s.y + s.h / 2))
+        .unwrap_or_default();
+    let now = (bar.layout.clone(), at);
+    if bar.saved != now {
+        kb.save(&now.0, now.1);
+        bar.saved = now;
+    }
+}
+
+/// Read the keyboards not read yet, each as its keys arrive.
+fn watch_keyboards(kb: &Keyboard, state: &Rc<RefCell<Bar>>, area: &gtk::DrawingArea) {
+    let added = kb.borrow_mut().scan();
+    for (path, fd) in added {
+        let (kb, st, ar) = (kb.clone(), state.clone(), area.clone());
+        glib::source::unix_fd_add_local(
+            fd,
+            glib::IOCondition::IN | glib::IOCondition::ERR | glib::IOCondition::HUP,
+            move |_, _| {
+                if kb.borrow_mut().read(&path).is_err() {
+                    return glib::ControlFlow::Break;
+                }
+                show_layout(&kb, &st, &ar);
+                glib::ControlFlow::Continue
+            },
+        );
+    }
+}
+
+fn strip(state: &Rc<RefCell<Bar>>, keyboard: Option<Keyboard>) -> (gtk::Window, gtk::DrawingArea) {
     let bar_h = state.borrow().bar_h;
     let window = gtk::Window::new(gtk::WindowType::Toplevel);
     window.init_layer_shell();
@@ -233,22 +318,30 @@ fn strip(state: &Rc<RefCell<Bar>>) -> (gtk::Window, gtk::DrawingArea) {
     }
     {
         let st = state.clone();
-        area.connect_button_release_event(move |_, event| {
+        area.connect_button_release_event(move |area, event| {
             if event.button() == 1 {
                 let (x, y) = event.position();
-                click(&st, x as i32, y as i32);
+                let on_layout = st.borrow().slots.layout.contains(x as i32, y as i32);
+                match &keyboard {
+                    // As on WinPE: a click on the indicator is the next layout.
+                    Some(kb) if on_layout => {
+                        kb.borrow_mut().switch_layout();
+                        show_layout(kb, &st, area);
+                    }
+                    _ => click(&st, x as i32, y as i32),
+                }
             }
             glib::Propagation::Stop
         });
     }
-    // No layout indicator: Wayland has no way for a client to learn the
-    // compositor's layout (plan, "taskbar" 4). The clock's tooltip says how
-    // to switch it instead.
+    // The indicator and the clock (the only hint when there was no
+    // indicator, plan "taskbar" 4) say how the layout is switched.
     area.set_has_tooltip(true);
     {
         let st = state.clone();
         area.connect_query_tooltip(move |_, x, y, _, tooltip| {
-            if st.borrow().slots.clock.contains(x, y) {
+            let s = st.borrow().slots;
+            if s.clock.contains(x, y) || s.layout.contains(x, y) {
                 tooltip.set_text(Some(&tr!("linux.layout_hint")));
                 true
             } else {
@@ -297,11 +390,16 @@ fn reflow(bar: &mut Bar, area: &gtk::DrawingArea, width: i32) {
     } else {
         measure(area, CLOSE_TEXT, font) + g
     };
+    let layout_w = if bar.layout.is_empty() {
+        0
+    } else {
+        measure(area, LAYOUT_SAMPLE, font) + g * 2
+    };
     bar.slots = layout::bar_slots(
         width,
         bar.bar_h,
         measure(area, &tr!("win.start"), font) + g * 3,
-        0,
+        layout_w,
         measure(area, CLOCK_SAMPLE, font) + g,
         close_w,
     );
@@ -408,7 +506,12 @@ fn show_menu(
         return;
     };
     let popup = gtk::Menu::new();
-    for item in menu::items_linux(on_medium) {
+    // Looked at on every opening: cheap, and never stale.
+    let found: Vec<bool> = menu::LINUX_TOOLS
+        .iter()
+        .map(|t| std::path::Path::new(t.exe).is_file())
+        .collect();
+    for item in menu::items_linux(on_medium, &found) {
         if item.separator_above {
             popup.append(&gtk::SeparatorMenuItem::new());
         }
@@ -451,6 +554,12 @@ fn chose(id: u32) {
             log("closed from the Start menu");
             gtk::main_quit();
         }
+        tool if tool >= menu::TOOL_BASE => {
+            match menu::LINUX_TOOLS.get((tool - menu::TOOL_BASE) as usize) {
+                Some(t) => launch_tool(t.exe),
+                None => log(&format!("menu line {tool} means nothing here")),
+            }
+        }
         other => log(&format!("menu line {other} means nothing here")),
     }
 }
@@ -470,6 +579,24 @@ fn launch(program: &str, args: &[&str]) {
         Err(error) => log(&format!("could not start {program}: {error}")),
     }
 }
+
+/// Krusader and FeatherPad are KDE and Qt programs, and those expect a
+/// session bus: Krusader's file operations and both programs' "one instance"
+/// go through it. The medium's session has none (no dbus-user-session), so
+/// each gets a bus of its own for as long as it runs — `dbus-run-session`,
+/// part of the medium's dbus. Where there is a bus, it is used as it is.
+fn launch_tool(exe: &str) {
+    let has_bus = std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
+        || std::env::var_os("XDG_RUNTIME_DIR")
+            .is_some_and(|d| std::path::Path::new(&d).join("bus").exists());
+    if has_bus || !std::path::Path::new(DBUS_RUN_SESSION).is_file() {
+        launch(exe, &[]);
+    } else {
+        launch(DBUS_RUN_SESSION, &["--", exe]);
+    }
+}
+
+const DBUS_RUN_SESSION: &str = "/usr/bin/dbus-run-session";
 
 /// A yes-or-no question with our own words on the buttons: the medium carries
 /// no GTK translations, so stock ones would be English whatever was chosen.
@@ -591,6 +718,15 @@ fn paint(bar: &Bar, area: &gtk::DrawingArea, cr: &gtk::cairo::Context) {
             BAR_TEXT,
         );
     }
+    text(
+        area,
+        cr,
+        &s.layout,
+        &bar.layout,
+        size,
+        Align::Center,
+        BAR_TEXT,
+    );
     text(area, cr, &s.clock, &bar.clock, size, Align::Right, BAR_TEXT);
     text(
         area,
