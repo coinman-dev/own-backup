@@ -102,7 +102,12 @@ mod tests {
     fn characters_windows_refuses_are_moved_and_restored() {
         let raw = b"a:b*c?d\"e<f>g|h\\i\x01";
         let shown = to_display(raw);
-        assert!(!shown.chars().any(|c| FORBIDDEN.contains(&c) || (c as u32) < 0x20), "{shown:?}");
+        assert!(
+            !shown
+                .chars()
+                .any(|c| FORBIDDEN.contains(&c) || (c as u32) < 0x20),
+            "{shown:?}"
+        );
         assert!(shown.starts_with("a\u{F03A}b"), "{shown:?}");
         assert_eq!(from_display(&shown), raw);
     }
