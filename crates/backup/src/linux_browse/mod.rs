@@ -35,10 +35,13 @@ use crate::fat_map::RawVolume;
 
 /// Enough of a volume's head to tell what it is: LUKS at 0, the LVM label in
 /// the first four sectors, the ext superblock at 1024, the swap signature at
-/// the end of the first page.
-pub const PROBE_LEN: usize = 4096;
+/// the end of the first page — and, to say what is there when it is none of
+/// those, the btrfs superblock at 64 KiB and the first ZFS uberblock at
+/// 128 KiB.
+pub const PROBE_LEN: usize = 132 * 1024;
 
-/// What a volume holds, as far as reading files from it is concerned.
+/// What a volume holds, as far as reading files from it is concerned. Only
+/// LUKS, LVM and ext are read; the others are recognised to say so.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Content {
@@ -46,6 +49,11 @@ pub enum Content {
     Lvm,
     Ext,
     Swap,
+    Btrfs,
+    Xfs,
+    Zfs,
+    /// Zeros: never written, or decrypted with a key that is not its own.
+    Empty,
     Other,
 }
 
@@ -57,8 +65,19 @@ pub fn identify(head: &[u8]) -> Content {
         Content::Lvm
     } else if head.get(1080..1082) == Some(&[0x53, 0xEF][..]) {
         Content::Ext
-    } else if matches!(head.get(4086..4096), Some(b"SWAPSPACE2") | Some(b"SWAP-SPACE")) {
+    } else if matches!(
+        head.get(4086..4096),
+        Some(b"SWAPSPACE2") | Some(b"SWAP-SPACE")
+    ) {
         Content::Swap
+    } else if head.get(0x10040..0x10048) == Some(b"_BHRfS_M") {
+        Content::Btrfs
+    } else if head.starts_with(b"XFSB") {
+        Content::Xfs
+    } else if head.get(128 * 1024..128 * 1024 + 8) == Some(&0x00ba_b10c_u64.to_le_bytes()[..]) {
+        Content::Zfs
+    } else if !head.is_empty() && head.iter().all(|&b| b == 0) {
+        Content::Empty
     } else {
         Content::Other
     }
@@ -145,6 +164,11 @@ pub fn open(
             Err(e) if crate::luks::is_wrong_passphrase(&e) => return Err(OpenError::WrongPassword),
             Err(e) => return Err(failed(e)),
         };
+        tracing::info!(
+            data_offset = params.data_offset,
+            sector = params.sector_size,
+            "linux browse: LUKS opened"
+        );
         vol = Box::new(DecryptingVolume::new(vol, params));
         encrypted = true;
     }
@@ -185,18 +209,33 @@ pub fn open(
             size,
             fs: load_ext(Box::new(SharedView(base))),
         }],
-        other => return Err(OpenError::Failed(not_ext(other))),
+        other => {
+            let head = head(&mut **base.borrow_mut()).unwrap_or_default();
+            tracing::warn!(
+                content = ?other,
+                first_bytes = %head.iter().take(16).map(|b| format!("{b:02x}")).collect::<String>(),
+                encrypted,
+                "linux browse: nothing readable in the partition"
+            );
+            return Err(OpenError::Failed(not_ext(other)));
+        }
     };
     Ok(Partition { encrypted, roots })
 }
 
 fn not_ext(c: Content) -> String {
+    use own_backup_common::tr;
     match c {
-        Content::Swap => "swap space, no files".into(),
-        Content::Luks => "an encrypted container inside an encrypted container".into(),
-        Content::Lvm => "an LVM physical volume inside a logical volume".into(),
-        _ => "not an ext2/3/4 filesystem (only those are read)".into(),
+        Content::Swap => tr!("linux_browse.swap"),
+        Content::Luks => tr!("linux_browse.luks_in_luks"),
+        Content::Lvm => tr!("linux_browse.lvm_in_lvm"),
+        Content::Btrfs => tr!("linux_browse.unsupported", what = "btrfs"),
+        Content::Xfs => tr!("linux_browse.unsupported", what = "XFS"),
+        Content::Zfs => tr!("linux_browse.unsupported", what = "ZFS"),
+        Content::Empty => tr!("linux_browse.empty"),
+        Content::Ext | Content::Other => tr!("linux_browse.unknown"),
     }
+    .into_owned()
 }
 
 fn head(vol: &mut dyn RawVolume) -> Result<Vec<u8>> {
@@ -263,7 +302,9 @@ pub fn open_partition(disk: &str, offset: u64, size: u64) -> Result<Box<dyn RawV
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     let device: Box<dyn RawVolume + Send> = {
         let _ = disk;
-        return Err(OwnBackupError::Device("no raw disks on this platform".into()));
+        return Err(OwnBackupError::Device(
+            "no raw disks on this platform".into(),
+        ));
     };
     Ok(Box::new(crate::volume_window::VolumeWindow::new(
         device, offset, size,

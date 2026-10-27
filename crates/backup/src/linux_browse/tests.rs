@@ -22,13 +22,13 @@ const MIB: usize = 1 << 20;
 
 #[test]
 fn the_head_of_a_volume_says_what_it_holds() {
-    let mut head = vec![0u8; PROBE_LEN];
+    let mut head = vec![1u8; PROBE_LEN];
     assert_eq!(identify(&head), Content::Other);
     head[1080] = 0x53;
     head[1081] = 0xEF;
     assert_eq!(identify(&head), Content::Ext);
     let mut swap = vec![0u8; PROBE_LEN];
-    swap[4086..].copy_from_slice(b"SWAPSPACE2");
+    swap[4086..4096].copy_from_slice(b"SWAPSPACE2");
     assert_eq!(identify(&swap), Content::Swap);
     let mut luks = head.clone();
     luks[..6].copy_from_slice(b"LUKS\xba\xbe");
@@ -36,6 +36,14 @@ fn the_head_of_a_volume_says_what_it_holds() {
     let pv = fixtures::label(64 << 20, 1 << 20, &[(4096, 1 << 16)]);
     assert_eq!(identify(&pv), Content::Lvm);
     assert_eq!(identify(&[]), Content::Other, "an empty volume");
+    let mut big = vec![1u8; PROBE_LEN];
+    big[0x10040..0x10048].copy_from_slice(b"_BHRfS_M");
+    assert_eq!(identify(&big), Content::Btrfs);
+    let mut zfs = vec![1u8; PROBE_LEN];
+    zfs[128 * 1024..128 * 1024 + 8].copy_from_slice(&0x00ba_b10c_u64.to_le_bytes());
+    assert_eq!(identify(&zfs), Content::Zfs);
+    assert_eq!(identify(b"XFSB rest"), Content::Xfs);
+    assert_eq!(identify(&vec![0u8; PROBE_LEN]), Content::Empty);
 }
 
 /// A logical volume made of two segments, the second lying before the first
@@ -68,12 +76,15 @@ fn a_logical_volume_reads_its_segments_in_its_own_order() {
     let mut seam = vec![0u8; 10];
     lv.read_at(2 * 4096 - 5, &mut seam).unwrap();
     assert_eq!(seam, [1, 1, 1, 1, 1, 2, 2, 2, 2, 2]);
-    assert!(lv.read_at(3 * 4096 - 1, &mut [0u8; 2]).is_err(), "past its end");
+    assert!(
+        lv.read_at(3 * 4096 - 1, &mut [0u8; 2]).is_err(),
+        "past its end"
+    );
 }
 
 #[test]
 fn what_is_not_a_linux_filesystem_says_so() {
-    let vol = MemVolume(vec![0u8; MIB]);
+    let vol = MemVolume(vec![7u8; MIB]);
     match open(Box::new(vol), None) {
         Err(OpenError::Failed(why)) => assert!(why.contains("ext2/3/4"), "{why}"),
         _ => panic!("opened"),
@@ -142,7 +153,10 @@ mod real {
                 .collect()
         };
         let root = names("\\");
-        assert!(root.contains(&"home".to_string()) && root.contains(&"etc".to_string()), "{root:?}");
+        assert!(
+            root.contains(&"home".to_string()) && root.contains(&"etc".to_string()),
+            "{root:?}"
+        );
         let home = names("\\home");
         // Links shown as what they point to; the one to nowhere left out.
         assert!(home.contains(&"userlink".to_string()), "{home:?}");
@@ -156,10 +170,15 @@ mod real {
             .find(|e| e.name.starts_with("a\u{F03A}b"))
             .expect("the name Windows cannot hold, moved");
         assert_eq!(colon.size, 5);
-        let koi = user.iter().find(|e| e.name.ends_with(".txt") && e.name.starts_with('\u{F7D0}'));
+        let koi = user
+            .iter()
+            .find(|e| e.name.ends_with(".txt") && e.name.starts_with('\u{F7D0}'));
         let koi = koi.expect("the KOI8 name").name.clone();
         let p = format!("\\home\\user\\{koi}");
-        assert_eq!(fs.read(&names::path_from_display(&p), 0, 100).unwrap(), b"koi8");
+        assert_eq!(
+            fs.read(&names::path_from_display(&p), 0, 100).unwrap(),
+            b"koi8"
+        );
 
         let report = names::path_from_display("\\home\\user\\Документы\\отчёт.txt");
         assert_eq!(fs.read(&report, 0, 100).unwrap(), "привет\n".as_bytes());
@@ -168,7 +187,10 @@ mod real {
         // A big file in pieces, out of order, past its end.
         let big = names::path_from_display("\\home\\userlink\\big.bin");
         let want: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
-        assert_eq!(fs.read(&big, 100_000, 50_000).unwrap(), &want[100_000..150_000]);
+        assert_eq!(
+            fs.read(&big, 100_000, 50_000).unwrap(),
+            &want[100_000..150_000]
+        );
         assert_eq!(fs.read(&big, 0, 10).unwrap(), &want[..10]);
         assert_eq!(fs.read(&big, 299_990, 100).unwrap(), &want[299_990..]);
         assert!(fs.read(&big, 400_000, 100).unwrap().is_empty());
@@ -176,7 +198,10 @@ mod real {
         assert_eq!(fs.read(&linked, 0, 300_000).unwrap(), want);
 
         assert!(fs.list(&names::path_from_display("\\nothing")).is_err());
-        assert!(fs.read(&names::path_from_display("\\home"), 0, 1).is_err(), "a directory");
+        assert!(
+            fs.read(&names::path_from_display("\\home"), 0, 1).is_err(),
+            "a directory"
+        );
     }
 
     #[test]
@@ -206,7 +231,10 @@ mod real {
             &[
                 (
                     "root",
-                    vec![("striped", vec![("pv0", 6)], 2), ("striped", vec![("pv0", 1)], 2)],
+                    vec![
+                        ("striped", vec![("pv0", 6)], 2),
+                        ("striped", vec![("pv0", 1)], 2),
+                    ],
                 ),
                 ("swap_1", vec![("striped", vec![("pv0", 10)], 1)]),
                 ("mirror", vec![("raid1", vec![("pv0", 11)], 1)]),
@@ -236,7 +264,10 @@ mod real {
         assert_eq!(names, ["vg0-root", "vg0-mirror"], "swap is not shown");
         assert_eq!(info[0].size, 16 * MIB as u64);
         assert_eq!(info[0].error, None);
-        assert!(info[1].error.as_deref().unwrap_or("").contains("raid1"), "{info:?}");
+        assert!(
+            info[1].error.as_deref().unwrap_or("").contains("raid1"),
+            "{info:?}"
+        );
         check_sample(p.roots[0].fs.as_mut().unwrap());
     }
 
@@ -279,7 +310,12 @@ mod real {
             .stdin(std::process::Stdio::piped())
             .spawn()
             .expect("cryptsetup");
-        child.stdin.take().unwrap().write_all(pw.as_bytes()).unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(pw.as_bytes())
+            .unwrap();
         assert!(child.wait().unwrap().success(), "luksFormat");
 
         let disk = std::fs::read(&file).unwrap();

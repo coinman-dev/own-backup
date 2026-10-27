@@ -20,6 +20,9 @@
 *.pdb
 *.exe
 *.dll
+# The Total Commander plugin as built (win/), and its install archive.
+*.wfx64
+win/*.zip
 
 .DS_Store
 Thumbs.db

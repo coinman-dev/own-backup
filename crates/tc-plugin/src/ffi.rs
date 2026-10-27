@@ -255,9 +255,16 @@ unsafe fn fill_w(e: &Entry, fd: *mut WIN32_FIND_DATAW) {
     fd.dwFileAttributes = attributes(e);
     fd.nFileSizeHigh = (e.size >> 32) as u32;
     fd.nFileSizeLow = e.size as u32;
-    let ft = filetime(e.modified, e.nanos);
-    fd.ftLastWriteTime.dwLowDateTime = ft as u32;
-    fd.ftLastWriteTime.dwHighDateTime = (ft >> 32) as u32;
+    // A partition or a logical volume has no time of its own: Total
+    // Commander's value for "unknown" rather than 1 January 1970.
+    if e.modified == 0 && e.nanos == 0 {
+        fd.ftLastWriteTime.dwHighDateTime = 0xFFFF_FFFF;
+        fd.ftLastWriteTime.dwLowDateTime = 0xFFFF_FFFE;
+    } else {
+        let ft = filetime(e.modified, e.nanos);
+        fd.ftLastWriteTime.dwLowDateTime = ft as u32;
+        fd.ftLastWriteTime.dwHighDateTime = (ft >> 32) as u32;
+    }
     let name: Vec<u16> = e.name.encode_utf16().take(fd.cFileName.len() - 1).collect();
     fd.cFileName[..name.len()].copy_from_slice(&name);
 }
