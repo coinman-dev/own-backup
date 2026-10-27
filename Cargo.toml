@@ -13,6 +13,7 @@ members = [
     "crates/cli",
     "crates/gui",
     "crates/shell",
+    "crates/tc-plugin",
 ]
 resolver = "2"
 exclude = ["vendor/glib", "vendor/glib-macros", "vendor/gtk3-macros"]

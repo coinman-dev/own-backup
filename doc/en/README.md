@@ -15,7 +15,8 @@ Version 0.1.6-beta. [Русская версия](../ru/README.md)
    backups, individual files.
 7. [Boot menu](07-boot-menu.md) — the computer's UEFI boot entries.
 8. [Tools](08-tools.md) — mounting a backup as a disk, validating an image,
-   letters for hidden partitions, bootable media.
+   letters for hidden partitions, Linux partitions in Total Commander,
+   bootable media.
 9. [Activity, Settings, Help](09-activity-settings-help.md).
 10. [Bootable media](10-bootable-media.md) — building it, writing it to a USB
     stick, working from it.

@@ -38,6 +38,9 @@ hkdf = { workspace = true }
 bech32 = { workspace = true }
 crc32fast = "1"
 ntfs = "0.4.0"
+# linux_browse/: files of a Linux partition read from Windows (the Total
+# Commander plugin) — ext2/3/4, read-only, in userspace.
+ext4-view = "1"
 tempfile = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -41,6 +41,8 @@ pub struct BackupServiceImpl {
     shutdown: crate::shutdown::ShutdownSignal,
     /// Expected bearer token. Empty string means auth is disabled (dev/TCP mode).
     service_token: String,
+    /// Linux partitions opened for the Total Commander plugin.
+    linux_browse: Arc<crate::linux_browse::Sessions>,
 }
 
 /// Tells the window an operation no longer waits its turn — once, whether
@@ -78,6 +80,7 @@ impl BackupServiceImpl {
             state,
             service_token,
             shutdown,
+            linux_browse: Arc::new(crate::linux_browse::Sessions::default()),
         }
     }
 
@@ -4359,6 +4362,176 @@ impl BackupService for BackupServiceImpl {
             ))
         }
     }
+
+    async fn linux_browse(&self, req: Request<JsonRequest>) -> Result<Response<JsonReply>, Status> {
+        use crate::linux_browse::{Request as Op, SourceInfo};
+        check_auth(&req, &self.service_token)?;
+        linux_browse_allowed(&req)?;
+        let op: Op = serde_json::from_str(&req.into_inner().json)
+            .map_err(|e| Status::invalid_argument(format!("linux_browse: {e}")))?;
+        let sessions = self.linux_browse.clone();
+        let failed = |e: String| Status::failed_precondition(e);
+        match op {
+            Op::Sources => {
+                let disks = machine_disks().await?;
+                let sources = tokio::task::spawn_blocking(move || {
+                    let mut found = own_backup_backup::linux_browse::find_sources(&disks);
+                    // Development builds: image files offered as partitions
+                    // (`OBK_LINUX_BROWSE_IMAGES=a.img;b.img`) — how the
+                    // plugin is tried without a Linux disk at hand.
+                    if cfg!(debug_assertions) {
+                        if let Ok(list) = std::env::var("OBK_LINUX_BROWSE_IMAGES") {
+                            found.extend(
+                                list.split(';')
+                                    .filter(|p| !p.trim().is_empty())
+                                    .filter_map(|p| own_backup_backup::linux_browse::image_source(p.trim())),
+                            );
+                        }
+                    }
+                    found
+                })
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+                sessions.remember_sources(&sources);
+                let shown: Vec<SourceInfo> = sources
+                    .iter()
+                    .map(|s| SourceInfo {
+                        id: s.id.clone(),
+                        name: linux_source_name(s),
+                        encrypted: s.content == own_backup_backup::linux_browse::Content::Luks,
+                        size: s.size,
+                    })
+                    .collect();
+                info!(found = shown.len(), "gRPC: LinuxBrowse sources");
+                json_reply(&shown)
+            }
+            Op::Open { source, passphrase } => {
+                let Some(found) = sessions.source(&source) else {
+                    return Err(failed(tr!("grpc_server.linux_browse_no_source").into_owned()));
+                };
+                let opened = tokio::task::spawn_blocking(move || sessions.open(&found, passphrase))
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?
+                    .map_err(failed)?;
+                json_reply(&opened)
+            }
+            Op::List {
+                session,
+                root,
+                path,
+            } => {
+                let entries =
+                    tokio::task::spawn_blocking(move || sessions.list(session, root, &path))
+                        .await
+                        .map_err(|e| Status::internal(e.to_string()))?
+                        .map_err(failed)?;
+                json_reply(&entries)
+            }
+            Op::Stat {
+                session,
+                root,
+                path,
+            } => {
+                let entry = tokio::task::spawn_blocking(move || sessions.stat(session, root, &path))
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?
+                    .map_err(failed)?;
+                json_reply(&entry)
+            }
+            Op::Close { session } => {
+                sessions.close(session);
+                json_reply(&serde_json::json!({}))
+            }
+        }
+    }
+
+    async fn linux_browse_read(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<BytesReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        linux_browse_allowed(&req)?;
+        let r: crate::linux_browse::ReadRequest = serde_json::from_str(&req.into_inner().json)
+            .map_err(|e| Status::invalid_argument(format!("linux_browse_read: {e}")))?;
+        let sessions = self.linux_browse.clone();
+        let data = tokio::task::spawn_blocking(move || sessions.read(&r))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(Status::failed_precondition)?;
+        Ok(Response::new(BytesReply { data }))
+    }
+}
+
+/// The disks of this machine, as the inventory sees them.
+async fn machine_disks() -> Result<Vec<own_backup_common::disk::DiskInfo>, Status> {
+    use own_backup_inventory::DiskInventory;
+    #[cfg(target_os = "windows")]
+    let disks = own_backup_inventory::WindowsInventory::new()
+        .map_err(|e| Status::internal(e.to_string()))?
+        .enumerate_disks()
+        .await;
+    #[cfg(target_os = "linux")]
+    let disks = own_backup_inventory::LinuxInventory::new()
+        .enumerate_disks()
+        .await;
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    let disks = own_backup_inventory::MockInventory::default()
+        .enumerate_disks()
+        .await;
+    disks.map_err(|e| Status::internal(e.to_string()))
+}
+
+/// Who may read Linux partitions raw. On Windows, whoever may call the
+/// service at all — the same people who may copy a whole disk into a backup
+/// and read it back. On Linux, root only: there the person has the system's
+/// own tools to mount a partition, and reading one past the permissions of
+/// the files on it is not something to hand to every desktop user.
+#[allow(clippy::result_large_err)] // a refusal goes back to the caller as it is
+fn linux_browse_allowed<T>(req: &Request<T>) -> Result<(), Status> {
+    #[cfg(unix)]
+    {
+        let info = req
+            .extensions()
+            .get::<tonic::transport::server::UdsConnectInfo>();
+        let (uid, _) = crate::peer_access::caller_ids(info)?;
+        if uid != 0 {
+            return Err(Status::permission_denied(
+                tr!("grpc_server.linux_browse_root_only").into_owned(),
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = req;
+    Ok(())
+}
+
+/// The folder name of a partition in the plugin: `Диск 3 · раздел 3 ·
+/// 128 ГБ · LUKS · /home`. Nothing in it Windows refuses in a name.
+fn linux_source_name(s: &own_backup_backup::linux_browse::Source) -> String {
+    use own_backup_backup::linux_browse::Content;
+    let disk = match s.disk_number {
+        Some(n) => tr!("grpc_server.linux_browse_disk", number = n).into_owned(),
+        None => s.disk.rsplit('/').next().unwrap_or(&s.disk).to_string(),
+    };
+    let what = match s.content {
+        Content::Luks => "LUKS",
+        Content::Lvm => "LVM",
+        _ => "ext",
+    };
+    let mut name = tr!(
+        "grpc_server.linux_browse_source",
+        disk = disk,
+        index = s.index,
+        size = own_backup_common::units::human_bytes(s.size),
+        what = what
+    )
+    .into_owned();
+    if !s.label.is_empty() {
+        name.push_str(" · ");
+        // `/home` reads as a path to Windows: the slash becomes one that is not.
+        name.push_str(&s.label.replace('/', "\u{2215}"));
+    }
+    own_backup_backup::linux_browse::names::to_display(name.as_bytes())
 }
 
 /// One boot entry as the boot page reads it — the same on both systems.

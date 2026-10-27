@@ -1199,6 +1199,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ext4-view"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ecf6379b7cfeace5e109ccc51955afc05f5f7f2466ae0cf2697bda46afd01e6"
+dependencies = [
+ "bitflags 2.13.2",
+ "crc",
+]
+
+[[package]]
 name = "fallible-iterator"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2951,6 +2961,7 @@ dependencies = [
  "bech32",
  "chrono",
  "crc32fast",
+ "ext4-view",
  "flate2",
  "getrandom 0.2.17",
  "ghash",
@@ -3239,6 +3250,24 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "windows 0.58.0",
+ "zeroize",
+]
+
+[[package]]
+name = "own-backup-tc-plugin"
+version = "0.1.7-beta"
+dependencies = [
+ "hyper-util",
+ "own-backup-common",
+ "prost",
+ "rust-i18n",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tonic",
+ "tonic-build",
+ "tower 0.4.13",
  "windows 0.58.0",
  "zeroize",
 ]
@@ -6699,6 +6728,7 @@ version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
 dependencies = [
+ "serde",
  "zeroize_derive",
 ]
 

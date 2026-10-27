@@ -558,6 +558,168 @@ pub fn allocation(text: &str, pv_uuid: &str) -> Result<Allocation, String> {
 }
 
 // ---------------------------------------------------------------------------
+// The logical volumes of one PV, for reading them from it
+// ---------------------------------------------------------------------------
+
+/// A logical volume of the PV's volume group, as reading its contents from
+/// this PV alone needs to know it: the files of a Linux partition read from
+/// Windows (`linux_browse`), where nothing assembles the group for us.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogicalVolume {
+    pub name: String,
+    /// Bytes, all its segments together.
+    pub size: u64,
+    /// Where it lies on this PV, in the volume's own order. Complete when
+    /// `unreadable` is `None`.
+    pub segments: Vec<PvSegment>,
+    /// Why it cannot be read from this PV alone: part of it on another PV,
+    /// striped over several, or not plain extents at all (thin, raid, a
+    /// snapshot, a cache). Such a volume is listed, never guessed at.
+    pub unreadable: Option<String>,
+}
+
+/// The volume group's logical volumes the tools would show (`VISIBLE`);
+/// hidden ones (a thin pool's data and metadata, a spare) are left out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VolumeLayout {
+    pub vg: String,
+    pub seqno: u64,
+    pub volumes: Vec<LogicalVolume>,
+}
+
+/// The logical volumes of the volume group `text` describes, as they lie on
+/// the PV `pv_uuid` (as in its label, no dashes).
+pub fn logical_volumes(text: &str, pv_uuid: &str) -> Result<VolumeLayout, String> {
+    let root = parse_text(text)?;
+    let (vg_name, vg) = root
+        .sections()
+        .find(|(_, s)| s.get("physical_volumes").is_some())
+        .ok_or("no volume group in the metadata")?;
+    let extent_size = nonneg(vg.int("extent_size"), "extent_size")? * SECTOR;
+    if extent_size == 0 {
+        return Err("extent size 0".into());
+    }
+    let seqno = nonneg(vg.int("seqno"), "seqno")?;
+    let pvs = vg.get("physical_volumes").ok_or("no physical_volumes")?;
+    let (pv_name, pv) = pvs
+        .sections()
+        .find(|(_, pv)| pv.str("id").unwrap_or_default().replace('-', "") == pv_uuid)
+        .ok_or("this PV is not in its volume group's metadata")?;
+    let pe_start = nonneg(pv.int("pe_start"), "pe_start")? * SECTOR;
+    let pe_count = nonneg(pv.int("pe_count"), "pe_count")?;
+
+    let mut volumes = Vec::new();
+    for (lv_name, lv) in vg
+        .get("logical_volumes")
+        .map(|l| l.sections().collect::<Vec<_>>())
+        .unwrap_or_default()
+    {
+        let visible = matches!(lv.get("status"), Some(Value::List(flags))
+            if flags.iter().any(|f| matches!(f, Value::Str(s) if s == "VISIBLE")));
+        if !visible {
+            continue;
+        }
+        let mut segments = Vec::new();
+        let mut size = 0u64;
+        let mut unreadable = None;
+        let mut segs: Vec<(&str, &Value)> = lv
+            .sections()
+            .filter(|(n, _)| n.starts_with("segment"))
+            .collect();
+        segs.sort_by_key(|(_, s)| s.int("start_extent").unwrap_or(0));
+        for (seg_name, seg) in segs {
+            let start = nonneg(seg.int("start_extent"), "start_extent")?;
+            let count = nonneg(seg.int("extent_count"), "extent_count")?;
+            size += count * extent_size;
+            if unreadable.is_some() {
+                continue;
+            }
+            let kind = seg.str("type").unwrap_or_default();
+            let stripes = seg.int("stripe_count").unwrap_or(1);
+            let why = match (kind, stripes, seg.get("stripes")) {
+                ("striped", 1, Some(Value::List(list))) => match list.as_slice() {
+                    [Value::Str(pv), Value::Int(first)] if pv == pv_name && *first >= 0 => {
+                        let first = *first as u64;
+                        if first + count > pe_count {
+                            Some(format!("{seg_name}: extents past the PV's end"))
+                        } else {
+                            segments.push(PvSegment {
+                                pv_offset: pe_start + first * extent_size,
+                                lv_offset: start * extent_size,
+                                length: count * extent_size,
+                            });
+                            None
+                        }
+                    }
+                    [Value::Str(_), Value::Int(_)] => {
+                        Some(format!("{seg_name}: on another physical volume"))
+                    }
+                    _ => Some(format!("{seg_name}: odd stripes")),
+                },
+                ("striped", n, _) if n > 1 => {
+                    Some(format!("{seg_name}: striped over {n} physical volumes"))
+                }
+                ("striped", _, _) => Some(format!("{seg_name}: no stripes")),
+                (other, _, _) => Some(format!("{seg_name}: a {other} segment")),
+            };
+            unreadable = why;
+        }
+        // The segments must cover the volume end to end, in order.
+        if unreadable.is_none() {
+            let mut at = 0;
+            for s in &segments {
+                if s.lv_offset != at {
+                    unreadable = Some("a gap between its segments".into());
+                    break;
+                }
+                at += s.length;
+            }
+        }
+        if unreadable.is_some() {
+            segments.clear();
+        }
+        volumes.push(LogicalVolume {
+            name: lv_name.to_string(),
+            size,
+            segments,
+            unreadable,
+        });
+    }
+    Ok(VolumeLayout {
+        vg: vg_name.to_string(),
+        seqno,
+        volumes,
+    })
+}
+
+/// [`logical_volumes`] as every metadata area of the PV says it: the areas
+/// as read, each with its offset on the device. Two areas that disagree
+/// (different sequence numbers) are an error, as for [`allocation_of_areas`].
+pub fn logical_volumes_of_areas(
+    areas: &[(u64, &[u8])],
+    pv_uuid: &str,
+) -> Result<VolumeLayout, String> {
+    let mut found: Option<VolumeLayout> = None;
+    for (i, (start, area)) in areas.iter().enumerate() {
+        let Some(text) = metadata_text(area, *start).map_err(|e| format!("area {i}: {e}"))? else {
+            continue;
+        };
+        let l = logical_volumes(&text, pv_uuid).map_err(|e| format!("area {i}: {e}"))?;
+        match &found {
+            None => found = Some(l),
+            Some(f) if f.seqno == l.seqno => {}
+            Some(f) => {
+                return Err(format!(
+                    "metadata areas disagree (seqno {} and {})",
+                    f.seqno, l.seqno
+                ))
+            }
+        }
+    }
+    found.ok_or_else(|| "no metadata area in use".to_string())
+}
+
+// ---------------------------------------------------------------------------
 // What a snapshot of a PV leaves for the engine
 // ---------------------------------------------------------------------------
 
@@ -958,6 +1120,109 @@ mod tests {
         assert_eq!(d1, guard_digest([&b"abcdef"[..]]));
         assert_ne!(d1, guard_digest([&b"abcdeg"[..]]));
         assert_eq!(d1.len(), 32);
+    }
+
+    /// Extent size 8192 sectors (4 MiB), pe_start 2048 sectors (1 MiB).
+    #[test]
+    fn logical_volumes_lie_where_their_segments_say() {
+        const MIB: u64 = 1 << 20;
+        let text = vg_text(
+            100,
+            &[
+                (
+                    "root",
+                    vec![
+                        ("striped", vec![("pv0", 10)], 5),
+                        ("striped", vec![("pv0", 2)], 3),
+                    ],
+                ),
+                ("swap", vec![("striped", vec![("pv0", 50)], 2)]),
+            ],
+        );
+        let l = logical_volumes(&text, UUID).unwrap();
+        assert_eq!(l.vg, "vg0");
+        assert_eq!(l.seqno, 7);
+        let root = &l.volumes[0];
+        assert_eq!((root.name.as_str(), root.size), ("root", 32 * MIB));
+        assert_eq!(root.unreadable, None);
+        assert_eq!(
+            root.segments,
+            vec![
+                PvSegment {
+                    pv_offset: MIB + 40 * MIB,
+                    lv_offset: 0,
+                    length: 20 * MIB
+                },
+                PvSegment {
+                    pv_offset: MIB + 8 * MIB,
+                    lv_offset: 20 * MIB,
+                    length: 12 * MIB
+                },
+            ]
+        );
+        assert_eq!(l.volumes[1].segments[0].pv_offset, MIB + 200 * MIB);
+    }
+
+    /// Anything that cannot be read from this PV alone is listed with the
+    /// reason, never with a guessed layout.
+    #[test]
+    fn a_volume_not_wholly_on_this_pv_is_unreadable_and_says_why() {
+        let text = vg_text(
+            100,
+            &[
+                ("elsewhere", vec![("striped", vec![("pv1", 0)], 4)]),
+                ("wide", vec![("striped", vec![("pv0", 0), ("pv1", 0)], 4)]),
+                ("mirror", vec![("raid1", vec![("pv0", 0)], 4)]),
+                (
+                    "half",
+                    vec![
+                        ("striped", vec![("pv0", 0)], 4),
+                        ("striped", vec![("pv1", 0)], 4),
+                    ],
+                ),
+                ("past", vec![("striped", vec![("pv0", 98)], 4)]),
+            ],
+        );
+        let l = logical_volumes(&text, UUID).unwrap();
+        let why: Vec<(&str, &str)> = l
+            .volumes
+            .iter()
+            .map(|v| (v.name.as_str(), v.unreadable.as_deref().unwrap_or("")))
+            .collect();
+        assert!(why[0].1.contains("another physical volume"), "{why:?}");
+        assert!(why[1].1.contains("striped over 2"), "{why:?}");
+        assert!(why[2].1.contains("raid1"), "{why:?}");
+        assert!(why[3].1.contains("another physical volume"), "{why:?}");
+        assert!(why[4].1.contains("past"), "{why:?}");
+        assert!(l.volumes.iter().all(|v| v.segments.is_empty()));
+        assert_eq!(
+            l.volumes[3].size,
+            8 * (4 << 20),
+            "the size counts every segment"
+        );
+    }
+
+    #[test]
+    fn hidden_volumes_are_not_listed() {
+        let text = vg_text(10, &[("root", vec![("striped", vec![("pv0", 0)], 1)])]).replace(
+            "\"WRITE\", \"VISIBLE\"]\nsegment_count",
+            "\"WRITE\"]\nsegment_count",
+        );
+        assert!(logical_volumes(&text, UUID).unwrap().volumes.is_empty());
+        assert!(logical_volumes(&text, "someoneelse").is_err());
+    }
+
+    #[test]
+    fn the_layout_is_read_from_every_metadata_area() {
+        let text = vg_text(10, &[("root", vec![("striped", vec![("pv0", 0)], 1)])]);
+        let a = mda(64 << 10, 8192, &text);
+        let b = mda(64 << 10, 4096, &text);
+        let l = logical_volumes_of_areas(&[(4096, &a[..]), (1 << 20, &b[..])], UUID);
+        assert!(l.is_err(), "the second says it lies elsewhere");
+        let l = logical_volumes_of_areas(&[(4096, &a[..])], UUID).unwrap();
+        assert_eq!(l.volumes.len(), 1);
+        let newer = mda(64 << 10, 8192, &text.replace("seqno = 7", "seqno = 8"));
+        assert!(logical_volumes_of_areas(&[(4096, &a[..]), (4096, &newer[..])], UUID).is_err());
     }
 
     #[test]

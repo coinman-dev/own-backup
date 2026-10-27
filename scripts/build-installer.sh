@@ -64,7 +64,8 @@ if [[ "$skip_build" -eq 0 ]]; then
         npm run build
     )
     cargo xwin build --locked --release --target x86_64-pc-windows-msvc \
-        -p own-backup-gui -p own-backup-service -p own-backup-cli -p own-backup-shell
+        -p own-backup-gui -p own-backup-service -p own-backup-cli -p own-backup-shell \
+        -p own-backup-tc-plugin
 fi
 
 stage="$target_dir/installer"
@@ -99,6 +100,16 @@ stage_text THIRD-PARTY-NOTICES.md THIRD-PARTY-NOTICES.txt
 # A package without any text stops the build rather than shipping a gap.
 python3 scripts/third-party-licenses.py "$target_dir/THIRD-PARTY-LICENSES.txt"
 stage_text "$target_dir/THIRD-PARTY-LICENSES.txt" THIRD-PARTY-LICENSES.txt
+# The Total Commander plugin (crates/tc-plugin): a DLL named as Total
+# Commander's 64-bit file system plugins are, with the description it reads
+# when the plugin is installed from its folder.
+if [[ ! -f "$exe_dir/own_backup_tc.dll" ]]; then
+    echo "plugin not found: $exe_dir/own_backup_tc.dll" >&2
+    exit 1
+fi
+mkdir -p "$stage/TotalCommander"
+cp "$exe_dir/own_backup_tc.dll" "$stage/TotalCommander/OwnBackup.wfx64"
+sed 's/\r$//; s/$/\r/' crates/tc-plugin/pluginst.inf >"$stage/TotalCommander/pluginst.inf"
 cp crates/gui/icons/icon.ico "$stage/icon.ico"
 cp "$script" "$stage/own-backup.nsi"
 

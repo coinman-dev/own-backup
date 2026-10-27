@@ -216,6 +216,22 @@
     "ru": "сборка носителя отменена; незаконченные файлы удалены",
     "en": "the medium build was cancelled; the unfinished files were removed"
   },
+  "grpc_server.linux_browse_no_source": {
+    "ru": "раздела нет в списке: обновите список разделов",
+    "en": "the partition is not in the list: refresh the list of partitions"
+  },
+  "grpc_server.linux_browse_root_only": {
+    "ru": "читать разделы Linux напрямую может только root",
+    "en": "only root may read Linux partitions directly"
+  },
+  "grpc_server.linux_browse_disk": {
+    "ru": "Диск %{number}",
+    "en": "Disk %{number}"
+  },
+  "grpc_server.linux_browse_source": {
+    "ru": "%{disk} · раздел %{index} · %{size} · %{what}",
+    "en": "%{disk} · partition %{index} · %{size} · %{what}"
+  },
   "grpc_server.media_unknown_tool": {
     "ru": "такого средства для носителя нет: %{tool}",
     "en": "there is no such tool for the medium: %{tool}"

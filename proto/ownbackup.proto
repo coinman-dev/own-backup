@@ -196,6 +196,13 @@ service BackupService {
   // partitions have to come from one moment to be compared at all.
   rpc BootStatus(Empty) returns (JsonReply);        // JSON: { uefi, writable, entries, esps, … }
   rpc BootAction(JsonRequest) returns (JsonReply);  // in: { action, … } -> { message, safety_copy }
+
+  // Files of Linux partitions (ext4, inside LVM and LUKS), read in place and
+  // read-only, for the Total Commander plugin. JSON `op`: sources | open |
+  // list | stat | close (service/src/linux_browse.rs); a file is read in
+  // pieces of at most 1 MiB by LinuxBrowseRead.
+  rpc LinuxBrowse(JsonRequest) returns (JsonReply);
+  rpc LinuxBrowseRead(JsonRequest) returns (BytesReply);  // in: ReadRequest -> the bytes
 }
 
 message Empty {}
@@ -204,6 +211,7 @@ message IdRequest { string id = 1; }
 message DeleteJobRequest { string id = 1; bool delete_files = 2; }
 message JsonRequest { string json = 1; }
 message JsonReply { string json = 1; }
+message BytesReply { bytes data = 1; }
 
 // One orchestration event. `kind` selects how to read `json`:
 //   "progress" -> JobProgress, "queue" -> QueueSnapshot, "finished" -> JobRun.
