@@ -2,6 +2,18 @@
 
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **The chain number in backup file names.** A new full starts the next
+  number and its versions carry it: `Disk_C_Win11_disk4_3-full_….obk`,
+  `Disk_C_Win11_disk4_3-inc_….obk`, so it is plain which full an increment
+  belongs to, and sorted by name a folder lists each chain together. Backups
+  made before keep their names (a version finds its parent by that name), and
+  versions added to such a chain stay unnumbered; the next full is numbered
+  past the chains already in the folder.
+
 ## 0.1.8-beta — 2026-10-28
 
 ### Added

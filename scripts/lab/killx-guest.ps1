@@ -946,9 +946,9 @@ function Aliases {
     $run3 = Rpc 'run3' @{ op = 'run'; id = $job.id; timeout_secs = 1800 }
     Check ($run3.status -eq 'success' -and $run3.backup_kind -eq 'incremental') "by mount point: an increment of the same chain ($($run3.backup_kind) $($run3.error))"
     $token = 'V' + $guid.Substring(11, 8).ToUpper()
-    Check ((Split-Path $run3.image_path -Leaf) -like "*_$($token)_inc_*") "a mount point is named by its volume, not by C ($($run3.image_path))"
+    Check ((Split-Path $run3.image_path -Leaf) -like "*_$($token)_*inc_*") "a mount point is named by its volume, not by C ($($run3.image_path))"
     $public = @(Get-ChildItem -LiteralPath $store -File | Where-Object { $_.Name -match '\.(vhdx|avhdx)$' } | ForEach-Object { $_.Name })
-    Check ($public.Count -eq 3 -and @($public | Where-Object { $_ -like '*_full_*' }).Count -eq 1) "one chain: one full and two increments ($($public -join ', '))"
+    Check ($public.Count -eq 3 -and @($public | Where-Object { $_ -like '*full_*' }).Count -eq 1) "one chain: one full and two increments ($($public -join ', '))"
     $versions = Rpc 'versions' @{ op = 'versions'; id = $job.id }
 
     $cases = @(
@@ -1904,12 +1904,12 @@ if ($media) {
         $run2 = Rpc 'run2' @{ op = 'run'; id = $id; timeout_secs = 1800 }
         Check ($run2.status -eq 'success') "run 2 succeeded: $($run2.error)"
         Check ($run2.backup_kind -eq 'full') "run 2 is a full ($($run2.backup_kind))"
-        Check ($run2.image_path -like "$store\$($jobName)_*_full_*.$imageExt") "run 2 published under its public name ($($run2.image_path))"
+        Check ($run2.image_path -like "$store\$($jobName)_*full_*.$imageExt") "run 2 published under its public name ($($run2.image_path))"
         # Run 3: an increment of run 2.
         $run3 = Rpc 'run3' @{ op = 'run'; id = $id; timeout_secs = 1800 }
         Check ($run3.status -eq 'success') "run 3 succeeded: $($run3.error)"
         Check ($run3.backup_kind -eq 'incremental') "run 3 is an increment ($($run3.backup_kind))"
-        Check ($run3.image_path -like "$store\$($jobName)_*_inc_*.$childExt") "run 3 published as a child ($($run3.image_path))"
+        Check ($run3.image_path -like "$store\$($jobName)_*inc_*.$childExt") "run 3 published as a child ($($run3.image_path))"
         # Run 4: the chain rolls over; keeping one chain deletes runs 2 and 3,
         # which needs a strict scan of a folder that holds the leftover.
         $run4 = Rpc 'run4' @{ op = 'run'; id = $id; timeout_secs = 1800 }

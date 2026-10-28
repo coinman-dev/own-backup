@@ -27,14 +27,19 @@ Backups are written only where a job says; the program keeps none of its own.
 A version is one file named
 
 ```
-<job>_<source>_<full|inc|diff>_<YYYYMMDD-HHMMSS>.<extension>
+<job>_<source>_<chain>-<full|inc|diff>_<YYYYMMDD-HHMMSS>.<extension>
 ```
 
 where `<source>` is `disk<N>` for a whole disk or the volume's name (its
-letter, for one), and the extension is `.vhdx` for a full VHDX version and
+letter, for one), `<chain>` the number of the chain the version belongs to (a
+new full starts the next one; see [Versions and
+chains](03-concepts.md#versions-and-chains)), and the extension is `.vhdx` for a full VHDX version and
 `.avhdx` for its incremental and differential versions (the Windows
 convention), `.qcow2` for qcow2, and `.obk` for every version of an encrypted
-job. For example `Disk_C_Win11_disk4_inc_20261024-185102.obk`. The time is UTC.
+job. For example `Disk_C_Win11_disk4_3-inc_20261030-185102.obk`, an
+increment of chain 3. The time is UTC. Backups made before 0.1.8-beta have no
+chain number in their names, and are never renamed: a version finds the one
+under it by that name.
 Each image carries its own metadata (what was copied, the checksums of every
 block, the partition layout), so a backup folder can be moved or copied
 elsewhere and still be opened, validated and restored.

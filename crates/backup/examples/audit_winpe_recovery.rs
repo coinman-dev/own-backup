@@ -84,7 +84,9 @@ mod probe {
         let mut images: Vec<_> = fs::read_dir(archive)?
             .filter_map(|entry| entry.ok())
             .filter(|entry| {
-                entry.file_name().to_string_lossy().contains("_inc_")
+                // `_inc_`, or `_3-inc_` with the chain number (0.1.8-beta on).
+                let name = entry.file_name().to_string_lossy().into_owned();
+                (name.contains("_inc_") || name.contains("-inc_"))
                     && entry.path().extension().is_some_and(|ext| ext == "obk")
             })
             .collect();

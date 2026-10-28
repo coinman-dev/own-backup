@@ -2685,7 +2685,8 @@ fn chain_source_group_matches(
 }
 
 /// Recover the source token that an image file name encodes. Names are
-/// `<name>_<token>_<tag>_<stamp>.<ext>`; token/tag/stamp are always the last
+/// `<name>_<token>_<tag>_<stamp>.<ext>` (the tag numbered since 0.1.8-beta,
+/// `3-inc`: still one segment); token/tag/stamp are always the last
 /// three underscore-separated segments, so we read from the end — robust even
 /// when `<name>` itself contains underscores.
 fn image_token(path: &Path) -> Option<String> {
@@ -2706,21 +2707,88 @@ fn image_token(path: &Path) -> Option<String> {
 }
 
 /// Timestamped output file names of one image of a run:
-/// `<name>_<token>_<full|inc|diff>_<stamp>.<ext>`.
+/// `<name>_<token>_<N>-<full|inc|diff>_<stamp>.<ext>`, N the number of its
+/// chain.
 ///
 /// The image this run writes, and the name it gets if the engine has to fall
 /// back to a full (parent unusable, disk re-partitioned) — one timestamp for
 /// both. The name says what the file IS: a full named `_inc_` was found in
 /// the owner's folder on 2026-10-14, after a fallback the name never learned.
-fn output_paths_for(job: &Job, token: &str, kind: &str) -> (PathBuf, PathBuf) {
+///
+/// The chain number tells which full an increment belongs to (owner,
+/// 2026-10-28: `_full_` and `_inc_` alone did not say it), and sorted by name
+/// a folder lists each chain together — its full, then its children by time.
+/// A full starts chain `next_chain` (the fallback full too: it is a new chain);
+/// a child takes the number its full carries. A full named before the numbers
+/// has none, and its children are named as it is, unnumbered: no chain is
+/// part one way, part the other. Existing files are never renamed — a child
+/// finds its parent by that file name.
+fn output_paths_for(job: &Job, token: &str, plan: &RunPlan, next_chain: u32) -> (PathBuf, PathBuf) {
     let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    let number = match plan.kind {
+        "full" => Some(next_chain),
+        _ => plan.base_image.as_deref().and_then(chain_number_in_name),
+    };
     (
-        image_name(job, token, kind, &stamp),
-        image_name(job, token, "full", &stamp),
+        image_name(job, token, plan.kind, number, &stamp),
+        image_name(job, token, "full", Some(next_chain), &stamp),
     )
 }
 
-fn image_name(job: &Job, token: &str, kind: &str, stamp: &str) -> PathBuf {
+/// The chain number an image's name carries (`…_3-inc_<stamp>.obk` → 3);
+/// `None` for a name from before the numbers (`…_inc_<stamp>.obk`).
+fn chain_number_in_name(path: &Path) -> Option<u32> {
+    let stem = path.file_stem()?.to_str()?;
+    let mut it = stem.rsplit('_');
+    let _stamp = it.next()?;
+    let (number, kind) = it.next()?.split_once('-')?;
+    if !matches!(kind, "full" | "inc" | "diff") {
+        return None;
+    }
+    number.parse().ok().filter(|n| *n > 0)
+}
+
+/// The number the next chain of one source gets: one past the highest number
+/// its images carry, and past the number of its chains — the chains named
+/// before the numbers count too, so a folder that already holds two starts
+/// the third as 3, not 1. A deleted old chain never gives its number again
+/// while a later one is there: retention keeps the newest.
+fn next_chain_number(
+    job: &Job,
+    folder: &Path,
+    of_source: impl Fn(&own_backup_backup::chains::ChainImage) -> bool,
+) -> u32 {
+    let chains = own_backup_backup::chains::list_job_chains(folder, &job.id).unwrap_or_default();
+    let mine: Vec<_> = chains
+        .iter()
+        .filter(|c| c.images.first().is_some_and(&of_source))
+        .collect();
+    let highest = mine
+        .iter()
+        .flat_map(|c| c.images.iter())
+        .filter_map(|i| chain_number_in_name(&i.image_path))
+        .max()
+        .unwrap_or(0);
+    highest.max(mine.len() as u32) + 1
+}
+
+/// [`next_chain_number`] for a volume: its chains as planning finds them.
+fn next_chain_number_for_volume(job: &Job, folder: &Path, device: &str) -> u32 {
+    let token = file_token(job, device);
+    let identity = own_backup_backup::source_identity::stable_source_id(device);
+    next_chain_number(job, folder, |base| {
+        chain_belongs_to(base, &token, &identity)
+    })
+}
+
+/// [`next_chain_number`] for a whole disk whose images carry `tag`.
+fn next_chain_number_for_disk(job: &Job, folder: &Path, tag: &str) -> u32 {
+    next_chain_number(job, folder, |base| {
+        image_token(&base.image_path).is_some_and(|t| t.eq_ignore_ascii_case(tag))
+    })
+}
+
+fn image_name(job: &Job, token: &str, kind: &str, chain: Option<u32>, stamp: &str) -> PathBuf {
     let safe_name = own_backup_common::file_name::safe_file_stem(&job.name, "backup");
     // VHDX children are AVHDX (the Windows convention); qcow2 children stay
     // .qcow2 (the qemu convention — chain role lives in the sidecar).
@@ -2736,6 +2804,10 @@ fn image_name(job: &Job, token: &str, kind: &str, stamp: &str) -> PathBuf {
         "incremental" => ("inc", child_ext),
         "differential" => ("diff", child_ext),
         _ => ("full", full_ext),
+    };
+    let tag = match chain {
+        Some(n) => format!("{n}-{tag}"),
+        None => tag.to_string(),
     };
     PathBuf::from(&job.dest_folder).join(format!("{safe_name}_{token}_{tag}_{stamp}.{ext}"))
 }
@@ -3834,8 +3906,12 @@ async fn perform_backup(
 
     for (idx, device) in volumes.iter().enumerate() {
         let plan = plan_run_for_volume(job, &folder, device);
-        let (image_path, full_image_path) =
-            output_paths_for(job, &file_token(job, device), plan.kind);
+        let (image_path, full_image_path) = output_paths_for(
+            job,
+            &file_token(job, device),
+            &plan,
+            next_chain_number_for_volume(job, &folder, device),
+        );
         let token = source_token(device);
         let vol_label = job.label_for(device);
         let vidx = idx as u64;
@@ -4002,8 +4078,13 @@ async fn perform_disk_backup(
     // full from child — the extension alone can't (a qcow2 child is still
     // `.qcow2`). Token position matches the per-volume scheme so `image_token`
     // reads `disk<N>` from `<name>_disk<N>_<tag>_<stamp>`.
-    let (image_path, full_image_path) =
-        output_paths_for(job, &format!("disk{}", ds.disk_number), plan.kind);
+    let disk_tag = format!("disk{}", ds.disk_number);
+    let (image_path, full_image_path) = output_paths_for(
+        job,
+        &disk_tag,
+        &plan,
+        next_chain_number_for_disk(job, &folder, &disk_tag),
+    );
 
     let partitions: Vec<DiskPartitionBackup> = ds
         .parts
@@ -4268,8 +4349,12 @@ async fn perform_backup(
     for (idx, device) in volumes.iter().enumerate() {
         // Full, or the next version of this volume's chain (qcow2).
         let plan = plan_run_for_volume(job, &folder, device);
-        let (image_path, full_image_path) =
-            output_paths_for(job, &file_token(job, device), plan.kind);
+        let (image_path, full_image_path) = output_paths_for(
+            job,
+            &file_token(job, device),
+            &plan,
+            next_chain_number_for_volume(job, &folder, device),
+        );
         let token = source_token(device);
         let vol_label = job.label_for(device);
         // The disk this volume lives on, as the GUI captured it at job save —
@@ -4488,7 +4573,12 @@ async fn perform_disk_backup(
     let folder = PathBuf::from(&job.dest_folder);
     let tag = ds.file_tag();
     let plan = plan_run_for_disk_tag(job, &folder, &tag);
-    let (image_path, full_image_path) = output_paths_for(job, &tag, plan.kind);
+    let (image_path, full_image_path) = output_paths_for(
+        job,
+        &tag,
+        &plan,
+        next_chain_number_for_disk(job, &folder, &tag),
+    );
 
     // Every partition held before a block is copied; one that cannot be is
     // the end of the run, and those already held are let go.
@@ -5937,13 +6027,18 @@ mod tests {
         };
         let token = file_token(&linux, dev);
         assert_eq!(token, source_token(dev));
-        let (name, _) = output_paths_for(&linux, &token, "full");
+        let (name, _) = output_paths_for(&linux, &token, &RunPlan::full(), 1);
         assert_eq!(image_token(&name).as_deref(), Some(token.as_str()));
 
         // Names are `<name>_<token>_<tag>_<stamp>`; token is read from the end
-        // so underscores inside <name> do not confuse it.
+        // so underscores inside <name> do not confuse it. A numbered tag
+        // (`3-inc`) is still one segment.
         assert_eq!(
             image_token(Path::new("job_C_full_20260101-000000.vhdx")).as_deref(),
+            Some("C")
+        );
+        assert_eq!(
+            image_token(Path::new("job_C_3-inc_20260101-000000.avhdx")).as_deref(),
             Some("C")
         );
         assert_eq!(
@@ -5974,27 +6069,54 @@ mod tests {
         let token = file_token(&job, dev);
         assert_eq!(token, "kubuntubootP4100000");
         // The file name round-trips: image_token reads it back (case-insensitive).
-        let (name, _) = output_paths_for(&job, &token, "full");
+        let (name, _) = output_paths_for(&job, &token, &RunPlan::full(), 1);
         assert!(image_token(&name).unwrap().eq_ignore_ascii_case(&token));
 
         // A planned child carries the full's name as well, for a fallback:
-        // same stamp, `_full_` and the full's extension.
-        let (child, full) = output_paths_for(&job, "disk4", "incremental");
-        let (child, full) = (
-            child.file_name().unwrap().to_string_lossy().into_owned(),
-            full.file_name().unwrap().to_string_lossy().into_owned(),
-        );
+        // same stamp, `full` and the full's extension — and the number of the
+        // NEXT chain, which a fallback full starts. The child itself takes its
+        // full's number.
+        let child_of = |base: &str| RunPlan {
+            kind: "incremental",
+            parent_image: Some(PathBuf::from(base)),
+            base_image: Some(PathBuf::from(base)),
+            increment_index: 1,
+        };
+        let names = |plan: &RunPlan| {
+            let (child, full) = output_paths_for(&job, "disk4", plan, 3);
+            (
+                child.file_name().unwrap().to_string_lossy().into_owned(),
+                full.file_name().unwrap().to_string_lossy().into_owned(),
+            )
+        };
+        let (child, full) = names(&child_of("j_disk4_2-full_20261025-094738.vhdx"));
         assert!(
-            child.contains("_disk4_inc_") && child.ends_with(".avhdx"),
+            child.contains("_disk4_2-inc_") && child.ends_with(".avhdx"),
             "{child}"
         );
         assert!(
-            full.contains("_disk4_full_") && full.ends_with(".vhdx"),
+            full.contains("_disk4_3-full_") && full.ends_with(".vhdx"),
             "{full}"
         );
         assert_eq!(
-            child.replace("_inc_", "_full_").replace(".avhdx", ".vhdx"),
+            child
+                .replace("_2-inc_", "_3-full_")
+                .replace(".avhdx", ".vhdx"),
             full
+        );
+        // A chain whose full was named before the numbers goes on unnumbered.
+        let (child, full) = names(&child_of("j_disk4_full_20261025-094738.vhdx"));
+        assert!(child.contains("_disk4_inc_"), "{child}");
+        assert!(full.contains("_disk4_3-full_"), "{full}");
+        // A full run starts the chain it was given.
+        let (first, _) = output_paths_for(&job, "disk4", &RunPlan::full(), 1);
+        assert!(
+            first
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("_disk4_1-full_"),
+            "{first:?}"
         );
 
         // No label → falls back to the stable device token.
@@ -6432,6 +6554,44 @@ mod tests {
         )
         .unwrap();
         image
+    }
+
+    /// The next chain's number: past the chains of this source already in the
+    /// folder, named before the numbers or not; other sources' and other
+    /// jobs' chains do not count.
+    #[test]
+    fn a_new_chain_is_numbered_after_the_ones_in_the_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut job = Job::default();
+        job.id = "job1".into();
+        let next = || next_chain_number_for_disk(&job, dir.path(), "disk4");
+        assert_eq!(next(), 1, "an empty folder starts at 1");
+
+        // Two chains from before the numbers: the next one is the third.
+        put_image_of_job(dir.path(), "j_disk4_full_20261022-114547.vhdx", "job1");
+        put_image_of_job(dir.path(), "j_disk4_full_20261025-094738.vhdx", "job1");
+        // Not this disk's, not this job's.
+        put_image_of_job(dir.path(), "j_disk2_7-full_20261025-094738.vhdx", "job1");
+        put_image_of_job(dir.path(), "x_disk4_9-full_20261025-094738.vhdx", "job2");
+        assert_eq!(next(), 3);
+
+        // A number higher than the count wins: older chains were deleted.
+        put_image_of_job(dir.path(), "j_disk4_5-full_20261101-000000.vhdx", "job1");
+        assert_eq!(next(), 6);
+
+        assert_eq!(
+            chain_number_in_name(Path::new("j_disk4_12-inc_20261101-000000.avhdx")),
+            Some(12)
+        );
+        assert_eq!(
+            chain_number_in_name(Path::new("j_disk4_inc_20261101-000000.avhdx")),
+            None
+        );
+        // Not a kind after the dash: not a number of ours.
+        assert_eq!(
+            chain_number_in_name(Path::new("j_disk4_3-x_20261101-000000.avhdx")),
+            None
+        );
     }
 
     /// Незавершённая консолидация СВОЕЙ цепочки останавливает запуск. Раньше
@@ -7261,7 +7421,7 @@ mod linux_run_tests {
         assert_eq!(run.image_path, run.images[0].image_path);
         let name = image.file_name().unwrap().to_string_lossy().into_owned();
         assert!(
-            name.starts_with("linux_run_") && name.contains("_full_") && name.ends_with(".qcow2"),
+            name.starts_with("linux_run_") && name.contains("_1-full_") && name.ends_with(".qcow2"),
             "{name}"
         );
         // The only file in the folder: nothing private is left beside it.
@@ -7438,11 +7598,27 @@ mod linux_run_tests {
                 perform_backup(&sink, &job, &cancel, None, &passwords, Some(keys.clone())).await;
             assert_eq!(run.status, "success", "run {n}: {}", run.error);
             assert!(run.image_path.ends_with(".obk"), "{}", run.image_path);
+            // One chain, number 1: the full and its increments carry it.
+            let tag = if n == 0 { "_1-full_" } else { "_1-inc_" };
+            assert!(run.image_path.contains(tag), "run {n}: {}", run.image_path);
             last = Some(run);
         }
         let last = last.unwrap();
         assert_eq!(last.backup_kind, "incremental");
         assert_eq!(last.consolidated_increments, 1, "the window holds one");
+        // The fold keeps the full's name; the increment left beside it is the
+        // same chain's.
+        let mut names: Vec<String> = std::fs::read_dir(&dest)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| !n.starts_with('.'))
+            .collect();
+        names.sort();
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert!(
+            names[0].contains("_1-full_") && names[1].contains("_1-inc_"),
+            "{names:?}"
+        );
         for entry in std::fs::read_dir(&dest).unwrap() {
             let name = entry.unwrap().file_name().to_string_lossy().into_owned();
             assert!(name.ends_with(".obk"), "only encrypted images: {name}");
