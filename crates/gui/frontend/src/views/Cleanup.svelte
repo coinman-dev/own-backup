@@ -12,6 +12,7 @@
   import CleanupMasksModal from '../components/CleanupMasksModal.svelte';
   import CleanupAutoModal from '../components/CleanupAutoModal.svelte';
   import { pickPath } from '../lib/pickPath.svelte';
+  import { cleanupState } from '../lib/cleanupStore.svelte';
   import { maskProblem } from '../lib/junkMasks';
   import type {
     CleanupCatalog,
@@ -40,20 +41,13 @@
   let loadError = $state<string | null>(null);
   let items = $state<Set<string>>(new Set());
   let users = $state<Set<string>>(new Set());
-  /** Per item: what the last analysis found, or what the last cleanup removed. */
-  let tallies = $state<Record<string, CleanupTally & { running?: string[] }>>({});
-  /** What the numbers on screen are. */
-  let shown = $state<'none' | 'analyze' | 'run'>('none');
-  let busy = $state<'analyze' | 'run' | null>(null);
   let confirming = $state(false);
-  let report = $state<CleanupReport | null>(null);
   let error = $state<string | null>(null);
+  /** The analysis and its marks live in `cleanupState` (lib/cleanupStore):
+   *  they outlast a visit to another section. */
   let focused = $state<string | null>(null);
   /** The item whose files are listed in the window over the page. */
   let viewing = $state<{ id: string; label: string } | null>(null);
-  /** The ticks changed after an analysis: its numbers and its list no longer
-   *  say what the cleanup would remove. */
-  let stale = $state(false);
   /** The junk search's masks, age and folders; the service's defaults until
    *  changed. */
   let junk = $state<CleanupJunk | null>(null);
@@ -64,12 +58,6 @@
   let editingAuto = $state(false);
   let autoSaving = $state(false);
   let autoError = $state<string | null>(null);
-  /** Per item: the files of the analysis' list unticked in its window, with
-   *  their sizes — they stay. */
-  let excluded = $state<Record<string, Map<string, number>>>({});
-  /** Items whose list was opened since the analysis: an item cleaned only
-   *  from its list (junk by masks) waits for that. */
-  let reviewed = $state<Set<string>>(new Set());
   let keepDays = $state(
     ((): number => {
       const v = Number(localStorage.getItem(HISTORY_KEY));
@@ -182,7 +170,8 @@
 
   function autoText(): string {
     const p = auto;
-    if (!p || p.schedule.kind === 'none' || p.items.length === 0) return m.cla_summary_off();
+    // An older service answers nothing of the kind.
+    if (!p?.schedule || p.schedule.kind === 'none' || !p.items?.length) return m.cla_summary_off();
     const at = p.schedule.time;
     const when =
       p.schedule.kind === 'daily'
@@ -198,20 +187,20 @@
   }
 
   function toggleExcluded(item: string, path: string, size: number) {
-    const next = new Map(excluded[item] ?? []);
+    const next = new Map(cleanupState.excluded[item] ?? []);
     if (next.has(path)) next.delete(path);
     else next.set(path, size);
-    excluded = { ...excluded, [item]: next };
+    cleanupState.excluded = { ...cleanupState.excluded, [item]: next };
     confirming = false;
   }
 
   function excludedBytes(item: string): number {
-    return [...(excluded[item]?.values() ?? [])].reduce((s, b) => s + b, 0);
+    return [...(cleanupState.excluded[item]?.values() ?? [])].reduce((s, b) => s + b, 0);
   }
 
   function openList(id: string, label: string) {
     viewing = { id, label };
-    reviewed = new Set([...reviewed, id]);
+    cleanupState.reviewed = new Set([...cleanupState.reviewed, id]);
   }
 
   /** Ticked items cleaned only from a list nobody has opened yet. One the
@@ -223,15 +212,15 @@
         (i) =>
           i.review &&
           items.has(i.id) &&
-          (shown !== 'analyze' || (!reviewed.has(i.id) && (tallies[i.id]?.files ?? 0) > 0)),
+          (cleanupState.shown !== 'analyze' || (!cleanupState.reviewed.has(i.id) && (cleanupState.tallies[i.id]?.files ?? 0) > 0)),
       );
   }
 
   /** Where the junk item is on its way to a cleanup, for its steps. */
   function step(id: string): 'masks' | 'analyze' | 'review' | 'clean' {
     if (!items.has(id)) return 'masks';
-    if (shown !== 'analyze' || !tallies[id]) return 'analyze';
-    if ((tallies[id]?.files ?? 0) > 0 && !reviewed.has(id)) return 'review';
+    if (cleanupState.shown !== 'analyze' || !cleanupState.tallies[id]) return 'analyze';
+    if ((cleanupState.tallies[id]?.files ?? 0) > 0 && !cleanupState.reviewed.has(id)) return 'review';
     return 'clean';
   }
 
@@ -252,7 +241,7 @@
   onMount(() => {
     api
       .cleanupProfile()
-      .then((p) => (auto = p))
+      .then((p) => (auto = p?.schedule ? p : null))
       .catch(() => {});
     api
       .cleanupCatalog()
@@ -274,8 +263,8 @@
       .catch((e) => (loadError = String(e)));
     const un = listen<CleanupProgress>('cleanup-progress', (e) => {
       const p = e.payload;
-      if (busy && p.mode === busy) {
-        tallies = { ...tallies, [p.item]: p };
+      if (cleanupState.busy && p.mode === cleanupState.busy) {
+        cleanupState.tallies = { ...cleanupState.tallies, [p.item]: p };
       }
     });
     return () => {
@@ -324,14 +313,14 @@
   function changed() {
     confirming = false;
     remember();
-    if (shown === 'analyze') {
-      tallies = {};
-      report = null;
-      shown = 'none';
-      stale = true;
+    if (cleanupState.shown === 'analyze') {
+      cleanupState.tallies = {};
+      cleanupState.report = null;
+      cleanupState.shown = 'none';
+      cleanupState.stale = true;
     }
-    excluded = {};
-    reviewed = new Set();
+    cleanupState.excluded = {};
+    cleanupState.reviewed = new Set();
   }
 
   /** Some of the catalogue only an administrator's window may clean. */
@@ -379,29 +368,29 @@
     const list = mode === 'analyze' ? every() : chosen();
     if (list.length === 0) return;
     if (mode === 'run' && unreviewed().length > 0) return;
-    const exclude = mode === 'run' ? list.flatMap((id) => [...(excluded[id]?.keys() ?? [])]) : [];
+    const exclude = mode === 'run' ? list.flatMap((id) => [...(cleanupState.excluded[id]?.keys() ?? [])]) : [];
     if (mode === 'analyze') {
-      excluded = {};
-      reviewed = new Set();
+      cleanupState.excluded = {};
+      cleanupState.reviewed = new Set();
     }
     confirming = false;
     error = null;
-    report = null;
-    busy = mode;
-    shown = mode;
-    stale = false;
-    tallies = {};
+    cleanupState.report = null;
+    cleanupState.busy = mode;
+    cleanupState.shown = mode;
+    cleanupState.stale = false;
+    cleanupState.tallies = {};
     try {
       const r =
         mode === 'analyze'
           ? await api.cleanupAnalyze(list, [...users], options())
           : await api.cleanupRun(list, [...users], options(), exclude);
-      report = r;
-      tallies = Object.fromEntries(r.items.map((i) => [i.id, i]));
+      cleanupState.report = r;
+      cleanupState.tallies = Object.fromEntries(r.items.map((i) => [i.id, i]));
     } catch (e) {
       error = String(e);
     } finally {
-      busy = null;
+      cleanupState.busy = null;
     }
   }
 
@@ -410,9 +399,9 @@
   }
 
   function sizeText(id: string): string {
-    const t = tallies[id];
+    const t = cleanupState.tallies[id];
     if (!t) {
-      if (busy === 'analyze' || (busy && items.has(id))) return '…';
+      if (cleanupState.busy === 'analyze' || (cleanupState.busy && items.has(id))) return '…';
       return m.cl_not_analyzed();
     }
     const records = t.records ?? 0;
@@ -436,19 +425,19 @@
 
   /** Whether the analysis listed anything of the item to look through. */
   function listed(id: string): boolean {
-    const t = tallies[id];
+    const t = cleanupState.tallies[id];
     return !!t && (t.files > 0 || (t.entries ?? 0) > 0);
   }
 
   function groupBytes(groupItems: CleanupItem[]): number | null {
-    const known = groupItems.filter((i) => items.has(i.id) && tallies[i.id]);
+    const known = groupItems.filter((i) => items.has(i.id) && cleanupState.tallies[i.id]);
     if (known.length === 0) return null;
-    return known.reduce((s, i) => s + tallies[i.id].bytes, 0);
+    return known.reduce((s, i) => s + cleanupState.tallies[i.id].bytes, 0);
   }
 
   const total = $derived(
     chosen().reduce(
-      (s, id) => s + (tallies[id]?.bytes ?? 0) - (shown === 'analyze' ? excludedBytes(id) : 0),
+      (s, id) => s + (cleanupState.tallies[id]?.bytes ?? 0) - (cleanupState.shown === 'analyze' ? excludedBytes(id) : 0),
       0,
     ),
   );
@@ -457,29 +446,29 @@
   );
 
   function hint(): string {
-    if (busy === 'analyze') return `${m.cl_hint_analyzing()} ${formatBytes(total)}`;
-    if (busy === 'run') return `${m.cl_hint_cleaning()} ${formatBytes(total)}`;
+    if (cleanupState.busy === 'analyze') return `${m.cl_hint_analyzing()} ${formatBytes(total)}`;
+    if (cleanupState.busy === 'run') return `${m.cl_hint_cleaning()} ${formatBytes(total)}`;
     if (askElevate) return m.cl_elevate_ask();
     if (confirming) return m.cl_confirm();
     if (chosen().length === 0) return m.cl_hint_nothing();
     const waiting = unreviewed();
-    if (waiting.length > 0 && shown !== 'run') {
+    if (waiting.length > 0 && cleanupState.shown !== 'run') {
       return m.cl_review_first({ names: waiting.map((i) => i.label).join(', ') });
     }
-    if (report && shown === 'run') {
-      const size = formatBytes(report.total.bytes);
-      if (report.cancelled) return m.cl_hint_cancelled({ size });
-      if (report.total.left_files > 0) {
+    if (cleanupState.report && cleanupState.shown === 'run') {
+      const size = formatBytes(cleanupState.report.total.bytes);
+      if (cleanupState.report.cancelled) return m.cl_hint_cancelled({ size });
+      if (cleanupState.report.total.left_files > 0) {
         return m.cl_hint_done_left({
           size,
-          count: report.total.left_files,
-          left: formatBytes(report.total.left_bytes),
+          count: cleanupState.report.total.left_files,
+          left: formatBytes(cleanupState.report.total.left_bytes),
         });
       }
       return m.cl_hint_done({ size });
     }
-    if (shown === 'analyze' && report) return m.cl_hint_found({ size: formatBytes(total) });
-    if (stale) return m.cl_stale();
+    if (cleanupState.shown === 'analyze' && cleanupState.report) return m.cl_hint_found({ size: formatBytes(total) });
+    if (cleanupState.stale) return m.cl_stale();
     return m.cl_hint_start();
   }
 </script>
@@ -507,7 +496,7 @@
                 <input
                   type="checkbox"
                   checked={g.items.filter(allowed).length > 0 && g.items.filter(allowed).every((i) => items.has(i.id))}
-                  disabled={!!busy}
+                  disabled={!!cleanupState.busy}
                   onchange={() => toggleGroup(g.items)}
                 />
                 <span class="name">{g.label}</span>
@@ -526,7 +515,7 @@
                     type="checkbox"
                     class:locked={!allowed(it)}
                     checked={items.has(it.id) && allowed(it)}
-                    disabled={!!busy}
+                    disabled={!!cleanupState.busy}
                     onclickcapture={(e) => {
                       if (!allowed(it)) {
                         e.preventDefault();
@@ -541,11 +530,11 @@
                   <span class="name">{it.label}</span>
                   <span
                     class="size"
-                    class:muted={!tallies[it.id] || !items.has(it.id)}
-                    title={tallies[it.id] ? m.cl_files({ count: tallies[it.id].files }) : ''}
+                    class:muted={!cleanupState.tallies[it.id] || !items.has(it.id)}
+                    title={cleanupState.tallies[it.id] ? m.cl_files({ count: cleanupState.tallies[it.id].files }) : ''}
                     >{sizeText(it.id)}</span
                   >
-                  {#if shown === 'analyze' && !busy && listed(it.id)}
+                  {#if cleanupState.shown === 'analyze' && !cleanupState.busy && listed(it.id)}
                     <button
                       class="files-btn"
                       title={m.cl_files_title()}
@@ -564,7 +553,7 @@
               <span class="auto-name">{m.cla_title()}</span>
               <span>{autoText()}</span>
             </div>
-            <button class="files-btn" disabled={!!busy} onclick={() => ((autoError = null), (editingAuto = true))}
+            <button class="files-btn" disabled={!!cleanupState.busy} onclick={() => ((autoError = null), (editingAuto = true))}
               >{m.cla_setup()}</button
             >
           </div>
@@ -587,7 +576,7 @@
                   <select
                     class="form-input"
                     value={keepDays}
-                    disabled={!!busy}
+                    disabled={!!cleanupState.busy}
                     onchange={(e) => setKeep(Number((e.currentTarget as HTMLSelectElement).value))}
                   >
                     {#each KEEP_CHOICES as d (d)}<option value={d}>{keepLabel(d)}</option>{/each}
@@ -596,30 +585,30 @@
               {/if}
               {#if focusedItem.review && junk}
                 {@const at = step(focusedItem.id)}
-                {@const found = tallies[focusedItem.id]?.files ?? 0}
+                {@const found = cleanupState.tallies[focusedItem.id]?.files ?? 0}
                 <ol class="steps">
                   <li class:now={at === 'masks'} class:done={at !== 'masks'}>
                     <span>{m.cl_step_masks({ count: junk.masks.length })}</span>
-                    <button class="files-btn" disabled={!!busy} onclick={() => (editingMasks = true)}
+                    <button class="files-btn" disabled={!!cleanupState.busy} onclick={() => (editingMasks = true)}
                       >{m.cl_junk_edit_masks({ count: junk.masks.length })}</button
                     >
                   </li>
                   <li class:now={at === 'analyze'} class:done={at === 'review' || at === 'clean'}>
                     <span>{m.cl_step_analyze()}</span>
                     {#if at === 'analyze'}
-                      <button class="files-btn" disabled={!!busy || !items.has(focusedItem.id)} onclick={() => go('analyze')}
+                      <button class="files-btn" disabled={!!cleanupState.busy || !items.has(focusedItem.id)} onclick={() => go('analyze')}
                         >{m.cl_analyze()}</button
                       >
                     {/if}
                   </li>
                   <li class:now={at === 'review'} class:done={at === 'clean'}>
-                    {#if shown === 'analyze' && tallies[focusedItem.id] && found === 0}
+                    {#if cleanupState.shown === 'analyze' && cleanupState.tallies[focusedItem.id] && found === 0}
                       <span>{m.cl_step_nothing()}</span>
                     {:else}
                       <span>{m.cl_step_review()}</span>
-                      {#if shown === 'analyze' && found > 0}
+                      {#if cleanupState.shown === 'analyze' && found > 0}
                         {@const it = focusedItem}
-                        <button class="files-btn" disabled={!!busy} onclick={() => openList(it.id, it.label)}
+                        <button class="files-btn" disabled={!!cleanupState.busy} onclick={() => openList(it.id, it.label)}
                           >{m.cl_step_files({ count: found })}</button
                         >
                       {/if}
@@ -634,7 +623,7 @@
                   <select
                     class="form-input"
                     value={junk.age_days}
-                    disabled={!!busy}
+                    disabled={!!cleanupState.busy}
                     onchange={(e) =>
                       junk && saveJunk({ ...junk, age_days: Number((e.currentTarget as HTMLSelectElement).value) })}
                   >
@@ -649,14 +638,14 @@
                         <span class="folder-path" title={f}><bdi>{f}</bdi></span>
                         <button
                           class="x"
-                          disabled={!!busy}
+                          disabled={!!cleanupState.busy}
                           title={m.cl_junk_remove_folder()}
                           aria-label={m.cl_junk_remove_folder()}
                           onclick={() => removeFolder(f)}>×</button
                         >
                       </div>
                     {/each}
-                    <button class="files-btn add" disabled={!!busy} onclick={addFolder}>{m.cl_junk_add_folder()}</button>
+                    <button class="files-btn add" disabled={!!cleanupState.busy} onclick={addFolder}>{m.cl_junk_add_folder()}</button>
                   {:else}
                     <p class="about muted">{m.cl_junk_folders_admin()}</p>
                   {/if}
@@ -673,7 +662,7 @@
                 <input
                   type="checkbox"
                   checked={users.has(u.sid)}
-                  disabled={!u.allowed || !!busy}
+                  disabled={!u.allowed || !!cleanupState.busy}
                   onchange={() => toggleUser(u.sid)}
                 />
                 <span>{u.name}</span>
@@ -724,7 +713,7 @@
     <CleanupFilesModal
       item={id}
       label={viewing.label}
-      excluded={excluded[id] ?? new Map()}
+      excluded={cleanupState.excluded[id] ?? new Map()}
       onToggle={(path, size) => toggleExcluded(id, path, size)}
       onClose={() => (viewing = null)}
     />
@@ -732,10 +721,10 @@
 
   <div class="footer">
     <div class="hint">{hint()}</div>
-    {#if askElevate && !busy}
+    {#if askElevate && !cleanupState.busy}
       <button class="btn outline" onclick={() => (askElevate = false)}>{m.common_cancel()}</button>
       <button class="btn green" onclick={elevate}>{m.cl_elevate()}</button>
-    {:else if busy}
+    {:else if cleanupState.busy}
       <button class="btn danger" onclick={cancel}>{m.common_cancel()}</button>
     {:else if confirming}
       <button class="btn outline" onclick={() => (confirming = false)}>{m.common_cancel()}</button>
