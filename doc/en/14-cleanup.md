@@ -10,7 +10,11 @@ and the users' are within its reach. There is no such section on Linux yet.
 1. Tick the items. On the left are the groups and items, on the right the
    chosen item's description and the users whose folders are cleaned.
 2. Press **Analyse**: each item shows its size, the bar at the bottom how much
-   can be freed in all. Nothing is removed.
+   can be freed in all. Nothing is removed. The **Files** button of an item
+   opens the list of what will be removed: path, size, date, search, largest
+   first or by path. The cleanup removes exactly that list: files that turned
+   up after the analysis stay. Changing the ticks or the users clears the
+   analysis — press **Analyse** again.
 3. Press **Clean up** and confirm with **Remove**. The items show the progress;
    the bar at the bottom shows the result — how much was freed and how many
    files stayed because programs hold them open. The result is recorded in

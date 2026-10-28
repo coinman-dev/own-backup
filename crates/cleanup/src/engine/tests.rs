@@ -296,3 +296,36 @@ fn folders_are_per_user_and_per_volume_where_they_should_be() {
     let sys = folders(&t(Base::Windows, r"Logs\CBS", false, 0), &r, &[]);
     assert!(sys[0].ends_with(Path::new("Windows/Logs/CBS")));
 }
+
+/// What the window listed is what goes: a file that turned up after the
+/// analysis stays, though the rules would take it.
+#[test]
+fn the_cleanup_removes_only_what_the_analysis_listed() {
+    let dir = tempfile::tempdir().unwrap();
+    let temp = dir.path().join(r"Users/u/AppData/Local/Temp");
+    write(&temp.join("a.tmp"), 10);
+    write(&temp.join("sub/b.tmp"), 20);
+
+    let seen = go(&TEMP, dir.path(), Mode::Analyze, TWO_DAYS);
+    let listed = &seen.listing["temp_user"];
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed.iter().map(|f| f.size).sum::<u64>(), 30);
+    let only: std::collections::HashSet<_> = listed.iter().map(|f| f.path.clone()).collect();
+
+    write(&temp.join("late.tmp"), 5);
+    let done = run_at_with(
+        &[&TEMP],
+        &roots(dir.path()),
+        &[user(dir.path())],
+        Mode::Remove,
+        &AtomicBool::new(false),
+        |_, _| {},
+        SystemTime::now() + TWO_DAYS,
+        Some(&only),
+    );
+    assert_eq!(done.total.files, 2);
+    assert!(!temp.join("a.tmp").exists());
+    assert!(!temp.join("sub").exists());
+    assert!(temp.join("late.tmp").exists(), "not listed, not removed");
+    assert!(done.listing.is_empty(), "a cleanup lists nothing");
+}

@@ -16,6 +16,7 @@
 //! - removes a folder below the target once it is empty and old enough, never
 //!   the target folder itself.
 
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, Metadata};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -65,7 +66,27 @@ pub struct Report {
     pub items: Vec<ItemReport>,
     pub total: Tally,
     pub cancelled: bool,
+    /// An analysis' files, item by item — what the window lists before the
+    /// cleanup, and what the cleanup is then held to. Kept by the service,
+    /// never sent whole.
+    #[serde(skip)]
+    pub listing: Listing,
 }
+
+/// A file an analysis found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    pub path: PathBuf,
+    pub size: u64,
+    pub modified: Option<SystemTime>,
+}
+
+/// An analysis' files by item id.
+pub type Listing = HashMap<String, Vec<Found>>;
+
+/// More files than this in one item are counted, not listed: a cleanup held
+/// to the list leaves the rest (the safe way round).
+pub const LIST_CAP: usize = 1_000_000;
 
 /// The places of this system the bases stand for.
 #[derive(Debug, Clone)]
@@ -136,7 +157,7 @@ pub fn run(
     cancel: &AtomicBool,
     progress: impl FnMut(&str, &Tally),
 ) -> Report {
-    run_at(
+    run_at_with(
         items,
         roots,
         users,
@@ -144,11 +165,50 @@ pub fn run(
         cancel,
         progress,
         SystemTime::now(),
+        None,
+    )
+}
+
+/// Clean, removing only files of `only` — what an analysis listed and the
+/// window showed. A file that turned up since stays; one that no longer
+/// matches (changed, now too young, gone) stays as well, every rule still
+/// applies.
+pub fn run_only(
+    items: &[&Item],
+    roots: &Roots,
+    users: &[User],
+    cancel: &AtomicBool,
+    progress: impl FnMut(&str, &Tally),
+    only: &HashSet<PathBuf>,
+) -> Report {
+    run_at_with(
+        items,
+        roots,
+        users,
+        Mode::Remove,
+        cancel,
+        progress,
+        SystemTime::now(),
+        Some(only),
     )
 }
 
 /// [`run`] with the clock given: ages are measured from `now`.
+#[cfg(test)]
 pub(crate) fn run_at(
+    items: &[&Item],
+    roots: &Roots,
+    users: &[User],
+    mode: Mode,
+    cancel: &AtomicBool,
+    progress: impl FnMut(&str, &Tally),
+    now: SystemTime,
+) -> Report {
+    run_at_with(items, roots, users, mode, cancel, progress, now, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_at_with(
     items: &[&Item],
     roots: &Roots,
     users: &[User],
@@ -156,14 +216,17 @@ pub(crate) fn run_at(
     cancel: &AtomicBool,
     mut progress: impl FnMut(&str, &Tally),
     now: SystemTime,
+    only: Option<&HashSet<PathBuf>>,
 ) -> Report {
     let mut report = Report {
         items: Vec::new(),
         total: Tally::default(),
         cancelled: false,
+        listing: Listing::new(),
     };
     for item in items {
         let mut tally = Tally::default();
+        let mut found = Vec::new();
         for target in item.targets {
             for folder in folders(target, roots, users) {
                 let mut walk = Walk {
@@ -174,9 +237,14 @@ pub(crate) fn run_at(
                     tally: &mut tally,
                     seen: 0,
                     progress: &mut |t| progress(item.id, t),
+                    only,
+                    found: (mode == Mode::Analyze).then_some(&mut found),
                 };
                 walk.root(&folder);
             }
+        }
+        if mode == Mode::Analyze {
+            report.listing.insert(item.id.to_string(), found);
         }
         progress(item.id, &tally);
         tracing::info!(
@@ -208,6 +276,10 @@ struct Walk<'a> {
     tally: &'a mut Tally,
     seen: u64,
     progress: &'a mut dyn FnMut(&Tally),
+    /// Removal held to these files (an analysis' list).
+    only: Option<&'a HashSet<PathBuf>>,
+    /// Analysis: where the files found go.
+    found: Option<&'a mut Vec<Found>>,
 }
 
 impl Walk<'_> {
@@ -257,7 +329,10 @@ impl Walk<'_> {
             }
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if !self.wanted(&name) || !self.old_enough(&meta) {
+            if !self.wanted(&name)
+                || !self.old_enough(&meta)
+                || self.only.is_some_and(|only| !only.contains(&path))
+            {
                 left = true;
                 continue;
             }
@@ -266,6 +341,15 @@ impl Walk<'_> {
                 Mode::Analyze => {
                     self.tally.files += 1;
                     self.tally.bytes += size;
+                    if let Some(found) = self.found.as_deref_mut() {
+                        if found.len() < LIST_CAP {
+                            found.push(Found {
+                                path: path.clone(),
+                                size,
+                                modified: meta.modified().ok(),
+                            });
+                        }
+                    }
                 }
                 Mode::Remove => match remove_file(&path, &meta) {
                     Ok(()) => {

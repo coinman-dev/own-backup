@@ -236,6 +236,10 @@
     "ru": "Чистить папки пользователя «%{user}» может только администратор.",
     "en": "Only an administrator may clean the folders of the user \"%{user}\"."
   },
+  "grpc_server.cleanup_not_analyzed": {
+    "ru": "Список файлов есть только после анализа — нажмите «Анализ».",
+    "en": "The list of files exists only after an analysis — press “Analyse”."
+  },
   "grpc_server.cleanup_unknown": {
     "ru": "Нет такого пункта очистки или пользователя: %{what}.",
     "en": "No such cleanup item or user: %{what}."

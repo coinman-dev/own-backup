@@ -1394,3 +1394,13 @@ export interface CleanupProgress extends CleanupTally {
   mode: 'analyze' | 'run';
   item: string;
 }
+
+/** A page of the files an analysis found for one item. */
+export interface CleanupFilesPage {
+  /** Files matching the filter, and their size. */
+  total: number;
+  bytes: number;
+  /** The analysis found more than it lists. */
+  truncated: boolean;
+  files: { path: string; size: number; modified: string | null }[];
+}

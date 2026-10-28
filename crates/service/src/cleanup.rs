@@ -5,11 +5,18 @@
 //! chosen user. A window run by an administrator may choose any user of the
 //! computer; anyone else only themselves — a cleanup removes files, and
 //! another person's are not theirs to remove.
+//!
+//! An analysis keeps the files it found: the window lists them (`files`, a
+//! page at a time — a recycle bin holds hundreds of thousands), and a cleanup
+//! of the same items for the same users removes only those (owner,
+//! 2026-10-28: what is shown is what goes).
 
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use own_backup_cleanup::{catalog, engine, users, Mode, Report, Roots, User};
+use own_backup_cleanup::{catalog, engine, users, Listing, Mode, Report, Roots, User};
 use serde::{Deserialize, Serialize};
 
 /// What the window asks.
@@ -25,7 +32,62 @@ pub enum Request {
         items: Vec<String>,
         users: Vec<String>,
     },
+    /// A page of the files the last analysis found for one item.
+    Files {
+        item: String,
+        #[serde(default)]
+        offset: usize,
+        #[serde(default = "page")]
+        limit: usize,
+        /// `size` (largest first) or `path`.
+        #[serde(default)]
+        sort: String,
+        /// Only paths containing this, case-insensitive.
+        #[serde(default)]
+        filter: String,
+    },
     Cancel,
+}
+
+fn page() -> usize {
+    500
+}
+
+/// One page of an item's files.
+#[derive(Debug, Serialize)]
+pub struct FilesReply {
+    /// Files matching the filter, and their size.
+    pub total: usize,
+    pub bytes: u64,
+    /// The analysis found more than it lists ([`engine::LIST_CAP`]).
+    pub truncated: bool,
+    pub files: Vec<FileDto>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FileDto {
+    pub path: String,
+    pub size: u64,
+    /// RFC 3339, when known.
+    pub modified: Option<String>,
+}
+
+/// The last analysis: whose, of what, and what it found.
+struct Analysis {
+    asker: Option<String>,
+    items: Vec<String>,
+    users: Vec<String>,
+    /// Files counted per item, listed or not.
+    counted: std::collections::HashMap<String, u64>,
+    listing: Listing,
+}
+
+/// A set of ids in one order and case, to compare two requests.
+fn key(ids: &[String]) -> Vec<String> {
+    let mut v: Vec<String> = ids.iter().map(|s| s.to_ascii_lowercase()).collect();
+    v.sort();
+    v.dedup();
+    v
 }
 
 /// The catalogue as the window draws it.
@@ -75,13 +137,17 @@ pub struct Progress {
 #[derive(Default)]
 pub struct Cleaner {
     running: Mutex<Option<Arc<AtomicBool>>>,
+    last: Mutex<Option<Analysis>>,
 }
 
 /// Why a request was refused, for a `Status`.
+#[derive(Debug)]
 pub enum Refusal {
     Busy,
     NotAllowed(String),
     Unknown(String),
+    /// `files` with no analysis of that item by this window's user.
+    NotAnalyzed,
 }
 
 impl Cleaner {
@@ -137,10 +203,71 @@ impl Cleaner {
         Ok((chosen, people))
     }
 
+    /// A page of `item`'s files from the last analysis — the asker's own (an
+    /// administrator's window may read any).
+    pub fn files(
+        &self,
+        asker: &Asker,
+        item: &str,
+        offset: usize,
+        limit: usize,
+        sort: &str,
+        filter: &str,
+    ) -> Result<FilesReply, Refusal> {
+        let last = self.last.lock().unwrap();
+        let Some(a) = last.as_ref() else {
+            return Err(Refusal::NotAnalyzed);
+        };
+        let theirs = match (&a.asker, &asker.sid) {
+            (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+            (None, None) => true,
+            _ => false,
+        };
+        if !theirs && !asker.admin {
+            return Err(Refusal::NotAnalyzed);
+        }
+        let Some(found) = a.listing.get(item) else {
+            return Err(Refusal::NotAnalyzed);
+        };
+        let needle = filter.to_lowercase();
+        let mut picked: Vec<&engine::Found> = found
+            .iter()
+            .filter(|f| {
+                needle.is_empty() || f.path.to_string_lossy().to_lowercase().contains(&needle)
+            })
+            .collect();
+        if sort == "size" {
+            picked.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
+        } else {
+            picked.sort_by(|a, b| a.path.cmp(&b.path));
+        }
+        let limit = limit.clamp(1, 5000);
+        Ok(FilesReply {
+            total: picked.len(),
+            bytes: picked.iter().map(|f| f.size).sum(),
+            truncated: a.counted.get(item).copied().unwrap_or(0) > found.len() as u64,
+            files: picked
+                .into_iter()
+                .skip(offset)
+                .take(limit)
+                .map(|f| FileDto {
+                    path: f.path.display().to_string(),
+                    size: f.size,
+                    modified: f
+                        .modified
+                        .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339()),
+                })
+                .collect(),
+        })
+    }
+
     /// Analyse or clean, on this thread (the caller runs it off the async
-    /// runtime). `progress` hears of each item.
+    /// runtime). `progress` hears of each item. An analysis is kept; a
+    /// cleanup of exactly what was analysed, for the same asker, removes only
+    /// the files it listed.
     pub fn go(
         &self,
+        asker: &Asker,
         items: &[&catalog::Item],
         people: &[User],
         mode: Mode,
@@ -160,20 +287,73 @@ impl Cleaner {
             Mode::Analyze => "analyze",
             Mode::Remove => "run",
         };
-        Ok(engine::run(
-            items,
-            &Roots::of_this_system(),
-            people,
-            mode,
-            &flag,
-            |item, tally| {
-                progress(Progress {
-                    mode: name,
-                    item: item.to_string(),
-                    tally: *tally,
-                })
-            },
-        ))
+        let ids: Vec<String> = items.iter().map(|i| i.id.to_string()).collect();
+        let sids: Vec<String> = people.iter().map(|u| u.sid.clone()).collect();
+        let roots = Roots::of_this_system();
+        let progress = |item: &str, tally: &engine::Tally| {
+            progress(Progress {
+                mode: name,
+                item: item.to_string(),
+                tally: *tally,
+            })
+        };
+        let report = match mode {
+            Mode::Analyze => {
+                let mut report = engine::run(items, &roots, people, mode, &flag, progress);
+                *self.last.lock().unwrap() = Some(Analysis {
+                    asker: asker.sid.clone(),
+                    items: key(&ids),
+                    users: key(&sids),
+                    counted: report
+                        .items
+                        .iter()
+                        .map(|i| (i.id.clone(), i.tally.files))
+                        .collect(),
+                    listing: std::mem::take(&mut report.listing),
+                });
+                report
+            }
+            Mode::Remove => {
+                let held = self.analysed_files(asker, &ids, &sids);
+                tracing::info!(held_to_analysis = held.is_some(), "cleanup run");
+                let report = match &held {
+                    Some(only) => engine::run_only(items, &roots, people, &flag, progress, only),
+                    None => engine::run(items, &roots, people, mode, &flag, progress),
+                };
+                // What was analysed is gone or left now: a second cleanup
+                // walks again.
+                *self.last.lock().unwrap() = None;
+                report
+            }
+        };
+        Ok(report)
+    }
+
+    /// The files the last analysis listed, when it was of exactly these
+    /// items and users and asked by the same person.
+    fn analysed_files(
+        &self,
+        asker: &Asker,
+        ids: &[String],
+        sids: &[String],
+    ) -> Option<HashSet<PathBuf>> {
+        let last = self.last.lock().unwrap();
+        let a = last.as_ref()?;
+        let same_asker = match (&a.asker, &asker.sid) {
+            (Some(x), Some(y)) => x.eq_ignore_ascii_case(y),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same_asker || a.items != key(ids) || a.users != key(sids) {
+            return None;
+        }
+        Some(
+            a.listing
+                .values()
+                .flatten()
+                .map(|f| f.path.clone())
+                .collect(),
+        )
     }
 }
 
@@ -257,6 +437,98 @@ mod tests {
         assert!(!nobody.may_clean("S-1-5-21-1-1001"));
     }
 
+    fn analysed(asker: &str) -> Cleaner {
+        let found = |p: &str, size: u64| engine::Found {
+            path: PathBuf::from(p),
+            size,
+            modified: None,
+        };
+        let cleaner = Cleaner::default();
+        *cleaner.last.lock().unwrap() = Some(Analysis {
+            asker: Some(asker.into()),
+            items: key(&["temp_user".into(), "recycle_bin".into()]),
+            users: key(&["S-1-5-21-1-1001".into()]),
+            counted: [("temp_user".to_string(), 3), ("recycle_bin".to_string(), 1)].into(),
+            listing: [
+                (
+                    "temp_user".to_string(),
+                    vec![
+                        found(r"C:\Users\u\AppData\Local\Temp\b.log", 10),
+                        found(r"C:\Users\u\AppData\Local\Temp\_MEI1\python.dll", 3000),
+                        found(r"C:\Users\u\AppData\Local\Temp\a.tmp", 200),
+                    ],
+                ),
+                (
+                    "recycle_bin".to_string(),
+                    vec![found(r"C:\$Recycle.Bin\S-1-5-21-1-1001\$Rx.txt", 7)],
+                ),
+            ]
+            .into(),
+        });
+        cleaner
+    }
+
+    fn me() -> Asker {
+        Asker {
+            sid: Some("S-1-5-21-1-1001".into()),
+            admin: false,
+        }
+    }
+
+    /// A cleanup of what was analysed is held to its list; of anything else —
+    /// other items, other users, another person's analysis — it walks anew.
+    #[test]
+    fn a_cleanup_is_held_to_the_analysis_of_the_same_request() {
+        let c = analysed("S-1-5-21-1-1001");
+        let items = ["recycle_bin".to_string(), "TEMP_USER".to_string()];
+        let users = ["s-1-5-21-1-1001".to_string()];
+        let held = c.analysed_files(&me(), &items, &users).unwrap();
+        assert_eq!(held.len(), 4);
+        assert!(c.analysed_files(&me(), &items[..1], &users).is_none());
+        assert!(c
+            .analysed_files(&me(), &items, &["S-1-5-21-1-1002".into()])
+            .is_none());
+        let other = Asker {
+            sid: Some("S-1-5-21-1-1002".into()),
+            admin: false,
+        };
+        assert!(c.analysed_files(&other, &items, &users).is_none());
+    }
+
+    #[test]
+    fn the_files_are_listed_a_page_at_a_time_largest_first_or_by_path() {
+        let c = analysed("S-1-5-21-1-1001");
+        let page = c.files(&me(), "temp_user", 0, 2, "size", "").unwrap();
+        assert_eq!(page.total, 3);
+        assert_eq!(page.bytes, 3210);
+        assert!(!page.truncated);
+        assert_eq!(page.files.len(), 2);
+        assert!(page.files[0].path.ends_with("python.dll"));
+        assert!(page.files[1].path.ends_with("a.tmp"));
+        let rest = c.files(&me(), "temp_user", 2, 2, "size", "").unwrap();
+        assert_eq!(rest.files.len(), 1);
+        let by_path = c.files(&me(), "temp_user", 0, 10, "path", "").unwrap();
+        assert!(by_path.files[0].path.ends_with("_MEI1\\python.dll"));
+        let filtered = c.files(&me(), "temp_user", 0, 10, "path", "MEI").unwrap();
+        assert_eq!((filtered.total, filtered.bytes), (1, 3000));
+        // Not analysed, or someone else's analysis.
+        assert!(matches!(
+            c.files(&me(), "shader_cache", 0, 10, "", ""),
+            Err(Refusal::NotAnalyzed)
+        ));
+        let other = Asker {
+            sid: Some("S-1-5-21-1-1002".into()),
+            admin: false,
+        };
+        assert!(matches!(
+            c.files(&other, "temp_user", 0, 10, "", ""),
+            Err(Refusal::NotAnalyzed)
+        ));
+        assert!(Cleaner::default()
+            .files(&me(), "temp_user", 0, 10, "", "")
+            .is_err());
+    }
+
     #[test]
     fn an_unknown_item_is_refused_not_ignored() {
         let admin = Asker {
@@ -288,6 +560,7 @@ mod tests {
                 left_bytes: 5,
             },
             cancelled: false,
+            listing: Default::default(),
         };
         let run = activity_record(&report, chrono::Utc::now());
         assert_eq!(run.operation, "cleanup");

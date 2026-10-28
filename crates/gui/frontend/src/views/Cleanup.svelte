@@ -8,6 +8,7 @@
   import { api } from '../lib/api';
   import { formatBytes } from '../lib/format';
   import { m } from '../lib/paraglide/messages';
+  import CleanupFilesModal from '../components/CleanupFilesModal.svelte';
   import type {
     CleanupCatalog,
     CleanupItem,
@@ -32,6 +33,11 @@
   let report = $state<CleanupReport | null>(null);
   let error = $state<string | null>(null);
   let focused = $state<string | null>(null);
+  /** The item whose files are listed in the window over the page. */
+  let viewing = $state<{ id: string; label: string } | null>(null);
+  /** The ticks changed after an analysis: its numbers and its list no longer
+   *  say what the cleanup would remove. */
+  let stale = $state(false);
 
   function remembered(key: string): string[] | null {
     try {
@@ -79,8 +85,7 @@
     if (next.has(id)) next.delete(id);
     else next.add(id);
     items = next;
-    confirming = false;
-    remember();
+    changed();
   }
 
   function toggleGroup(groupItems: CleanupItem[]) {
@@ -91,8 +96,7 @@
       else next.add(i.id);
     }
     items = next;
-    confirming = false;
-    remember();
+    changed();
   }
 
   function toggleUser(sid: string) {
@@ -100,8 +104,20 @@
     if (next.has(sid)) next.delete(sid);
     else next.add(sid);
     users = next;
+    changed();
+  }
+
+  /** After a change of ticks an analysis says nothing about the new choice:
+   *  its numbers go, and the cleanup is no longer held to its list. */
+  function changed() {
     confirming = false;
     remember();
+    if (shown === 'analyze') {
+      tallies = {};
+      report = null;
+      shown = 'none';
+      stale = true;
+    }
   }
 
   /** The ticked items, in the catalogue's order. */
@@ -117,6 +133,7 @@
     report = null;
     busy = mode;
     shown = mode;
+    stale = false;
     tallies = {};
     try {
       const r =
@@ -178,6 +195,7 @@
       return m.cl_hint_done({ size });
     }
     if (shown === 'analyze' && report) return m.cl_hint_found({ size: formatBytes(total) });
+    if (stale) return m.cl_stale();
     return m.cl_hint_start();
   }
 </script>
@@ -229,6 +247,16 @@
                     title={tallies[it.id] ? m.cl_files({ count: tallies[it.id].files }) : ''}
                     >{sizeText(it.id)}</span
                   >
+                  {#if shown === 'analyze' && !busy && (tallies[it.id]?.files ?? 0) > 0}
+                    <button
+                      class="files-btn"
+                      title={m.cl_files_title()}
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        viewing = { id: it.id, label: it.label };
+                      }}>{m.cl_files_button()}</button
+                    >
+                  {/if}
                 </div>
               {/each}
             </div>
@@ -270,6 +298,10 @@
     {#if error}<div class="banner err">{error}</div>{/if}
   </div>
 
+  {#if viewing}
+    <CleanupFilesModal item={viewing.id} label={viewing.label} onClose={() => (viewing = null)} />
+  {/if}
+
   <div class="footer">
     <div class="hint">{hint()}</div>
     {#if busy}
@@ -307,6 +339,8 @@
   .name { flex: 1; min-width: 0; }
   .size { font-size: 13px; color: var(--text); white-space: nowrap; }
   .muted { color: var(--text-muted); }
+  .files-btn { background: transparent; border: 1px solid var(--border-strong); border-radius: 5px; padding: 2px 9px; font-size: 12px; color: var(--accent-text); cursor: pointer; font-family: var(--font); }
+  .files-btn:hover { background: var(--accent-soft); }
   .cap { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted); margin-bottom: 8px; }
   .about-name { font-size: 14px; font-weight: 600; color: var(--head); margin-bottom: 6px; }
   .about { font-size: 13px; line-height: 1.5; color: var(--text); margin: 0 0 6px; }

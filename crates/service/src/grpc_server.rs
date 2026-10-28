@@ -4490,6 +4490,9 @@ impl BackupService for BackupServiceImpl {
             Refusal::Unknown(what) => Status::invalid_argument(
                 tr!("grpc_server.cleanup_unknown", what = what).into_owned(),
             ),
+            Refusal::NotAnalyzed => {
+                Status::failed_precondition(tr!("grpc_server.cleanup_not_analyzed").into_owned())
+            }
         };
         let cleaner = self.cleaner.clone();
         let (mode, items, users) = match op {
@@ -4497,6 +4500,21 @@ impl BackupService for BackupServiceImpl {
             Op::Cancel => {
                 cleaner.cancel();
                 return json_reply(&serde_json::json!({}));
+            }
+            Op::Files {
+                item,
+                offset,
+                limit,
+                sort,
+                filter,
+            } => {
+                let page = tokio::task::spawn_blocking(move || {
+                    cleaner.files(&asker, &item, offset, limit, &sort, &filter)
+                })
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?
+                .map_err(refused)?;
+                return json_reply(&page);
             }
             Op::Analyze { items, users } => (Mode::Analyze, items, users),
             Op::Run { items, users } => (Mode::Remove, items, users),
@@ -4507,7 +4525,7 @@ impl BackupService for BackupServiceImpl {
         let started = chrono::Utc::now();
         let report = tokio::task::spawn_blocking(move || {
             let mut last: Option<std::time::Instant> = None;
-            cleaner.go(&chosen, &people, mode, |p| {
+            cleaner.go(&asker, &chosen, &people, mode, |p| {
                 if last.is_none_or(|t| t.elapsed().as_millis() >= 200) {
                     last = Some(std::time::Instant::now());
                     emit_engine(&events, "cleanup", &p);

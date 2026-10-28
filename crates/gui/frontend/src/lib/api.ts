@@ -43,6 +43,7 @@ import type {
   LinuxMediaStatus,
   LinuxMediaRelease,
   CleanupCatalog,
+  CleanupFilesPage,
   CleanupReport,
   LinuxMediaDownload,
   ServiceStatus,
@@ -92,6 +93,8 @@ export const api = {
   cleanupRun: (items: string[], users: string[]) =>
     invoke<CleanupReport>('cleanup', { op: { op: 'run', items, users } }),
   cleanupCancel: () => invoke<unknown>('cleanup', { op: { op: 'cancel' } }),
+  cleanupFiles: (item: string, offset: number, limit: number, sort: 'size' | 'path', filter: string) =>
+    invoke<CleanupFilesPage>('cleanup', { op: { op: 'files', item, offset, limit, sort, filter } }),
   buildLinuxMedia: (options: LinuxMediaBuild) =>
     invoke<LinuxMediaReport>('build_linux_media', { options }),
   // Linux: the ready medium of the installed version from GitHub, downloaded
