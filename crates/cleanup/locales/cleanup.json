@@ -128,6 +128,66 @@
     "ru": "Отчёты и дампы, которые браузеры (Chrome, Edge, Vivaldi, Brave, Яндекс, Firefox, Thunderbird) собирают при сбоях, отправленные и ждущие отправки.",
     "en": "Reports and dumps browsers (Chrome, Edge, Vivaldi, Brave, Yandex, Firefox, Thunderbird) collect when they crash, sent and waiting to be sent."
   },
+  "cleanup.group_programs": {
+    "ru": "Программы",
+    "en": "Programs"
+  },
+  "cleanup.office_recent": {
+    "ru": "Недавние документы Microsoft Office",
+    "en": "Microsoft Office recent documents"
+  },
+  "cleanup.office_recent_about": {
+    "ru": "Списки недавних файлов и папок Word, Excel, PowerPoint и других программ Office всех версий, в том числе для вошедшей учётной записи Microsoft. Места, закреплённые в этих списках, остаются; сами документы не затрагиваются. Открытая программа Office записывает список заново при закрытии — закройте её перед очисткой.",
+    "en": "The recent files and folders of Word, Excel, PowerPoint and the other Office programs of every version, the signed-in Microsoft account's too. The places pinned to those lists stay; the documents themselves are not touched. An open Office program writes its list back when it closes — close it before the cleanup."
+  },
+  "cleanup.apps_recent": {
+    "ru": "Недавние файлы программ",
+    "en": "Programs' recent files"
+  },
+  "cleanup.apps_recent_about": {
+    "ru": "Недавние файлы Paint, WordPad, Проигрывателя Windows Media, MPC-HC (вместе с местом, где остановлен просмотр), Adobe Acrobat Reader, история папок и архивов 7-Zip и WinRAR, последний раздел редактора реестра. Настройки программ — например, избранные папки 7-Zip — остаются.",
+    "en": "The recent files of Paint, WordPad, Windows Media Player, MPC-HC (with where playback stopped), Adobe Acrobat Reader, the folder and archive history of 7-Zip and WinRAR, Registry Editor's last key. The programs' settings — 7-Zip's folder shortcuts, say — stay."
+  },
+  "cleanup.app_caches": {
+    "ru": "Кэши программ",
+    "en": "Programs' caches"
+  },
+  "cleanup.app_caches_about": {
+    "ru": "Кэши, которые программы пересоздают сами: миниатюры XnView MP, кэш Discord, Visual Studio Code и встроенного браузера Steam. Открытая программа не трогается.",
+    "en": "Caches the programs rebuild by themselves: XnView MP's thumbnails, the caches of Discord, Visual Studio Code and Steam's built-in browser. A program that is open is left."
+  },
+  "cleanup.telegram_cache": {
+    "ru": "Кэш Telegram Desktop",
+    "en": "Telegram Desktop cache"
+  },
+  "cleanup.telegram_cache_about": {
+    "ru": "Загруженные фото, видео, стикеры и файлы чатов во всех учётных записях Telegram Desktop. Они снова загрузятся из облака Telegram, когда вы их откроете. Вход и переписка не затрагиваются. Закройте Telegram перед очисткой.",
+    "en": "The photos, videos, stickers and files of chats Telegram Desktop downloaded, in every account. They download again from Telegram's cloud when you open them. The sign-in and the chats are not touched. Close Telegram before the cleanup."
+  },
+  "cleanup.dev_caches": {
+    "ru": "Кэши npm, pip, Yarn и NuGet",
+    "en": "npm, pip, Yarn and NuGet caches"
+  },
+  "cleanup.dev_caches_about": {
+    "ru": "Скачанные пакеты, которые менеджеры пакетов хранят про запас. Удалить безопасно — при следующей установке они скачаются снова; без интернета установить их будет нельзя.",
+    "en": "Downloaded packages the package managers keep in reserve. It is safe to remove them — the next install downloads them again; without the internet they cannot be installed."
+  },
+  "cleanup.app_logs": {
+    "ru": "Журналы программ",
+    "en": "Programs' logs"
+  },
+  "cleanup.app_logs_about": {
+    "ru": "Журналы qBittorrent, Zed, DaVinci Resolve, OBS Studio и npm старше недели. Только папки журналов: проекты, настройки и база проектов DaVinci Resolve рядом с ними не затрагиваются.",
+    "en": "The logs of qBittorrent, Zed, DaVinci Resolve, OBS Studio and npm older than a week. Only the logs' folders: the projects, the settings and DaVinci Resolve's project library beside them are not touched."
+  },
+  "cleanup.driver_installers": {
+    "ru": "Установщики драйверов NVIDIA",
+    "en": "NVIDIA driver installers"
+  },
+  "cleanup.driver_installers_about": {
+    "ru": "Распакованный установщик драйвера (C:\\NVIDIA\\DisplayDriver) и скачанные пакеты драйверов (ProgramData\\NVIDIA Corporation\\Downloader) старше суток. Установленный драйвер не затрагивается; для переустановки той же версии её придётся скачать снова.",
+    "en": "The unpacked driver installer (C:\\NVIDIA\\DisplayDriver) and the downloaded driver packages (ProgramData\\NVIDIA Corporation\\Downloader) older than a day. The installed driver is not touched; to reinstall the same version you will have to download it again."
+  },
   "cleanup.group_traces": {
     "ru": "Следы Windows",
     "en": "Windows traces"

@@ -179,6 +179,10 @@ pub fn folders(target: &Target, roots: &Roots, users: &[User]) -> Vec<PathBuf> {
         Base::ProgramData => below(&roots.program_data, target.path),
         Base::LocalAppData => per_user("Local"),
         Base::RoamingAppData => per_user("Roaming"),
+        Base::SystemDrive => below(
+            roots.windows.parent().unwrap_or(&roots.windows),
+            target.path,
+        ),
         Base::Profile => users
             .iter()
             .flat_map(|u| below(&u.profile, target.path))
@@ -291,16 +295,23 @@ pub(crate) fn run_at_with(
         let mut tally = Tally::default();
         let mut found = Vec::new();
         let mut running: Vec<String> = Vec::new();
-        for target in item.targets {
-            if let Some(open) = target
-                .programs
+        // Whether one of `programs` runs; if so, it is named for the window.
+        let mut open = |programs: &[&str]| {
+            let Some(open) = programs
                 .iter()
                 .find(|p| roots.running.contains(&p.to_ascii_lowercase()))
-            {
-                let name = crate::catalog::program_name(open).to_string();
-                if !running.contains(&name) {
-                    running.push(name);
-                }
+            else {
+                return false;
+            };
+            let name = crate::catalog::program_name(open).to_string();
+            if !running.contains(&name) {
+                running.push(name);
+            }
+            true
+        };
+        let keys: Vec<&RegTarget> = item.keys.iter().filter(|k| !open(k.programs)).collect();
+        for target in item.targets {
+            if open(target.programs) {
                 continue;
             }
             for folder in folders(target, roots, users) {
@@ -319,7 +330,7 @@ pub(crate) fn run_at_with(
                 walk.root(&folder);
             }
         }
-        if !item.keys.is_empty() {
+        if !keys.is_empty() {
             let mut reg = Registry {
                 mode,
                 cancel,
@@ -328,7 +339,7 @@ pub(crate) fn run_at_with(
                 found: (mode == Mode::Analyze).then_some(&mut found),
             };
             for user in users {
-                reg.user(item.keys, user, roots.hives);
+                reg.user(&keys, user, roots.hives);
             }
         }
         if mode == Mode::Analyze {
@@ -536,7 +547,7 @@ struct Registry<'a> {
 }
 
 impl Registry<'_> {
-    fn user(&mut self, keys: &[RegTarget], user: &User, open: OpenHive) {
+    fn user(&mut self, keys: &[&RegTarget], user: &User, open: OpenHive) {
         if self.cancel.load(Ordering::Relaxed) {
             return;
         }
@@ -557,8 +568,15 @@ impl Registry<'_> {
     }
 
     fn key(&mut self, hive: &dyn Hive, root: &str, key: &RegTarget) {
-        let at = format!(r"{root}\{}", key.path);
-        for v in hive.values(key.path) {
+        for path in expand(hive, key.path) {
+            self.one_key(hive, root, key, &path);
+        }
+    }
+
+    /// One key `path` stands for (its masks resolved).
+    fn one_key(&mut self, hive: &dyn Hive, root: &str, key: &RegTarget, path: &str) {
+        let at = format!(r"{root}\{path}");
+        for v in hive.values(path) {
             // The default value is the key's own.
             let wanted = !v.name.is_empty()
                 && (key.values.is_empty() || key.values.iter().any(|m| matches_mask(m, &v.name)));
@@ -570,14 +588,14 @@ impl Registry<'_> {
                 None => format!(r"{at}\{}", v.name),
             };
             self.one(PathBuf::from(shown), v.size, || {
-                hive.delete_value(key.path, &v.name)
+                hive.delete_value(path, &v.name)
             });
         }
         if key.subkeys {
-            for s in hive.subkeys(key.path) {
+            for s in hive.subkeys(path) {
                 let shown = format!(r"{at}\{}\", s.name);
                 self.one(PathBuf::from(shown), s.size, || {
-                    hive.delete_subkey(key.path, &s.name)
+                    hive.delete_subkey(path, &s.name)
                 });
             }
         }
@@ -610,6 +628,36 @@ impl Registry<'_> {
             },
         }
     }
+}
+
+/// The keys `path` stands for: a part with `*` or `?` is every subkey there
+/// whose name it matches.
+fn expand(hive: &dyn Hive, path: &str) -> Vec<String> {
+    let mut found = vec![String::new()];
+    for part in path.split('\\').filter(|s| !s.is_empty()) {
+        let join = |at: &str, name: &str| {
+            if at.is_empty() {
+                name.to_string()
+            } else {
+                format!(r"{at}\{name}")
+            }
+        };
+        if !part.contains(['*', '?']) {
+            found = found.iter().map(|at| join(at, part)).collect();
+            continue;
+        }
+        found = found
+            .iter()
+            .flat_map(|at| {
+                hive.subkey_names(at)
+                    .into_iter()
+                    .filter(|name| matches_mask(part, name))
+                    .map(|name| join(at, &name))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+    }
+    found
 }
 
 /// A link, a junction, or (Windows) any other reparse point.

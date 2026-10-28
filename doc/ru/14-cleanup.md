@@ -49,6 +49,13 @@
 | Списки переходов (по умолчанию выкл.) | `Recent\AutomaticDestinations`, `Recent\CustomDestinations` | папки, закреплённые на панели быстрого доступа Проводника |
 | История «Выполнить» и Проводника (по умолчанию выкл.) | в реестре `Explorer\RunMRU`, `TypedPaths`, `WordWheelQuery` | — |
 | Подключения к удалённому рабочему столу (по умолчанию выкл.) | в реестре `Terminal Server Client\Default` (`MRU*`), `Servers`; `Документы\Default.rdp` | сохранённые пароли (диспетчер учётных данных), другие файлы `.rdp` |
+| Недавние документы Microsoft Office (по умолчанию выкл.) | в реестре `Office\<версия>\<программа>\File MRU`, `Place MRU`, в том числе `User MRU\<учётная запись>` — только `Item N`; ярлыки `AppData\Roaming\Microsoft\Office\Recent` | места, закреплённые в списках; открытая программа Office |
+| Недавние файлы программ (по умолчанию выкл.) | в реестре: Paint, WordPad, Проигрыватель Windows Media, MPC-HC (`Recent File List`, `MediaHistory`, `PlaylistHistory`), 7-Zip (`FolderHistory`, `CopyHistory`, `PanelPath*`, `ArcHistory`, `PathHistory`), WinRAR, Adobe Acrobat Reader, `LastKey` редактора реестра | настройки программ (избранные папки 7-Zip, настройки MPC-HC); открытая программа |
+| Кэши программ | миниатюры XnView MP (`Thumb.db`), кэш Discord, Visual Studio Code, `Steam\htmlcache` | открытая программа |
+| Кэш Telegram Desktop (по умолчанию выкл.) | `tdata\user_data*\cache`, `media_cache` всех учётных записей | вход и переписка; открытый Telegram |
+| Кэши npm, pip, Yarn и NuGet (по умолчанию выкл.) | `npm-cache\_cacache`, `pip\cache`, `Yarn\Cache`, `NuGet\v3-cache` | — |
+| Журналы программ | папки журналов qBittorrent, Zed, DaVinci Resolve, OBS Studio, npm | журналы моложе недели; проекты и база проектов DaVinci Resolve; открытая программа |
+| Установщики драйверов NVIDIA (по умолчанию выкл.) | `C:\NVIDIA\DisplayDriver`, `ProgramData\NVIDIA Corporation\Downloader\*` | моложе суток; установленный драйвер |
 
 ## Что гарантировано
 
@@ -72,6 +79,11 @@
   выключите в его настройках «Продолжать работу фоновых расширений и
   приложений».
 - Пароли, закладки и автозаполнение браузеров не удаляются никогда.
+- **У программ — только их кэши, журналы и списки недавнего.** Настройки
+  и данные — проекты и база проектов DaVinci Resolve, несохранённые
+  документы Notepad++, раздачи qBittorrent, вход в Telegram — не
+  затрагиваются. Открытая программа пропускается, у пункта видно
+  «закройте: …».
 - **Реестр — только перечисленные списки.** Удаляются значения и подразделы
   этих разделов; сами разделы и их значение «по умолчанию» остаются. Реестр
   вошедшего пользователя служба открывает в `HKEY_USERS`; у невошедшего —

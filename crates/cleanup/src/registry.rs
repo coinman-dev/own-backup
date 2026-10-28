@@ -35,6 +35,8 @@ pub struct Subkey {
 pub trait Hive {
     fn values(&self, key: &str) -> Vec<Value>;
     fn subkeys(&self, key: &str) -> Vec<Subkey>;
+    /// The subkeys' names alone (no sizes: cheap).
+    fn subkey_names(&self, key: &str) -> Vec<String>;
     fn delete_value(&self, key: &str, name: &str) -> io::Result<()>;
     /// The subkey and everything below it.
     fn delete_subkey(&self, key: &str, name: &str) -> io::Result<()>;
@@ -305,6 +307,12 @@ mod win {
                     Subkey { name, size }
                 })
                 .collect()
+        }
+
+        fn subkey_names(&self, key: &str) -> Vec<String> {
+            self.key(key, KEY_READ)
+                .map(|k| k.subkeys())
+                .unwrap_or_default()
         }
 
         fn delete_value(&self, key: &str, name: &str) -> io::Result<()> {

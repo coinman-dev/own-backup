@@ -498,7 +498,11 @@ impl crate::registry::Hive for FakeHive {
     }
 
     fn subkeys(&self, key: &str) -> Vec<crate::registry::Subkey> {
-        let prefix = format!(r"{key}\");
+        let prefix = if key.is_empty() {
+            String::new()
+        } else {
+            format!(r"{key}\")
+        };
         self.with(|keys| {
             let mut subs: std::collections::BTreeMap<String, u64> = Default::default();
             for (path, values) in keys.iter() {
@@ -511,6 +515,10 @@ impl crate::registry::Hive for FakeHive {
                 .map(|(name, size)| crate::registry::Subkey { name, size })
                 .collect()
         })
+    }
+
+    fn subkey_names(&self, key: &str) -> Vec<String> {
+        self.subkeys(key).into_iter().map(|s| s.name).collect()
     }
 
     fn delete_value(&self, key: &str, name: &str) -> std::io::Result<()> {
@@ -805,4 +813,180 @@ fn jump_lists_go_but_quick_access_pins_stay() {
     assert!(auto
         .join("5f7b5f1e01b83767.automaticDestinations-ms")
         .exists());
+}
+
+// --- programs ---------------------------------------------------------------
+
+fn run_items(ids: &[&str], dir: &Path, mode: Mode, running: &[&str]) -> Report {
+    let items: Vec<&Item> = ids
+        .iter()
+        .map(|id| crate::catalog::item(id).unwrap())
+        .collect();
+    let mut r = roots(dir);
+    r.running = running.iter().map(|p| p.to_string()).collect();
+    run_at_with(
+        &items,
+        &r,
+        &[user(dir)],
+        mode,
+        Options::default(),
+        &AtomicBool::new(false),
+        |_, _| {},
+        SystemTime::now() + TWO_DAYS * 4,
+        None,
+    )
+}
+
+/// Office's recent files of every version and application, signed-in
+/// account's lists too: `Item N` go, the places pinned beside them and the
+/// list's settings stay. While Word runs, the lists are left.
+#[test]
+fn office_lists_lose_their_items_but_keep_pinned_places() {
+    let dir = tempfile::tempdir().unwrap();
+    let sid = user(dir.path()).sid;
+    let word = r"Software\Microsoft\Office\16.0\Word\File MRU";
+    let account = r"Software\Microsoft\Office\16.0\Excel\User MRU\ADAL_1234\Place MRU";
+    let options = r"Software\Microsoft\Office\16.0\Word\Options";
+    set_key(
+        &sid,
+        word,
+        vec![
+            value("FOLDERID_Documents", 40, None),
+            value(
+                "Item 1",
+                90,
+                Some(r"[F00000000][T01DB0000][O00000000]*D:\Отчёт.docx"),
+            ),
+            value("Max Display", 4, None),
+        ],
+    );
+    set_key(
+        &sid,
+        account,
+        vec![value("Item 1", 60, Some(r"D:\Таблицы\"))],
+    );
+    set_key(&sid, options, vec![value("Item 1", 4, None)]);
+
+    let open = run_items(
+        &["office_recent"],
+        dir.path(),
+        Mode::Remove,
+        &["winword.exe"],
+    );
+    assert_eq!(open.items[0].running, vec!["Microsoft Word"]);
+    assert_eq!(open.total.entries, 0, "Word is open: its lists stay");
+
+    let seen = run_items(&["office_recent"], dir.path(), Mode::Analyze, &[]);
+    assert_eq!(seen.total.entries, 2, "Word's Item 1 and Excel's account's");
+    let done = run_items(&["office_recent"], dir.path(), Mode::Remove, &[]);
+    assert_eq!(done.total.entries, 2);
+    assert_eq!(
+        key_values(&sid, word),
+        vec!["FOLDERID_Documents", "Max Display"]
+    );
+    assert!(key_values(&sid, account).is_empty());
+    assert_eq!(key_values(&sid, options), vec!["Item 1"], "not a list");
+}
+
+/// The programs' recent lists take their own values: 7-Zip's folder
+/// shortcuts and MPC-HC's settings stay.
+#[test]
+fn program_lists_take_only_their_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let sid = user(dir.path()).sid;
+    set_key(
+        &sid,
+        r"Software\7-Zip\FM",
+        vec![
+            value("FolderHistory", 80, None),
+            value("PanelPath1", 20, Some(r"D:\Archives\")),
+            value("FolderShortcuts", 30, None),
+            value("ShowGrid", 4, None),
+        ],
+    );
+    let history = r"Software\MPC-HC\MPC-HC\MediaHistory";
+    set_key(&sid, history, vec![value("LastAdded", 8, None)]);
+    set_key(
+        &sid,
+        &format!(r"{history}\+2wow5YesELh"),
+        vec![value("Filename", 80, Some(r"H:\Video\DSCF1652.MOV"))],
+    );
+    set_key(
+        &sid,
+        r"Software\MPC-HC\MPC-HC\Settings",
+        vec![value("ShowOSD", 4, None)],
+    );
+
+    let done = run_items(&["apps_recent"], dir.path(), Mode::Remove, &[]);
+    assert_eq!(
+        done.total.entries, 4,
+        "two 7-Zip values, LastAdded, the file"
+    );
+    assert_eq!(
+        key_values(&sid, r"Software\7-Zip\FM"),
+        vec!["FolderShortcuts", "ShowGrid"]
+    );
+    assert!(!key_exists(&sid, &format!(r"{history}\+2wow5YesELh")));
+    assert_eq!(
+        key_values(&sid, r"Software\MPC-HC\MPC-HC\Settings"),
+        vec!["ShowOSD"]
+    );
+}
+
+/// Logs a week old go; a fresh log and DaVinci Resolve's project library
+/// beside the logs stay. Telegram's caches of every account go, its
+/// account data stays. NVIDIA's unpacked driver on the system drive goes.
+#[test]
+fn program_logs_and_caches_go_and_their_data_stays() {
+    let dir = tempfile::tempdir().unwrap();
+    let support = dir
+        .path()
+        .join("ProgramData/Blackmagic Design/DaVinci Resolve/Support");
+    write(&support.join("logs/ResolveDebug.txt"), 100);
+    write(
+        &support.join("Resolve Project Library/Resolve Projects/project.db"),
+        50,
+    );
+    let roaming = dir.path().join("Users/u/AppData/Roaming");
+    let tdata = roaming.join("Telegram Desktop/tdata");
+    write(&tdata.join("user_data/cache/0/AB/file"), 300);
+    write(&tdata.join("user_data#2/media_cache/x"), 200);
+    write(&tdata.join("D877F783D5D3EF8C/maps"), 10);
+    write(&tdata.join("key_datas"), 10);
+    write(
+        &dir.path().join("NVIDIA/DisplayDriver/572.16/setup.exe"),
+        1000,
+    );
+    write(&dir.path().join("NVIDIA/notes.txt"), 5);
+
+    let done = run_items(
+        &["app_logs", "telegram_cache", "driver_installers"],
+        dir.path(),
+        Mode::Remove,
+        &[],
+    );
+    assert_eq!(done.items[0].tally.files, 1, "the log");
+    assert_eq!(done.items[1].tally.files, 2, "both accounts' caches");
+    assert_eq!(done.items[2].tally.files, 1, "the unpacked driver");
+    assert!(!support.join("logs/ResolveDebug.txt").exists());
+    assert!(support
+        .join("Resolve Project Library/Resolve Projects/project.db")
+        .exists());
+    assert!(tdata.join("D877F783D5D3EF8C/maps").exists());
+    assert!(tdata.join("key_datas").exists());
+    assert!(dir.path().join("NVIDIA/notes.txt").exists());
+
+    // A log written now stays.
+    write(&support.join("logs/fresh.txt"), 10);
+    let again = run_at(
+        &[crate::catalog::item("app_logs").unwrap()],
+        &roots(dir.path()),
+        &[user(dir.path())],
+        Mode::Remove,
+        &AtomicBool::new(false),
+        |_, _| {},
+        SystemTime::now(),
+    );
+    assert_eq!(again.total.files, 0);
+    assert!(support.join("logs/fresh.txt").exists());
 }

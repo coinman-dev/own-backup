@@ -448,6 +448,15 @@ mod win {
             "UsernameHint",
             r"HOST\me",
         );
+        let word = r"Software\Microsoft\Office\16.0\Word\File MRU";
+        hive::binary(root, word, "FOLDERID_Documents", &[1, 2, 3, 4]);
+        hive::text(
+            root,
+            word,
+            "Item 1",
+            r"[F00000000][T01DB0000]*D:\Отчёт.docx",
+        );
+        hive::dword(root, word, "Max Display");
         hive::close(root);
 
         // Not signed in: no HKEY_USERS\<SID>, the profile's file.
@@ -463,7 +472,7 @@ mod win {
             running: Default::default(),
             hives: own_backup_cleanup::registry::open_user,
         };
-        let items: Vec<_> = ["run_history", "recent_docs", "rdp_history"]
+        let items: Vec<_> = ["run_history", "recent_docs", "rdp_history", "office_recent"]
             .iter()
             .map(|id| catalog::item(id).unwrap())
             .collect();
@@ -484,8 +493,8 @@ mod win {
         }
         println!("analysis: {:?}", seen.total);
         check(
-            seen.total.entries == 7,
-            "analysis: a, b, MRUList; RecentDocs 0 and .docx; MRU0; the server",
+            seen.total.entries == 8,
+            "analysis: a, b, MRUList; RecentDocs 0 and .docx; MRU0; the server; Office Item 1",
         );
         let listed: Vec<String> = seen
             .listing
@@ -514,7 +523,7 @@ mod win {
                 .unwrap();
             let refused = go(Mode::Remove);
             check(
-                refused.total.entries == 0 && refused.total.left_files == 3,
+                refused.total.entries == 0 && refused.total.left_files == 4,
                 "a hive held by another is left (once per item)",
             );
             drop(held);
@@ -550,6 +559,11 @@ mod win {
         check(
             hive::names(root, &format!(r"{tsc}\Servers\host.example")).is_none(),
             "Remote Desktop: the server is gone",
+        );
+        check(
+            hive::names(root, word)
+                == Some(vec!["FOLDERID_Documents".into(), "Max Display".into()]),
+            r"Office: Item 1 gone (found through Office\*\*), the pinned place stays",
         );
         hive::close(root);
         let again = go(Mode::Analyze);

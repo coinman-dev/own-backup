@@ -25,6 +25,13 @@
   Browser history can keep its last day, week or month: only older visits
   are removed from the history database, edited on a copy, checked and then
   put in place.
+- **Cleanup: programs.** Microsoft Office recent documents (the places
+  pinned to the lists stay), the recent files of Paint, WordPad, Windows
+  Media Player, MPC-HC, 7-Zip, WinRAR, Adobe Acrobat Reader; the caches of
+  XnView MP, Discord, Visual Studio Code, Steam, Telegram Desktop, npm, pip,
+  Yarn and NuGet; the logs of qBittorrent, Zed, DaVinci Resolve, OBS Studio;
+  NVIDIA driver installers. The programs' settings and data are not touched;
+  a program that is open is left.
 - **Cleanup: Windows traces** (off by default): recent documents (shortcuts
   and the registry's lists, the Open and Save As dialogs' too), jump lists
   (the folders pinned to Quick access stay), the Run box's, Explorer's

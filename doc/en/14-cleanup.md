@@ -50,6 +50,13 @@ The chosen items and users are remembered.
 | Jump lists (off by default) | `Recent\AutomaticDestinations`, `Recent\CustomDestinations` | the folders pinned to Explorer's Quick access |
 | Run and Explorer history (off by default) | in the registry `Explorer\RunMRU`, `TypedPaths`, `WordWheelQuery` | — |
 | Remote Desktop connections (off by default) | in the registry `Terminal Server Client\Default` (`MRU*`), `Servers`; `Documents\Default.rdp` | saved passwords (Credential Manager), other `.rdp` files |
+| Microsoft Office recent documents (off by default) | in the registry `Office\<version>\<program>\File MRU`, `Place MRU`, `User MRU\<account>` too — `Item N` only; the shortcuts in `AppData\Roaming\Microsoft\Office\Recent` | the places pinned to the lists; an Office program that is open |
+| Programs' recent files (off by default) | in the registry: Paint, WordPad, Windows Media Player, MPC-HC (`Recent File List`, `MediaHistory`, `PlaylistHistory`), 7-Zip (`FolderHistory`, `CopyHistory`, `PanelPath*`, `ArcHistory`, `PathHistory`), WinRAR, Adobe Acrobat Reader, Registry Editor's `LastKey` | the programs' settings (7-Zip's folder shortcuts, MPC-HC's settings); a program that is open |
+| Programs' caches | XnView MP's thumbnails (`Thumb.db`), the caches of Discord, Visual Studio Code, `Steam\htmlcache` | a program that is open |
+| Telegram Desktop cache (off by default) | `tdata\user_data*\cache`, `media_cache` of every account | the sign-in and the chats; Telegram open |
+| npm, pip, Yarn and NuGet caches (off by default) | `npm-cache\_cacache`, `pip\cache`, `Yarn\Cache`, `NuGet\v3-cache` | — |
+| Programs' logs | the log folders of qBittorrent, Zed, DaVinci Resolve, OBS Studio, npm | logs younger than a week; DaVinci Resolve's projects and project library; a program that is open |
+| NVIDIA driver installers (off by default) | `C:\NVIDIA\DisplayDriver`, `ProgramData\NVIDIA Corporation\Downloader\*` | younger than a day; the installed driver |
 
 ## What is guaranteed
 
@@ -73,6 +80,10 @@ The chosen items and users are remembered.
   closed — then turn off "Continue running background extensions and apps"
   in its settings.
 - Browsers' passwords, bookmarks and autofill are never removed.
+- **Of programs, only their caches, logs and recent lists.** Their settings
+  and data — DaVinci Resolve's projects and project library, Notepad++'s
+  unsaved documents, qBittorrent's torrents, the Telegram sign-in — are not
+  touched. A program that is open is left, and the item says "close: …".
 - **In the registry, only the lists named.** The values and subkeys of those
   keys go; the keys themselves and their default values stay. The service
   opens a signed-in user's registry in `HKEY_USERS`; for a user who is not
