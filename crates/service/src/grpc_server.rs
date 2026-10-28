@@ -43,6 +43,8 @@ pub struct BackupServiceImpl {
     service_token: String,
     /// Linux partitions opened for the Total Commander plugin.
     linux_browse: Arc<crate::linux_browse::Sessions>,
+    /// The window's «Очистка»: one analysis or cleanup at a time.
+    cleaner: Arc<crate::cleanup::Cleaner>,
 }
 
 /// Tells the window an operation no longer waits its turn — once, whether
@@ -81,6 +83,7 @@ impl BackupServiceImpl {
             service_token,
             shutdown,
             linux_browse: Arc::new(crate::linux_browse::Sessions::default()),
+            cleaner: Arc::default(),
         }
     }
 
@@ -4463,6 +4466,95 @@ impl BackupService for BackupServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?
             .map_err(Status::failed_precondition)?;
         Ok(Response::new(BytesReply { data }))
+    }
+
+    async fn cleanup(&self, req: Request<JsonRequest>) -> Result<Response<JsonReply>, Status> {
+        use crate::cleanup::{activity_record, Cleaner, Refusal, Request as Op};
+        use own_backup_cleanup::Mode;
+        check_auth(&req, &self.service_token)?;
+        if !cfg!(windows) {
+            return Err(Status::unimplemented(
+                tr!("grpc_server.cleanup_windows_only").into_owned(),
+            ));
+        }
+        let asker = cleanup_asker(&req);
+        let op: Op = serde_json::from_str(&req.into_inner().json)
+            .map_err(|e| Status::invalid_argument(format!("cleanup: {e}")))?;
+        let refused = |r: Refusal| match r {
+            Refusal::Busy => {
+                Status::failed_precondition(tr!("grpc_server.cleanup_busy").into_owned())
+            }
+            Refusal::NotAllowed(user) => Status::permission_denied(
+                tr!("grpc_server.cleanup_not_allowed", user = user).into_owned(),
+            ),
+            Refusal::Unknown(what) => Status::invalid_argument(
+                tr!("grpc_server.cleanup_unknown", what = what).into_owned(),
+            ),
+        };
+        let cleaner = self.cleaner.clone();
+        let (mode, items, users) = match op {
+            Op::Catalog => return json_reply(&cleaner.catalog(&asker)),
+            Op::Cancel => {
+                cleaner.cancel();
+                return json_reply(&serde_json::json!({}));
+            }
+            Op::Analyze { items, users } => (Mode::Analyze, items, users),
+            Op::Run { items, users } => (Mode::Remove, items, users),
+        };
+        let (chosen, people) = Cleaner::resolve(&asker, &items, &users).map_err(refused)?;
+        info!(?mode, items = ?items, users = people.len(), "gRPC: Cleanup");
+        let events = self.state.events.clone();
+        let started = chrono::Utc::now();
+        let report = tokio::task::spawn_blocking(move || {
+            let mut last: Option<std::time::Instant> = None;
+            cleaner.go(&chosen, &people, mode, |p| {
+                if last.is_none_or(|t| t.elapsed().as_millis() >= 200) {
+                    last = Some(std::time::Instant::now());
+                    emit_engine(&events, "cleanup", &p);
+                }
+            })
+        })
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map_err(refused)?;
+        info!(
+            ?mode,
+            files = report.total.files,
+            bytes = report.total.bytes,
+            left = report.total.left_files,
+            cancelled = report.cancelled,
+            "cleanup finished"
+        );
+        if mode == Mode::Remove {
+            let mut run = activity_record(&report, started);
+            if let Err(e) = self.state.store.record_run(run.clone()) {
+                tracing::error!(error = %e, "the cleanup could not be recorded in the activity");
+            }
+            run.in_language(own_backup_common::lang::code());
+            let _ = self.state.events.send(Event {
+                kind: "finished".into(),
+                json: serde_json::to_string(&run).unwrap_or_default(),
+            });
+        }
+        json_reply(&report)
+    }
+}
+
+/// Who asks for a cleanup: their SID and whether they may clean other users'
+/// folders (an administrator's window). Development over TCP has no caller;
+/// a debug build lets it clean anyone's, a release build nobody's.
+fn cleanup_asker<T>(req: &Request<T>) -> crate::cleanup::Asker {
+    #[cfg(windows)]
+    if let Some(c) = req.extensions().get::<crate::PipeCaller>() {
+        return crate::cleanup::Asker {
+            sid: Some(c.sid.clone()),
+            admin: c.elevated,
+        };
+    }
+    let _ = req;
+    crate::cleanup::Asker {
+        sid: None,
+        admin: cfg!(debug_assertions),
     }
 }
 

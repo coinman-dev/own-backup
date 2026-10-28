@@ -203,6 +203,11 @@ service BackupService {
   // pieces of at most 1 MiB by LinuxBrowseRead.
   rpc LinuxBrowse(JsonRequest) returns (JsonReply);
   rpc LinuxBrowseRead(JsonRequest) returns (BytesReply);  // in: ReadRequest -> the bytes
+
+  // Disk cleanup, the window's «Очистка» (Windows for now). JSON `op`:
+  // catalog | analyze | run | cancel (service/src/cleanup.rs); progress goes
+  // out as `cleanup` events, a run is recorded in the activity.
+  rpc Cleanup(JsonRequest) returns (JsonReply);
 }
 
 message Empty {}

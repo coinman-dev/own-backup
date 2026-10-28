@@ -224,6 +224,22 @@
     "ru": "читать разделы Linux напрямую может только root",
     "en": "only root may read Linux partitions directly"
   },
+  "grpc_server.cleanup_windows_only": {
+    "ru": "Очистка диска пока есть только в Windows.",
+    "en": "Disk cleanup is available on Windows only for now."
+  },
+  "grpc_server.cleanup_busy": {
+    "ru": "Анализ или очистка уже идёт — дождитесь конца или отмените.",
+    "en": "An analysis or a cleanup is already running — wait for it to end or cancel it."
+  },
+  "grpc_server.cleanup_not_allowed": {
+    "ru": "Чистить папки пользователя «%{user}» может только администратор.",
+    "en": "Only an administrator may clean the folders of the user \"%{user}\"."
+  },
+  "grpc_server.cleanup_unknown": {
+    "ru": "Нет такого пункта очистки или пользователя: %{what}.",
+    "en": "No such cleanup item or user: %{what}."
+  },
   "grpc_server.linux_browse_disk": {
     "ru": "Диск %{number}",
     "en": "Disk %{number}"

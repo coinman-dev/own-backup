@@ -1,0 +1,95 @@
+{
+  "_version": 2,
+  "cleanup.group_temp": {
+    "ru": "Временные файлы",
+    "en": "Temporary files"
+  },
+  "cleanup.group_reports": {
+    "ru": "Отчёты, дампы и журналы",
+    "en": "Reports, dumps and logs"
+  },
+  "cleanup.group_caches": {
+    "ru": "Кэши",
+    "en": "Caches"
+  },
+  "cleanup.temp_user": {
+    "ru": "Временные файлы пользователя",
+    "en": "The user's temporary files"
+  },
+  "cleanup.temp_user_about": {
+    "ru": "Папка Temp пользователя (AppData\\Local\\Temp): то, что программы и установщики оставили после себя. Удаляются файлы старше суток — то, чем запущенная программа пользуется сейчас, остаётся.",
+    "en": "The user's Temp folder (AppData\\Local\\Temp): what programs and installers left behind. Files older than a day are removed — what a running program uses now stays."
+  },
+  "cleanup.temp_windows": {
+    "ru": "Временные файлы Windows",
+    "en": "Windows temporary files"
+  },
+  "cleanup.temp_windows_about": {
+    "ru": "Папка Windows\\Temp: временные файлы служб и установщиков. Удаляются файлы старше суток.",
+    "en": "The Windows\\Temp folder: temporary files of services and installers. Files older than a day are removed."
+  },
+  "cleanup.recycle_bin": {
+    "ru": "Корзина",
+    "en": "Recycle Bin"
+  },
+  "cleanup.recycle_bin_about": {
+    "ru": "Всё, что лежит в корзине пользователя на каждом диске. Вернуть эти файлы после очистки будет нельзя.",
+    "en": "Everything in the user's Recycle Bin on every drive. These files cannot be brought back after the cleanup."
+  },
+  "cleanup.error_reports": {
+    "ru": "Отчёты об ошибках Windows",
+    "en": "Windows error reports"
+  },
+  "cleanup.error_reports_about": {
+    "ru": "Отчёты, которые Windows собирает при сбоях программ (WER), отправленные и ждущие отправки.",
+    "en": "Reports Windows collects when programs fail (WER), sent and waiting to be sent."
+  },
+  "cleanup.crash_dumps": {
+    "ru": "Аварийные дампы",
+    "en": "Crash dumps"
+  },
+  "cleanup.crash_dumps_about": {
+    "ru": "Снимки памяти после сбоев системы (MEMORY.DMP, Minidump) и программ (AppData\\Local\\CrashDumps). Нужны только для разбора сбоя.",
+    "en": "Memory snapshots after system failures (MEMORY.DMP, Minidump) and program crashes (AppData\\Local\\CrashDumps). Needed only to investigate the failure."
+  },
+  "cleanup.windows_logs": {
+    "ru": "Журналы установки Windows",
+    "en": "Windows setup logs"
+  },
+  "cleanup.windows_logs_about": {
+    "ru": "Журналы обслуживания и обновления Windows (Logs\\CBS, DISM, WindowsUpdate) старше недели. Журналы событий Windows не затрагиваются.",
+    "en": "Windows servicing and update logs (Logs\\CBS, DISM, WindowsUpdate) older than a week. The Windows event logs are not touched."
+  },
+  "cleanup.inet_cache": {
+    "ru": "Кэш WinINet",
+    "en": "WinINet cache"
+  },
+  "cleanup.inet_cache_about": {
+    "ru": "Загрузки, которые кэширует сетевая библиотека Windows (INetCache): старый Internet Explorer, справка, часть программ. Браузеры Chrome, Edge и Firefox хранят свой кэш отдельно.",
+    "en": "Downloads cached by the Windows network library (INetCache): the old Internet Explorer, help and some programs. Chrome, Edge and Firefox keep their caches elsewhere."
+  },
+  "cleanup.shader_cache": {
+    "ru": "Кэш шейдеров (DirectX, NVIDIA, AMD)",
+    "en": "Shader cache (DirectX, NVIDIA, AMD)"
+  },
+  "cleanup.shader_cache_about": {
+    "ru": "Собранные шейдеры видеокарты. Пересоздаются сами; первый запуск игры после очистки может быть медленнее.",
+    "en": "Compiled graphics shaders. They are rebuilt by themselves; the first start of a game after the cleanup may be slower."
+  },
+  "cleanup.thumbnails": {
+    "ru": "Кэш миниатюр",
+    "en": "Thumbnail cache"
+  },
+  "cleanup.thumbnails_about": {
+    "ru": "Миниатюры и значки, которые Проводник показывает в папках. Пересоздаются при просмотре; файлы, занятые Проводником, остаются.",
+    "en": "Thumbnails and icons Explorer shows in folders. They are rebuilt when viewed; files Explorer holds open stay."
+  },
+  "cleanup.prefetch": {
+    "ru": "Prefetch",
+    "en": "Prefetch"
+  },
+  "cleanup.prefetch_about": {
+    "ru": "Сведения, по которым Windows быстрее запускает программы. После очистки первые запуски будут медленнее — обычно чистить не нужно.",
+    "en": "What Windows uses to start programs faster. After the cleanup the first starts are slower — usually there is no need to clean it."
+  }
+}

@@ -12,6 +12,7 @@
   import Boot from './views/Boot.svelte';
   import Tools from './views/Tools.svelte';
   import Activity from './views/Activity.svelte';
+  import Cleanup from './views/Cleanup.svelte';
   import Settings from './views/Settings.svelte';
   import About from './views/About.svelte';
   import type { ViewName } from './lib/types';
@@ -165,6 +166,8 @@
         <Tools />
       {:else if currentView === 'activity'}
         <Activity />
+      {:else if currentView === 'cleanup'}
+        <Cleanup />
       {:else if currentView === 'settings'}
         <Settings />
       {:else if currentView === 'about'}

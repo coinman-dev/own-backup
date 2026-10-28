@@ -726,6 +726,21 @@ impl BackupClient {
 
     /// Linux: can the boot medium be built now, and the cache an earlier
     /// build left.
+    /// The window's «Очистка»: `{op: catalog | analyze | run | cancel, …}`
+    /// (service/src/cleanup.rs). An analysis or a cleanup returns when it
+    /// ends; its progress comes as `cleanup` events.
+    pub async fn cleanup(&mut self, op: &serde_json::Value) -> Result<serde_json::Value> {
+        let reply = self
+            .inner
+            .cleanup(self.request(proto::JsonRequest {
+                json: op.to_string(),
+            }))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
     pub async fn linux_media_status(
         &mut self,
     ) -> Result<own_backup_common::engine_dto::LinuxMediaStatusDto> {

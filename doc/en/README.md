@@ -23,6 +23,8 @@ Version 0.1.6-beta. [Русская версия](../ru/README.md)
 11. [Command line](11-command-line.md).
 12. [Files, folders and logs](12-files-and-logs.md) — where everything is kept.
 13. [Troubleshooting and FAQ](13-troubleshooting.md).
+14. [Disk cleanup](14-cleanup.md) — Windows: temporary files, reports, dumps,
+    caches and the Recycle Bin.
 
 License: PolyForm Noncommercial 1.0.0 — free for noncommercial use; see
 [License](01-overview.md#license).

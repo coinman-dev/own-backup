@@ -4,6 +4,17 @@
 
 ## Unreleased
 
+### Added
+
+- **Windows: disk cleanup.** A new section, **Cleanup**, before Settings:
+  temporary files, Windows error reports, crash dumps, setup logs, the WinINet
+  and shader caches, thumbnails, Prefetch and the Recycle Bin, for the system
+  and the chosen users. **Analyse** shows how much each item takes, **Clean
+  up** removes it — plainly and fast, not into the Recycle Bin. Only the
+  folders of the items are touched, never a mask over a whole disk; files
+  younger than a day in the temporary folders, files in use, links and
+  junctions stay. The result goes into Activity.
+
 ### Changed
 
 - **The chain number in backup file names.** A new full starts the next

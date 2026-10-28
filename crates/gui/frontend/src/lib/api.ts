@@ -42,6 +42,8 @@ import type {
   LinuxMediaReport,
   LinuxMediaStatus,
   LinuxMediaRelease,
+  CleanupCatalog,
+  CleanupReport,
   LinuxMediaDownload,
   ServiceStatus,
   MountBackendStatus,
@@ -82,6 +84,14 @@ export const api = {
     invoke<MediaStickReport>('write_media_stick', { options }),
   // Linux: the medium built by the service from the installed package.
   linuxMediaStatus: () => invoke<LinuxMediaStatus>('linux_media_status'),
+  /** «Очистка» (Windows): the catalogue, an analysis, the cleanup, its cancel.
+   *  Progress comes on `cleanup-progress`. */
+  cleanupCatalog: () => invoke<CleanupCatalog>('cleanup', { op: { op: 'catalog' } }),
+  cleanupAnalyze: (items: string[], users: string[]) =>
+    invoke<CleanupReport>('cleanup', { op: { op: 'analyze', items, users } }),
+  cleanupRun: (items: string[], users: string[]) =>
+    invoke<CleanupReport>('cleanup', { op: { op: 'run', items, users } }),
+  cleanupCancel: () => invoke<unknown>('cleanup', { op: { op: 'cancel' } }),
   buildLinuxMedia: (options: LinuxMediaBuild) =>
     invoke<LinuxMediaReport>('build_linux_media', { options }),
   // Linux: the ready medium of the installed version from GitHub, downloaded

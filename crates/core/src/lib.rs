@@ -513,13 +513,30 @@ struct KilledRunNote {
     started_at: String,
 }
 
+/// What a disk cleanup did, as «Активность» shows it.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct CleanupSummary {
+    /// Files removed and their size.
+    pub files: u64,
+    pub bytes: u64,
+    /// Files that were to go but could not — in use, refused.
+    pub left_files: u64,
+    pub left_bytes: u64,
+    /// The items cleaned, in both languages: the history is read later, by a
+    /// window that may speak the other one.
+    pub items: Vec<own_backup_common::lang::Localized>,
+}
+
 /// A single completed (or failed) run — feeds the dashboard and Activity.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct JobRun {
-    /// backup (also the default for old history) | verify.
+    /// backup (also the default for old history) | verify | cleanup.
     pub operation: String,
     pub verification: Option<own_backup_common::engine_dto::JobVerifySummary>,
+    /// What a disk cleanup removed (`operation: "cleanup"`, no job).
+    pub cleanup: Option<CleanupSummary>,
     pub id: String,
     pub job_id: String,
     pub job_name: String,

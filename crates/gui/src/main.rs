@@ -725,6 +725,7 @@ fn main() {
             commands::engine::list_media_sticks,
             commands::engine::write_media_stick,
             commands::engine::linux_media_status,
+            commands::engine::cleanup,
             commands::engine::build_linux_media,
             commands::engine::clear_linux_media_cache,
             commands::engine::default_media_folder,
@@ -882,6 +883,7 @@ async fn bridge_service_events(app: tauri::AppHandle, link: Arc<ServiceLink>) {
                                 "restore-disk" => "restore-disk-progress",
                                 "restore-plan" => "restore-plan-progress",
                                 "media" => "media-progress",
+                                "cleanup" => "cleanup-progress",
                                 "waiting" => "busy-waiting",
                                 _ => continue,
                             };

@@ -8,6 +8,7 @@ mod app_state;
 mod data_dir_acl;
 mod grpc_server;
 mod install;
+mod cleanup;
 mod linux_browse;
 #[cfg(target_os = "linux")]
 mod logind_events;

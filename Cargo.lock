@@ -3004,6 +3004,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "own-backup-cleanup"
+version = "0.1.8-beta"
+dependencies = [
+ "own-backup-common",
+ "rust-i18n",
+ "serde",
+ "tempfile",
+ "tracing",
+ "windows 0.58.0",
+]
+
+[[package]]
 name = "own-backup-cli"
 version = "0.1.8-beta"
 dependencies = [

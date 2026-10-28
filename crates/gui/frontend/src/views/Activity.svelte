@@ -7,6 +7,7 @@
   import { formatBytes, formatDate, formatDuration } from '../lib/format';
   import type { JobRun, RestoreRunState } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
+  import { locale } from '../lib/i18n.svelte';
 
   // Restores live in the service's own history, not in the job runs: this
   // list used to show copies only, and a finished restore vanished for good
@@ -157,10 +158,12 @@
           </div>
           <div class="body">
             <div class="title">
-              {r.operation === 'verify'
+              {r.operation === 'cleanup'
+                ? (r.status === 'cancelled' ? m.act_cleanup_cancelled() : m.act_cleanup_done())
+                : r.operation === 'verify'
                 ? (r.status === 'success' ? m.act_verify_done() : r.status === 'cancelled' ? m.act_verify_cancelled() : m.act_verify_failed())
                 : (r.status === 'success' ? m.act_backup_done() : r.skipped ? m.act_backup_skipped() : r.interrupted ? m.act_backup_interrupted() : r.status === 'cancelled' ? m.act_backup_cancelled() : m.act_backup_failed())}
-              — {r.job_name}
+              {#if r.job_name}— {r.job_name}{/if}
               <span class="time">{formatDate(r.finished_at || r.started_at)}</span>
             </div>
             {#if (r.status === 'error' || r.interrupted) && r.error}
@@ -180,7 +183,23 @@
             {#each r.notes ?? [] as note}
               <div class="note">{note}</div>
             {/each}
-            {#if r.operation === 'verify'}
+            {#if r.operation === 'cleanup' && r.cleanup}
+              {@const c = r.cleanup}
+              <div class="stats">
+                <div><span class="k">{m.act_cleanup_freed()}</span><span class="v">{formatBytes(c.bytes)}</span></div>
+                <div><span class="k">{m.act_cleanup_files()}</span><span class="v">{c.files}</span></div>
+                {#if c.left_files > 0}
+                  <div><span class="k">{m.act_cleanup_left()}</span><span class="v">{c.left_files} ({formatBytes(c.left_bytes)})</span></div>
+                {/if}
+                <div><span class="k">{m.act_time()}</span><span class="v">{formatDuration(r.duration_secs)}</span></div>
+              </div>
+              {#if c.items.length > 0}
+                <details class="follow">
+                  <summary>{m.act_cleanup_items({ count: c.items.length })}</summary>
+                  <ul>{#each c.items as it, i (i)}<li>{locale() === 'en' ? it.en : it.ru}</li>{/each}</ul>
+                </details>
+              {/if}
+            {:else if r.operation === 'verify'}
               <div class="stats">
                 <div><span class="k">{m.act_time()}</span><span class="v">{formatDuration(r.duration_secs)}</span></div>
                 <div><span class="k">{m.act_verify_blocks()}</span><span class="v">{r.used_blocks}</span></div>

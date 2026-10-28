@@ -347,6 +347,7 @@ export type ViewName =
   | 'boot'
   | 'tools'
   | 'activity'
+  | 'cleanup'
   | 'settings'
   | 'about';
 
@@ -519,6 +520,8 @@ export interface VerificationConfig {
 export interface JobRun {
   operation?: string;
   verification?: JobVerifySummary | null;
+  /** What a disk cleanup removed (`operation: 'cleanup'`). */
+  cleanup?: CleanupSummary | null;
   id: string;
   job_id: string;
   job_name: string;
@@ -1326,4 +1329,68 @@ export interface HiddenVolume {
   size_bytes: number;
   filesystem: string;
   label: string;
+}
+
+// --- «Очистка» (service/src/cleanup.rs) -----------------------------------
+
+/** A text kept in both languages (history read by a window of either). */
+export interface Localized {
+  ru: string;
+  en: string;
+}
+
+export interface CleanupSummary {
+  files: number;
+  bytes: number;
+  left_files: number;
+  left_bytes: number;
+  items: Localized[];
+}
+
+export interface CleanupItem {
+  id: string;
+  label: string;
+  about: string;
+  default_on: boolean;
+  /** Cleaned in each chosen user's folders. */
+  per_user: boolean;
+}
+
+export interface CleanupGroup {
+  id: string;
+  label: string;
+  items: CleanupItem[];
+}
+
+export interface CleanupUser {
+  sid: string;
+  name: string;
+  /** The person at the window. */
+  me: boolean;
+  /** Whether this window may clean the user's folders (administrator: anyone). */
+  allowed: boolean;
+}
+
+export interface CleanupCatalog {
+  groups: CleanupGroup[];
+  users: CleanupUser[];
+}
+
+export interface CleanupTally {
+  files: number;
+  bytes: number;
+  left_files: number;
+  left_bytes: number;
+}
+
+export interface CleanupReport {
+  items: ({ id: string } & CleanupTally)[];
+  total: CleanupTally;
+  cancelled: boolean;
+}
+
+/** `cleanup-progress`: one item's tally so far. */
+export interface CleanupProgress extends CleanupTally {
+  mode: 'analyze' | 'run';
+  item: string;
 }
