@@ -32,8 +32,12 @@
   Yarn and NuGet; the logs of qBittorrent, Zed, DaVinci Resolve, OBS Studio;
   NVIDIA driver installers. The programs' settings and data are not touched;
   a program that is open is left.
-- **Cleanup: files by masks** (off by default) — as in Ace Utilities, but
-  carefully: only in the users' profiles and in folders an administrator
+- **Cleanup: Windows Update cache** — downloaded update files
+  (`SoftwareDistribution\Download`) older than a day; the update history
+  stays.
+- **Cleanup: files by masks** (off by default) — a list of masks as in Ace
+  Utilities (temporary files and junk on; backups, logs, `*.chk` off), own
+  masks, but carefully: only in the users' profiles and in folders an administrator
   added; Windows, Program Files, ProgramData, AppData, `.git`,
   `node_modules`, cloud folders and the program's own files are never
   touched; masks too broad (`*.*`) are refused; files older than a week

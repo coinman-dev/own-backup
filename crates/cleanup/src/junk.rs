@@ -28,17 +28,152 @@ use serde::Deserialize;
 use crate::engine::{is_link, matches_mask, remove_file, Found, Mode, Tally, LIST_CAP};
 use crate::users::User;
 
-/// The masks offered: files that are junk wherever they are.
-pub const DEFAULT_MASKS: &[&str] = &[
-    "*.tmp",
-    "*.temp",
-    "~$*",
-    "Thumbs.db",
-    "*.dmp",
-    "*.gid",
-    "*._mp",
-    "*.$$$",
+/// What kind of junk a mask finds — how the window groups and explains it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    /// Programs' temporary files.
+    Temp,
+    /// Left by Windows and old programs (help indexes, dumps, thumbnails).
+    Junk,
+    /// Intermediate files of a build (Visual Studio): a project rebuilds them.
+    Build,
+    /// Backup copies — of a document too (`Работа.odt.bak`).
+    Backup,
+    /// Logs.
+    Log,
+    /// Pieces of files a disk check recovered — they may be yours.
+    Recovered,
+}
+
+/// A mask the window offers.
+#[derive(Debug, Clone, Copy)]
+pub struct Known {
+    pub mask: &'static str,
+    pub kind: Kind,
+    pub default_on: bool,
+}
+
+const fn known(mask: &'static str, kind: Kind, default_on: bool) -> Known {
+    Known {
+        mask,
+        kind,
+        default_on,
+    }
+}
+
+/// Ace Utilities' list (owner, 2026-10-28), sorted by kind. On by default:
+/// temporary files and junk; off: backups (`*.prv` took the Acronis agent's
+/// keys, `*.bak` a document's backup on the owner's machine), logs, files a
+/// disk check recovered, a build's intermediate files, and `*.tmp*`, which
+/// takes templates (`.tmpl`) too.
+pub const KNOWN: &[Known] = &[
+    known("*.tmp", Kind::Temp, true),
+    known("*.temp", Kind::Temp, true),
+    known("~$*", Kind::Temp, true),
+    known("*.~mp", Kind::Temp, true),
+    known("*._mp", Kind::Temp, true),
+    known("*._dd", Kind::Temp, true),
+    known("*._detmp", Kind::Temp, true),
+    known("*.$$$", Kind::Temp, true),
+    known("*.$db", Kind::Temp, true),
+    known("*.db$", Kind::Temp, true),
+    known("*.??$", Kind::Temp, true),
+    known("*.?$?", Kind::Temp, true),
+    known("*.??~", Kind::Temp, true),
+    known("*.?~?", Kind::Temp, true),
+    known("*.~??", Kind::Temp, true),
+    known("*.~*", Kind::Temp, true),
+    known("~*.???", Kind::Temp, true),
+    known("~*.", Kind::Temp, true),
+    known("*.---", Kind::Temp, true),
+    known("*.___", Kind::Temp, true),
+    known("*.^", Kind::Temp, true),
+    known("*.tmp*", Kind::Temp, false),
+    known("Thumbs.db", Kind::Junk, true),
+    known("thumbcache*.db", Kind::Junk, true),
+    known("*.dmp", Kind::Junk, true),
+    known("*.gid", Kind::Junk, true),
+    known("*.fts", Kind::Junk, true),
+    known("*.ftg", Kind::Junk, true),
+    known("*.nch", Kind::Junk, true),
+    known("0*.nch", Kind::Junk, true),
+    known("*.err", Kind::Junk, true),
+    known("CHKLIST.MS", Kind::Junk, true),
+    known("chklist.*", Kind::Junk, true),
+    known("*.ilk", Kind::Build, false),
+    known("*.aps", Kind::Build, false),
+    known("*.ncb", Kind::Build, false),
+    known("*.pch", Kind::Build, false),
+    known("*.old", Kind::Backup, false),
+    known("*.bak", Kind::Backup, false),
+    known("*.bk", Kind::Backup, false),
+    known("*.db.bak", Kind::Backup, false),
+    known("*.wbk", Kind::Backup, false),
+    known("*.sik", Kind::Backup, false),
+    known("*.prv", Kind::Backup, false),
+    known("*.log", Kind::Log, false),
+    known("*log.txt", Kind::Log, false),
+    known("*.chk", Kind::Recovered, false),
 ];
+
+/// A mask as the window lists it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MaskDto {
+    pub mask: &'static str,
+    pub kind: Kind,
+    /// The kind's name («Временные»).
+    pub kind_label: String,
+    /// What such files are and what removing them means.
+    pub about: String,
+    pub default_on: bool,
+}
+
+/// The masks offered, for the window.
+pub fn offered() -> Vec<MaskDto> {
+    use own_backup_common::tr;
+    KNOWN
+        .iter()
+        .map(|k| {
+            let (label, about) = match k.kind {
+                Kind::Temp => (tr!("cleanup.mask_temp"), tr!("cleanup.mask_temp_about")),
+                Kind::Junk => (tr!("cleanup.mask_junk"), tr!("cleanup.mask_junk_about")),
+                Kind::Build => (tr!("cleanup.mask_build"), tr!("cleanup.mask_build_about")),
+                Kind::Backup => (tr!("cleanup.mask_backup"), tr!("cleanup.mask_backup_about")),
+                Kind::Log => (tr!("cleanup.mask_log"), tr!("cleanup.mask_log_about")),
+                Kind::Recovered => (
+                    tr!("cleanup.mask_recovered"),
+                    tr!("cleanup.mask_recovered_about"),
+                ),
+            };
+            // A few say more than their kind.
+            let about = match k.mask {
+                "~$*" => tr!("cleanup.mask_owner_about"),
+                "*.tmp*" => tr!("cleanup.mask_tmp_star_about"),
+                "*.prv" => tr!("cleanup.mask_prv_about"),
+                "*.wbk" => tr!("cleanup.mask_wbk_about"),
+                _ => about,
+            };
+            MaskDto {
+                mask: k.mask,
+                kind: k.kind,
+                kind_label: label.into_owned(),
+                about: about.into_owned(),
+                default_on: k.default_on,
+            }
+        })
+        .collect()
+}
+
+/// The masks on by default.
+pub fn default_masks() -> Vec<String> {
+    KNOWN
+        .iter()
+        .filter(|k| k.default_on)
+        .map(|k| k.mask.to_string())
+        .collect()
+}
+
 /// A week: a temporary file of something still at work is younger.
 pub const DEFAULT_AGE_DAYS: u32 = 7;
 
@@ -57,7 +192,7 @@ pub struct JunkOptions {
 impl Default for JunkOptions {
     fn default() -> Self {
         Self {
-            masks: DEFAULT_MASKS.iter().map(|m| m.to_string()).collect(),
+            masks: default_masks(),
             age_days: DEFAULT_AGE_DAYS,
             folders: Vec::new(),
         }
@@ -70,10 +205,53 @@ pub enum MaskProblem {
     Empty,
     /// A name only: no folders, no drive.
     Path,
-    /// Would catch files that are not junk: fewer than two letters besides
-    /// `*`, `?` and `.` (`*.*`, `*.d*` — `.docx` too).
+    /// Would catch files that are not junk: it takes one of [`PRECIOUS`], or
+    /// it says too little — fewer than two characters besides `*`, `?` and
+    /// `.`, unless one of them is a mark temporary files carry (`~ $ ^ _ -`):
+    /// `*.*`, `*.d*` (`.docx` too), `K*`.
     TooBroad,
 }
+
+/// Names of files that are anything but junk: a mask taking any of them is
+/// too broad.
+const PRECIOUS: &[&str] = &[
+    "Отчёт.docx",
+    "report.doc",
+    "table.xlsx",
+    "slides.pptx",
+    "paper.pdf",
+    "photo.jpg",
+    "image.png",
+    "video.mp4",
+    "movie.mkv",
+    "song.mp3",
+    "archive.zip",
+    "archive.7z",
+    "setup.exe",
+    "library.dll",
+    "notes.txt",
+    "readme.md",
+    "page.html",
+    "main.rs",
+    "program.py",
+    "script.js",
+    "config.ini",
+    "settings.json",
+    "data.xml",
+    "database.db",
+    "database.sqlite",
+    "key.pem",
+    "id_rsa",
+    "Makefile",
+    "book.epub",
+    "drawing.psd",
+    "project.drp",
+    "disk.vhdx",
+    "copy.obk",
+];
+
+/// Marks temporary files carry in their names.
+const TEMP_MARKS: &[char] = &['~', '$', '^', '_', '-'];
 
 pub fn check_mask(mask: &str) -> Result<(), MaskProblem> {
     let mask = mask.trim();
@@ -83,14 +261,24 @@ pub fn check_mask(mask: &str) -> Result<(), MaskProblem> {
     if mask.contains(['\\', '/', ':']) {
         return Err(MaskProblem::Path);
     }
-    let letters = mask
+    let literal: Vec<char> = mask
         .chars()
         .filter(|c| !matches!(c, '*' | '?' | '.'))
-        .count();
-    if letters < 2 {
+        .collect();
+    let says_enough = literal.len() >= 2 || literal.iter().any(|c| TEMP_MARKS.contains(c));
+    if !says_enough || PRECIOUS.iter().any(|name| mask_matches(mask, name)) {
         return Err(MaskProblem::TooBroad);
     }
     Ok(())
+}
+
+/// A mask as Windows reads it: `*` and `?`, case-insensitive; a mask ending
+/// in a dot (`~*.`) takes names without an extension.
+pub fn mask_matches(mask: &str, name: &str) -> bool {
+    match mask.strip_suffix('.') {
+        Some(stem) if !stem.is_empty() => !name.contains('.') && matches_mask(stem, name),
+        _ => matches_mask(mask, name),
+    }
 }
 
 /// Folders never entered, by name, wherever they are.
@@ -246,7 +434,7 @@ impl Search<'_> {
                 continue;
             }
             if ours(&name)
-                || !self.masks.iter().any(|m| matches_mask(m, &name))
+                || !self.masks.iter().any(|m| mask_matches(m, &name))
                 || !self.old_enough(&meta)
                 || self.only.is_some_and(|only| !only.contains(&path))
             {
@@ -305,17 +493,38 @@ mod tests {
 
     #[test]
     fn masks_too_broad_or_with_a_path_are_refused() {
-        for ok in DEFAULT_MASKS {
-            assert_eq!(check_mask(ok), Ok(()), "{ok}");
+        // Every mask of Ace Utilities' list passes, once each.
+        let mut seen = std::collections::HashSet::new();
+        for k in KNOWN {
+            assert_eq!(check_mask(k.mask), Ok(()), "{}", k.mask);
+            assert!(seen.insert(k.mask.to_lowercase()), "{} twice", k.mask);
         }
-        assert_eq!(check_mask("*.bak"), Ok(()));
+        assert!(default_masks().contains(&"*.tmp".to_string()));
+        for off in ["*.bak", "*.prv", "*.log", "*log.txt", "*.chk", "*.tmp*"] {
+            assert!(!default_masks().contains(&off.to_string()), "{off}");
+        }
         assert_eq!(check_mask(" "), Err(MaskProblem::Empty));
-        for broad in ["*", "*.*", "*.?", "*.d*", "a*", "?.??", "..."] {
+        for broad in [
+            "*", "*.*", "*.?", "*.???", "*.d*", "a*", "K*", "?.??", "...", "*.doc*", "*.txt",
+            "photo*",
+        ] {
             assert_eq!(check_mask(broad), Err(MaskProblem::TooBroad), "{broad}");
         }
         for path in [r"C:\*.tmp", "Temp/*.tmp", r"..\*.tmp"] {
             assert_eq!(check_mask(path), Err(MaskProblem::Path), "{path}");
         }
+    }
+
+    #[test]
+    fn masks_read_as_windows_reads_them() {
+        assert!(mask_matches("~*.", "~WRL0001"));
+        assert!(!mask_matches("~*.", "~WRL0001.tmp"));
+        assert!(mask_matches("~*.???", "~WRL0001.tmp"));
+        assert!(mask_matches("*.~*", "Отчёт.~docx"));
+        assert!(mask_matches("thumbcache*.db", "thumbcache_1024.db"));
+        assert!(mask_matches("*log.txt", "ResolveDebuglog.txt"));
+        assert!(!mask_matches("*.tmp", "page.tmpl"));
+        assert!(mask_matches("*.tmp*", "page.tmpl"));
     }
 
     #[test]

@@ -200,6 +200,64 @@
     "ru": "Временные и брошенные файлы по маскам имён (*.tmp, ~$*, Thumbs.db…) в профилях отмеченных пользователей и в добавленных папках. Не заходит в Windows, Program Files, ProgramData, AppData, .git, node_modules и облачные папки; файлы этой программы и образы копий не трогает. Удаляются только файлы старше выбранного срока и только после того, как вы просмотрели список, — снимите галочку с файла, который нужен.",
     "en": "Temporary and abandoned files by name masks (*.tmp, ~$*, Thumbs.db…) in the ticked users' profiles and in the folders added. It does not enter Windows, Program Files, ProgramData, AppData, .git, node_modules or cloud folders; this program's files and backup images are never touched. Only files older than the chosen age go, and only after you have looked through the list — untick a file you need."
   },
+  "cleanup.mask_temp": { "ru": "Временные", "en": "Temporary" },
+  "cleanup.mask_temp_about": {
+    "ru": "Временный файл, который программа не убрала за собой.",
+    "en": "A temporary file a program did not clean up after itself."
+  },
+  "cleanup.mask_junk": { "ru": "Мусор", "en": "Junk" },
+  "cleanup.mask_junk_about": {
+    "ru": "Остатки Windows и старых программ: индексы справки, дампы памяти, кэш миниатюр, списки установщиков.",
+    "en": "Leftovers of Windows and old programs: help indexes, memory dumps, the thumbnail cache, setup lists."
+  },
+  "cleanup.mask_build": { "ru": "Сборка", "en": "Build" },
+  "cleanup.mask_build_about": {
+    "ru": "Промежуточные файлы сборки Visual Studio: проект пересоздаст их, но следующая сборка будет дольше.",
+    "en": "Visual Studio's intermediate build files: the project makes them again, but the next build takes longer."
+  },
+  "cleanup.mask_backup": { "ru": "Резервные", "en": "Backups" },
+  "cleanup.mask_backup_about": {
+    "ru": "Резервные копии — в том числе ваших документов (Работа.odt.bak). Включайте, только просмотрев список.",
+    "en": "Backup copies — of your documents too (Work.odt.bak). Turn on only after looking through the list."
+  },
+  "cleanup.mask_log": { "ru": "Журналы", "en": "Logs" },
+  "cleanup.mask_log_about": {
+    "ru": "Журналы программ. Иногда нужны, чтобы разобраться в сбое; некоторые программы хранят в .txt и свои настройки.",
+    "en": "Programs' logs. Sometimes needed to understand a failure; some programs keep their settings in .txt too."
+  },
+  "cleanup.mask_recovered": { "ru": "Восстановленные", "en": "Recovered" },
+  "cleanup.mask_recovered_about": {
+    "ru": "Куски файлов, которые восстановила проверка диска (FOUND.000). Это могут быть части ваших файлов.",
+    "en": "Pieces of files a disk check recovered (FOUND.000). They may be parts of your files."
+  },
+  "cleanup.mask_owner_about": {
+    "ru": "Файл-владелец, который Office кладёт рядом с открытым документом (~$Отчёт.docx); старый — остался после сбоя.",
+    "en": "The owner file Office puts beside an open document (~$Report.docx); an old one was left by a crash."
+  },
+  "cleanup.mask_tmp_star_about": {
+    "ru": "Всё, что начинается на .tmp, — в том числе шаблоны .tmpl. Выключено по умолчанию.",
+    "en": "Everything starting with .tmp — templates (.tmpl) too. Off by default."
+  },
+  "cleanup.mask_prv_about": {
+    "ru": "Так называются и закрытые ключи программ (rsa.prv агента Acronis). Выключено по умолчанию.",
+    "en": "Programs' private keys are named so too (the Acronis agent's rsa.prv). Off by default."
+  },
+  "cleanup.mask_wbk_about": {
+    "ru": "Резервная копия документа, которую делает Word.",
+    "en": "The backup copy of a document Word makes."
+  },
+  "cleanup.group_windows": {
+    "ru": "Обновления и компоненты Windows",
+    "en": "Windows updates and components"
+  },
+  "cleanup.update_cache": {
+    "ru": "Кэш обновлений Windows",
+    "en": "Windows Update cache"
+  },
+  "cleanup.update_cache_about": {
+    "ru": "Скачанные файлы обновлений (Windows\\SoftwareDistribution\\Download) старше суток. Установленные обновления не затрагиваются; то, что ещё не установлено, Windows скачает снова. Журнал обновлений (DataStore) не удаляется.",
+    "en": "Downloaded update files (Windows\\SoftwareDistribution\\Download) older than a day. Installed updates are not touched; what is not installed yet Windows downloads again. The update history (DataStore) is not removed."
+  },
   "cleanup.group_traces": {
     "ru": "Следы Windows",
     "en": "Windows traces"

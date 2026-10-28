@@ -191,7 +191,7 @@ impl Item {
 
 /// Groups, in the order the window shows them.
 pub const GROUPS: &[&str] = &[
-    "temp", "reports", "caches", "browsers", "programs", "traces", "junk",
+    "temp", "reports", "caches", "windows", "browsers", "programs", "traces", "junk",
 ];
 
 // Programs whose lists and caches the "programs" items clean.
@@ -703,6 +703,16 @@ static ITEMS: &[Item] = &[
         ],
         keys: &[],
     },
+    // --- Windows updates and components ------------------------------------
+    //
+    // Only the download folder: beside it, `DataStore` is the update history.
+    Item {
+        id: "update_cache",
+        group: "windows",
+        default_on: true,
+        targets: &[tree(Base::Windows, r"SoftwareDistribution\Download", DAY)],
+        keys: &[],
+    },
     // --- junk by masks -----------------------------------------------------
     Item {
         id: "junk",
@@ -1027,6 +1037,7 @@ pub fn label_both(id: &str) -> Localized {
         "app_logs" => tr_both!("cleanup.app_logs"),
         "driver_installers" => tr_both!("cleanup.driver_installers"),
         "junk" => tr_both!("cleanup.junk"),
+        "update_cache" => tr_both!("cleanup.update_cache"),
         _ => Localized::plain(id),
     }
 }
@@ -1061,6 +1072,7 @@ pub fn about(id: &str) -> String {
         "app_logs" => tr!("cleanup.app_logs_about"),
         "driver_installers" => tr!("cleanup.driver_installers_about"),
         "junk" => tr!("cleanup.junk_about"),
+        "update_cache" => tr!("cleanup.update_cache_about"),
         _ => return String::new(),
     }
     .into_owned()
@@ -1076,6 +1088,7 @@ pub fn group_label(id: &str) -> String {
         "traces" => tr!("cleanup.group_traces"),
         "programs" => tr!("cleanup.group_programs"),
         "junk" => tr!("cleanup.group_junk"),
+        "windows" => tr!("cleanup.group_windows"),
         _ => return id.to_string(),
     }
     .into_owned()

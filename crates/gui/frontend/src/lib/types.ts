@@ -1382,6 +1382,16 @@ export interface CleanupCatalog {
   admin?: boolean;
   /** The junk masks and age offered. */
   junk?: CleanupJunk;
+  /** Every junk mask offered, with its kind and what it finds. */
+  masks?: CleanupMask[];
+}
+
+export interface CleanupMask {
+  mask: string;
+  kind: 'temp' | 'junk' | 'build' | 'backup' | 'log' | 'recovered';
+  kind_label: string;
+  about: string;
+  default_on: boolean;
 }
 
 /** What the junk search looks for and where. */

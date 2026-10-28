@@ -41,6 +41,7 @@ The chosen items and users are remembered.
 | Shader cache | `D3DSCache`, the NVIDIA and AMD caches | — |
 | Thumbnail cache (off by default) | `AppData\Local\Microsoft\Windows\Explorer` | files Explorer holds |
 | Prefetch (off by default) | `Windows\Prefetch` | — |
+| Windows Update cache | `Windows\SoftwareDistribution\Download` | files younger than a day; the update history `DataStore`; what is not installed yet Windows downloads again |
 | Browser cache | the caches of Chrome, Edge, Vivaldi, Brave, Yandex, Opera, Firefox, Thunderbird in every profile | a browser that is open |
 | Browser history (off by default) | `History` of Chromium browsers — whole, or what is older than the days kept (the database is edited on a copy and checked); `Visited Links`, `Top Sites`, `Shortcuts` | bookmarks, passwords; Firefox history (it shares a database with the bookmarks); a database left with a crash journal |
 | Browser cookies (off by default) | `Cookies` of Chromium browsers, `cookies.sqlite` of Firefox and Thunderbird | a browser that is open |
@@ -71,10 +72,16 @@ name masks — like Ace Utilities' junk cleaning, but more carefully:
   there would remove the file in the cloud too), links and junctions. This
   program's files (`.own-backup-*`) and backup images (`.obk`, `.vhdx`,
   `.qcow2`) are never touched, whatever the masks.
-- **Masks.** By default `*.tmp *.temp ~$* Thumbs.db *.dmp *.gid *._mp *.$$$`;
-  they can be changed in the item's description. A mask too broad is
-  refused: a file name only, with at least two letters besides `*`, `?` and
-  the dot — `*.*` or `*.d*` (which would catch `.docx` too) will not do.
+- **Masks** — a list as in Ace Utilities (the "Masks…" button in the
+  item's description): the mask, its kind and what it finds. Temporary
+  files and junk are on (`*.tmp`, `*.temp`, `~$*`, `*.~*`, `*.$$$`,
+  `Thumbs.db`, `*.dmp`, `*.gid` …); off are backups (`*.bak`, `*.old`,
+  `*.prv`, `*.wbk` — your documents and programs' keys turn up there), logs
+  (`*.log`, `*log.txt`), pieces of files after a disk check (`*.chk`), a
+  build's intermediate files and `*.tmp*` (it takes `.tmpl` templates).
+  Own masks can be added. A mask is a file name only, and one that does not
+  take ordinary files: `*.*`, `*.d*` (it would catch `.docx`), `K*` are
+  refused.
 - **Age.** Files older than a day, a week (the default), a month or three
   months go.
 - **Only after a look.** The item is cleaned only once its **Files** list

@@ -107,6 +107,8 @@ pub struct CatalogReply {
     pub admin: bool,
     /// The junk masks and age offered.
     pub junk: own_backup_cleanup::junk::JunkOptions,
+    /// Every mask offered, with its kind and what it finds.
+    pub masks: Vec<own_backup_cleanup::junk::MaskDto>,
 }
 
 #[derive(Debug, Serialize)]
@@ -188,6 +190,7 @@ impl Cleaner {
                 .collect(),
             admin: asker.admin,
             junk: Default::default(),
+            masks: own_backup_cleanup::junk::offered(),
         }
     }
 

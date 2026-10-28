@@ -9,7 +9,9 @@
   import { formatBytes } from '../lib/format';
   import { m } from '../lib/paraglide/messages';
   import CleanupFilesModal from '../components/CleanupFilesModal.svelte';
+  import CleanupMasksModal from '../components/CleanupMasksModal.svelte';
   import { pickPath } from '../lib/pickPath.svelte';
+  import { maskProblem } from '../lib/junkMasks';
   import type {
     CleanupCatalog,
     CleanupItem,
@@ -50,8 +52,8 @@
   /** The junk search's masks, age and folders; the service's defaults until
    *  changed. */
   let junk = $state<CleanupJunk | null>(null);
-  let masksText = $state('');
-  let maskError = $state<string | null>(null);
+  /** The window of masks is open. */
+  let editingMasks = $state(false);
   /** Per item: the files of the analysis' list unticked in its window, with
    *  their sizes — they stay. */
   let excluded = $state<Record<string, Map<string, number>>>({});
@@ -81,19 +83,11 @@
     changed();
   }
 
-  /** A mask that means junk: a file name with two letters besides * ? and
-   *  the dot (the service refuses others the same way). */
-  function maskOk(mask: string): boolean {
-    const t = mask.trim();
-    if (!t || /[\\/:]/.test(t)) return false;
-    return [...t].filter((c) => !'*?.'.includes(c)).length >= 2;
-  }
-
   function rememberedJunk(): CleanupJunk | null {
     try {
       const v = JSON.parse(localStorage.getItem(JUNK_KEY) ?? 'null');
       if (!v || !Array.isArray(v.masks) || typeof v.age_days !== 'number' || !Array.isArray(v.folders)) return null;
-      const masks = v.masks.filter((x: unknown) => typeof x === 'string' && maskOk(x));
+      const masks = v.masks.filter((x: unknown) => typeof x === 'string' && maskProblem(x) === null);
       if (masks.length === 0) return null;
       const age = (AGE_CHOICES as readonly number[]).includes(v.age_days) ? v.age_days : 7;
       return { masks, age_days: age, folders: v.folders.filter((x: unknown) => typeof x === 'string') };
@@ -109,25 +103,9 @@
     changed();
   }
 
-  function setMasks() {
-    if (!junk) return;
-    const list = masksText.split(/[\s,;]+/).filter(Boolean);
-    const bad = list.find((x) => !maskOk(x));
-    if (bad) {
-      maskError = m.cl_junk_bad_mask({ mask: bad });
-      return;
-    }
-    if (list.length === 0) {
-      maskError = m.cl_junk_no_masks();
-      return;
-    }
-    maskError = null;
-    saveJunk({ ...junk, masks: list });
-  }
-
-  function defaultMasks() {
-    masksText = (catalog?.junk?.masks ?? []).join(' ');
-    setMasks();
+  function setMasks(masks: string[]) {
+    editingMasks = false;
+    if (junk) saveJunk({ ...junk, masks });
   }
 
   function ageLabel(days: number): string {
@@ -209,7 +187,6 @@
         const offered = c.junk ?? { masks: ['*.tmp'], age_days: 7, folders: [] };
         const kept = rememberedJunk() ?? offered;
         junk = { ...kept, folders: c.admin ? kept.folders : [] };
-        masksText = junk.masks.join(' ');
       })
       .catch((e) => (loadError = String(e)));
     const un = listen<CleanupProgress>('cleanup-progress', (e) => {
@@ -477,12 +454,13 @@
                 </label>
               {/if}
               {#if focusedItem.review && junk}
-                <label class="keep">
+                <div class="keep">
                   <span>{m.cl_junk_masks()}</span>
-                  <input class="form-input" bind:value={masksText} disabled={!!busy} onchange={setMasks} />
-                </label>
-                {#if maskError}<p class="about bad">{maskError}</p>{/if}
-                <button class="linkish" disabled={!!busy} onclick={defaultMasks}>{m.cl_junk_defaults()}</button>
+                  <span class="masks" title={junk.masks.join(' ')}>{junk.masks.join(' ')}</span>
+                  <button class="files-btn add" disabled={!!busy} onclick={() => (editingMasks = true)}
+                    >{m.cl_junk_edit_masks({ count: junk.masks.length })}</button
+                  >
+                </div>
                 <label class="keep">
                   <span>{m.cl_junk_age()}</span>
                   <select
@@ -544,6 +522,15 @@
     {#if error}<div class="banner err">{error}</div>{/if}
   </div>
 
+  {#if editingMasks && junk}
+    <CleanupMasksModal
+      offered={catalog?.masks ?? []}
+      chosen={junk.masks}
+      onSave={setMasks}
+      onClose={() => (editingMasks = false)}
+    />
+  {/if}
+
   {#if viewing}
     {@const id = viewing.id}
     <CleanupFilesModal
@@ -601,9 +588,7 @@
   .about-name { font-size: 14px; font-weight: 600; color: var(--head); margin-bottom: 6px; }
   .about { font-size: 13px; line-height: 1.5; color: var(--text); margin: 0 0 6px; }
   .keep { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; font-size: 13px; color: var(--text); }
-  .about.bad { color: var(--error-text); }
-  .linkish { align-self: flex-start; background: none; border: none; padding: 0; margin-top: 4px; font-size: 12.5px; color: var(--accent-text); cursor: pointer; font-family: var(--font); }
-  .linkish:disabled { opacity: .45; cursor: default; }
+  .masks { font-size: 12.5px; color: var(--text-secondary); display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
   .folder { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); }
   .folder-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
   .x { background: none; border: none; font-size: 16px; line-height: 1; color: var(--text-muted); cursor: pointer; padding: 0 4px; }
