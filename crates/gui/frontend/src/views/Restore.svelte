@@ -357,10 +357,12 @@
       {/each}
     </div>
     {#if addError}<div class="add-err">{addError()}</div>{/if}
-    <button class="add-btn" onclick={() => { addError = null; addOpen = true; }}>
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-      {m.rl_add()}
-    </button>
+    <div class="add-bar">
+      <button class="add-btn" onclick={() => { addError = null; addOpen = true; }}>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        {m.rl_add()}
+      </button>
+    </div>
   </div>
 
   <!-- right: restore panel -->
@@ -434,9 +436,11 @@
   .enc-badge { margin-left: 6px; font-size: 11px; }
   .enc-badge svg { vertical-align: -1px; }
   .job-path { font-size: 12px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  /* As tall as the action bar beside it (--footer-height): one line across. */
-  .add-btn { display: flex; align-items: center; gap: 10px; flex-shrink: 0; height: var(--footer-height); padding: 0 18px; background: none; border: none; border-top: 1px solid var(--border); cursor: pointer; font-size: 14px; font-weight: 600; color: var(--accent-text); font-family: var(--font); }
-  .add-btn:hover { background: var(--panel2); }
+  /* As tall as the action bar beside it (--footer-height): one line across.
+     The button is green, as «Создать копию» (owner, 2026-10-28). */
+  .add-bar { display: flex; align-items: center; flex-shrink: 0; min-height: var(--footer-height); padding: 12px 16px; border-top: 1px solid var(--border); }
+  .add-btn { flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 24px; line-height: 20px; border: 1px solid transparent; border-radius: 6px; background: var(--green); color: #fff; cursor: pointer; font-size: 14px; font-weight: 600; font-family: var(--font); transition: background-color .15s ease; }
+  .add-btn:hover { background: var(--green-hover); }
   .remember { display: flex; align-items: flex-start; gap: 9px; margin: 4px 0 16px; font-size: 13px; color: var(--text); cursor: pointer; line-height: 1.45; }
   .remember input { width: auto; margin-top: 2px; flex: 0 0 auto; }
   .job-item.added { display: flex; align-items: center; padding: 0; }
