@@ -6,7 +6,7 @@
 # refuses an ISO it does not name). Uses `gh` and the API only: no workflows.
 #
 #   scripts/upload-linux-media.sh TAG ISO VERSION
-#   scripts/upload-linux-media.sh v0.1.6 target/dist/own-backup-media_0.1.6-1_amd64.iso 0.1.6-1
+#   scripts/upload-linux-media.sh v0.1.8-beta target/dist/own-backup-media_0.1.8~beta_amd64.iso 0.1.8~beta
 #
 # VERSION is the .deb's Version exactly as installed (`dpkg-query -W
 # own-backup`): the window downloads only the medium of the installed build.

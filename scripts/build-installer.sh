@@ -100,24 +100,24 @@ stage_text THIRD-PARTY-NOTICES.md THIRD-PARTY-NOTICES.txt
 # A package without any text stops the build rather than shipping a gap.
 python3 scripts/third-party-licenses.py "$target_dir/THIRD-PARTY-LICENSES.txt"
 stage_text "$target_dir/THIRD-PARTY-LICENSES.txt" THIRD-PARTY-LICENSES.txt
-# The Total Commander plugin (crates/tc-plugin): a DLL named as Total
-# Commander's 64-bit file system plugins are, with the description it reads
-# when the plugin is installed from its folder.
+# The Total Commander plugin (crates/tc-plugin), installed as a ZIP only:
+# opened in Total Commander, it offers to install the plugin itself. Inside,
+# the DLL named as TC's 64-bit file system plugins are and the description
+# TC reads when it installs one.
 if [[ ! -f "$exe_dir/own_backup_tc.dll" ]]; then
     echo "plugin not found: $exe_dir/own_backup_tc.dll" >&2
     exit 1
 fi
+rm -rf "$stage/TotalCommander"
 mkdir -p "$stage/TotalCommander"
-cp "$exe_dir/own_backup_tc.dll" "$stage/TotalCommander/OwnBackup.wfx64"
-sed 's/\r$//; s/$/\r/' crates/tc-plugin/pluginst.inf >"$stage/TotalCommander/pluginst.inf"
-# The same two files in a ZIP: opened in Total Commander, it offers to
-# install the plugin itself.
-python3 - "$stage/TotalCommander" <<'PY'
+python3 - "$exe_dir/own_backup_tc.dll" crates/tc-plugin/pluginst.inf \
+    "$stage/TotalCommander/OwnBackup-TC-plugin.zip" <<'PY'
 import sys, zipfile
-d = sys.argv[1]
-with zipfile.ZipFile(f"{d}/OwnBackup-TC-plugin.zip", "w", zipfile.ZIP_DEFLATED) as z:
-    for name in ("OwnBackup.wfx64", "pluginst.inf"):
-        z.write(f"{d}/{name}", name)
+dll, inf, out = sys.argv[1:]
+text = open(inf, encoding="utf-8").read().replace("\r\n", "\n").replace("\n", "\r\n")
+with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+    z.write(dll, "OwnBackup.wfx64")
+    z.writestr("pluginst.inf", text)
 PY
 cp crates/gui/icons/icon.ico "$stage/icon.ico"
 cp "$script" "$stage/own-backup.nsi"

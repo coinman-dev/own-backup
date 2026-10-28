@@ -2961,7 +2961,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-backup"
-version = "0.1.7-beta"
+version = "0.1.8-beta"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -3005,7 +3005,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-cli"
-version = "0.1.7-beta"
+version = "0.1.8-beta"
 dependencies = [
  "chrono",
  "clap",
@@ -3034,7 +3034,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-client"
-version = "0.1.7-beta"
+version = "0.1.8-beta"
 dependencies = [
  "hyper-util",
  "own-backup-backup",
@@ -3056,7 +3056,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-common"
-version = "0.1.7-beta"
+version = "0.1.8-beta"
 dependencies = [
  "chrono",
  "libc",
@@ -3072,7 +3072,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-core"
-version = "0.1.7-beta"
+version = "0.1.8-beta"
 dependencies = [
  "chrono",
  "own-backup-backup",
@@ -3093,7 +3093,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-gui"
-version = "0.1.7-beta"
+version = "0.1.8-beta"
 dependencies = [
  "chrono",
  "glib",
@@ -3134,7 +3134,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-inventory"
-version = "0.1.7-beta"
+version = "0.1.8-beta"
 dependencies = [
  "async-trait",
  "own-backup-common",
@@ -3148,7 +3148,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-metadata"
-version = "0.1.7-beta"
+version = "0.1.8-beta"
 dependencies = [
  "chrono",
  "own-backup-common",
@@ -3163,7 +3163,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-restore"
-version = "0.1.7-beta"
+version = "0.1.8-beta"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3183,7 +3183,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-scheduler"
-version = "0.1.7-beta"
+version = "0.1.8-beta"
 dependencies = [
  "chrono",
  "cron",
@@ -3199,7 +3199,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-service"
-version = "0.1.7-beta"
+version = "0.1.8-beta"
 dependencies = [
  "async-stream",
  "chrono",
@@ -3236,7 +3236,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-shell"
-version = "0.1.7-beta"
+version = "0.1.8-beta"
 dependencies = [
  "gtk",
  "libc",
@@ -3250,7 +3250,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-snapshot"
-version = "0.1.7-beta"
+version = "0.1.8-beta"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3267,7 +3267,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-tc-plugin"
-version = "0.1.7-beta"
+version = "0.1.8-beta"
 dependencies = [
  "hyper-util",
  "own-backup-common",

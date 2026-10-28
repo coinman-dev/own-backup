@@ -6,7 +6,7 @@ Download the files from the
 
 | File | For |
 |---|---|
-| `own-backup-install.exe` | Windows 10/11, x64 |
+| `own-backup-install_<version>.exe` | Windows 10/11, x64 |
 | `own-backup_<version>_amd64.deb` | Ubuntu 24.04+, Debian 13+, amd64 |
 | `OwnBackup-Linux-<version>_amd64.iso` | Linux boot medium (see [Bootable media](10-bootable-media.md)) |
 
@@ -23,7 +23,7 @@ Download the files from the
 
 ### Install
 
-1. Run `own-backup-install.exe` and confirm the administrator prompt.
+1. Run `own-backup-install_0.1.8-beta.exe` and confirm the administrator prompt.
 2. Choose the language of the wizard (English or Russian) and follow it.
 
 The installer puts the program into `C:\Program Files\OwnBackup` for all users
@@ -38,8 +38,8 @@ by its schedule.
 ### Silent install
 
 ```
-own-backup-install.exe /S
-own-backup-install.exe /S /D=D:\Programs\OwnBackup
+own-backup-install_0.1.8-beta.exe /S
+own-backup-install_0.1.8-beta.exe /S /D=D:\Programs\OwnBackup
 ```
 
 `/S` installs without questions. `/D=<folder>`, which must be the last
@@ -65,7 +65,7 @@ them. **Backups are never deleted** by uninstalling.
 ### Install
 
 ```bash
-sudo apt install ./own-backup_0.1.6.beta-1_amd64.deb
+sudo apt install ./own-backup_0.1.8.beta_amd64.deb
 ```
 
 The package installs the window and the command line into `/usr/bin`, the

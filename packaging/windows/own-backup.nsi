@@ -61,7 +61,8 @@ RequestExecutionLevel admin
 ; service copies it from here when it builds a medium (backup/src/media_layout.rs).
 !define SHELL_EXE "own-backup-shell.exe"
 ; The Total Commander plugin: files of Linux partitions, read through the
-; service (crates/tc-plugin). Added in Total Commander by hand, from here.
+; service (crates/tc-plugin). Only its ZIP is installed (owner, 2026-10-28):
+; opened in Total Commander, it installs the plugin into TC's own folder.
 !define TC_DIR "TotalCommander"
 !define TC_PLUGIN "OwnBackup.wfx64"
 ; own_backup_common::WINDOWS_SERVICE_NAME
@@ -308,16 +309,15 @@ Section "!${NAME}" SecMain
     File "THIRD-PARTY-NOTICES.txt"
     File "THIRD-PARTY-LICENSES.txt"
 
-    ; Total Commander may have the plugin loaded, and a loaded DLL cannot be
-    ; replaced — but it can be renamed. The old one goes at the next restart.
-    SetOutPath "$INSTDIR\${TC_DIR}"
-    Delete "$INSTDIR\${TC_DIR}\${TC_PLUGIN}.old"
-    Rename "$INSTDIR\${TC_DIR}\${TC_PLUGIN}" "$INSTDIR\${TC_DIR}\${TC_PLUGIN}.old"
-    File "${TC_DIR}\${TC_PLUGIN}"
-    File "${TC_DIR}\pluginst.inf"
     ; Opened in Total Commander, the ZIP installs the plugin by itself.
+    SetOutPath "$INSTDIR\${TC_DIR}"
     File "${TC_DIR}\OwnBackup-TC-plugin.zip"
+    ; The bare DLL and its inf, as development builds before 0.1.8-beta put
+    ; them here. Total Commander may have that DLL loaded: then it goes at the
+    ; next restart.
+    Delete "$INSTDIR\${TC_DIR}\pluginst.inf"
     Delete /REBOOTOK "$INSTDIR\${TC_DIR}\${TC_PLUGIN}.old"
+    Delete /REBOOTOK "$INSTDIR\${TC_DIR}\${TC_PLUGIN}"
     SetOutPath "$INSTDIR"
 
     ; Before the service is touched, so that a failure below still leaves a

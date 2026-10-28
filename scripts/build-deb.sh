@@ -46,15 +46,21 @@ if [[ -z "$version" ]]; then
     exit 1
 fi
 # Debian orders "0.1.5~beta" before "0.1.5", as semver orders "0.1.5-beta";
-# a hyphen would be read as the Debian revision. "-1" is the package revision;
-# DEB_REVISION gives another one (a test build of the same version, e.g.
-# DEB_REVISION=2 upgrades an installed -1).
+# a hyphen would be read as the Debian revision. "-1" is the package revision
+# of a local test build; DEB_REVISION gives another one (DEB_REVISION=2
+# upgrades an installed -1). DEB_REVISION=none is a release: no revision
+# (own-backup_0.1.8~beta), and the release's medium is named after it, so the
+# installed program finds it (media_linux::release_asset_name). Test builds of
+# the same version, -1 and up, sort after the release and install over it.
 revision="${DEB_REVISION:-1}"
-if [[ ! "$revision" =~ ^[0-9][0-9A-Za-z.+~]*$ ]]; then
-    echo "DEB_REVISION must start with a digit and use only 0-9A-Za-z.+~: $revision" >&2
+if [[ "$revision" == none ]]; then
+    deb_version="$(printf '%s' "$version" | sed 's/-/~/')"
+elif [[ "$revision" =~ ^[0-9][0-9A-Za-z.+~]*$ ]]; then
+    deb_version="$(printf '%s' "$version" | sed 's/-/~/')-$revision"
+else
+    echo "DEB_REVISION must be none or start with a digit and use only 0-9A-Za-z.+~: $revision" >&2
     exit 1
 fi
-deb_version="$(printf '%s' "$version" | sed 's/-/~/')-$revision"
 
 target_dir="${CARGO_TARGET_DIR:-$root/target}"
 bin_dir="$target_dir/release"

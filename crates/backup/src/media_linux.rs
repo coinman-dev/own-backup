@@ -571,32 +571,38 @@ pub fn deb_upstream(version: &str) -> String {
 
 /// Windows: the medium of the program version `upstream` (`0.1.6~beta`),
 /// whose package revision the Windows program does not know. The newest
-/// release with a medium of that version is taken, and in it the highest
-/// revision; the answer is the whole Debian version (`0.1.6~beta-1`) and
-/// the release, as [`find_release_iso`] finds it.
+/// release with a medium of that version is taken. A release's own package
+/// has no revision (`0.1.8~beta`, from 0.1.8-beta on), and that medium is
+/// preferred; otherwise the highest revision there (`0.1.6~beta-1`, as
+/// releases up to 0.1.7-beta and test builds are named). The answer is the
+/// whole Debian version and the release, as [`find_release_iso`] finds it.
 pub fn find_release_iso_of_upstream(
     releases: &serde_json::Value,
     upstream: &str,
 ) -> Option<(String, ReleaseIso)> {
     let bare = release_asset_name(upstream);
     let prefix = format!("{}-", bare.strip_suffix("_amd64.iso")?);
-    let revision = releases.as_array()?.iter().find_map(|r| {
+    let version = releases.as_array()?.iter().find_map(|r| {
         if r.get("draft").and_then(|d| d.as_bool()) == Some(true) {
             return None;
         }
-        r.get("assets")?
+        let names = r
+            .get("assets")?
             .as_array()?
             .iter()
-            .filter_map(|a| a.get("name")?.as_str())
+            .filter_map(|a| a.get("name")?.as_str());
+        if names.clone().any(|n| n == bare) {
+            return Some(upstream.to_string());
+        }
+        names
             .filter_map(|n| n.strip_prefix(prefix.as_str())?.strip_suffix("_amd64.iso"))
             .filter(|rev| {
                 rev.starts_with(|c: char| c.is_ascii_digit())
                     && rev.chars().all(|c| c.is_ascii_alphanumeric() || c == '.')
             })
             .max_by_key(|rev| revision_key(rev))
-            .map(str::to_string)
+            .map(|rev| format!("{upstream}-{rev}"))
     })?;
-    let version = format!("{upstream}-{revision}");
     find_release_iso(releases, &version).map(|r| (version, r))
 }
 
@@ -657,6 +663,38 @@ mod tests {
             "assets": [asset("OwnBackup-Linux-0.1.6.beta2-1_amd64.iso", 1)] }]);
         assert!(find_release_iso_of_upstream(&other, "0.1.6~beta").is_none());
         assert!(find_release_iso_of_upstream(&releases, "0.1.8~beta").is_none());
+    }
+
+    /// From 0.1.8-beta a release's package has no revision, and neither has
+    /// its medium's name; a test build beside it (`-2`) is not taken instead.
+    #[test]
+    fn a_release_medium_without_a_revision_is_found_and_preferred() {
+        let asset = |name: &str, size: u64| {
+            serde_json::json!({
+                "name": name,
+                "size": size,
+                "browser_download_url": format!("https://github.com/x/releases/download/t/{name}"),
+            })
+        };
+        let releases = serde_json::json!([
+            { "tag_name": "v0.1.8-beta", "draft": false,
+              "assets": [asset("own-backup-install_0.1.8-beta.exe", 1),
+                         asset("own-backup_0.1.8.beta_amd64.deb", 2),
+                         asset("OwnBackup-Linux-0.1.8.beta-2_amd64.iso", 3),
+                         asset("OwnBackup-Linux-0.1.8.beta_amd64.iso", 4),
+                         asset("SHA256SUMS.txt", 90)] },
+            { "tag_name": "v0.1.7-beta", "draft": false,
+              "assets": [asset("OwnBackup-Linux-0.1.7.beta-1_amd64.iso", 5)] },
+        ]);
+        let (version, found) = find_release_iso_of_upstream(&releases, "0.1.8~beta").unwrap();
+        assert_eq!(version, "0.1.8~beta");
+        assert_eq!(found.name, "OwnBackup-Linux-0.1.8.beta_amd64.iso");
+        assert_eq!(found.size, 4);
+        // The installed package of that release finds the same file.
+        assert_eq!(find_release_iso(&releases, "0.1.8~beta").unwrap().size, 4);
+        // Older releases keep their revision.
+        let (version, _) = find_release_iso_of_upstream(&releases, "0.1.7~beta").unwrap();
+        assert_eq!(version, "0.1.7~beta-1");
     }
 
     #[test]

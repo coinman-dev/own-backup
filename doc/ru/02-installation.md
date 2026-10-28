@@ -6,7 +6,7 @@
 
 | Файл | Для чего |
 |---|---|
-| `own-backup-install.exe` | Windows 10/11, x64 |
+| `own-backup-install_<версия>.exe` | Windows 10/11, x64 |
 | `own-backup_<версия>_amd64.deb` | Ubuntu 24.04+, Debian 13+, amd64 |
 | `OwnBackup-Linux-<версия>_amd64.iso` | Загрузочный носитель Linux (см. [Загрузочный носитель](10-bootable-media.md)) |
 
@@ -22,7 +22,7 @@
 
 ### Установка
 
-1. Запустите `own-backup-install.exe` и подтвердите запрос администратора.
+1. Запустите `own-backup-install_0.1.8-beta.exe` и подтвердите запрос администратора.
 2. Выберите язык мастера (русский или английский) и пройдите его.
 
 Установщик кладёт программу в `C:\Program Files\OwnBackup` для всех
@@ -38,8 +38,8 @@
 ### Тихая установка
 
 ```
-own-backup-install.exe /S
-own-backup-install.exe /S /D=D:\Programs\OwnBackup
+own-backup-install_0.1.8-beta.exe /S
+own-backup-install_0.1.8-beta.exe /S /D=D:\Programs\OwnBackup
 ```
 
 `/S` ставит без вопросов. `/D=<папка>`, обязательно последним аргументом,
@@ -66,7 +66,7 @@ own-backup-install.exe /S /D=D:\Programs\OwnBackup
 ### Установка
 
 ```bash
-sudo apt install ./own-backup_0.1.6.beta-1_amd64.deb
+sudo apt install ./own-backup_0.1.8.beta_amd64.deb
 ```
 
 Пакет кладёт окно и командную строку в `/usr/bin`, службу — в
