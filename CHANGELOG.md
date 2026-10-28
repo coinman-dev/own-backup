@@ -16,6 +16,11 @@
   folders of the items are touched, never a mask over a whole disk; files
   younger than a day in the temporary folders, files in use, links and
   junctions stay. The result goes into Activity.
+- **Cleanup: browsers.** The caches of Chrome, Edge, Vivaldi, Brave, Yandex,
+  Opera, Firefox and Thunderbird in every profile; history, cookies and saved
+  tabs (off by default). A browser that is open is left and the item says to
+  close it; passwords, bookmarks and autofill are never touched, nor
+  Firefox's history, which shares a database with the bookmarks.
 
 ### Changed
 

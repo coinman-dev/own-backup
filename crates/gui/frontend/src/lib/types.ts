@@ -1384,7 +1384,8 @@ export interface CleanupTally {
 }
 
 export interface CleanupReport {
-  items: ({ id: string } & CleanupTally)[];
+  /** `running`: programs that were open, whose folders were left. */
+  items: ({ id: string; running?: string[] } & CleanupTally)[];
   total: CleanupTally;
   cancelled: boolean;
 }

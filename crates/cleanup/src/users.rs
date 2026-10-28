@@ -43,6 +43,20 @@ pub fn fixed_volumes() -> Vec<PathBuf> {
     }
 }
 
+/// The programs running now, by executable name in lower case
+/// (`chrome.exe`) — of every session: a browser another person has open is
+/// as open as the window's own.
+pub fn running_programs() -> std::collections::HashSet<String> {
+    #[cfg(windows)]
+    {
+        win::running_programs()
+    }
+    #[cfg(not(windows))]
+    {
+        std::collections::HashSet::new()
+    }
+}
+
 #[cfg(windows)]
 mod win {
     use std::path::PathBuf;
@@ -154,6 +168,38 @@ mod win {
         let text = String::from_utf16_lossy(&buf[..chars]);
         let text = text.trim_end_matches('\0');
         (!text.is_empty()).then(|| PathBuf::from(text))
+    }
+
+    pub(super) fn running_programs() -> std::collections::HashSet<String> {
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        };
+        let mut names = std::collections::HashSet::new();
+        // SAFETY: the snapshot is closed below; the entry carries its size,
+        // and each successful call leaves a terminated name in it.
+        unsafe {
+            let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+                return names;
+            };
+            let mut entry = PROCESSENTRY32W {
+                dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                ..Default::default()
+            };
+            let mut more = Process32FirstW(snapshot, &mut entry).is_ok();
+            while more {
+                let end = entry
+                    .szExeFile
+                    .iter()
+                    .position(|c| *c == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                names.insert(String::from_utf16_lossy(&entry.szExeFile[..end]).to_lowercase());
+                more = Process32NextW(snapshot, &mut entry).is_ok();
+            }
+            let _ = CloseHandle(snapshot);
+        }
+        names
     }
 
     pub(super) fn fixed_volumes() -> Vec<PathBuf> {

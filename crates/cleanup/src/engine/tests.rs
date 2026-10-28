@@ -14,6 +14,7 @@ const fn t(base: Base, path: &'static str, recursive: bool, age: u32) -> Target 
         recursive,
         min_age_hours: age,
         keep: &[],
+        programs: &[],
     }
 }
 
@@ -27,6 +28,7 @@ fn roots(dir: &Path) -> Roots {
         windows: dir.join("Windows"),
         program_data: dir.join("ProgramData"),
         volumes: vec![dir.join("C"), dir.join("D")],
+        running: Default::default(),
     }
 }
 
@@ -155,6 +157,7 @@ fn masks_and_flat_targets_take_only_their_files() {
                 recursive: false,
                 min_age_hours: 0,
                 keep: &[],
+                programs: &[],
             },
             Target {
                 base: Base::Windows,
@@ -163,6 +166,7 @@ fn masks_and_flat_targets_take_only_their_files() {
                 recursive: false,
                 min_age_hours: 0,
                 keep: &[],
+                programs: &[],
             },
         ],
     };
@@ -198,6 +202,7 @@ fn the_recycle_bin_is_emptied_on_every_volume_but_its_desktop_ini() {
             recursive: true,
             min_age_hours: 0,
             keep: &["desktop.ini"],
+            programs: &[],
         }],
     };
     let dir = tempfile::tempdir().unwrap();
@@ -286,6 +291,7 @@ fn folders_are_per_user_and_per_volume_where_they_should_be() {
         recursive: true,
         min_age_hours: 0,
         keep: &[],
+        programs: &[],
     };
     let got = folders(&bin, &r, std::slice::from_ref(&u));
     assert_eq!(got.len(), 2);
@@ -328,4 +334,71 @@ fn the_cleanup_removes_only_what_the_analysis_listed() {
     assert!(!temp.join("sub").exists());
     assert!(temp.join("late.tmp").exists(), "not listed, not removed");
     assert!(done.listing.is_empty(), "a cleanup lists nothing");
+}
+
+/// A browser's profiles are found by the mask in the path; an open browser's
+/// folders are left, and the report says which browser to close.
+#[test]
+fn browser_profiles_are_found_and_an_open_browser_is_left() {
+    let dir = tempfile::tempdir().unwrap();
+    let ud = dir
+        .path()
+        .join(r"Users/u/AppData/Local/Google/Chrome/User Data");
+    write(&ud.join("Default/Cache/Cache_Data/f_000001"), 100);
+    write(&ud.join("Profile 1/Cache/Cache_Data/f_000002"), 200);
+    write(&ud.join("Default/History"), 7);
+    write(&ud.join("Default/Bookmarks"), 9);
+    let edge = dir
+        .path()
+        .join(r"Users/u/AppData/Local/Microsoft/Edge/User Data");
+    write(&edge.join("Default/Cache/Cache_Data/f_000003"), 300);
+    // A junction-like link among the profiles is not a profile.
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(dir.path().join("elsewhere"), ud.join("Linked")).unwrap();
+
+    let cache = crate::catalog::item("browser_cache").unwrap();
+    let mut r = roots(dir.path());
+    let seen = run_at(
+        &[cache],
+        &r,
+        &[user(dir.path())],
+        Mode::Analyze,
+        &AtomicBool::new(false),
+        |_, _| {},
+        SystemTime::now(),
+    );
+    assert_eq!((seen.total.files, seen.total.bytes), (3, 600));
+    assert!(seen.items[0].running.is_empty());
+
+    // Chrome is open: its folders are left, Edge's are cleaned.
+    r.running.insert("chrome.exe".into());
+    let done = run_at(
+        &[cache],
+        &r,
+        &[user(dir.path())],
+        Mode::Remove,
+        &AtomicBool::new(false),
+        |_, _| {},
+        SystemTime::now(),
+    );
+    assert_eq!((done.total.files, done.total.bytes), (1, 300));
+    assert_eq!(done.items[0].running, ["Google Chrome"]);
+    assert!(ud.join("Default/Cache/Cache_Data/f_000001").exists());
+    assert!(!edge.join("Default/Cache/Cache_Data/f_000003").exists());
+
+    // History takes the history files and nothing else of the profile.
+    r.running.clear();
+    let history = crate::catalog::item("browser_history").unwrap();
+    let gone = run_at(
+        &[history],
+        &r,
+        &[user(dir.path())],
+        Mode::Remove,
+        &AtomicBool::new(false),
+        |_, _| {},
+        SystemTime::now(),
+    );
+    assert_eq!(gone.total.files, 1);
+    assert!(!ud.join("Default/History").exists());
+    assert!(ud.join("Default/Bookmarks").exists(), "bookmarks stay");
 }

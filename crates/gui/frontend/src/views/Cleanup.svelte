@@ -25,7 +25,7 @@
   let items = $state<Set<string>>(new Set());
   let users = $state<Set<string>>(new Set());
   /** Per item: what the last analysis found, or what the last cleanup removed. */
-  let tallies = $state<Record<string, CleanupTally>>({});
+  let tallies = $state<Record<string, CleanupTally & { running?: string[] }>>({});
   /** What the numbers on screen are. */
   let shown = $state<'none' | 'analyze' | 'run'>('none');
   let busy = $state<'analyze' | 'run' | null>(null);
@@ -159,9 +159,10 @@
       if (busy && items.has(id)) return '…';
       return m.cl_not_analyzed();
     }
-    if (t.files === 0 && t.left_files === 0) return m.cl_empty();
+    if (t.files === 0 && t.left_files === 0 && !t.running?.length) return m.cl_empty();
     const left = t.left_files > 0 ? ` · ${m.cl_left({ size: formatBytes(t.left_bytes) })}` : '';
-    return formatBytes(t.bytes) + left;
+    const open = t.running?.length ? ` · ${m.cl_close({ names: t.running.join(', ') })}` : '';
+    return formatBytes(t.bytes) + left + open;
   }
 
   function groupBytes(groupItems: CleanupItem[]): number | null {

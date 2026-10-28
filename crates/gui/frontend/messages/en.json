@@ -52,6 +52,7 @@
   "cl_empty": "empty",
   "cl_files": "Files: {count}",
   "cl_left": "in use: {size}",
+  "cl_close": "close: {names}",
   "cl_analyze": "Analyse",
   "cl_clean": "Clean up",
   "cl_confirm": "Remove what is ticked? These files cannot be brought back.",

@@ -84,6 +84,42 @@
     "ru": "Миниатюры и значки, которые Проводник показывает в папках. Пересоздаются при просмотре; файлы, занятые Проводником, остаются.",
     "en": "Thumbnails and icons Explorer shows in folders. They are rebuilt when viewed; files Explorer holds open stay."
   },
+  "cleanup.group_browsers": {
+    "ru": "Браузеры",
+    "en": "Browsers"
+  },
+  "cleanup.browser_cache": {
+    "ru": "Кэш браузеров",
+    "en": "Browser cache"
+  },
+  "cleanup.browser_cache_about": {
+    "ru": "Загруженные страницы, картинки и скрипты, которые браузеры хранят, чтобы открывать сайты быстрее: Chrome, Edge, Vivaldi, Brave, Яндекс, Opera, Firefox, Thunderbird. Пересоздаются сами. Открытый браузер не трогается — закройте его перед очисткой.",
+    "en": "Downloaded pages, images and scripts browsers keep to open sites faster: Chrome, Edge, Vivaldi, Brave, Yandex, Opera, Firefox, Thunderbird. They are rebuilt by themselves. A browser that is open is left — close it before the cleanup."
+  },
+  "cleanup.browser_history": {
+    "ru": "История браузеров",
+    "en": "Browser history"
+  },
+  "cleanup.browser_history_about": {
+    "ru": "Посещённые сайты, часто посещаемые и подсказки адресной строки в браузерах на Chromium (Chrome, Edge, Vivaldi, Brave, Яндекс, Opera). История Firefox хранится вместе с закладками и не удаляется. Закладки и пароли не затрагиваются.",
+    "en": "Visited sites, the most visited and the address bar's suggestions in Chromium browsers (Chrome, Edge, Vivaldi, Brave, Yandex, Opera). Firefox keeps its history together with the bookmarks, so it is not removed. Bookmarks and passwords are not touched."
+  },
+  "cleanup.browser_cookies": {
+    "ru": "Cookie браузеров",
+    "en": "Browser cookies"
+  },
+  "cleanup.browser_cookies_about": {
+    "ru": "Cookie сайтов во всех браузерах и Thunderbird. После очистки придётся заново войти на сайты, где вы были залогинены.",
+    "en": "Sites' cookies in every browser and Thunderbird. After the cleanup you have to sign in again to the sites you were signed in to."
+  },
+  "cleanup.browser_sessions": {
+    "ru": "Сохранённые вкладки",
+    "en": "Saved tabs"
+  },
+  "cleanup.browser_sessions_about": {
+    "ru": "Сессии браузеров — вкладки, которые браузер откроет при следующем запуске или восстановит после сбоя. После очистки браузер начнёт с чистого окна.",
+    "en": "Browsers' sessions — the tabs a browser opens at its next start or brings back after a crash. After the cleanup the browser starts with a clean window."
+  },
   "cleanup.prefetch": {
     "ru": "Prefetch",
     "en": "Prefetch"

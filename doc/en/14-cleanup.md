@@ -36,6 +36,10 @@ The chosen items and users are remembered.
 | Shader cache | `D3DSCache`, the NVIDIA and AMD caches | — |
 | Thumbnail cache (off by default) | `AppData\Local\Microsoft\Windows\Explorer` | files Explorer holds |
 | Prefetch (off by default) | `Windows\Prefetch` | — |
+| Browser cache | the caches of Chrome, Edge, Vivaldi, Brave, Yandex, Opera, Firefox, Thunderbird in every profile | a browser that is open |
+| Browser history (off by default) | `History`, `Visited Links`, `Top Sites`, `Shortcuts` of Chromium browsers | bookmarks, passwords; Firefox history (it shares a database with the bookmarks) |
+| Browser cookies (off by default) | `Cookies` of Chromium browsers, `cookies.sqlite` of Firefox and Thunderbird | a browser that is open |
+| Saved tabs (off by default) | `Sessions` of Chromium browsers, Firefox `sessionstore` | a browser that is open |
 
 ## What is guaranteed
 
@@ -54,3 +58,8 @@ The chosen items and users are remembered.
   user cleans only their own folders; a window run as an administrator may
   tick any user of the computer.
 - Restore points and the Windows event logs are not removed.
+- **An open browser is left.** Its folders are skipped, and the item says
+  "close: …". Edge may keep running in the background after its window is
+  closed — then turn off "Continue running background extensions and apps"
+  in its settings.
+- Browsers' passwords, bookmarks and autofill are never removed.

@@ -20,6 +20,8 @@ windows = { version = "0.58", features = [
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_System_Registry",
+    # Which browsers are open (users::running_programs): their folders are left.
+    "Win32_System_Diagnostics_ToolHelp",
 ] }
 
 [dev-dependencies]

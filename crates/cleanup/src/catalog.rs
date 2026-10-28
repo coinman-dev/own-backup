@@ -22,6 +22,8 @@ pub enum Base {
     ProgramData,
     /// A user's local application data (`<profile>\AppData\Local`).
     LocalAppData,
+    /// A user's roaming application data (`<profile>\AppData\Roaming`).
+    RoamingAppData,
     /// A user's recycle bin on every volume (`X:\$Recycle.Bin\<SID>`).
     RecycleBin,
 }
@@ -29,7 +31,10 @@ pub enum Base {
 impl Base {
     /// One folder per chosen user, not one for the system.
     pub fn per_user(self) -> bool {
-        matches!(self, Base::LocalAppData | Base::RecycleBin)
+        matches!(
+            self,
+            Base::LocalAppData | Base::RoamingAppData | Base::RecycleBin
+        )
     }
 }
 
@@ -37,7 +42,9 @@ impl Base {
 #[derive(Debug, Clone, Copy)]
 pub struct Target {
     pub base: Base,
-    /// Below the base, `\`-separated; empty for the base itself.
+    /// Below the base, `\`-separated; empty for the base itself. A part with
+    /// `*` or `?` stands for every folder its name matches (a browser's
+    /// profiles: `User Data\*\Cache`).
     pub path: &'static str,
     /// File names that go (`*` and `?`, case-insensitive); empty — every file.
     pub masks: &'static [&'static str],
@@ -48,6 +55,9 @@ pub struct Target {
     /// Names never removed, wherever they are (the recycle bin's
     /// `desktop.ini`).
     pub keep: &'static [&'static str],
+    /// Programs (`chrome.exe`) whose files these are: while one runs, the
+    /// folder is left — its databases are open and in use.
+    pub programs: &'static [&'static str],
 }
 
 const fn tree(base: Base, path: &'static str, min_age_hours: u32) -> Target {
@@ -58,6 +68,7 @@ const fn tree(base: Base, path: &'static str, min_age_hours: u32) -> Target {
         recursive: true,
         min_age_hours,
         keep: &[],
+        programs: &[],
     }
 }
 
@@ -74,6 +85,7 @@ const fn files(
         recursive: false,
         min_age_hours,
         keep: &[],
+        programs: &[],
     }
 }
 
@@ -100,7 +112,7 @@ impl Item {
 }
 
 /// Groups, in the order the window shows them.
-pub const GROUPS: &[&str] = &["temp", "reports", "caches"];
+pub const GROUPS: &[&str] = &["temp", "reports", "caches", "browsers"];
 
 static ITEMS: &[Item] = &[
     // --- temporary files -------------------------------------------------
@@ -127,6 +139,7 @@ static ITEMS: &[Item] = &[
             recursive: true,
             min_age_hours: 0,
             keep: &["desktop.ini"],
+            programs: &[],
         }],
     },
     // --- reports, dumps and logs -----------------------------------------
@@ -201,11 +214,245 @@ static ITEMS: &[Item] = &[
     },
 ];
 
+// --- browsers ---------------------------------------------------------------
+//
+// One list of browsers, the items built from it: every Chromium browser keeps
+// its profiles the same way (`User Data\<profile>\…`), every Gecko one as
+// `Profiles\<profile>\…`. Passwords (`Login Data`) and autofill (`Web Data`,
+// which also holds the search engines) are not touched at all; Firefox's
+// history shares `places.sqlite` with the bookmarks, so it is not removed
+// either — that needs the database edited, not deleted.
+
+/// How a browser lays out its profiles.
+#[derive(Debug, Clone, Copy)]
+enum Layout {
+    /// `User Data\<profile>` below local application data.
+    Chromium { user_data: &'static str },
+    /// One profile in roaming data, its cache in local data (Opera).
+    Opera { dir: &'static str },
+    /// `Profiles\<profile>` below both local (cache) and roaming data.
+    Gecko { dir: &'static str },
+}
+
+#[derive(Debug)]
+struct Browser {
+    /// As the window names it when it has to be closed.
+    name: &'static str,
+    exe: &'static str,
+    layout: Layout,
+}
+
+static BROWSERS: [Browser; 9] = [
+    Browser {
+        name: "Google Chrome",
+        exe: "chrome.exe",
+        layout: Layout::Chromium {
+            user_data: r"Google\Chrome\User Data",
+        },
+    },
+    Browser {
+        name: "Microsoft Edge",
+        exe: "msedge.exe",
+        layout: Layout::Chromium {
+            user_data: r"Microsoft\Edge\User Data",
+        },
+    },
+    Browser {
+        name: "Vivaldi",
+        exe: "vivaldi.exe",
+        layout: Layout::Chromium {
+            user_data: r"Vivaldi\User Data",
+        },
+    },
+    Browser {
+        name: "Brave",
+        exe: "brave.exe",
+        layout: Layout::Chromium {
+            user_data: r"BraveSoftware\Brave-Browser\User Data",
+        },
+    },
+    Browser {
+        name: "Yandex Browser",
+        exe: "browser.exe",
+        layout: Layout::Chromium {
+            user_data: r"Yandex\YandexBrowser\User Data",
+        },
+    },
+    Browser {
+        name: "Opera",
+        exe: "opera.exe",
+        layout: Layout::Opera {
+            dir: r"Opera Software\Opera Stable",
+        },
+    },
+    Browser {
+        name: "Opera GX",
+        exe: "opera.exe",
+        layout: Layout::Opera {
+            dir: r"Opera Software\Opera GX Stable",
+        },
+    },
+    Browser {
+        name: "Mozilla Firefox",
+        exe: "firefox.exe",
+        layout: Layout::Gecko {
+            dir: r"Mozilla\Firefox\Profiles",
+        },
+    },
+    Browser {
+        name: "Mozilla Thunderbird",
+        exe: "thunderbird.exe",
+        layout: Layout::Gecko {
+            dir: r"Thunderbird\Profiles",
+        },
+    },
+];
+
+/// Chromium's history: the database, its journal, and what is derived from
+/// it (most visited, the address bar's suggestions).
+const CHROMIUM_HISTORY: &[&str] = &[
+    "History",
+    "History-journal",
+    "Visited Links",
+    "Top Sites",
+    "Top Sites-journal",
+    "Shortcuts",
+    "Shortcuts-journal",
+    "Network Action Predictor",
+    "Network Action Predictor-journal",
+];
+const CHROMIUM_COOKIES: &[&str] = &["Cookies", "Cookies-journal"];
+/// Sessions of browsers that kept them in the profile folder itself.
+const CHROMIUM_OLD_SESSIONS: &[&str] = &[
+    "Current Session",
+    "Current Tabs",
+    "Last Session",
+    "Last Tabs",
+];
+const GECKO_COOKIES: &[&str] = &[
+    "cookies.sqlite",
+    "cookies.sqlite-wal",
+    "cookies.sqlite-shm",
+    "cookies.sqlite-journal",
+];
+const GECKO_SESSION: &[&str] = &["sessionstore.jsonlz4"];
+
+/// A path made once and kept for the life of the program, as the targets'
+/// `&'static` paths are.
+fn keep(path: String) -> &'static str {
+    Box::leak(path.into_boxed_str())
+}
+
+fn of(b: &'static Browser, base: Base, path: String, masks: &'static [&'static str]) -> Target {
+    Target {
+        base,
+        path: keep(path),
+        masks,
+        recursive: masks.is_empty(),
+        min_age_hours: 0,
+        keep: &[],
+        programs: std::slice::from_ref(&b.exe),
+    }
+}
+
+fn browser_items() -> Vec<Item> {
+    let (mut cache, mut history, mut cookies, mut sessions) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for b in &BROWSERS {
+        match b.layout {
+            Layout::Chromium { user_data } => {
+                let local = Base::LocalAppData;
+                let profile = format!(r"{user_data}\*");
+                for sub in [
+                    "Cache",
+                    "Code Cache",
+                    "GPUCache",
+                    r"Service Worker\CacheStorage",
+                    r"Service Worker\ScriptCache",
+                ] {
+                    cache.push(of(b, local, format!(r"{profile}\{sub}"), &[]));
+                }
+                for sub in ["ShaderCache", "GrShaderCache", "GraphiteDawnCache"] {
+                    cache.push(of(b, local, format!(r"{user_data}\{sub}"), &[]));
+                }
+                history.push(of(b, local, profile.clone(), CHROMIUM_HISTORY));
+                cookies.push(of(
+                    b,
+                    local,
+                    format!(r"{profile}\Network"),
+                    CHROMIUM_COOKIES,
+                ));
+                cookies.push(of(b, local, profile.clone(), CHROMIUM_COOKIES));
+                sessions.push(of(b, local, format!(r"{profile}\Sessions"), &[]));
+                sessions.push(of(b, local, profile, CHROMIUM_OLD_SESSIONS));
+            }
+            Layout::Opera { dir } => {
+                let roaming = Base::RoamingAppData;
+                cache.push(of(b, Base::LocalAppData, format!(r"{dir}\Cache"), &[]));
+                for sub in [
+                    "Code Cache",
+                    "GPUCache",
+                    "ShaderCache",
+                    r"Service Worker\CacheStorage",
+                ] {
+                    cache.push(of(b, roaming, format!(r"{dir}\{sub}"), &[]));
+                }
+                history.push(of(b, roaming, dir.to_string(), CHROMIUM_HISTORY));
+                cookies.push(of(b, roaming, format!(r"{dir}\Network"), CHROMIUM_COOKIES));
+                cookies.push(of(b, roaming, dir.to_string(), CHROMIUM_COOKIES));
+                sessions.push(of(b, roaming, format!(r"{dir}\Sessions"), &[]));
+            }
+            Layout::Gecko { dir } => {
+                let profile = format!(r"{dir}\*");
+                for sub in ["cache2", "startupCache", "thumbnails"] {
+                    cache.push(of(b, Base::LocalAppData, format!(r"{profile}\{sub}"), &[]));
+                }
+                let roaming = Base::RoamingAppData;
+                cookies.push(of(b, roaming, profile.clone(), GECKO_COOKIES));
+                sessions.push(of(b, roaming, profile.clone(), GECKO_SESSION));
+                sessions.push(of(
+                    b,
+                    roaming,
+                    format!(r"{profile}\sessionstore-backups"),
+                    &[],
+                ));
+            }
+        }
+    }
+    let item = |id, default_on, targets: Vec<Target>| Item {
+        id,
+        group: "browsers",
+        default_on,
+        targets: Box::leak(targets.into_boxed_slice()),
+    };
+    vec![
+        item("browser_cache", true, cache),
+        item("browser_history", false, history),
+        item("browser_cookies", false, cookies),
+        item("browser_sessions", false, sessions),
+    ]
+}
+
+/// The name of the program behind `exe` (`chrome.exe` → «Google Chrome»).
+pub fn program_name(exe: &str) -> &str {
+    BROWSERS
+        .iter()
+        .find(|b| b.exe.eq_ignore_ascii_case(exe))
+        .map(|b| b.name)
+        .unwrap_or(exe)
+}
+
+static CATALOG: std::sync::LazyLock<Vec<Item>> = std::sync::LazyLock::new(|| {
+    let mut all = ITEMS.to_vec();
+    all.extend(browser_items());
+    all
+});
+
 /// Everything that can be cleaned on this system. Empty on Linux for now
 /// (PLAN §6б: Linux after Windows).
 pub fn catalog() -> &'static [Item] {
     if cfg!(windows) || cfg!(test) {
-        ITEMS
+        &CATALOG
     } else {
         &[]
     }
@@ -234,6 +481,10 @@ pub fn label_both(id: &str) -> Localized {
         "shader_cache" => tr_both!("cleanup.shader_cache"),
         "thumbnails" => tr_both!("cleanup.thumbnails"),
         "prefetch" => tr_both!("cleanup.prefetch"),
+        "browser_cache" => tr_both!("cleanup.browser_cache"),
+        "browser_history" => tr_both!("cleanup.browser_history"),
+        "browser_cookies" => tr_both!("cleanup.browser_cookies"),
+        "browser_sessions" => tr_both!("cleanup.browser_sessions"),
         _ => Localized::plain(id),
     }
 }
@@ -251,6 +502,10 @@ pub fn about(id: &str) -> String {
         "shader_cache" => tr!("cleanup.shader_cache_about"),
         "thumbnails" => tr!("cleanup.thumbnails_about"),
         "prefetch" => tr!("cleanup.prefetch_about"),
+        "browser_cache" => tr!("cleanup.browser_cache_about"),
+        "browser_history" => tr!("cleanup.browser_history_about"),
+        "browser_cookies" => tr!("cleanup.browser_cookies_about"),
+        "browser_sessions" => tr!("cleanup.browser_sessions_about"),
         _ => return String::new(),
     }
     .into_owned()
@@ -262,6 +517,7 @@ pub fn group_label(id: &str) -> String {
         "temp" => tr!("cleanup.group_temp"),
         "reports" => tr!("cleanup.group_reports"),
         "caches" => tr!("cleanup.group_caches"),
+        "browsers" => tr!("cleanup.group_browsers"),
         _ => return id.to_string(),
     }
     .into_owned()
@@ -345,5 +601,45 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Passwords, bookmarks, autofill and Firefox's history-with-bookmarks
+    /// are never a browser item's; every browser folder waits for its
+    /// browser to be closed.
+    #[test]
+    fn browser_items_leave_passwords_bookmarks_and_autofill_alone() {
+        const NEVER: &[&str] = &[
+            "Login Data",
+            "Web Data",
+            "Bookmarks",
+            "Preferences",
+            "places.sqlite",
+            "logins.json",
+            "key4.db",
+        ];
+        for i in catalog().iter().filter(|i| i.group == "browsers") {
+            for t in i.targets {
+                assert!(
+                    !t.programs.is_empty(),
+                    "{}: {} has no program",
+                    i.id,
+                    t.path
+                );
+                for never in NEVER {
+                    assert!(!t.path.contains(never), "{}: {}", i.id, t.path);
+                    assert!(
+                        !t.masks.iter().any(|m| m.eq_ignore_ascii_case(never)),
+                        "{}: {never}",
+                        i.id
+                    );
+                }
+                // A profile folder itself is never taken whole.
+                if t.path.ends_with('*') || t.path.ends_with("Stable") {
+                    assert!(!t.masks.is_empty(), "{}: whole profile {}", i.id, t.path);
+                }
+            }
+        }
+        assert_eq!(program_name("CHROME.EXE"), "Google Chrome");
+        assert_eq!(program_name("other.exe"), "other.exe");
     }
 }

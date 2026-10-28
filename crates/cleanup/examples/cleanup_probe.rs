@@ -79,6 +79,27 @@ mod win {
                 mib(i.tally.bytes),
                 catalog::label(&i.id)
             );
+            if !i.running.is_empty() {
+                println!("{:<16} left, open: {}", "", i.running.join(", "));
+            }
+            // Where an item's files are, by folder (the browsers' profiles).
+            if i.id.starts_with("browser") {
+                let mut dirs = std::collections::BTreeMap::<String, (u64, u64)>::new();
+                for f in report.listing.get(&i.id).into_iter().flatten() {
+                    let shown = f
+                        .path
+                        .parent()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default()
+                        .replace(&me, "%USERPROFILE%");
+                    let e = dirs.entry(shown).or_default();
+                    e.0 += 1;
+                    e.1 += f.size;
+                }
+                for (d, (n, b)) in dirs {
+                    println!("{:<16} {:>8} files {:>10.1} MiB   {d}", "", n, mib(b));
+                }
+            }
         }
         println!(
             "TOTAL {} files {:.1} MiB",
@@ -158,6 +179,7 @@ mod win {
             windows: dir.join("Windows"),
             program_data: dir.join("ProgramData"),
             volumes: vec![],
+            running: Default::default(),
         };
         let user = User {
             sid: "S-1-5-21-0-0-0-1001".into(),

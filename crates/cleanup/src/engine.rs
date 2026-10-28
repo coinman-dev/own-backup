@@ -59,6 +59,8 @@ pub struct ItemReport {
     pub id: String,
     #[serde(flatten)]
     pub tally: Tally,
+    /// Programs that were open, whose folders were left (`Google Chrome`).
+    pub running: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -97,6 +99,9 @@ pub struct Roots {
     pub program_data: PathBuf,
     /// The roots of the volumes whose recycle bins are emptied (`C:\`, `D:\`).
     pub volumes: Vec<PathBuf>,
+    /// Programs running now, lower-case (`chrome.exe`): their folders are
+    /// left.
+    pub running: HashSet<String>,
 }
 
 impl Roots {
@@ -111,37 +116,57 @@ impl Roots {
             windows: env("SystemRoot", r"C:\Windows"),
             program_data: env("ProgramData", r"C:\ProgramData"),
             volumes: crate::users::fixed_volumes(),
+            running: crate::users::running_programs(),
         }
     }
 }
 
 /// `a\b` below `base`, part by part (the separator is Windows'; the tests run
-/// anywhere).
-fn below(base: &Path, path: &str) -> PathBuf {
-    let mut p = base.to_path_buf();
+/// anywhere). A part with `*` or `?` is every folder there whose name it
+/// matches — folders only, links and junctions never.
+fn below(base: &Path, path: &str) -> Vec<PathBuf> {
+    let mut found = vec![base.to_path_buf()];
     for part in path.split('\\').filter(|s| !s.is_empty()) {
-        p.push(part);
+        if !part.contains(['*', '?']) {
+            found.iter_mut().for_each(|p| p.push(part));
+            continue;
+        }
+        found = found
+            .iter()
+            .filter_map(|dir| fs::read_dir(dir).ok())
+            .flatten()
+            .flatten()
+            .filter(|e| matches_mask(part, &e.file_name().to_string_lossy()))
+            .filter(|e| fs::symlink_metadata(e.path()).is_ok_and(|m| m.is_dir() && !is_link(&m)))
+            .map(|e| e.path())
+            .collect();
+        found.sort();
     }
-    p
+    found
 }
 
 /// The folders a target stands for — one for a system target, one per user,
-/// or one per user and volume for the recycle bin.
+/// or one per user and volume for the recycle bin; more where the path has
+/// a mask (one per browser profile).
 pub fn folders(target: &Target, roots: &Roots, users: &[User]) -> Vec<PathBuf> {
-    match target.base {
-        Base::Windows => vec![below(&roots.windows, target.path)],
-        Base::ProgramData => vec![below(&roots.program_data, target.path)],
-        Base::LocalAppData => users
+    let per_user = |sub: &str| -> Vec<PathBuf> {
+        users
             .iter()
-            .map(|u| below(&below(&u.profile, r"AppData\Local"), target.path))
-            .collect(),
+            .flat_map(|u| below(&u.profile.join("AppData").join(sub), target.path))
+            .collect()
+    };
+    match target.base {
+        Base::Windows => below(&roots.windows, target.path),
+        Base::ProgramData => below(&roots.program_data, target.path),
+        Base::LocalAppData => per_user("Local"),
+        Base::RoamingAppData => per_user("Roaming"),
         Base::RecycleBin => users
             .iter()
             .flat_map(|u| {
                 roots
                     .volumes
                     .iter()
-                    .map(move |v| below(&v.join("$Recycle.Bin").join(&u.sid), target.path))
+                    .flat_map(move |v| below(&v.join("$Recycle.Bin").join(&u.sid), target.path))
             })
             .collect(),
     }
@@ -227,7 +252,19 @@ pub(crate) fn run_at_with(
     for item in items {
         let mut tally = Tally::default();
         let mut found = Vec::new();
+        let mut running: Vec<String> = Vec::new();
         for target in item.targets {
+            if let Some(open) = target
+                .programs
+                .iter()
+                .find(|p| roots.running.contains(&p.to_ascii_lowercase()))
+            {
+                let name = crate::catalog::program_name(open).to_string();
+                if !running.contains(&name) {
+                    running.push(name);
+                }
+                continue;
+            }
             for folder in folders(target, roots, users) {
                 let mut walk = Walk {
                     target,
@@ -259,6 +296,7 @@ pub(crate) fn run_at_with(
         report.items.push(ItemReport {
             id: item.id.to_string(),
             tally,
+            running,
         });
         if cancel.load(Ordering::Relaxed) {
             report.cancelled = true;

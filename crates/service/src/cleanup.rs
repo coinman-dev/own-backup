@@ -552,6 +552,7 @@ mod tests {
                     left_files: 1,
                     left_bytes: 5,
                 },
+                running: vec![],
             }],
             total: engine::Tally {
                 files: 3,
