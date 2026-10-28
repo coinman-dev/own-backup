@@ -18,9 +18,13 @@
     "@inlang/paraglide-js": "^2.25.4",
     "@inlang/plugin-message-format": "^4.4.4",
     "@sveltejs/vite-plugin-svelte": "^5",
+    "deepmerge": "file:../../../vendor/deepmerge",
     "svelte": "^5",
     "svelte-check": "^4.7.6",
     "typescript": "^5.7",
     "vite": "^6"
+  },
+  "overrides": {
+    "deepmerge": "$deepmerge"
   }
 }
