@@ -46,6 +46,26 @@ fn the_head_of_a_volume_says_what_it_holds() {
     assert_eq!(identify(&vec![0u8; PROBE_LEN]), Content::Empty);
 }
 
+/// The inventory's made-up «LUKS (зашифровано)» is not repeated after the
+/// type; a real label or mount point is kept.
+#[test]
+fn a_partition_is_named_by_its_own_label_only() {
+    let mut part: own_backup_common::disk::PartitionInfo =
+        serde_json::from_value(serde_json::json!({
+            "index": 3, "offset_bytes": 0, "size_bytes": 1, "gpt_type_guid": "",
+            "gpt_partition_guid": "", "filesystem": "unknown", "volume_letter": null,
+            "volume_label": "LUKS (зашифровано)", "fs_uuid": "", "is_system": false,
+            "is_boot": false
+        }))
+        .unwrap();
+    assert_eq!(source_label(&part, Content::Luks), "");
+    part.volume_label = String::new();
+    part.linux_last_mounted = "/boot".into();
+    assert_eq!(source_label(&part, Content::Ext), "/boot");
+    part.volume_label = "data".into();
+    assert_eq!(source_label(&part, Content::Btrfs), "data");
+}
+
 /// A logical volume made of two segments, the second lying before the first
 /// on the PV, reads in its own order.
 #[test]

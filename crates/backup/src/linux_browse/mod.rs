@@ -352,11 +352,7 @@ pub fn find_sources(disks: &[own_backup_common::disk::DiskInfo]) -> Vec<Source> 
             ) {
                 continue;
             }
-            let label = if !part.volume_label.is_empty() {
-                part.volume_label.clone()
-            } else {
-                part.linux_last_mounted.clone()
-            };
+            let label = source_label(part, content);
             out.push(Source {
                 id: format!("{}#{}", disk.device_id, part.index),
                 disk: disk.device_id.clone(),
@@ -371,6 +367,21 @@ pub fn find_sources(disks: &[own_backup_common::disk::DiskInfo]) -> Vec<Source> 
         }
     }
     out
+}
+
+/// What a partition is called besides its place and type: its label, or
+/// where it was last mounted. Not for a LUKS container: the inventory gives
+/// those a made-up label, «LUKS (зашифровано)», and the name already says
+/// LUKS — it read «LUKS · LUKS (зашифровано)» (owner, 28.10).
+fn source_label(part: &own_backup_common::disk::PartitionInfo, content: Content) -> String {
+    if content == Content::Luks {
+        return String::new();
+    }
+    if !part.volume_label.is_empty() {
+        part.volume_label.clone()
+    } else {
+        part.linux_last_mounted.clone()
+    }
 }
 
 /// An image file offered as a partition (development builds of the service:
