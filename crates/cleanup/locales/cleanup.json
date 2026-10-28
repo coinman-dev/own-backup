@@ -234,10 +234,6 @@
     "ru": "Файл-владелец, который Office кладёт рядом с открытым документом (~$Отчёт.docx); старый — остался после сбоя.",
     "en": "The owner file Office puts beside an open document (~$Report.docx); an old one was left by a crash."
   },
-  "cleanup.mask_tmp_star_about": {
-    "ru": "Всё, что начинается на .tmp, — в том числе шаблоны .tmpl. Выключено по умолчанию.",
-    "en": "Everything starting with .tmp — templates (.tmpl) too. Off by default."
-  },
   "cleanup.mask_prv_about": {
     "ru": "Так называются и закрытые ключи программ (rsa.prv агента Acronis). Выключено по умолчанию.",
     "en": "Programs' private keys are named so too (the Acronis agent's rsa.prv). Off by default."

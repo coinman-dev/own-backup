@@ -28,6 +28,9 @@
   /** «Хранить историю»: 0 removes it all; a week unless chosen otherwise. */
   const KEEP_CHOICES = [0, 1, 7, 30] as const;
   const JUNK_KEY = 'ob.cleanup.junk';
+  /** Masks once offered and taken out of the list (owner, 28.10: `*.tmp*`
+   *  takes `.tmpl` templates): dropped from a remembered choice too. */
+  const WITHDRAWN = ['*.tmp*'];
   /** Junk by masks: files unchanged for this many days. */
   const AGE_CHOICES = [1, 7, 30, 90] as const;
 
@@ -87,7 +90,9 @@
     try {
       const v = JSON.parse(localStorage.getItem(JUNK_KEY) ?? 'null');
       if (!v || !Array.isArray(v.masks) || typeof v.age_days !== 'number' || !Array.isArray(v.folders)) return null;
-      const masks = v.masks.filter((x: unknown) => typeof x === 'string' && maskProblem(x) === null);
+      const masks = v.masks.filter(
+        (x: unknown) => typeof x === 'string' && maskProblem(x) === null && !WITHDRAWN.includes(x),
+      );
       if (masks.length === 0) return null;
       const age = (AGE_CHOICES as readonly number[]).includes(v.age_days) ? v.age_days : 7;
       return { masks, age_days: age, folders: v.folders.filter((x: unknown) => typeof x === 'string') };
@@ -103,8 +108,12 @@
     changed();
   }
 
-  function setMasks(masks: string[]) {
+  function setMasks(masks: string[], id: string) {
     editingMasks = false;
+    if (!items.has(id)) {
+      items = new Set([...items, id]);
+      remember();
+    }
     if (junk) saveJunk({ ...junk, masks });
   }
 
@@ -149,11 +158,25 @@
     reviewed = new Set([...reviewed, id]);
   }
 
-  /** Ticked items cleaned only from a list nobody has opened yet. */
+  /** Ticked items cleaned only from a list nobody has opened yet. One the
+   *  analysis found nothing for has nothing to look through. */
   function unreviewed(): CleanupItem[] {
     return (catalog?.groups ?? [])
       .flatMap((g) => g.items)
-      .filter((i) => i.review && items.has(i.id) && (shown !== 'analyze' || !reviewed.has(i.id)));
+      .filter(
+        (i) =>
+          i.review &&
+          items.has(i.id) &&
+          (shown !== 'analyze' || (!reviewed.has(i.id) && (tallies[i.id]?.files ?? 0) > 0)),
+      );
+  }
+
+  /** Where the junk item is on its way to a cleanup, for its steps. */
+  function step(id: string): 'masks' | 'analyze' | 'review' | 'clean' {
+    if (!items.has(id)) return 'masks';
+    if (shown !== 'analyze' || !tallies[id]) return 'analyze';
+    if ((tallies[id]?.files ?? 0) > 0 && !reviewed.has(id)) return 'review';
+    return 'clean';
   }
 
   function remembered(key: string): string[] | null {
@@ -489,13 +512,40 @@
                 </label>
               {/if}
               {#if focusedItem.review && junk}
-                <div class="keep">
-                  <span>{m.cl_junk_masks()}</span>
-                  <span class="masks" title={junk.masks.join(' ')}>{junk.masks.join(' ')}</span>
-                  <button class="files-btn add" disabled={!!busy} onclick={() => (editingMasks = true)}
-                    >{m.cl_junk_edit_masks({ count: junk.masks.length })}</button
-                  >
-                </div>
+                {@const at = step(focusedItem.id)}
+                {@const found = tallies[focusedItem.id]?.files ?? 0}
+                <ol class="steps">
+                  <li class:now={at === 'masks'} class:done={at !== 'masks'}>
+                    <span>{m.cl_step_masks({ count: junk.masks.length })}</span>
+                    <button class="files-btn" disabled={!!busy} onclick={() => (editingMasks = true)}
+                      >{m.cl_junk_edit_masks({ count: junk.masks.length })}</button
+                    >
+                  </li>
+                  <li class:now={at === 'analyze'} class:done={at === 'review' || at === 'clean'}>
+                    <span>{m.cl_step_analyze()}</span>
+                    {#if at === 'analyze'}
+                      <button class="files-btn" disabled={!!busy || !items.has(focusedItem.id)} onclick={() => go('analyze')}
+                        >{m.cl_analyze()}</button
+                      >
+                    {/if}
+                  </li>
+                  <li class:now={at === 'review'} class:done={at === 'clean'}>
+                    {#if shown === 'analyze' && tallies[focusedItem.id] && found === 0}
+                      <span>{m.cl_step_nothing()}</span>
+                    {:else}
+                      <span>{m.cl_step_review()}</span>
+                      {#if shown === 'analyze' && found > 0}
+                        {@const it = focusedItem}
+                        <button class="files-btn" disabled={!!busy} onclick={() => openList(it.id, it.label)}
+                          >{m.cl_step_files({ count: found })}</button
+                        >
+                      {/if}
+                    {/if}
+                  </li>
+                  <li class:now={at === 'clean' && found > 0}>
+                    <span>{m.cl_step_clean()}</span>
+                  </li>
+                </ol>
                 <label class="keep">
                   <span>{m.cl_junk_age()}</span>
                   <select
@@ -558,10 +608,11 @@
   </div>
 
   {#if editingMasks && junk}
+    {@const id = focused ?? 'junk'}
     <CleanupMasksModal
       offered={catalog?.masks ?? []}
       chosen={junk.masks}
-      onSave={setMasks}
+      onSave={(masks) => setMasks(masks, id)}
       onClose={() => (editingMasks = false)}
     />
   {/if}
@@ -608,7 +659,14 @@
   .cols { display: flex; gap: 16px; align-items: flex-start; }
   .card { border: 1px solid var(--border); border-radius: 8px; background: var(--card-bg); padding: 14px 18px; }
   .tree { flex: 1; min-width: 0; padding: 8px 0; }
-  .side { width: 340px; flex-shrink: 0; display: flex; flex-direction: column; gap: 16px; }
+  /* In sight while the list scrolls: held at the top of the page. */
+  .side { width: 340px; flex-shrink: 0; display: flex; flex-direction: column; gap: 16px; position: sticky; top: 0; max-height: calc(100vh - 130px); overflow-y: auto; }
+  .steps { margin: 10px 0 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; font-size: 13px; color: var(--text-secondary); }
+  .steps li { padding-left: 2px; }
+  .steps li span { display: block; margin-bottom: 4px; }
+  .steps li.now { color: var(--head); font-weight: 600; }
+  .steps li.done { color: var(--text-muted); }
+  .steps li.done span::after { content: ' ✓'; color: var(--green); }
   .group + .group { border-top: 1px solid var(--border); margin-top: 6px; padding-top: 6px; }
   .row { display: flex; align-items: center; gap: 10px; padding: 6px 18px; font-size: 14px; color: var(--text); cursor: pointer; }
   .row.head { font-weight: 600; color: var(--head); }
@@ -625,7 +683,6 @@
   .about-name { font-size: 14px; font-weight: 600; color: var(--head); margin-bottom: 6px; }
   .about { font-size: 13px; line-height: 1.5; color: var(--text); margin: 0 0 6px; }
   .keep { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; font-size: 13px; color: var(--text); }
-  .masks { font-size: 12.5px; color: var(--text-secondary); display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
   .folder { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); }
   .folder-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
   .x { background: none; border: none; font-size: 16px; line-height: 1; color: var(--text-muted); cursor: pointer; padding: 0 4px; }

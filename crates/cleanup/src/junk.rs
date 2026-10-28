@@ -65,8 +65,8 @@ const fn known(mask: &'static str, kind: Kind, default_on: bool) -> Known {
 /// Ace Utilities' list (owner, 2026-10-28), sorted by kind. On by default:
 /// temporary files and junk; off: backups (`*.prv` took the Acronis agent's
 /// keys, `*.bak` a document's backup on the owner's machine), logs, files a
-/// disk check recovered, a build's intermediate files, and `*.tmp*`, which
-/// takes templates (`.tmpl`) too.
+/// disk check recovered, a build's intermediate files. Ace's `*.tmp*` is not
+/// offered at all (owner, 2026-10-28): it takes templates (`.tmpl`) too.
 pub const KNOWN: &[Known] = &[
     known("*.tmp", Kind::Temp, true),
     known("*.temp", Kind::Temp, true),
@@ -89,7 +89,6 @@ pub const KNOWN: &[Known] = &[
     known("*.---", Kind::Temp, true),
     known("*.___", Kind::Temp, true),
     known("*.^", Kind::Temp, true),
-    known("*.tmp*", Kind::Temp, false),
     known("Thumbs.db", Kind::Junk, true),
     known("thumbcache*.db", Kind::Junk, true),
     known("*.dmp", Kind::Junk, true),
@@ -149,7 +148,6 @@ pub fn offered() -> Vec<MaskDto> {
             // A few say more than their kind.
             let about = match k.mask {
                 "~$*" => tr!("cleanup.mask_owner_about"),
-                "*.tmp*" => tr!("cleanup.mask_tmp_star_about"),
                 "*.prv" => tr!("cleanup.mask_prv_about"),
                 "*.wbk" => tr!("cleanup.mask_wbk_about"),
                 _ => about,
@@ -500,7 +498,7 @@ mod tests {
             assert!(seen.insert(k.mask.to_lowercase()), "{} twice", k.mask);
         }
         assert!(default_masks().contains(&"*.tmp".to_string()));
-        for off in ["*.bak", "*.prv", "*.log", "*log.txt", "*.chk", "*.tmp*"] {
+        for off in ["*.bak", "*.prv", "*.log", "*log.txt", "*.chk"] {
             assert!(!default_masks().contains(&off.to_string()), "{off}");
         }
         assert_eq!(check_mask(" "), Err(MaskProblem::Empty));
@@ -525,6 +523,7 @@ mod tests {
         assert!(mask_matches("*log.txt", "ResolveDebuglog.txt"));
         assert!(!mask_matches("*.tmp", "page.tmpl"));
         assert!(mask_matches("*.tmp*", "page.tmpl"));
+        assert!(!KNOWN.iter().any(|k| k.mask == "*.tmp*"), "not offered");
     }
 
     #[test]

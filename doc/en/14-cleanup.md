@@ -95,7 +95,8 @@ name masks — like Ace Utilities' junk cleaning, but more carefully:
   `Thumbs.db`, `*.dmp`, `*.gid` …); off are backups (`*.bak`, `*.old`,
   `*.prv`, `*.wbk` — your documents and programs' keys turn up there), logs
   (`*.log`, `*log.txt`), pieces of files after a disk check (`*.chk`), a
-  build's intermediate files and `*.tmp*` (it takes `.tmpl` templates).
+  build's intermediate files. Ace's `*.tmp*` is not there: it takes `.tmpl`
+  templates.
   Own masks can be added. A mask is a file name only, and one that does not
   take ordinary files: `*.*`, `*.d*` (it would catch `.docx`), `K*` are
   refused.
