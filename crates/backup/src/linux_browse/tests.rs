@@ -182,7 +182,8 @@ mod real {
             .find(|e| e.name.ends_with(".txt") && e.name.starts_with('\u{F7D0}'));
         let koi = koi.expect("the KOI8 name").name.clone();
         assert_eq!(
-            fs.read(&at(&format!("\\home\\user\\{koi}")), 0, 100).unwrap(),
+            fs.read(&at(&format!("\\home\\user\\{koi}")), 0, 100)
+                .unwrap(),
             b"koi8"
         );
 
@@ -203,14 +204,15 @@ mod real {
         assert_eq!(fs.read(&at("\\home\\link.bin"), 0, 300_000).unwrap(), want);
 
         // A link to an absolute path is read from the root the tree is in.
-        assert_eq!(
-            fs.read(&at("\\etc\\abs"), 0, 100).unwrap(),
-            b"own-backup\n"
-        );
+        assert_eq!(fs.read(&at("\\etc\\abs"), 0, 100).unwrap(), b"own-backup\n");
         // A file with a hole reads zeros in it.
         let sparse = at("\\home\\user\\sparse.bin");
         assert_eq!(fs.stat(&sparse).unwrap().size, 2 * MIB as u64);
-        assert!(fs.read(&sparse, MIB as u64, 4096).unwrap().iter().all(|&b| b == 0));
+        assert!(fs
+            .read(&sparse, MIB as u64, 4096)
+            .unwrap()
+            .iter()
+            .all(|&b| b == 0));
         assert_eq!(fs.read(&sparse, 2 * MIB as u64 - 3, 10).unwrap(), b"end");
 
         assert!(fs.list(&at("\\nothing")).is_err());
@@ -302,7 +304,15 @@ mod real {
         let ok = Command::new("mkfs.btrfs")
             .args(["-q", "-f", "-L", "obk-btrfs", "--rootdir"])
             .arg(&src)
-            .args(["--subvol", "rw:@", "--subvol", "rw:@home", "--compress", compress, "--shrink"])
+            .args([
+                "--subvol",
+                "rw:@",
+                "--subvol",
+                "rw:@home",
+                "--compress",
+                compress,
+                "--shrink",
+            ])
             .arg(&img)
             .status()
             .map(|s| s.success())
@@ -320,7 +330,10 @@ mod real {
         assert_eq!(info[0].label, "obk-btrfs");
         let fs = p.roots[0].fs.as_mut().unwrap();
         let top: Vec<String> = fs.list(b"/").unwrap().into_iter().map(|e| e.name).collect();
-        assert!(top.contains(&"@".to_string()) && top.contains(&"@home".to_string()), "{top:?}");
+        assert!(
+            top.contains(&"@".to_string()) && top.contains(&"@home".to_string()),
+            "{top:?}"
+        );
         check_sample(fs, "\\@");
         let note = names::path_from_display("\\@home\\user\\note.txt");
         assert_eq!(fs.read(&note, 0, 100).unwrap(), b"home subvolume\n");
@@ -334,8 +347,8 @@ mod real {
             let Some(img) = btrfs_image(compress) else {
                 return;
             };
-            let mut p = open(Box::new(MemVolume(img)), None)
-                .unwrap_or_else(|e| panic!("{compress}: {e}"));
+            let mut p =
+                open(Box::new(MemVolume(img)), None).unwrap_or_else(|e| panic!("{compress}: {e}"));
             check_btrfs(&mut p);
         }
     }
@@ -370,7 +383,12 @@ mod real {
             .stdin(std::process::Stdio::piped())
             .spawn()
             .expect("cryptsetup");
-        child.stdin.take().unwrap().write_all(pw.as_bytes()).unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(pw.as_bytes())
+            .unwrap();
         assert!(child.wait().unwrap().success(), "luksFormat");
         let disk = std::fs::read(&file).unwrap();
         let params = crate::luks::open_luks(&mut MemVolume(disk), pw.as_bytes()).unwrap();

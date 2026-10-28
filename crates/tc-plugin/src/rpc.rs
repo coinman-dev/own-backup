@@ -49,10 +49,9 @@ impl Grpc {
                 token = std::env::var("OWN_BACKUP_TOKEN").unwrap_or_default();
             }
         }
-        let channel = self
-            .rt
-            .block_on(connect(endpoint, pipe))
-            .map_err(|e| RemoteError::Failed(own_backup_common::tr!("tc.no_service", error = e).into_owned()))?;
+        let channel = self.rt.block_on(connect(endpoint, pipe)).map_err(|e| {
+            RemoteError::Failed(own_backup_common::tr!("tc.no_service", error = e).into_owned())
+        })?;
         self.client = Some((
             BackupServiceClient::new(channel)
                 .max_decoding_message_size(own_backup_common::MAX_RPC_MESSAGE)
@@ -111,15 +110,15 @@ impl Remote for Grpc {
     }
 
     fn list(&mut self, session: u64, root: usize, path: &str) -> Result<Vec<Entry>, RemoteError> {
-        Self::parse(self.call(
-            json!({ "op": "list", "session": session, "root": root, "path": path }),
-        )?)
+        Self::parse(
+            self.call(json!({ "op": "list", "session": session, "root": root, "path": path }))?,
+        )
     }
 
     fn stat(&mut self, session: u64, root: usize, path: &str) -> Result<Entry, RemoteError> {
-        Self::parse(self.call(
-            json!({ "op": "stat", "session": session, "root": root, "path": path }),
-        )?)
+        Self::parse(
+            self.call(json!({ "op": "stat", "session": session, "root": root, "path": path }))?,
+        )
     }
 
     fn read(

@@ -194,7 +194,10 @@ impl<R: Remote> Browser<R> {
         let mut refreshed = false;
         let mut wrong = false;
         loop {
-            match self.remote.open(&source.id, pass.as_deref().map(|p| p.as_str())) {
+            match self
+                .remote
+                .open(&source.id, pass.as_deref().map(|p| p.as_str()))
+            {
                 Ok(Opened::Open { session, roots, .. }) => {
                     if let Some(p) = pass {
                         self.passphrases.insert(source.id.clone(), p);
@@ -319,7 +322,9 @@ impl<R: Remote> Browser<R> {
         offset: u64,
         len: usize,
     ) -> Result<Vec<u8>, BrowseError> {
-        self.with_target(ui, path, |r, t| r.read(t.session, t.root, &t.path, offset, len))
+        self.with_target(ui, path, |r, t| {
+            r.read(t.session, t.root, &t.path, offset, len)
+        })
     }
 }
 
@@ -405,7 +410,12 @@ mod tests {
                 roots,
             })
         }
-        fn list(&mut self, session: u64, root: usize, path: &str) -> Result<Vec<Entry>, RemoteError> {
+        fn list(
+            &mut self,
+            session: u64,
+            root: usize,
+            path: &str,
+        ) -> Result<Vec<Entry>, RemoteError> {
             if !self.live.contains(&session) {
                 return Err(RemoteError::SessionGone);
             }
@@ -456,7 +466,10 @@ mod tests {
         assert_eq!(top.len(), 2);
         assert!(top.iter().all(|e| e.dir));
         let files = b.list(&mut ui, "\\Диск 1 · раздел 1").unwrap();
-        assert_eq!(files[0].name, "0:\\", "its own root, without a volume level");
+        assert_eq!(
+            files[0].name, "0:\\",
+            "its own root, without a volume level"
+        );
         let deep = b.list(&mut ui, "\\Диск 1 · раздел 1\\home\\user").unwrap();
         assert_eq!(deep[0].name, "0:\\home\\user");
         assert!(ui.1.is_empty(), "no passphrase asked for a plain partition");
@@ -470,18 +483,25 @@ mod tests {
         let names: Vec<&str> = vols.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["vg-root", "vg-thin"]);
         assert_eq!(ui.1, [false, true], "asked, then told it was wrong");
-        let inside = b.list(&mut ui, "\\Диск 1 · раздел 3\\vg-root\\etc").unwrap();
+        let inside = b
+            .list(&mut ui, "\\Диск 1 · раздел 3\\vg-root\\etc")
+            .unwrap();
         assert_eq!(inside[0].name, "0:\\etc");
         assert!(matches!(
             b.list(&mut ui, "\\Диск 1 · раздел 3\\vg-thin"),
             Err(BrowseError::Failed(m)) if m.contains("thin")
         ));
-        assert_eq!(b.list(&mut ui, "\\Диск 1 · раздел 3\\nothing"), Err(BrowseError::NotFound));
+        assert_eq!(
+            b.list(&mut ui, "\\Диск 1 · раздел 3\\nothing"),
+            Err(BrowseError::NotFound)
+        );
 
         // The service forgot the session: opened again with the kept
         // passphrase, nobody asked.
         b.remote().live.clear();
-        let again = b.read(&mut ui, "\\Диск 1 · раздел 3\\vg-root\\f", 5, 10).unwrap();
+        let again = b
+            .read(&mut ui, "\\Диск 1 · раздел 3\\vg-root\\f", 5, 10)
+            .unwrap();
         assert_eq!(again, b"\\f@5");
         assert_eq!(ui.1.len(), 2, "not asked again");
         let last = b.remote().opens.last().unwrap().clone();
@@ -492,7 +512,10 @@ mod tests {
     fn a_cancelled_passphrase_is_not_an_error_to_show() {
         let mut b = Browser::new(Fake::default());
         let mut ui = Person(vec![], vec![]);
-        assert_eq!(b.list(&mut ui, "\\Диск 1 · раздел 3"), Err(BrowseError::Cancelled));
+        assert_eq!(
+            b.list(&mut ui, "\\Диск 1 · раздел 3"),
+            Err(BrowseError::Cancelled)
+        );
         assert_eq!(b.list(&mut ui, "\\Диск 9"), Err(BrowseError::NotFound));
     }
 
