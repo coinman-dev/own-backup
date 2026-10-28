@@ -20,6 +20,8 @@ be encrypted with a password. From a backup you can restore a partition, a disk
 or individual files — and, from the boot medium, the disk Windows itself boots
 from.
 
+![The Backup page with a job selected](../images/en/backup-dashboard.png)
+
 > **0.1.7-beta is a prerelease; the Linux version is new since 0.1.6-beta.**
 > Check an important backup by restoring it to a spare disk or a virtual
 > machine before you rely on it — on Linux especially.
