@@ -2,9 +2,11 @@
 //! of how much each item takes, the cleanup itself, its cancel.
 //!
 //! The service removes what the items name, for the system and for each
-//! chosen user. A window run by an administrator may choose any user of the
-//! computer; anyone else only themselves — a cleanup removes files, and
-//! another person's are not theirs to remove.
+//! chosen user. An administrator of the computer — elevated or not: the
+//! service does the work, as it does on a schedule with no window (owner,
+//! 2026-10-28) — may choose any user and Windows' own components; anyone else
+//! only their own folders — a cleanup removes files, and another person's
+//! are not theirs to remove.
 //!
 //! An analysis keeps the files it found: the window lists them (`files`, a
 //! page at a time — a recycle bin holds hundreds of thousands), and a cleanup

@@ -4587,7 +4587,7 @@ fn cleanup_asker<T>(req: &Request<T>) -> crate::cleanup::Asker {
     if let Some(c) = req.extensions().get::<crate::PipeCaller>() {
         return crate::cleanup::Asker {
             sid: Some(c.sid.clone()),
-            admin: c.elevated,
+            admin: c.administrator,
         };
     }
     let _ = req;

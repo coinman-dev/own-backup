@@ -3,12 +3,12 @@
 rust_i18n::i18n!("locales", fallback = "ru");
 
 mod app_state;
+mod cleanup;
 // The decision is plain code tested everywhere; only Windows applies it.
 #[cfg_attr(not(windows), allow(dead_code))]
 mod data_dir_acl;
 mod grpc_server;
 mod install;
-mod cleanup;
 mod linux_browse;
 #[cfg(target_os = "linux")]
 mod logind_events;
@@ -1464,6 +1464,12 @@ pub(crate) struct PipeCaller {
     pub sid: String,
     /// SYSTEM, or a token elevated as an administrator.
     pub elevated: bool,
+    /// A member of the Administrators group, elevated or not (UAC's limited
+    /// token of an administrator). The disk cleanup goes by this: the
+    /// service does that work itself, as it will on a schedule with no
+    /// window at all (owner, 2026-10-28); everything else still asks for
+    /// `elevated`.
+    pub administrator: bool,
 }
 
 #[cfg(windows)]
@@ -1522,7 +1528,8 @@ fn client_in_active_console(
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::Security::{
-        EqualSid, GetTokenInformation, TokenElevation, TokenUser, TOKEN_ELEVATION, TOKEN_QUERY,
+        EqualSid, GetTokenInformation, TokenElevation, TokenElevationType,
+        TokenElevationTypeLimited, TokenUser, TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE, TOKEN_QUERY,
         TOKEN_USER,
     };
     use windows::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeClientSessionId};
@@ -1596,7 +1603,26 @@ fn client_in_active_console(
         }
         .is_ok()
             && elevation.TokenIsElevated != 0);
-    let caller = PipeCaller { sid, elevated };
+    // An administrator whose window runs unelevated holds UAC's limited
+    // token; a standard user's is the default kind.
+    let mut kind = TOKEN_ELEVATION_TYPE::default();
+    let administrator = elevated
+        || (unsafe {
+            GetTokenInformation(
+                client_token.0,
+                TokenElevationType,
+                Some(std::ptr::addr_of_mut!(kind).cast()),
+                std::mem::size_of::<TOKEN_ELEVATION_TYPE>() as u32,
+                &mut len,
+            )
+        }
+        .is_ok()
+            && kind == TokenElevationTypeLimited);
+    let caller = PipeCaller {
+        sid,
+        elevated,
+        administrator,
+    };
     let mut console_token = HANDLE::default();
     if unsafe { WTSQueryUserToken(active, &mut console_token) }.is_err() {
         // A stripped WinPE may have no WTS token; its single temporary console

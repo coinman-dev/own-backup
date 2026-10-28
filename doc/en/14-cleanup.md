@@ -63,8 +63,9 @@ The chosen items and users are remembered.
 
 What Windows keeps for itself is removed not file by file but by Windows'
 own handlers — the ones Disk Cleanup (cleanmgr) runs: they measure and
-remove by themselves. These items are removed only from a window run as an
-administrator; their size shows in any window.
+remove by themselves. Only a computer's administrator may remove these
+items (the window need not be run "as administrator" — the service does
+the work); their size shows to any user.
 
 | Item | Windows handler | After the cleanup |
 |---|---|---|
@@ -81,8 +82,8 @@ administrator; their size shows in any window.
 The **Files by masks** item (off by default) looks for abandoned files by
 name masks — like Ace Utilities' junk cleaning, but more carefully:
 
-- **Where.** In the ticked users' profiles; a window run as an
-  administrator may add other folders and drives ("Where else to search").
+- **Where.** In the ticked users' profiles; a computer's administrator may
+  add other folders and drives ("Where else to search").
 - **Never entered:** `Windows`, `Program Files`, `ProgramData`, `AppData`
   (programs' junk is the other items' business), `.git`, `node_modules`,
   cloud folders (OneDrive, Dropbox, Google Drive, Yandex Disk — a removal
@@ -120,9 +121,11 @@ name masks — like Ace Utilities' junk cleaning, but more carefully:
 - **Links and junctions are not followed.** What they point to stays intact;
   cloud placeholders (OneDrive) are not touched either.
 - **Files in use are skipped** and counted apart.
-- **Other users' folders — only from an administrator's window.** An ordinary
-  user cleans only their own folders; a window run as an administrator may
-  tick any user of the computer.
+- **Other users' folders — an administrator's only.** An ordinary user
+  cleans only their own folders; a computer's administrator may tick any
+  user. The window need not be run "as administrator" for that: the
+  service cleans. An ordinary user has a "Restart as administrator" button —
+  Windows asks for an administrator's password.
 - Restore points and the Windows event logs are not removed.
 - **An open browser is left.** Its folders are skipped, and the item says
   "close: …". Edge may keep running in the background after its window is

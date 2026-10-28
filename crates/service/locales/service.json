@@ -233,8 +233,8 @@
     "en": "An analysis or a cleanup is already running — wait for it to end or cancel it."
   },
   "grpc_server.cleanup_not_allowed": {
-    "ru": "Чистить папки пользователя «%{user}» может только администратор.",
-    "en": "Only an administrator may clean the folders of the user \"%{user}\"."
+    "ru": "Чистить папки пользователя «%{user}» может только администратор компьютера.",
+    "en": "Only a computer's administrator may clean the folders of the user \"%{user}\"."
   },
   "grpc_server.cleanup_not_analyzed": {
     "ru": "Список файлов есть только после анализа — нажмите «Анализ».",
@@ -249,12 +249,12 @@
     "en": "The mask \"%{mask}\" will not do: a file name only, and one that does not take ordinary files — documents, photos, programs (as *.*, *.d* or K* would)."
   },
   "grpc_server.cleanup_admin_only": {
-    "ru": "«%{item}» удаляется только из окна, запущенного от имени администратора.",
-    "en": "\"%{item}\" is removed only from a window run as an administrator."
+    "ru": "«%{item}» удаляет только администратор компьютера.",
+    "en": "\"%{item}\" is removed only by a computer's administrator."
   },
   "grpc_server.cleanup_folders_admin_only": {
-    "ru": "Искать мусор в других папках может только окно, запущенное от имени администратора.",
-    "en": "Only a window run as an administrator may search for junk in other folders."
+    "ru": "Искать мусор в других папках может только администратор компьютера.",
+    "en": "Only a computer's administrator may search for junk in other folders."
   },
   "grpc_server.cleanup_unknown": {
     "ru": "Нет такого пункта очистки или пользователя: %{what}.",
