@@ -295,6 +295,9 @@ export const api = {
   serviceHealth: () => invoke<ServiceHealth>('service_health'),
   /** Which system the window runs on, its service channel and log folders. */
   platformInfo: () => invoke<PlatformInfo>('platform_info'),
+  /** Start the window again as an administrator (UAC), opening at `view`;
+   *  `false` when the person said no. */
+  relaunchElevated: (view: string) => invoke<boolean>('relaunch_elevated', { view }),
   /** Active keyboard layout; null where it cannot be told (non-Windows). */
   keyboardLayout: () => invoke<KeyboardLayout | null>('keyboard_layout'),
   /** Layout and Caps Lock for a password field, taskbar or not. */

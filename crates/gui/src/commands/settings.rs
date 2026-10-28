@@ -93,6 +93,9 @@ pub struct PlatformInfo {
     /// The service's log folder where it is fixed (Linux: `/var/log/own-backup`).
     /// `None` on Windows, where it is `Logs` beside the program.
     pub service_log_dir: Option<String>,
+    /// The section to open at start (`--view cleanup`): a window started
+    /// again as an administrator comes back where it was asked from.
+    pub start_view: Option<String>,
 }
 
 #[tauri::command]
@@ -114,6 +117,67 @@ pub fn platform_info() -> PlatformInfo {
         channel,
         ui_log_dir: crate::ui_log_dir().map(|d| d.display().to_string()),
         service_log_dir,
+        start_view: start_view(),
+    }
+}
+
+/// `--view <name>` of this process, a plain word only.
+fn start_view() -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    args.iter()
+        .position(|a| a == "--view")
+        .and_then(|i| args.get(i + 1))
+        .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
+        .cloned()
+}
+
+/// Start this window again as an administrator (Windows asks through UAC),
+/// opening at `view`; this one closes once the new one has started. What
+/// Windows keeps for itself — its components, other users' folders — is
+/// cleaned only from an administrator's window, as Disk Cleanup cleans
+/// system files only after «Очистить системные файлы». `false`: the person
+/// said no.
+#[tauri::command]
+pub fn relaunch_elevated(app: tauri::AppHandle, view: String) -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::core::{w, PCWSTR};
+        use windows::Win32::Foundation::ERROR_CANCELLED;
+        use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW};
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        if !view.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+            return Err(format!("view: {view}"));
+        }
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+        let file = wide(&exe.to_string_lossy());
+        let params = wide(&format!("--after {} --view {view}", std::process::id()));
+        let mut info = SHELLEXECUTEINFOW {
+            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_NOASYNC,
+            lpVerb: w!("runas"),
+            lpFile: PCWSTR(file.as_ptr()),
+            lpParameters: PCWSTR(params.as_ptr()),
+            nShow: SW_SHOWNORMAL.0,
+            ..Default::default()
+        };
+        // SAFETY: the strings live until the call returns; the structure
+        // carries its own size.
+        match unsafe { ShellExecuteExW(&mut info) } {
+            Ok(()) => {
+                tracing::info!("the window starts again as an administrator; this one closes");
+                app.exit(0);
+                Ok(true)
+            }
+            Err(e) if e.code() == ERROR_CANCELLED.to_hresult() => Ok(false),
+            Err(e) => Err(e.message()),
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app, view);
+        Err("Windows only".into())
     }
 }
 

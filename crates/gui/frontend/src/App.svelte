@@ -39,6 +39,14 @@
     currentView = view;
   }
 
+  // Started again as an administrator from a section: open it again.
+  api
+    .platformInfo()
+    .then((p) => {
+      if (p.start_view === 'cleanup') currentView = 'cleanup';
+    })
+    .catch(() => {});
+
   // A section asked for from inside another one (a job's «Подключить как диск»).
   $effect(() => {
     if (nav.request) {

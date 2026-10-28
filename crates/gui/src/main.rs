@@ -241,6 +241,33 @@ fn enforce_single_instance() {
     std::mem::forget(handle);
 }
 
+/// `--after <pid>`: wait (a while) for that process — the window this one
+/// replaces (`relaunch_elevated`) — to end.
+#[cfg(target_os = "windows")]
+fn wait_for_previous_window() {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    };
+
+    let args: Vec<String> = std::env::args().collect();
+    let Some(pid) = args
+        .iter()
+        .position(|a| a == "--after")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|p| p.parse::<u32>().ok())
+    else {
+        return;
+    };
+    // SAFETY: a handle only to wait on, closed after.
+    unsafe {
+        if let Ok(handle) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+            let _ = WaitForSingleObject(handle, 20_000);
+            let _ = CloseHandle(handle);
+        }
+    }
+}
+
 /// Linux: the window's name in the person's runtime directory
 /// (`instance_linux`). A second window hands the first a «show» and leaves; if
 /// the first does not answer — still starting — it says so on its terminal
@@ -482,6 +509,10 @@ fn main() {
     #[cfg(target_os = "linux")]
     glib::set_prgname(Some("own-backup"));
 
+    // Started again as an administrator by the window it replaces: that one
+    // is closing, and holds the single-instance mutex until it has.
+    #[cfg(target_os = "windows")]
+    wait_for_previous_window();
     // Only one GUI at a time.
     #[cfg(target_os = "windows")]
     enforce_single_instance();
@@ -758,6 +789,7 @@ fn main() {
             commands::settings::tray_icon_enabled,
             commands::settings::set_tray_icon_enabled,
             commands::settings::platform_info,
+            commands::settings::relaunch_elevated,
             // The boot medium has no taskbar to say which layout is active.
             commands::keyboard::keyboard_layout,
             // …and every password field says it too, beside its eye.

@@ -251,6 +251,21 @@
     reviewed = new Set();
   }
 
+  /** Some of the catalogue only an administrator's window may clean. */
+  const limited = $derived(
+    !!catalog &&
+      !catalog.admin &&
+      (catalog.groups.some((g) => g.items.some((i) => i.admin_only)) || catalog.users.some((u) => !u.allowed)),
+  );
+
+  async function elevate() {
+    try {
+      await api.relaunchElevated('cleanup');
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   /** Whether this window may clean the item (Windows' own components need
    *  an administrator's). */
   function allowed(i: CleanupItem): boolean {
@@ -384,6 +399,12 @@
   <div class="scroll">
     <h1>{m.cl_title()}</h1>
     <p class="lead">{m.cl_lead()}</p>
+    {#if limited}
+      <div class="elevate">
+        <span>{m.cl_elevate_hint()}</span>
+        <button class="files-btn" onclick={elevate}>{m.cl_elevate()}</button>
+      </div>
+    {/if}
 
     {#if loadError}
       <div class="banner err">{loadError}</div>
@@ -450,7 +471,10 @@
               <div class="about-name">{focusedItem.label}</div>
               <p class="about">{focusedItem.about}</p>
               {#if focusedItem.per_user}<p class="about muted">{m.cl_per_user()}</p>{/if}
-              {#if !allowed(focusedItem)}<p class="about muted">{m.cl_item_admin_only()}</p>{/if}
+              {#if !allowed(focusedItem)}
+                <p class="about muted">{m.cl_item_admin_only()}</p>
+                <button class="files-btn add" onclick={elevate}>{m.cl_elevate()}</button>
+              {/if}
               {#if focusedItem.id === 'browser_history'}
                 <label class="keep">
                   <span>{m.cl_keep_history()}</span>
@@ -579,6 +603,8 @@
   .scroll { flex: 1; overflow: auto; padding: 30px 44px; }
   h1 { font-size: 24px; font-weight: 300; color: var(--head); margin-bottom: 8px; }
   .lead { font-size: 13px; color: var(--text-secondary); margin: 0 0 20px; max-width: 900px; line-height: 1.5; }
+  .elevate { display: flex; align-items: center; gap: 12px; margin: -8px 0 16px; padding: 8px 14px; font-size: 13px; color: var(--text); background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; max-width: 900px; }
+  .elevate span { flex: 1; }
   .cols { display: flex; gap: 16px; align-items: flex-start; }
   .card { border: 1px solid var(--border); border-radius: 8px; background: var(--card-bg); padding: 14px 18px; }
   .tree { flex: 1; min-width: 0; padding: 8px 0; }

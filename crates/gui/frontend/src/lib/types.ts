@@ -270,6 +270,8 @@ export interface PlatformInfo {
   ui_log_dir: string | null;
   /** The service's log folder where it is fixed (Linux); null on Windows. */
   service_log_dir: string | null;
+  /** The section to open at start (a window started again as an administrator). */
+  start_view?: string | null;
 }
 
 /** What the service's backup engine and scheduler carry out
