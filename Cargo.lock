@@ -3218,6 +3218,7 @@ dependencies = [
  "getrandom 0.2.17",
  "libc",
  "own-backup-backup",
+ "own-backup-cleanup",
  "own-backup-client",
  "own-backup-common",
  "own-backup-core",
