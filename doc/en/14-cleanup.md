@@ -1,10 +1,11 @@
-# Disk cleanup (Windows)
+# Disk cleanup (Windows and Linux)
 
 The **Cleanup** section removes what programs and Windows leave behind:
 temporary files, error reports, crash dumps, setup logs, caches, the
 Recycle Bin and the traces of work — browser history, recent documents. The
 Own Backup service does the work, so both the system's folders
-and the users' are within its reach. There is no such section on Linux yet.
+and the users' are within its reach. Linux has items of its own — see
+"Linux" below; the boot medium has no such section.
 
 ## How to use it
 
@@ -99,7 +100,8 @@ name masks — like Ace Utilities' junk cleaning, but more carefully:
 - **Where.** In the ticked users' profiles; a computer's administrator may
   add other folders and drives ("Where else to search").
 - **Never entered:** `Windows`, `Program Files`, `ProgramData`, `AppData`
-  (programs' junk is the other items' business), `.git`, `node_modules`,
+  and hidden folders (`.cargo`, `.npm`, `.config`, `.git`… — programs' data;
+  programs' junk is the other items' business), `node_modules`,
   cloud folders (OneDrive, Dropbox, Google Drive, Yandex Disk — a removal
   there would remove the file in the cloud too), links and junctions. This
   program's files (`.own-backup-*`) and backup images (`.obk`, `.vhdx`,
@@ -121,6 +123,39 @@ name masks — like Ace Utilities' junk cleaning, but more carefully:
   was opened after the analysis; the service does not remove it without
   an analysis. Each file of the list has a tick — untick it and the file
   stays. Folders are not removed.
+
+## Linux
+
+On Linux the service runs as root, and the items are Linux's own:
+
+| Item | Where | What stays |
+|---|---|---|
+| apt package cache (administrator only) | `/var/cache/apt/archives/*.deb`, `partial`, `*.bin` | installed programs, `lock` |
+| Old logs in /var/log (administrator) | logrotate's copies: `*.gz`, `*.1`…`*.9`, `*-20…` | the current logs, copies younger than a day |
+| systemd journal (administrator) | `journalctl --vacuum-size=200M` | the last 200 MB |
+| Crash reports (administrator) | `/var/crash`, `/var/lib/systemd/coredump` | — |
+| Old snap revisions (administrator) | `snap remove --revision` of the disabled ones | current revisions |
+| snapd cache (administrator) | `/var/lib/snapd/cache` | the snaps themselves |
+| Unneeded packages (administrator, off) | `apt-get autoremove --purge` (old kernels too) | — |
+| apt package lists (administrator, off) | `/var/lib/apt/lists` | `lock`, `partial` |
+| Trash | `~/.local/share/Trash` | — |
+| Thumbnail, shader, font caches | `~/.cache/thumbnails`, `mesa_shader_cache`, `nvidia/GLCache`, `fontconfig` | — |
+| Browsers | Chrome, Chromium, Edge, Vivaldi, Brave, Yandex, Opera (`~/.config`, `~/.cache`), Firefox and Thunderbird, snap and flatpak too | as on Windows: passwords, bookmarks, autofill — never |
+| npm, pip, Go, Cargo, Yarn, Playwright, Gradle caches (off) | `~/.npm/_cacache`, `~/.cache/pip`, `go-build`, `~/.cargo/registry/cache`… | — |
+| Editors' and tools' junk | Cursor's extension archives, Zed's logs and build scratch, JNA, the Gradle daemon, gopls, staticcheck | the AI agents' sessions and memory (`~/.claude`, `~/.codex`, `~/.gemini`, `~/.copilot`, opencode) — never |
+| Recent files (off) | `recently-used.xbel`, `~/.local/share/RecentDocuments` | the files themselves |
+| Files by masks | home folders (plus the masks `*Zone.Identifier`, `.DS_Store`, `*.swp`, `*.orig`, `*.rej`) | hidden folders, other file systems |
+
+- **A user's folders are cleaned with that user's own rights**
+  (`setfsuid`/`setfsgid` for the walk): a link or a folder swapped in cannot
+  make root remove what the user could not, and a browser history cut down
+  stays the user's file.
+- System items are an administrator's only: root or a member of `sudo`,
+  `wheel`, `admin`.
+- Sockets, pipes and devices are never removed; `/tmp` and `/var/tmp` are
+  left to systemd-tmpfiles.
+- Commands' output (`snap`, `apt-get`) is read in the C locale, never a
+  translation.
 
 ## What is guaranteed
 

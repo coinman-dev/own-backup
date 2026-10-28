@@ -32,6 +32,8 @@ fn roots(dir: &Path) -> Roots {
         volumes: vec![dir.join("C"), dir.join("D")],
         running: Default::default(),
         hives: fake_hives,
+        fs_root: dir.join("root"),
+        rights: |_| Ok(None),
     }
 }
 
@@ -1098,4 +1100,203 @@ fn junk_ignores_masks_too_broad() {
     let seen = junk_run(dir.path(), Mode::Remove, junk, TWO_DAYS * 4, None);
     assert_eq!(seen.total.files, 0);
     assert!(dir.path().join("Users/u/Documents/Отчёт.docx").exists());
+}
+
+// --- Linux ------------------------------------------------------------------
+
+/// Linux's catalogue: named, described, grouped, its own ids once; the
+/// system's part an administrator's; nothing touches passwords, bookmarks or
+/// the AI agents' sessions and memory.
+#[test]
+fn the_linux_catalogue_is_whole_and_leaves_what_it_must() {
+    let all = crate::catalog::linux_catalog();
+    let mut seen = std::collections::BTreeSet::new();
+    for i in all {
+        assert!(seen.insert(i.id), "{} twice", i.id);
+        assert!(crate::catalog::GROUPS.contains(&i.group), "{}", i.id);
+        assert_ne!(crate::catalog::label(i.id), i.id, "{} has no name", i.id);
+        assert!(
+            !crate::catalog::about(i.id).is_empty(),
+            "{} has no description",
+            i.id
+        );
+        assert_eq!(i.group == "system", i.admin_only(), "{}", i.id);
+        for t in i.targets {
+            assert!(!t.path.contains('\\'), "{}: {}", i.id, t.path);
+            if t.base == Base::Home || t.base == Base::Root {
+                assert!(!t.path.is_empty(), "{}: the whole {:?}", i.id, t.base);
+            }
+            for never in [
+                ".claude",
+                ".codex",
+                ".gemini",
+                ".copilot",
+                "opencode",
+                ".ssh",
+                ".gnupg",
+                "Login Data",
+                "Web Data",
+                "Bookmarks",
+                "places.sqlite",
+                "logins.json",
+                "key4.db",
+            ] {
+                assert!(!t.path.contains(never), "{}: {}", i.id, t.path);
+                assert!(
+                    !t.masks.iter().any(|m| m.eq_ignore_ascii_case(never)),
+                    "{}",
+                    i.id
+                );
+            }
+            if i.group == "browsers" {
+                assert!(!t.programs.is_empty(), "{}: {}", i.id, t.path);
+            }
+            assert!(
+                !t.path.starts_with("tmp") && !t.path.starts_with("var/tmp"),
+                "{}",
+                i.id
+            );
+        }
+    }
+    for id in ["trash", "journal", "apt_cache", "browser_cache", "junk"] {
+        assert!(seen.contains(id), "{id}");
+    }
+}
+
+fn linux_item(id: &str) -> &'static Item {
+    crate::catalog::linux_catalog()
+        .iter()
+        .find(|i| i.id == id)
+        .unwrap()
+}
+
+/// A user's trash, thumbnails and Firefox cache (snap too) go; the apt
+/// cache's packages and rotated logs go, the live log and a socket in a
+/// cache folder stay.
+#[cfg(unix)]
+#[test]
+fn linux_items_clean_their_folders_and_leave_sockets_and_live_logs() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("Users/u");
+    let root = dir.path().join("root");
+    write(&home.join(".local/share/Trash/files/old.pdf"), 100);
+    write(&home.join(".local/share/Trash/info/old.pdf.trashinfo"), 10);
+    write(&home.join(".cache/thumbnails/large/a.png"), 20);
+    write(
+        &home.join(".cache/mozilla/firefox/ab12.default-release/cache2/entries/X"),
+        30,
+    );
+    write(
+        &home.join("snap/firefox/common/.cache/mozilla/firefox/cd34.default/cache2/Y"),
+        40,
+    );
+    write(
+        &home.join(".mozilla/firefox/ab12.default-release/places.sqlite"),
+        50,
+    );
+    let socket = home.join(".cache/thumbnails/listener.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    write(&root.join("var/cache/apt/archives/foo_1.0_amd64.deb"), 1000);
+    write(&root.join("var/cache/apt/archives/lock"), 0);
+    write(&root.join("var/log/syslog"), 5);
+    write(&root.join("var/log/syslog.1"), 5);
+    write(&root.join("var/log/apt/history.log.2.gz"), 5);
+
+    let items: Vec<&Item> = [
+        "trash",
+        "thumbs",
+        "browser_cache",
+        "apt_cache",
+        "rotated_logs",
+    ]
+    .iter()
+    .map(|id| linux_item(id))
+    .collect();
+    let mut r = roots(dir.path());
+    r.fs_root = root.clone();
+    let done = run_at_with(
+        &items,
+        &r,
+        &[user(dir.path())],
+        Mode::Remove,
+        Options::default(),
+        &AtomicBool::new(false),
+        |_, _| {},
+        SystemTime::now() + TWO_DAYS,
+        None,
+    );
+    let by_id = |id: &str| done.items.iter().find(|i| i.id == id).unwrap().tally;
+    assert_eq!(by_id("trash").files, 2);
+    assert_eq!(by_id("thumbs").files, 1, "the picture, not the socket");
+    assert_eq!(by_id("browser_cache").files, 2, "Firefox and the snap's");
+    assert_eq!(by_id("apt_cache").files, 1);
+    assert_eq!(by_id("rotated_logs").files, 2);
+    assert!(socket.exists(), "a socket is never removed");
+    assert!(home
+        .join(".mozilla/firefox/ab12.default-release/places.sqlite")
+        .exists());
+    assert!(root.join("var/cache/apt/archives/lock").exists());
+    assert!(root.join("var/log/syslog").exists(), "the live log stays");
+}
+
+/// As root, a user's folders are cleaned with the user's rights: what the
+/// user could not remove (a root-owned folder in their cache) stays, what
+/// they could goes. Runs only as root (`sudo` the test binary).
+#[cfg(target_os = "linux")]
+#[test]
+fn as_root_a_users_folders_are_cleaned_with_the_users_rights() {
+    use std::os::unix::fs::{chown, PermissionsExt};
+    // SAFETY: no arguments.
+    if unsafe { libc::geteuid() } != 0 {
+        eprintln!("not root: skipped");
+        return;
+    }
+    let Some(person) = crate::users::profiles().into_iter().next() else {
+        eprintln!("no user on this system: skipped");
+        return;
+    };
+    let uid: u32 = person.sid.parse().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let home = dir.path().join("home");
+    let thumbs = home.join(".cache/thumbnails");
+    write(&thumbs.join("mine.png"), 10);
+    write(&thumbs.join("roots/theirs.png"), 10);
+    for p in [&home, &home.join(".cache"), &thumbs] {
+        chown(p, Some(uid), None).unwrap();
+    }
+    chown(thumbs.join("mine.png"), Some(uid), None).unwrap();
+    // root's folder inside, not writable by the user.
+    std::fs::set_permissions(thumbs.join("roots"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let u = User {
+        sid: person.sid.clone(),
+        name: person.name.clone(),
+        profile: home.clone(),
+    };
+    let done = run_at_with(
+        &[linux_item("thumbs")],
+        &Roots {
+            rights: crate::users::as_user,
+            ..roots(dir.path())
+        },
+        &[u],
+        Mode::Remove,
+        Options::default(),
+        &AtomicBool::new(false),
+        |_, _| {},
+        SystemTime::now(),
+        None,
+    );
+    assert_eq!(done.total.files, 1, "the user's own file");
+    assert_eq!(
+        done.total.left_files, 1,
+        "root's file is not the user's to remove"
+    );
+    assert!(thumbs.join("roots/theirs.png").exists());
+    assert!(!thumbs.join("mine.png").exists());
+    // And root is root again on this thread.
+    let probe = dir.path().join("root-again");
+    std::fs::write(&probe, b"x").unwrap();
+    use std::os::unix::fs::MetadataExt;
+    assert_eq!(std::fs::metadata(&probe).unwrap().uid(), 0);
 }

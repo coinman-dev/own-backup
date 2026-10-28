@@ -35,6 +35,14 @@
 - **Cleanup: Windows Update cache** — downloaded update files
   (`SoftwareDistribution\Download`) older than a day; the update history
   stays.
+- **Disk cleanup on Linux.** The Cleanup section and the automatic cleanup
+  on Linux too: the apt cache, old logs, the systemd journal (to 200 MB),
+  crash reports, old snap revisions, `apt autoremove` (off); the trash,
+  thumbnails, shaders, browsers (snap and flatpak Firefox too), developer
+  caches, editors' junk. A user's folders are cleaned with that user's own
+  rights; the system's part by an administrator only (root, the sudo
+  group). The mask search no longer enters hidden folders (`.cargo`,
+  `.npm`…) — on Windows either; the `*.err` mask is off by default.
 - **Automatic cleanup and cleanup before a copy.** The service cleans by
   itself, with no window: on a schedule (a day, weekdays, a day of the
   month, a missed one after start-up) and before the copy of jobs that tick

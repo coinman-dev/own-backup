@@ -68,6 +68,14 @@ const fn known(mask: &'static str, kind: Kind, default_on: bool) -> Known {
 /// disk check recovered, a build's intermediate files. Ace's `*.tmp*` is not
 /// offered at all (owner, 2026-10-28): it takes templates (`.tmpl`) too.
 pub const KNOWN: &[Known] = &[
+    // From the owner's Linux script (wsl-cleanup.sh): what Windows' copies
+    // and macOS' leave behind, and editors' leftovers.
+    known("*Zone.Identifier", Kind::Junk, true),
+    known(".DS_Store", Kind::Junk, true),
+    known("*.swp", Kind::Temp, false),
+    known("*.swo", Kind::Temp, false),
+    known("*.orig", Kind::Backup, false),
+    known("*.rej", Kind::Backup, false),
     known("*.tmp", Kind::Temp, true),
     known("*.temp", Kind::Temp, true),
     known("~$*", Kind::Temp, true),
@@ -97,7 +105,8 @@ pub const KNOWN: &[Known] = &[
     known("*.ftg", Kind::Junk, true),
     known("*.nch", Kind::Junk, true),
     known("0*.nch", Kind::Junk, true),
-    known("*.err", Kind::Junk, true),
+    // Off: a project's tests keep expected errors so (`tests/*.err`).
+    known("*.err", Kind::Junk, false),
     known("CHKLIST.MS", Kind::Junk, true),
     known("chklist.*", Kind::Junk, true),
     known("*.ilk", Kind::Build, false),
@@ -304,6 +313,9 @@ const NEVER_ENTERED: &[&str] = &[
     ".svn",
     ".hg",
     "node_modules",
+    // Python's installed packages.
+    "site-packages",
+    "dist-packages",
 ];
 
 /// Synced cloud folders, by the start of their name (`OneDrive - Работа`).
@@ -327,9 +339,15 @@ fn ours(name: &str) -> bool {
             .any(|ext| lower.ends_with(ext))
 }
 
+/// Hidden folders are programs' data — `~/.cargo`, `~/.npm`, `~/.config`
+/// on Linux, `.rustup` and `.cargo` in a Windows profile too — as AppData
+/// is: on the owner's machine (2026-10-28) `*.err` found 25 test files in a
+/// crate's sources under `~/.cargo/registry`, `.DS_Store` others under
+/// `~/.cargo/git`. A file there is never junk to a mask.
 fn entered(name: &str) -> bool {
     let lower = name.to_lowercase();
-    !NEVER_ENTERED.iter().any(|n| n.eq_ignore_ascii_case(name))
+    !name.starts_with('.')
+        && !NEVER_ENTERED.iter().any(|n| n.eq_ignore_ascii_case(name))
         && !CLOUD.iter().any(|c| lower.starts_with(&c.to_lowercase()))
 }
 
@@ -385,10 +403,14 @@ pub(crate) fn walk(
         found,
         progress,
         seen: 0,
+        device: None,
     };
     for place in places {
         match fs::symlink_metadata(place) {
-            Ok(m) if m.is_dir() && !is_link(&m) => search.dir(place),
+            Ok(m) if m.is_dir() && !is_link(&m) => {
+                search.device = device_of(&m);
+                search.dir(place)
+            }
             _ => {}
         }
     }
@@ -405,6 +427,28 @@ struct Search<'a> {
     found: Option<&'a mut Vec<Found>>,
     progress: &'a mut dyn FnMut(&Tally),
     seen: u64,
+    /// The file system of the place being searched (Unix).
+    device: Option<u64>,
+}
+
+fn device_of(meta: &fs::Metadata) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some(meta.dev())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        None
+    }
+}
+
+fn same_device(place: Option<u64>, meta: &fs::Metadata) -> bool {
+    match (place, device_of(meta)) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    }
 }
 
 impl Search<'_> {
@@ -420,7 +464,12 @@ impl Search<'_> {
             let Ok(meta) = fs::symlink_metadata(&path) else {
                 continue;
             };
-            if is_link(&meta) {
+            if is_link(&meta) || !(meta.is_dir() || meta.is_file()) {
+                continue;
+            }
+            // Never onto another file system (Linux: /proc, a mounted
+            // share, a stick) below the place searched.
+            if meta.is_dir() && !same_device(self.device, &meta) {
                 continue;
             }
             let name = entry.file_name();
@@ -535,6 +584,9 @@ mod tests {
         assert!(!entered("program files"));
         assert!(!entered("OneDrive - Работа"));
         assert!(!entered(".git"));
+        assert!(!entered(".cargo"), "a hidden folder is a program's data");
+        assert!(!entered(".config"));
+        assert!(!entered("site-packages"));
         assert!(entered("Documents"));
     }
 

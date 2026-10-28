@@ -19,10 +19,96 @@
 //!       settings, as a user who is not signed in has; the real engine
 //!       loads it privately, lists and removes the traces; checks that the
 //!       settings stay and that a hive held by someone else is left.
+//!
+//!   cleanup_probe analyze          (Linux)
+//!       Every Linux item for the users of this system — measured, nothing
+//!       removed. As a user: that user only; as root: every user (each with
+//!       their own rights) and the system's part.
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 fn main() {
-    eprintln!("cleanup_probe runs on Windows");
+    use std::sync::atomic::AtomicBool;
+
+    use own_backup_cleanup::{catalog, engine, users, Mode, Roots};
+
+    if std::env::args().nth(1).as_deref() != Some("analyze") {
+        eprintln!("cleanup_probe analyze");
+        std::process::exit(2);
+    }
+    // SAFETY: no arguments.
+    let me = unsafe { libc::geteuid() };
+    let people: Vec<_> = users::profiles()
+        .into_iter()
+        .filter(|u| me == 0 || u.sid == me.to_string())
+        .collect();
+    for u in &people {
+        println!("user {} {} {}", u.sid, u.name, u.profile.display());
+    }
+    let roots = Roots::of_this_system();
+    let items: Vec<_> = catalog::catalog()
+        .iter()
+        .filter(|i| me == 0 || !i.admin_only())
+        .collect();
+    let report = engine::run(
+        &items,
+        &roots,
+        &people,
+        Mode::Analyze,
+        own_backup_cleanup::Options {
+            history_keep_days: 7,
+            ..Default::default()
+        },
+        &AtomicBool::new(false),
+        |_, _| {},
+    );
+    let mib = |b: u64| b as f64 / (1024.0 * 1024.0);
+    for i in &report.items {
+        let t = &i.tally;
+        println!(
+            "{:<20} {:>8} files {:>10.1} MiB  rec {:<5} left {:<3} {}{}",
+            i.id,
+            t.files,
+            mib(t.bytes),
+            t.records,
+            t.left_files,
+            catalog::label(&i.id),
+            if i.running.is_empty() {
+                String::new()
+            } else {
+                format!("  (open: {})", i.running.join(", "))
+            }
+        );
+        if i.id == "junk" {
+            for f in report.listing.get(&i.id).into_iter().flatten().take(40) {
+                println!("{:<20} {:>9} {}", "", f.size, f.path.display());
+            }
+        }
+        if i.id == "browser_cache" || i.id == "editor_junk" || i.id == "dev_caches_linux" {
+            let mut dirs = std::collections::BTreeMap::<String, (u64, u64)>::new();
+            for f in report.listing.get(&i.id).into_iter().flatten() {
+                let mut p = f.path.clone();
+                while p.components().count() > 5 {
+                    p.pop();
+                }
+                let e = dirs.entry(p.display().to_string()).or_default();
+                e.0 += 1;
+                e.1 += f.size;
+            }
+            for (d, (n, b)) in dirs {
+                println!("{:<20} {:>8} files {:>10.1} MiB  {d}", "", n, mib(b));
+            }
+        }
+    }
+    println!(
+        "TOTAL {} files {:.1} MiB",
+        report.total.files,
+        mib(report.total.bytes)
+    );
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn main() {
+    eprintln!("cleanup_probe runs on Windows and Linux");
 }
 
 #[cfg(windows)]
@@ -235,6 +321,8 @@ mod win {
             volumes: vec![],
             running: Default::default(),
             hives: own_backup_cleanup::registry::open_user,
+            fs_root: dir.join("root"),
+            rights: own_backup_cleanup::users::as_user,
         };
         let user = User {
             sid: "S-1-5-21-0-0-0-1001".into(),
@@ -462,6 +550,8 @@ mod win {
             volumes: vec![],
             running: Default::default(),
             hives: own_backup_cleanup::registry::open_user,
+            fs_root: dir.join("root"),
+            rights: own_backup_cleanup::users::as_user,
         };
         let user = User {
             sid: "S-1-5-21-0-0-0-1001".into(),
@@ -633,6 +723,8 @@ mod win {
             volumes: vec![],
             running: Default::default(),
             hives: own_backup_cleanup::registry::open_user,
+            fs_root: dir.join("root"),
+            rights: own_backup_cleanup::users::as_user,
         };
         let items: Vec<_> = ["run_history", "recent_docs", "rdp_history", "office_recent"]
             .iter()

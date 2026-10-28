@@ -36,6 +36,13 @@ pub enum Base {
     /// One of Windows' own cleanup handlers, named by the target's path
     /// ([`crate::volume_cache`]), on the system volume.
     VolumeCache,
+    /// Linux: a user's home folder (`/home/anna`).
+    Home,
+    /// Linux: the system's root (`/`) — root's to clean.
+    Root,
+    /// Linux: a system command's work, named by the target's path
+    /// ([`crate::linux_system`]: the journal, old snap revisions, apt).
+    Command,
 }
 
 impl Base {
@@ -48,6 +55,7 @@ impl Base {
                 | Base::RecycleBin
                 | Base::Profile
                 | Base::Junk
+                | Base::Home
         )
     }
 }
@@ -131,7 +139,7 @@ pub enum Trim {
     ChromiumHistory,
 }
 
-const fn tree(base: Base, path: &'static str, min_age_hours: u32) -> Target {
+pub(crate) const fn tree(base: Base, path: &'static str, min_age_hours: u32) -> Target {
     Target {
         base,
         path,
@@ -144,7 +152,7 @@ const fn tree(base: Base, path: &'static str, min_age_hours: u32) -> Target {
     }
 }
 
-const fn files(
+pub(crate) const fn files(
     base: Base,
     path: &'static str,
     masks: &'static [&'static str],
@@ -177,9 +185,9 @@ const fn handler(name: &'static str) -> Target {
 }
 
 /// A day: what a running program or installer still uses is younger.
-const DAY: u32 = 24;
+pub(crate) const DAY: u32 = 24;
 /// A week: logs that may still explain a recent failure are younger.
-const WEEK: u32 = 7 * 24;
+pub(crate) const WEEK: u32 = 7 * 24;
 
 /// One line of the window's list.
 #[derive(Debug, Clone, Copy)]
@@ -202,7 +210,9 @@ impl Item {
     /// Windows' own components (a previous installation, superseded
     /// updates): removed from an administrator's window only.
     pub fn admin_only(&self) -> bool {
-        self.targets.iter().any(|t| t.base == Base::VolumeCache)
+        self.targets
+            .iter()
+            .any(|t| matches!(t.base, Base::VolumeCache | Base::Root | Base::Command))
     }
 
     /// Cleaned only as an analysis listed it and the window showed it: the
@@ -214,7 +224,7 @@ impl Item {
 
 /// Groups, in the order the window shows them.
 pub const GROUPS: &[&str] = &[
-    "temp", "reports", "caches", "windows", "browsers", "programs", "traces", "junk",
+    "temp", "system", "reports", "caches", "windows", "browsers", "programs", "traces", "junk",
 ];
 
 // Programs whose lists and caches the "programs" items clean.
@@ -276,6 +286,18 @@ const PROGRAM_NAMES: &[(&str, &str)] = &[
     ("zed.exe", "Zed"),
     ("resolve.exe", "DaVinci Resolve"),
     ("obs64.exe", "OBS Studio"),
+    // Linux processes.
+    ("chrome", "Google Chrome"),
+    ("chromium", "Chromium"),
+    ("chromium-browser", "Chromium"),
+    ("msedge", "Microsoft Edge"),
+    ("vivaldi-bin", "Vivaldi"),
+    ("brave", "Brave"),
+    ("yandex_browser", "Yandex Browser"),
+    ("opera", "Opera"),
+    ("firefox", "Mozilla Firefox"),
+    ("firefox-bin", "Mozilla Firefox"),
+    ("thunderbird", "Mozilla Thunderbird"),
 ];
 
 static ITEMS: &[Item] = &[
@@ -897,10 +919,10 @@ static BROWSERS: [Browser; 9] = [
 /// Chromium's history database and its journal: removed, or cut down to
 /// the last days ([`Trim::ChromiumHistory`]) — then both stay as they are
 /// but for the old rows.
-const CHROMIUM_HISTORY_DB: &[&str] = &["History", "History-journal"];
+pub(crate) const CHROMIUM_HISTORY_DB: &[&str] = &["History", "History-journal"];
 /// What is derived from the history (visited links, most visited, the
 /// address bar's suggestions): removed either way, the browser rebuilds it.
-const CHROMIUM_HISTORY: &[&str] = &[
+pub(crate) const CHROMIUM_HISTORY: &[&str] = &[
     "Visited Links",
     "Top Sites",
     "Top Sites-journal",
@@ -909,32 +931,32 @@ const CHROMIUM_HISTORY: &[&str] = &[
     "Network Action Predictor",
     "Network Action Predictor-journal",
 ];
-const CHROMIUM_COOKIES: &[&str] = &["Cookies", "Cookies-journal"];
+pub(crate) const CHROMIUM_COOKIES: &[&str] = &["Cookies", "Cookies-journal"];
 /// Sessions of browsers that kept them in the profile folder itself.
-const CHROMIUM_OLD_SESSIONS: &[&str] = &[
+pub(crate) const CHROMIUM_OLD_SESSIONS: &[&str] = &[
     "Current Session",
     "Current Tabs",
     "Last Session",
     "Last Tabs",
 ];
-const GECKO_COOKIES: &[&str] = &[
+pub(crate) const GECKO_COOKIES: &[&str] = &[
     "cookies.sqlite",
     "cookies.sqlite-wal",
     "cookies.sqlite-shm",
     "cookies.sqlite-journal",
 ];
-const GECKO_SESSION: &[&str] = &["sessionstore.jsonlz4"];
+pub(crate) const GECKO_SESSION: &[&str] = &["sessionstore.jsonlz4"];
 
 /// A path made once and kept for the life of the program, as the targets'
 /// `&'static` paths are.
-fn keep(path: String) -> &'static str {
+pub(crate) fn keep_path(path: String) -> &'static str {
     Box::leak(path.into_boxed_str())
 }
 
 fn of(b: &'static Browser, base: Base, path: String, masks: &'static [&'static str]) -> Target {
     Target {
         base,
-        path: keep(path),
+        path: keep_path(path),
         masks,
         recursive: masks.is_empty(),
         min_age_hours: 0,
@@ -1058,6 +1080,17 @@ pub fn program_name(exe: &str) -> &str {
         .unwrap_or(exe)
 }
 
+static LINUX_CATALOG: std::sync::LazyLock<Vec<Item>> = std::sync::LazyLock::new(|| {
+    let mut all = crate::catalog_linux::ITEMS.to_vec();
+    all.extend(crate::catalog_linux::browser_items());
+    all
+});
+
+/// Linux's catalogue, whatever this system is (its tests run anywhere).
+pub fn linux_catalog() -> &'static [Item] {
+    &LINUX_CATALOG
+}
+
 static CATALOG: std::sync::LazyLock<Vec<Item>> = std::sync::LazyLock::new(|| {
     let mut all = ITEMS.to_vec();
     all.extend(browser_items());
@@ -1069,6 +1102,8 @@ static CATALOG: std::sync::LazyLock<Vec<Item>> = std::sync::LazyLock::new(|| {
 pub fn catalog() -> &'static [Item] {
     if cfg!(windows) || cfg!(test) {
         &CATALOG
+    } else if cfg!(target_os = "linux") {
+        &LINUX_CATALOG
     } else {
         &[]
     }
@@ -1115,6 +1150,21 @@ pub fn label_both(id: &str) -> Localized {
         "driver_installers" => tr_both!("cleanup.driver_installers"),
         "junk" => tr_both!("cleanup.junk"),
         "update_cache" => tr_both!("cleanup.update_cache"),
+        "apt_cache" => tr_both!("cleanup.apt_cache"),
+        "rotated_logs" => tr_both!("cleanup.rotated_logs"),
+        "journal" => tr_both!("cleanup.journal"),
+        "linux_crashes" => tr_both!("cleanup.linux_crashes"),
+        "snap_old" => tr_both!("cleanup.snap_old"),
+        "snap_cache" => tr_both!("cleanup.snap_cache"),
+        "apt_autoremove" => tr_both!("cleanup.apt_autoremove"),
+        "apt_lists" => tr_both!("cleanup.apt_lists"),
+        "trash" => tr_both!("cleanup.trash"),
+        "thumbs" => tr_both!("cleanup.thumbs"),
+        "mesa_cache" => tr_both!("cleanup.mesa_cache"),
+        "font_cache" => tr_both!("cleanup.font_cache"),
+        "dev_caches_linux" => tr_both!("cleanup.dev_caches_linux"),
+        "editor_junk" => tr_both!("cleanup.editor_junk"),
+        "recent_files" => tr_both!("cleanup.recent_files"),
         "update_cleanup" => tr_both!("cleanup.update_cleanup"),
         "previous_windows" => tr_both!("cleanup.previous_windows"),
         "delivery_optimization" => tr_both!("cleanup.delivery_optimization"),
@@ -1157,6 +1207,21 @@ pub fn about(id: &str) -> String {
         "driver_installers" => tr!("cleanup.driver_installers_about"),
         "junk" => tr!("cleanup.junk_about"),
         "update_cache" => tr!("cleanup.update_cache_about"),
+        "apt_cache" => tr!("cleanup.apt_cache_about"),
+        "rotated_logs" => tr!("cleanup.rotated_logs_about"),
+        "journal" => tr!("cleanup.journal_about"),
+        "linux_crashes" => tr!("cleanup.linux_crashes_about"),
+        "snap_old" => tr!("cleanup.snap_old_about"),
+        "snap_cache" => tr!("cleanup.snap_cache_about"),
+        "apt_autoremove" => tr!("cleanup.apt_autoremove_about"),
+        "apt_lists" => tr!("cleanup.apt_lists_about"),
+        "trash" => tr!("cleanup.trash_about"),
+        "thumbs" => tr!("cleanup.thumbs_about"),
+        "mesa_cache" => tr!("cleanup.mesa_cache_about"),
+        "font_cache" => tr!("cleanup.font_cache_about"),
+        "dev_caches_linux" => tr!("cleanup.dev_caches_linux_about"),
+        "editor_junk" => tr!("cleanup.editor_junk_about"),
+        "recent_files" => tr!("cleanup.recent_files_about"),
         "update_cleanup" => tr!("cleanup.update_cleanup_about"),
         "previous_windows" => tr!("cleanup.previous_windows_about"),
         "delivery_optimization" => tr!("cleanup.delivery_optimization_about"),
@@ -1180,6 +1245,7 @@ pub fn group_label(id: &str) -> String {
         "programs" => tr!("cleanup.group_programs"),
         "junk" => tr!("cleanup.group_junk"),
         "windows" => tr!("cleanup.group_windows"),
+        "system" => tr!("cleanup.group_system"),
         _ => return id.to_string(),
     }
     .into_owned()

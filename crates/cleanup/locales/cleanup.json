@@ -197,8 +197,8 @@
     "en": "Files by masks"
   },
   "cleanup.junk_about": {
-    "ru": "Временные и брошенные файлы по маскам имён (*.tmp, ~$*, Thumbs.db…) в профилях отмеченных пользователей и в добавленных папках. Не заходит в Windows, Program Files, ProgramData, AppData, .git, node_modules и облачные папки; файлы этой программы и образы копий не трогает. Удаляются только файлы старше выбранного срока и только после того, как вы просмотрели список, — снимите галочку с файла, который нужен.",
-    "en": "Temporary and abandoned files by name masks (*.tmp, ~$*, Thumbs.db…) in the ticked users' profiles and in the folders added. It does not enter Windows, Program Files, ProgramData, AppData, .git, node_modules or cloud folders; this program's files and backup images are never touched. Only files older than the chosen age go, and only after you have looked through the list — untick a file you need."
+    "ru": "Временные и брошенные файлы по маскам имён (*.tmp, ~$*, Thumbs.db…) в профилях отмеченных пользователей и в добавленных папках. Не заходит в Windows, Program Files, ProgramData, AppData, скрытые папки (.cargo, .npm, .config, .git…), node_modules и облачные папки; файлы этой программы и образы копий не трогает. Удаляются только файлы старше выбранного срока и только после того, как вы просмотрели список, — снимите галочку с файла, который нужен.",
+    "en": "Temporary and abandoned files by name masks (*.tmp, ~$*, Thumbs.db…) in the ticked users' profiles and in the folders added. It does not enter Windows, Program Files, ProgramData, AppData, hidden folders (.cargo, .npm, .config, .git…), node_modules or cloud folders; this program's files and backup images are never touched. Only files older than the chosen age go, and only after you have looked through the list — untick a file you need."
   },
   "cleanup.mask_temp": { "ru": "Временные", "en": "Temporary" },
   "cleanup.mask_temp_about": {
@@ -301,6 +301,130 @@
   "cleanup.windows_esd_about": {
     "ru": "Образ Windows, который нужен, чтобы «Вернуть компьютер в исходное состояние» без интернета. После удаления для сброса понадобится загрузка из облака или установочный носитель.",
     "en": "The Windows image needed to “Reset this PC” without the internet. After the removal a reset needs a cloud download or installation media."
+  },
+  "cleanup.group_system": {
+    "ru": "Система и пакеты",
+    "en": "System and packages"
+  },
+  "cleanup.apt_cache": {
+    "ru": "Кэш пакетов apt",
+    "en": "apt package cache"
+  },
+  "cleanup.apt_cache_about": {
+    "ru": "Скачанные пакеты .deb, которые apt хранит после установки (/var/cache/apt/archives), и его индексы. Установленные программы не затрагиваются; пакет понадобится — apt скачает его снова.",
+    "en": "The .deb packages apt keeps after installing (/var/cache/apt/archives), and its indexes. Installed programs are not touched; a package needed again is downloaded again."
+  },
+  "cleanup.rotated_logs": {
+    "ru": "Старые журналы /var/log",
+    "en": "Old logs in /var/log"
+  },
+  "cleanup.rotated_logs_about": {
+    "ru": "Прежние копии журналов, которые оставляет logrotate (*.gz, *.1, *-20260101…). Текущие журналы служб остаются.",
+    "en": "The earlier copies of logs logrotate leaves (*.gz, *.1, *-20260101…). The services' current logs stay."
+  },
+  "cleanup.journal": {
+    "ru": "Журнал systemd",
+    "en": "systemd journal"
+  },
+  "cleanup.journal_about": {
+    "ru": "Журнал systemd урезается до 200 МБ штатной командой journalctl --vacuum-size; свежие записи остаются.",
+    "en": "The systemd journal is cut to 200 MB by journalctl --vacuum-size; recent entries stay."
+  },
+  "cleanup.linux_crashes": {
+    "ru": "Отчёты о сбоях",
+    "en": "Crash reports"
+  },
+  "cleanup.linux_crashes_about": {
+    "ru": "Отчёты apport (/var/crash) и дампы памяти systemd-coredump после сбоев программ. Нужны только для разбора сбоя.",
+    "en": "apport's reports (/var/crash) and systemd-coredump's memory dumps after programs crashed. Needed only to investigate the crash."
+  },
+  "cleanup.snap_old": {
+    "ru": "Старые версии snap",
+    "en": "Old snap revisions"
+  },
+  "cleanup.snap_old_about": {
+    "ru": "Отключённые прежние версии snap-пакетов, которые snapd хранит для отката (snap remove --revision). Текущие версии остаются; откатиться на удалённую версию будет нельзя.",
+    "en": "The disabled earlier revisions snapd keeps for a rollback (snap remove --revision). Current revisions stay; you cannot roll back to a removed one."
+  },
+  "cleanup.snap_cache": {
+    "ru": "Кэш snapd",
+    "en": "snapd cache"
+  },
+  "cleanup.snap_cache_about": {
+    "ru": "Копии скачанных snap-пакетов в /var/lib/snapd/cache. Сами пакеты лежат отдельно и остаются.",
+    "en": "Copies of downloaded snaps in /var/lib/snapd/cache. The snaps themselves are elsewhere and stay."
+  },
+  "cleanup.apt_autoremove": {
+    "ru": "Ненужные пакеты (apt autoremove)",
+    "en": "Unneeded packages (apt autoremove)"
+  },
+  "cleanup.apt_autoremove_about": {
+    "ru": "Пакеты, которые ставились как зависимости и больше ничему не нужны, — в том числе старые ядра (apt autoremove --purge). Проверьте список: это удаление программ.",
+    "en": "Packages installed as dependencies that nothing needs any more — old kernels too (apt autoremove --purge). Look at the list: this removes programs."
+  },
+  "cleanup.apt_lists": {
+    "ru": "Списки пакетов apt",
+    "en": "apt package lists"
+  },
+  "cleanup.apt_lists_about": {
+    "ru": "Скачанные списки пакетов репозиториев (/var/lib/apt/lists). До следующего apt update установить или обновить пакеты будет нельзя.",
+    "en": "The repositories' downloaded package lists (/var/lib/apt/lists). Until the next apt update nothing can be installed or upgraded."
+  },
+  "cleanup.trash": {
+    "ru": "Корзина",
+    "en": "Trash"
+  },
+  "cleanup.trash_about": {
+    "ru": "Всё, что лежит в корзине пользователя (~/.local/share/Trash). Вернуть эти файлы после очистки будет нельзя.",
+    "en": "Everything in the user's trash (~/.local/share/Trash). These files cannot be brought back after the cleanup."
+  },
+  "cleanup.thumbs": {
+    "ru": "Кэш миниатюр",
+    "en": "Thumbnail cache"
+  },
+  "cleanup.thumbs_about": {
+    "ru": "Миниатюры картинок и видео, которые показывают файловые менеджеры (~/.cache/thumbnails). Пересоздаются при просмотре.",
+    "en": "Pictures' and videos' thumbnails file managers show (~/.cache/thumbnails). They are rebuilt when viewed."
+  },
+  "cleanup.mesa_cache": {
+    "ru": "Кэш шейдеров (Mesa, NVIDIA)",
+    "en": "Shader cache (Mesa, NVIDIA)"
+  },
+  "cleanup.mesa_cache_about": {
+    "ru": "Собранные шейдеры видеокарты. Пересоздаются сами; первый запуск игры или программы после очистки может быть медленнее.",
+    "en": "Compiled graphics shaders. They are rebuilt by themselves; the first start of a game or program after the cleanup may be slower."
+  },
+  "cleanup.font_cache": {
+    "ru": "Кэш шрифтов",
+    "en": "Font cache"
+  },
+  "cleanup.font_cache_about": {
+    "ru": "Кэш fontconfig (~/.cache/fontconfig). Пересоздаётся сам.",
+    "en": "fontconfig's cache (~/.cache/fontconfig). It is rebuilt by itself."
+  },
+  "cleanup.dev_caches_linux": {
+    "ru": "Кэши npm, pip, Go, Cargo, Yarn, Playwright, Gradle",
+    "en": "npm, pip, Go, Cargo, Yarn, Playwright, Gradle caches"
+  },
+  "cleanup.dev_caches_linux_about": {
+    "ru": "Скачанные пакеты и собранное менеджерами пакетов про запас. Удалить безопасно — при следующей сборке они скачаются или соберутся снова; без интернета это будет нельзя.",
+    "en": "What the package managers downloaded and built in reserve. It is safe to remove — the next build downloads or builds it again; without the internet it cannot."
+  },
+  "cleanup.editor_junk": {
+    "ru": "Мусор редакторов и инструментов",
+    "en": "Editors' and tools' junk"
+  },
+  "cleanup.editor_junk_about": {
+    "ru": "Старые архивы расширений Cursor, ротированные журналы и временная сборка расширений Zed, временные файлы JNA, журналы демона Gradle старше недели, кэши gopls и staticcheck. Сессии и память ИИ-агентов (~/.claude, ~/.codex, ~/.gemini, ~/.copilot) не затрагиваются никогда.",
+    "en": "Cursor's old extension archives, Zed's rotated logs and extension build scratch, JNA's temporary files, the Gradle daemon's logs older than a week, gopls' and staticcheck's caches. The AI agents' sessions and memory (~/.claude, ~/.codex, ~/.gemini, ~/.copilot) are never touched."
+  },
+  "cleanup.recent_files": {
+    "ru": "Недавние файлы",
+    "en": "Recent files"
+  },
+  "cleanup.recent_files_about": {
+    "ru": "Списки недавно открытых файлов рабочего стола (recently-used.xbel GNOME/GTK, RecentDocuments KDE). Сами файлы не затрагиваются.",
+    "en": "The desktop's lists of recently opened files (GNOME/GTK recently-used.xbel, KDE RecentDocuments). The files themselves are not touched."
   },
   "cleanup.update_cache": {
     "ru": "Кэш обновлений Windows",

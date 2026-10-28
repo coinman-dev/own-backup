@@ -11,13 +11,16 @@
   import CleanupFilesModal from '../components/CleanupFilesModal.svelte';
   import CleanupMasksModal from '../components/CleanupMasksModal.svelte';
   import CleanupAutoModal from '../components/CleanupAutoModal.svelte';
+  import CleanupProfileModal from '../components/CleanupProfileModal.svelte';
   import { pickPath } from '../lib/pickPath.svelte';
   import { cleanupState } from '../lib/cleanupStore.svelte';
   import { maskProblem } from '../lib/junkMasks';
+  import { isWindows } from '../lib/platformStore.svelte';
   import type {
     CleanupCatalog,
     CleanupItem,
     CleanupJunk,
+    CleanupNamedProfile,
     CleanupOptions,
     CleanupProfile,
     CleanupProgress,
@@ -58,6 +61,11 @@
   let editingAuto = $state(false);
   let autoSaving = $state(false);
   let autoError = $state<string | null>(null);
+  /** The profiles saved under a name, as the service keeps them. */
+  let profiles = $state<CleanupNamedProfile[]>([]);
+  let editingProfile = $state(false);
+  let profileSaving = $state(false);
+  let profileError = $state<string | null>(null);
   let keepDays = $state(
     ((): number => {
       const v = Number(localStorage.getItem(HISTORY_KEY));
@@ -157,6 +165,71 @@
     }
   }
 
+  async function saveProfile(name: string) {
+    profileSaving = true;
+    profileError = null;
+    try {
+      const saved = await api.cleanupSaveNamed({
+        name,
+        items: autoItems().take.map((i) => i.id),
+        users: [...users],
+        options: options(),
+      });
+      profiles = profiles.some((p) => p.id === saved.id)
+        ? profiles.map((p) => (p.id === saved.id ? saved : p))
+        : [...profiles, saved];
+      editingProfile = false;
+    } catch (e) {
+      profileError = String(e);
+    } finally {
+      profileSaving = false;
+    }
+  }
+
+  async function deleteProfile(p: CleanupNamedProfile) {
+    if (!p.id) return;
+    profileError = null;
+    try {
+      await api.cleanupDeleteNamed(p.id);
+      profiles = profiles.filter((x) => x.id !== p.id);
+    } catch (e) {
+      profileError = String(e);
+    }
+  }
+
+  /** A saved profile back on the page: its ticks, users and days of history
+   *  kept, to change and save again. */
+  function openProfile(p: CleanupNamedProfile) {
+    const known = new Set(every());
+    items = new Set(p.items.filter((id) => known.has(id)));
+    const mayClean = new Set(catalog?.users.filter((u) => u.allowed).map((u) => u.sid) ?? []);
+    const theirs = p.users.filter((sid) => mayClean.has(sid));
+    if (theirs.length > 0) users = new Set(theirs);
+    const keep = p.options?.history_keep_days;
+    if (typeof keep === 'number' && (KEEP_CHOICES as readonly number[]).includes(keep)) {
+      keepDays = keep;
+      localStorage.setItem(HISTORY_KEY, String(keep));
+    }
+    editingProfile = false;
+    changed();
+  }
+
+  /** The saved profile the page's ticks are now, if any: the header's list
+   *  shows it, and «свой выбор» once a tick differs. */
+  const matchedProfile = $derived.by(() => {
+    const key = (list: Iterable<string>) => [...list].sort().join('\n');
+    const take = key(autoItems().take.map((i) => i.id));
+    const who = key(users);
+    return (
+      profiles.find(
+        (p) =>
+          key(p.items) === take &&
+          key(p.users) === who &&
+          (p.options?.history_keep_days ?? 7) === keepDays,
+      )?.id ?? ''
+    );
+  });
+
   function weekdayNames(days: string[]): string {
     const names: Record<string, () => string> = {
       mon: m.wiz_day_mon, tue: m.wiz_day_tue, wed: m.wiz_day_wed, thu: m.wiz_day_thu,
@@ -242,6 +315,10 @@
     api
       .cleanupProfile()
       .then((p) => (auto = p?.schedule ? p : null))
+      .catch(() => {});
+    api
+      .cleanupProfiles()
+      .then((list) => (profiles = Array.isArray(list) ? list : []))
       .catch(() => {});
     api
       .cleanupCatalog()
@@ -448,7 +525,7 @@
   function hint(): string {
     if (cleanupState.busy === 'analyze') return `${m.cl_hint_analyzing()} ${formatBytes(total)}`;
     if (cleanupState.busy === 'run') return `${m.cl_hint_cleaning()} ${formatBytes(total)}`;
-    if (askElevate) return m.cl_elevate_ask();
+    if (askElevate) return isWindows() ? m.cl_elevate_ask() : m.cl_admin_hint_linux();
     if (confirming) return m.cl_confirm();
     if (chosen().length === 0) return m.cl_hint_nothing();
     const waiting = unreviewed();
@@ -475,12 +552,45 @@
 
 <div class="page">
   <div class="scroll">
-    <h1>{m.cl_title()}</h1>
+    <div class="title-row">
+      <h1>{m.cl_title()}</h1>
+      <label class="profile-pick">
+        <span>{m.cl_profile()}</span>
+        <select
+          class="form-input"
+          value={matchedProfile}
+          disabled={!catalog || !!cleanupState.busy || profiles.length === 0}
+          title={profiles.length === 0 ? m.clp_row_none() : ''}
+          onchange={(e) => {
+            const select = e.currentTarget as HTMLSelectElement;
+            const p = profiles.find((x) => x.id === select.value);
+            if (p) openProfile(p);
+            // A profile with users this window may not clean is not the
+            // page's ticks after all: the list says so.
+            select.value = matchedProfile;
+          }}
+        >
+          <option value="">{m.cl_profile_own()}</option>
+          {#each profiles as p (p.id)}<option value={p.id}>{p.name}</option>{/each}
+        </select>
+      </label>
+      <span class="grow"></span>
+      <button
+        class="btn outline"
+        title={autoText()}
+        disabled={!catalog || !!cleanupState.busy}
+        onclick={() => ((autoError = null), (editingAuto = true))}>{m.cla_setup_button()}</button
+      >
+    </div>
     <p class="lead">{m.cl_lead()}</p>
     {#if limited}
       <div class="elevate">
-        <span>{m.cl_elevate_hint()}</span>
-        <button class="files-btn" onclick={elevate}>{m.cl_elevate()}</button>
+        {#if isWindows()}
+          <span>{m.cl_elevate_hint()}</span>
+          <button class="files-btn" onclick={elevate}>{m.cl_elevate()}</button>
+        {:else}
+          <span>{m.cl_admin_hint_linux()}</span>
+        {/if}
       </div>
     {/if}
 
@@ -496,6 +606,8 @@
                 <input
                   type="checkbox"
                   checked={g.items.filter(allowed).length > 0 && g.items.filter(allowed).every((i) => items.has(i.id))}
+                  indeterminate={g.items.some((i) => items.has(i.id) && allowed(i)) &&
+                    !g.items.filter(allowed).every((i) => items.has(i.id))}
                   disabled={!!cleanupState.busy}
                   onchange={() => toggleGroup(g.items)}
                 />
@@ -550,11 +662,17 @@
           {/each}
           <div class="auto">
             <div class="auto-text">
-              <span class="auto-name">{m.cla_title()}</span>
-              <span>{autoText()}</span>
+              <span class="auto-name">{m.clp_row()}</span>
+              <span
+                >{profiles.length > 0
+                  ? m.clp_row_saved({ names: profiles.map((p) => `«${p.name}»`).join(', ') })
+                  : m.clp_row_none()}</span
+              >
             </div>
-            <button class="files-btn" disabled={!!cleanupState.busy} onclick={() => ((autoError = null), (editingAuto = true))}
-              >{m.cla_setup()}</button
+            <button
+              class="files-btn"
+              disabled={!!cleanupState.busy}
+              onclick={() => ((profileError = null), (editingProfile = true))}>{m.clp_save_as()}</button
             >
           </div>
         </div>
@@ -568,7 +686,7 @@
               {#if focusedItem.per_user}<p class="about muted">{m.cl_per_user()}</p>{/if}
               {#if !allowed(focusedItem)}
                 <p class="about muted">{m.cl_item_admin_only()}</p>
-                <button class="files-btn add" onclick={elevate}>{m.cl_elevate()}</button>
+                {#if isWindows()}<button class="files-btn add" onclick={elevate}>{m.cl_elevate()}</button>{/if}
               {/if}
               {#if focusedItem.id === 'browser_history'}
                 <label class="keep">
@@ -698,6 +816,22 @@
     />
   {/if}
 
+  {#if editingProfile && catalog}
+    {@const chosenNow = autoItems()}
+    <CleanupProfileModal
+      {profiles}
+      items={chosenNow.take.map((i) => ({ id: i.id, label: i.label }))}
+      users={catalog.users.filter((u) => users.has(u.sid)).map((u) => ({ sid: u.sid, name: u.name }))}
+      left={chosenNow.left}
+      saving={profileSaving}
+      error={profileError}
+      onSave={saveProfile}
+      onOpen={openProfile}
+      onDelete={deleteProfile}
+      onClose={() => (editingProfile = false)}
+    />
+  {/if}
+
   {#if editingMasks && junk}
     {@const id = focused ?? 'junk'}
     <CleanupMasksModal
@@ -722,8 +856,8 @@
   <div class="footer">
     <div class="hint">{hint()}</div>
     {#if askElevate && !cleanupState.busy}
-      <button class="btn outline" onclick={() => (askElevate = false)}>{m.common_cancel()}</button>
-      <button class="btn green" onclick={elevate}>{m.cl_elevate()}</button>
+      <button class="btn outline" onclick={() => (askElevate = false)}>{isWindows() ? m.common_cancel() : m.common_close()}</button>
+      {#if isWindows()}<button class="btn green" onclick={elevate}>{m.cl_elevate()}</button>{/if}
     {:else if cleanupState.busy}
       <button class="btn danger" onclick={cancel}>{m.common_cancel()}</button>
     {:else if confirming}
@@ -746,6 +880,12 @@
 <style>
   .page { height: 100%; display: flex; flex-direction: column; }
   .scroll { flex: 1; overflow: auto; padding: 30px 44px; }
+  .title-row { display: flex; align-items: center; gap: 16px; margin-bottom: 8px; }
+  .title-row h1 { margin: 0 8px 0 0; }
+  .title-row .grow { flex: 1; }
+  .profile-pick { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text); }
+  .profile-pick .form-input { width: auto; min-width: 200px; max-width: 320px; }
+  .title-row .btn { padding: 7px 18px; }
   h1 { font-size: 24px; font-weight: 300; color: var(--head); margin-bottom: 8px; }
   .lead { font-size: 13px; color: var(--text-secondary); margin: 0 0 20px; max-width: 900px; line-height: 1.5; }
   .elevate { display: flex; align-items: center; gap: 12px; margin: -8px 0 16px; padding: 8px 14px; font-size: 13px; color: var(--text); background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; max-width: 900px; }
@@ -772,6 +912,8 @@
   .row.item.focused { background: var(--accent-soft); }
   .row input { width: auto; margin: 0; flex: 0 0 auto; }
   .row input.locked { opacity: .45; }
+  /* Part of the group ticked: a dash, in grey rather than the accent. */
+  .row input:indeterminate { accent-color: var(--text-muted); }
   .name { flex: 1; min-width: 0; }
   .size { font-size: 13px; color: var(--text); white-space: nowrap; }
   .muted { color: var(--text-muted); }

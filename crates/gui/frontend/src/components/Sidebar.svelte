@@ -56,9 +56,9 @@
     /** A function, so the menu follows a change of language. */
     label: () => string;
     icon: string;
-    /** Only in installed Windows: «Очистка» (PLAN §6б — Linux comes later;
-     *  on the boot medium there is nothing of the person's to clean). */
-    windowsOnly?: boolean;
+    /** Not on the boot medium: «Очистка» — there is nothing of the
+     *  person's to clean there. */
+    installedOnly?: boolean;
   }
 
   // Icons from the design (Own Backup.dc.html), its <rect>/<circle> spelled
@@ -105,7 +105,7 @@
       label: m.nav_cleanup,
       // Метла: черенок и веник.
       icon: 'M20 4l-7.5 7.5M10 10l4 4-3.5 6.5H5.5L4 19v-4.5z M7.5 20.5l2.5-4.5',
-      windowsOnly: true,
+      installedOnly: true,
     },
     {
       id: 'settings',
@@ -135,7 +135,7 @@
   </div>
 
   <ul class="nav-list">
-    {#each navItems.filter((i) => !i.windowsOnly || (isWindows() && !media.active)) as item}
+    {#each navItems.filter((i) => !i.installedOnly || !media.active) as item}
       <li>
         <button
           class="nav-item"

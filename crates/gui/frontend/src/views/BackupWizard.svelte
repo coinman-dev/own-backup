@@ -147,24 +147,40 @@
     ].filter(
       (s) =>
         !(media.active && s.key === 'schedule') &&
-        // The disk cleanup is the Windows service's, and not the medium's.
-        !(s.key === 'cleanup' && (media.active || !isWindows())),
+        // The disk cleanup is the installed service's, not the medium's.
+        !(s.key === 'cleanup' && media.active),
     ),
   );
 
-  // «Очистка»: what the service's automatic cleanup set holds — the cleanup
-  // before the copy runs it. Read when the step is first shown.
-  let cleanupSet = $state<{ items: string[]; users: number; empty: boolean } | null>(null);
+  // «Очистка»: the cleanup profiles saved in «Очистка» and the automatic
+  // cleanup's set (jobs saved before profiles clean by it) — the cleanup
+  // before the copy runs the one chosen. Read when the step is first shown.
+  type CleanupSet = { id: string; name: string; items: string[]; users: number };
+  let cleanupSets = $state<{ auto: CleanupSet; named: CleanupSet[] } | null>(null);
   let cleanupSetError = $state<string | null>(null);
   $effect(() => {
-    if (stepKey !== 'cleanup' || cleanupSet || cleanupSetError) return;
-    Promise.all([api.cleanupProfile(), api.cleanupCatalog()])
-      .then(([p, c]) => {
+    if (stepKey !== 'cleanup' || cleanupSets || cleanupSetError) return;
+    Promise.all([api.cleanupProfile(), api.cleanupProfiles(), api.cleanupCatalog()])
+      .then(([a, list, c]) => {
         const names = new Map(c.groups.flatMap((g) => g.items).map((i) => [i.id, i.label]));
-        const items = (p?.items ?? []).map((id) => names.get(id) ?? id);
-        cleanupSet = { items, users: p?.users?.length ?? 0, empty: items.length === 0 };
+        const set = (id: string, name: string, p: { items?: string[]; users?: string[] } | null): CleanupSet => ({
+          id,
+          name,
+          items: (p?.items ?? []).map((i) => names.get(i) ?? i),
+          users: p?.users?.length ?? 0,
+        });
+        cleanupSets = {
+          auto: set('', m.wiz_cleanup_auto_set(), a),
+          named: (Array.isArray(list) ? list : []).map((p) => set(p.id ?? '', p.name, p)),
+        };
       })
       .catch((e) => (cleanupSetError = String(e)));
+  });
+  const cleanupChosen = $derived.by(() => {
+    if (!cleanupSets) return null;
+    const id = job.advanced.cleanup_profile ?? '';
+    if (!id) return cleanupSets.auto;
+    return cleanupSets.named.find((s) => s.id === id) ?? null;
   });
   // The tab list is filtered (no schedule on the boot medium), so the body must
   // be keyed by the step's KEY, never by its index: on the medium index 2 said
@@ -2134,18 +2150,37 @@
             {m.wiz_adv_cleanup_before()}
           </label>
           <div class="adv-hint">{m.wiz_adv_cleanup_before_hint()}</div>
-          <div class="adv-title">{m.wiz_cleanup_set()}</div>
           {#if cleanupSetError}
             <div class="note warn">{cleanupSetError}</div>
-          {:else if !cleanupSet}
+          {:else if !cleanupSets}
             <div class="adv-hint">…</div>
-          {:else if cleanupSet.empty}
-            <div class="note warn">{m.wiz_cleanup_set_empty()}</div>
           {:else}
-            <ul class="cleanup-list">
-              {#each cleanupSet.items as name (name)}<li>{name}</li>{/each}
-            </ul>
-            <div class="adv-hint">{m.wiz_cleanup_set_users({ count: cleanupSet.users })}</div>
+            <div class="adv-title">{m.wiz_cleanup_profile()}</div>
+            <select
+              class="form-input cleanup-pick"
+              value={job.advanced.cleanup_profile ?? ''}
+              onchange={(e) => (job.advanced.cleanup_profile = (e.currentTarget as HTMLSelectElement).value)}
+            >
+              {#each cleanupSets.named as s (s.id)}<option value={s.id}>{s.name}</option>{/each}
+              <option value="">{cleanupSets.auto.name}</option>
+              {#if job.advanced.cleanup_profile && !cleanupChosen}
+                <option value={job.advanced.cleanup_profile}>{m.wiz_cleanup_profile_gone()}</option>
+              {/if}
+            </select>
+            {#if cleanupSets.named.length === 0}
+              <div class="adv-hint">{m.wiz_cleanup_no_profiles()}</div>
+            {/if}
+            <div class="adv-title">{m.wiz_cleanup_set()}</div>
+            {#if !cleanupChosen}
+              <div class="note warn">{m.wiz_cleanup_profile_gone_note()}</div>
+            {:else if cleanupChosen.items.length === 0}
+              <div class="note warn">{cleanupChosen.id ? m.wiz_cleanup_profile_empty() : m.wiz_cleanup_set_empty()}</div>
+            {:else}
+              <ul class="cleanup-list">
+                {#each cleanupChosen.items as name (name)}<li>{name}</li>{/each}
+              </ul>
+              <div class="adv-hint">{m.wiz_cleanup_set_users({ count: cleanupChosen.users })}</div>
+            {/if}
           {/if}
           <div class="adv-hint">{m.wiz_cleanup_set_where()}</div>
         </div>
@@ -2651,6 +2686,7 @@
   .btn.green:hover:not(:disabled) { background: var(--green-hover); }
   .cleanup-step { display: flex; flex-direction: column; gap: 8px; max-width: 760px; }
   .cleanup-step .adv-title { margin-top: 14px; }
+  .cleanup-pick { max-width: 420px; }
   .chk.big { font-size: 15px; font-weight: 600; }
   .cleanup-list { margin: 0; padding-left: 20px; font-size: 13px; color: var(--text); columns: 2; column-gap: 32px; }
   .cleanup-list li { margin: 2px 0; break-inside: avoid; }

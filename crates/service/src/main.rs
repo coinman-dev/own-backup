@@ -1019,7 +1019,7 @@ pub async fn run_main_loop(
     // The cleanup before a copy, and the scheduled one (Windows: the cleanup
     // is Windows' only for now).
     let _ = cleanup_hook.set(state.auto.clone());
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     if !own_backup_common::media_mode::is_media_mode() {
         auto_cleanup::spawn(state.auto.clone(), shutdown.clone());
     }

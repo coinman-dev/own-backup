@@ -3007,6 +3007,7 @@ dependencies = [
 name = "own-backup-cleanup"
 version = "0.1.8-beta"
 dependencies = [
+ "libc",
  "own-backup-common",
  "rusqlite",
  "rust-i18n",

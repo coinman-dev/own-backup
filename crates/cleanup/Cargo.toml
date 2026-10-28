@@ -32,5 +32,9 @@ windows = { version = "0.58", features = [
 # The `implement` macro names it at the crate root.
 windows-core = "0.58"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# users.rs: a user's own rights for the thread that cleans their folders.
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"

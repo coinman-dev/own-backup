@@ -62,6 +62,15 @@ pub enum Request {
     SaveProfile {
         profile: crate::auto_cleanup::Profile,
     },
+    /// The profiles saved under a name ([`crate::auto_cleanup::Named`]).
+    Profiles,
+    /// Save the window's ticks under a name.
+    SaveNamed {
+        profile: crate::auto_cleanup::Named,
+    },
+    DeleteNamed {
+        id: String,
+    },
 }
 
 fn page() -> usize {
@@ -183,6 +192,15 @@ pub enum Refusal {
     AdminOnly(String),
     /// An item that is not cleaned on a schedule (junk by masks): its name.
     NotScheduled(String),
+    /// A profile's name empty or too long.
+    BadName,
+    /// Another user's profile, changed by someone who is not an
+    /// administrator: its name.
+    NotYours(String),
+    /// A profile some jobs clean by: their names.
+    ProfileInUse(String),
+    /// A job's profile that is no longer there.
+    NoProfile,
 }
 
 impl Cleaner {

@@ -122,6 +122,11 @@ pub struct Roots {
     pub running: HashSet<String>,
     /// How a user's registry is reached ([`crate::registry::open_user`]).
     pub hives: OpenHive,
+    /// How a user's own rights are taken for their folders
+    /// ([`crate::users::as_user`]). The tests give their own.
+    pub rights: fn(&User) -> std::io::Result<Option<crate::users::AsUser>>,
+    /// Linux: the system's root (`/`), below which root's targets are.
+    pub fs_root: PathBuf,
 }
 
 impl Roots {
@@ -138,16 +143,18 @@ impl Roots {
             volumes: crate::users::fixed_volumes(),
             running: crate::users::running_programs(),
             hives: crate::registry::open_user,
+            fs_root: PathBuf::from("/"),
+            rights: crate::users::as_user,
         }
     }
 }
 
-/// `a\b` below `base`, part by part (the separator is Windows'; the tests run
-/// anywhere). A part with `*` or `?` is every folder there whose name it
+/// `a\b` (Windows) or `a/b` (Linux) below `base`, part by part (the tests
+/// run anywhere). A part with `*` or `?` is every folder there whose name it
 /// matches — folders only, links and junctions never.
 fn below(base: &Path, path: &str) -> Vec<PathBuf> {
     let mut found = vec![base.to_path_buf()];
-    for part in path.split('\\').filter(|s| !s.is_empty()) {
+    for part in path.split(['\\', '/']).filter(|s| !s.is_empty()) {
         if !part.contains(['*', '?']) {
             found.iter_mut().for_each(|p| p.push(part));
             continue;
@@ -182,7 +189,12 @@ pub fn folders(target: &Target, roots: &Roots, users: &[User]) -> Vec<PathBuf> {
         Base::LocalAppData => per_user("Local"),
         Base::RoamingAppData => per_user("Roaming"),
         Base::Junk => users.iter().map(|u| u.profile.clone()).collect(),
-        Base::VolumeCache => Vec::new(),
+        Base::VolumeCache | Base::Command => Vec::new(),
+        Base::Home => users
+            .iter()
+            .flat_map(|u| below(&u.profile, target.path))
+            .collect(),
+        Base::Root => below(&roots.fs_root, target.path),
         Base::SystemDrive => below(
             roots.windows.parent().unwrap_or(&roots.windows),
             target.path,
@@ -318,23 +330,30 @@ pub(crate) fn run_at_with(
             if open(target.programs) {
                 continue;
             }
-            if target.base == Base::VolumeCache {
-                let root = roots.windows.ancestors().last().unwrap_or(&roots.windows);
-                match crate::volume_cache::run(
-                    target.path,
-                    &root.to_string_lossy(),
-                    mode == Mode::Remove,
-                    cancel,
-                ) {
-                    Ok(done) => tally.bytes += done.bytes,
-                    // Not on this Windows, or not on this system at all.
+            if matches!(target.base, Base::VolumeCache | Base::Command) {
+                let done = if target.base == Base::Command {
+                    crate::linux_system::run(target.path, mode == Mode::Remove, cancel)
+                        .map(|o| o.bytes)
+                } else {
+                    let root = roots.windows.ancestors().last().unwrap_or(&roots.windows);
+                    crate::volume_cache::run(
+                        target.path,
+                        &root.to_string_lossy(),
+                        mode == Mode::Remove,
+                        cancel,
+                    )
+                    .map(|o| o.bytes)
+                };
+                match done {
+                    Ok(bytes) => tally.bytes += bytes,
+                    // Not on this system, or nothing of its kind on it.
                     Err(e)
                         if matches!(
                             e.kind(),
                             std::io::ErrorKind::NotFound | std::io::ErrorKind::Unsupported
                         ) => {}
                     Err(e) => {
-                        tracing::info!(handler = target.path, error = %e, "cleanup: Windows handler failed");
+                        tracing::info!(handler = target.path, error = %e, "cleanup: system handler failed");
                         tally.left_files += 1;
                     }
                 }
@@ -342,33 +361,66 @@ pub(crate) fn run_at_with(
                 continue;
             }
             if target.base == Base::Junk {
-                crate::junk::walk(
-                    &crate::junk::places(users, &options.junk),
-                    &options.junk,
-                    mode,
-                    now,
-                    cancel,
-                    only,
-                    &mut tally,
-                    (mode == Mode::Analyze).then_some(&mut found),
-                    &mut |t| progress(item.id, t),
-                );
+                let junk = &options.junk;
+                let places = crate::junk::places(users, junk);
+                // Each user's profile with the user's rights; a folder an
+                // administrator added outside them as the service.
+                for place in &places {
+                    let owner = users.iter().find(|u| place.starts_with(&u.profile));
+                    let _rights = match owner.map(roots.rights).transpose() {
+                        Ok(rights) => rights.flatten(),
+                        Err(e) => {
+                            tracing::info!(folder = %place.display(), error = %e, "cleanup: the user's rights could not be taken; left");
+                            tally.left_files += 1;
+                            continue;
+                        }
+                    };
+                    crate::junk::walk(
+                        std::slice::from_ref(place),
+                        junk,
+                        mode,
+                        now,
+                        cancel,
+                        only,
+                        &mut tally,
+                        (mode == Mode::Analyze).then_some(&mut found),
+                        &mut |t| progress(item.id, t),
+                    );
+                }
                 continue;
             }
-            for folder in folders(target, roots, users) {
-                let mut walk = Walk {
-                    target,
-                    mode,
-                    now,
-                    cancel,
-                    tally: &mut tally,
-                    seen: 0,
-                    progress: &mut |t| progress(item.id, t),
-                    only,
-                    found: (mode == Mode::Analyze).then_some(&mut found),
-                    options: &options,
+            // A user's folders with the user's own rights (Linux, as root):
+            // see `users::as_user`. Elsewhere one pass for everyone.
+            let per_user: Vec<Option<&User>> = if target.base.per_user() {
+                users.iter().map(Some).collect()
+            } else {
+                vec![None]
+            };
+            for user in per_user {
+                let _rights = match user.map(roots.rights).transpose() {
+                    Ok(rights) => rights.flatten(),
+                    Err(e) => {
+                        tracing::info!(error = %e, "cleanup: the user's rights could not be taken; their folders are left");
+                        tally.left_files += 1;
+                        continue;
+                    }
                 };
-                walk.root(&folder);
+                let whose = user.map_or(users, std::slice::from_ref);
+                for folder in folders(target, roots, whose) {
+                    let mut walk = Walk {
+                        target,
+                        mode,
+                        now,
+                        cancel,
+                        tally: &mut tally,
+                        seen: 0,
+                        progress: &mut |t| progress(item.id, t),
+                        only,
+                        found: (mode == Mode::Analyze).then_some(&mut found),
+                        options: &options,
+                    };
+                    walk.root(&folder);
+                }
             }
         }
         if !keys.is_empty() {
@@ -460,6 +512,12 @@ impl Walk<'_> {
                 continue;
             };
             if is_link(&meta) {
+                left = true;
+                continue;
+            }
+            // Sockets, pipes, devices: never a cleaner's (a program listens
+            // on a socket in its cache folder — Zed's in ~/.cache/zed).
+            if !meta.is_dir() && !meta.is_file() {
                 left = true;
                 continue;
             }

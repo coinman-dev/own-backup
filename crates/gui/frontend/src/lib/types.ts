@@ -501,8 +501,10 @@ export interface AdvancedConfig {
   low_priority: boolean;
   /** Cap on the read speed, MB/s; 0 = none. */
   speed_limit_mbps: number;
-  /** Clean the disk before the copy, by the automatic cleanup set (Windows). */
+  /** Clean the disk before the copy… */
   cleanup_before?: boolean;
+  /** …by this cleanup profile (its id); empty: the automatic cleanup's set. */
+  cleanup_profile?: string;
 }
 
 /** Byte totals per file category — real data from the backup walk. */
@@ -1356,6 +1358,19 @@ export interface CleanupProfile {
   admin?: boolean;
   /** When the schedule last ran it. */
   last_run?: string | null;
+}
+
+/** A cleanup set saved under a name («Сохранить профиль как…»): a job's
+ *  cleanup before the copy cleans by one. */
+export interface CleanupNamedProfile {
+  /** Given by the service. */
+  id?: string;
+  name: string;
+  items: string[];
+  users: string[];
+  options: CleanupOptions;
+  owner?: string | null;
+  admin?: boolean;
 }
 
 export interface CleanupSummary {

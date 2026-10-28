@@ -9,9 +9,15 @@
 //! against that again, as a request from them would be. Junk by masks is not
 //! part of it: those files go only from a list someone looked through
 //! ([`own_backup_cleanup::catalog::Item::reviewed`]).
+//!
+//! Profiles (`cleanup-profiles.json`): sets saved under a name from the page
+//! («Сохранить профиль как…»). A job chooses one for its cleanup before the
+//! copy (`AdvancedConfig::cleanup_profile`); a job that names none cleans by
+//! the automatic set, as before profiles. Each is kept with who saved it and
+//! checked against that again on every run.
 
-// The schedule runs on Windows only: the cleanup is Windows' for now.
-#![cfg_attr(not(windows), allow(dead_code))]
+// The schedule runs on Windows and Linux.
+#![cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -26,6 +32,9 @@ use crate::cleanup::{activity_record, Asker, Cleaner, Refusal};
 use crate::grpc_server::proto::Event;
 
 const FILE: &str = "cleanup-auto.json";
+const PROFILES: &str = "cleanup-profiles.json";
+/// A profile's name, in characters.
+const NAME_MAX: usize = 80;
 const TICK: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// What the automatic cleanup cleans and when.
@@ -44,6 +53,23 @@ pub struct Profile {
     pub admin: bool,
     /// When the schedule last ran it (RFC 3339).
     pub last_run: Option<String>,
+}
+
+/// A set saved under a name: what a job's cleanup before the copy cleans.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Named {
+    /// Kept by the service: a new profile gets one, a profile saved again
+    /// under the same name keeps its own (the jobs name it by this).
+    pub id: String,
+    pub name: String,
+    pub items: Vec<String>,
+    /// SIDs (uids on Linux).
+    pub users: Vec<String>,
+    pub options: Options,
+    /// As [`Profile::owner`] and [`Profile::admin`]: the service's.
+    pub owner: Option<String>,
+    pub admin: bool,
 }
 
 /// What starts a run, as «Активность» names it.
@@ -67,7 +93,8 @@ pub struct AutoCleanup {
     store: Arc<JobStore>,
     events: broadcast::Sender<Event>,
     file: PathBuf,
-    /// One writer of the file at a time.
+    profiles_file: PathBuf,
+    /// One writer of the files at a time.
     lock: Mutex<()>,
 }
 
@@ -82,6 +109,7 @@ impl AutoCleanup {
             store,
             events,
             file: data_dir.join(FILE),
+            profiles_file: data_dir.join(PROFILES),
             lock: Mutex::new(()),
         }
     }
@@ -94,25 +122,86 @@ impl AutoCleanup {
     }
 
     fn write(&self, profile: &Profile) -> std::io::Result<()> {
-        let tmp = self.file.with_extension("json.tmp");
-        let bytes = serde_json::to_vec_pretty(profile).map_err(std::io::Error::other)?;
-        std::fs::write(&tmp, bytes)?;
-        std::fs::rename(&tmp, &self.file)
+        write_json(&self.file, profile)
+    }
+
+    /// The saved profiles, in the order they were first saved.
+    pub fn profiles(&self) -> Vec<Named> {
+        std::fs::read(&self.profiles_file)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    }
+
+    /// Save the window's set under a name, checked as a cleanup by `asker`
+    /// would be. The same name (in any case) replaces that profile, if it is
+    /// `asker`'s or `asker` is an administrator.
+    pub fn save_named(&self, asker: &Asker, mut wanted: Named) -> Result<Named, Refusal> {
+        wanted.name = wanted.name.trim().to_string();
+        if wanted.name.is_empty() || wanted.name.chars().count() > NAME_MAX {
+            return Err(Refusal::BadName);
+        }
+        check_set(asker, &wanted.items, &wanted.users)?;
+        let _one = self.lock.lock().unwrap();
+        let mut all = self.profiles();
+        let same = all
+            .iter()
+            .position(|p| p.name.to_lowercase() == wanted.name.to_lowercase());
+        wanted.owner = asker.sid.clone();
+        wanted.admin = asker.admin;
+        match same {
+            Some(at) => {
+                if !may_change(asker, &all[at]) {
+                    return Err(Refusal::NotYours(all[at].name.clone()));
+                }
+                wanted.id = all[at].id.clone();
+                all[at] = wanted.clone();
+            }
+            None => {
+                wanted.id = uuid::Uuid::new_v4().to_string();
+                all.push(wanted.clone());
+            }
+        }
+        write_json(&self.profiles_file, &all).map_err(|e| Refusal::Unknown(e.to_string()))?;
+        info!(
+            name = %wanted.name,
+            items = wanted.items.len(),
+            users = wanted.users.len(),
+            "cleanup profile saved"
+        );
+        Ok(wanted)
+    }
+
+    /// Delete a profile: its owner's or an administrator's, and only one no
+    /// job cleans by.
+    pub fn delete_named(&self, asker: &Asker, id: &str) -> Result<(), Refusal> {
+        let _one = self.lock.lock().unwrap();
+        let mut all = self.profiles();
+        let Some(at) = all.iter().position(|p| p.id == id) else {
+            return Ok(());
+        };
+        if !may_change(asker, &all[at]) {
+            return Err(Refusal::NotYours(all[at].name.clone()));
+        }
+        let jobs: Vec<String> = self
+            .store
+            .list()
+            .into_iter()
+            .filter(|j| j.advanced.cleanup_profile == id)
+            .map(|j| j.name)
+            .collect();
+        if !jobs.is_empty() {
+            return Err(Refusal::ProfileInUse(jobs.join(", ")));
+        }
+        let gone = all.remove(at);
+        write_json(&self.profiles_file, &all).map_err(|e| Refusal::Unknown(e.to_string()))?;
+        info!(name = %gone.name, "cleanup profile deleted");
+        Ok(())
     }
 
     /// Save the window's set, checked as a cleanup by `asker` would be.
     pub fn save(&self, asker: &Asker, mut wanted: Profile) -> Result<Profile, Refusal> {
-        if let Some(id) = wanted
-            .items
-            .iter()
-            .find(|id| catalog::item(id).is_some_and(|i| i.reviewed()))
-        {
-            return Err(Refusal::NotScheduled(catalog::label(id)));
-        }
-        let (items, _) = Cleaner::resolve(asker, &wanted.items, &wanted.users)?;
-        if let Some(i) = items.iter().find(|i| i.admin_only() && !asker.admin) {
-            return Err(Refusal::AdminOnly(catalog::label(i.id)));
-        }
+        check_set(asker, &wanted.items, &wanted.users)?;
         if !matches!(
             wanted.schedule.kind.as_str(),
             "none" | "daily" | "weekly" | "monthly"
@@ -141,9 +230,26 @@ impl AutoCleanup {
     }
 
     /// Clean by the set, on this thread, and record it in the activity.
-    /// `job`: the job whose copy waits for it.
+    /// `job`: the job whose copy waits for it; it cleans by the profile it
+    /// names, or by the automatic set if it names none.
     pub fn run(&self, trigger: Trigger, job: Option<&own_backup_core::Job>) -> Result<(), Refusal> {
-        let p = self.profile();
+        let chosen = job.map_or("", |j| j.advanced.cleanup_profile.as_str());
+        let p = if chosen.is_empty() {
+            let p = self.profile();
+            Named {
+                items: p.items,
+                users: p.users,
+                options: p.options,
+                owner: p.owner,
+                admin: p.admin,
+                ..Named::default()
+            }
+        } else {
+            self.profiles()
+                .into_iter()
+                .find(|p| p.id == chosen)
+                .ok_or(Refusal::NoProfile)?
+        };
         let ids: Vec<String> = p
             .items
             .iter()
@@ -189,6 +295,7 @@ impl AutoCleanup {
         }
         info!(
             trigger = trigger.code(),
+            profile = %p.name,
             files = report.total.files,
             bytes = report.total.bytes,
             left = report.total.left_files,
@@ -245,6 +352,35 @@ impl AutoCleanup {
             warn!(error = %e, "automatic cleanup: its last run could not be saved");
         }
     }
+}
+
+/// What a set may hold, for `asker`: items cleaned on their own (not junk by
+/// masks), users `asker` may clean, Windows' components only for an
+/// administrator.
+fn check_set(asker: &Asker, items: &[String], users: &[String]) -> Result<(), Refusal> {
+    if let Some(id) = items
+        .iter()
+        .find(|id| catalog::item(id).is_some_and(|i| i.reviewed()))
+    {
+        return Err(Refusal::NotScheduled(catalog::label(id)));
+    }
+    let (items, _) = Cleaner::resolve(asker, items, users)?;
+    if let Some(i) = items.iter().find(|i| i.admin_only() && !asker.admin) {
+        return Err(Refusal::AdminOnly(catalog::label(i.id)));
+    }
+    Ok(())
+}
+
+/// A profile is changed by whoever saved it or by an administrator.
+fn may_change(asker: &Asker, p: &Named) -> bool {
+    asker.admin || p.owner.is_none() || p.owner == asker.sid
+}
+
+fn write_json<T: Serialize>(file: &std::path::Path, value: &T) -> std::io::Result<()> {
+    let tmp = file.with_extension("json.tmp");
+    let bytes = serde_json::to_vec_pretty(value).map_err(std::io::Error::other)?;
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, file)
 }
 
 fn per_user(id: &str) -> bool {
@@ -310,6 +446,66 @@ mod tests {
         wanted.schedule.time = "25:99".into();
         assert!(matches!(a.save(&me, wanted), Err(Refusal::Unknown(_))));
         assert_eq!(a.profile().schedule.time, "03:30", "the old set stays");
+    }
+
+    /// A profile saved again under its name (in another case) keeps its id;
+    /// another user may not replace it; one a job cleans by is not deleted.
+    #[test]
+    fn profiles_are_saved_by_name_and_kept_while_a_job_uses_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = auto(dir.path());
+        let asker = |sid: &str, admin| Asker {
+            sid: Some(sid.into()),
+            admin,
+        };
+        let (me, other, admin) = (
+            asker("S-1-5-21-1-1001", false),
+            asker("S-1-5-21-1-1002", false),
+            asker("S-1-5-21-1-500", true),
+        );
+        let named = |name: &str| Named {
+            name: name.into(),
+            ..Named::default()
+        };
+        assert!(matches!(
+            a.save_named(&me, named("  ")),
+            Err(Refusal::BadName)
+        ));
+        let first = a.save_named(&me, named(" Перед копией ")).unwrap();
+        assert_eq!(first.name, "Перед копией");
+        assert_eq!(first.owner, me.sid);
+        assert!(!first.id.is_empty());
+        let again = a.save_named(&me, named("перед КОПИЕЙ")).unwrap();
+        assert_eq!(again.id, first.id, "the same name keeps its id");
+        assert_eq!(a.profiles().len(), 1);
+        assert!(matches!(
+            a.save_named(&other, named("Перед копией")),
+            Err(Refusal::NotYours(_))
+        ));
+        assert!(matches!(
+            a.delete_named(&other, &first.id),
+            Err(Refusal::NotYours(_))
+        ));
+
+        let mut job = own_backup_core::Job {
+            name: "Диск C".into(),
+            ..Default::default()
+        };
+        job.advanced.cleanup_profile = first.id.clone();
+        let job = a.store.upsert(job).unwrap();
+        assert!(matches!(
+            a.delete_named(&admin, &first.id),
+            Err(Refusal::ProfileInUse(names)) if names == "Диск C"
+        ));
+        a.store.delete(&job.id).unwrap();
+        a.delete_named(&admin, &first.id).unwrap();
+        assert!(a.profiles().is_empty());
+
+        // A job whose profile is gone cleans nothing and says so.
+        assert!(matches!(
+            a.run(Trigger::BeforeBackup, Some(&job)),
+            Err(Refusal::NoProfile)
+        ));
     }
 
     /// An empty set runs nothing and records nothing.

@@ -4484,7 +4484,11 @@ impl BackupService for BackupServiceImpl {
         use crate::cleanup::{activity_record, Cleaner, Refusal, Request as Op};
         use own_backup_cleanup::Mode;
         check_auth(&req, &self.service_token)?;
-        if !cfg!(windows) {
+        // Windows and Linux; not on the boot medium, which has nothing of
+        // its own to clean.
+        if !(cfg!(windows) || cfg!(target_os = "linux"))
+            || own_backup_common::media_mode::is_media_mode()
+        {
             return Err(Status::unimplemented(
                 tr!("grpc_server.cleanup_windows_only").into_owned(),
             ));
@@ -4520,6 +4524,18 @@ impl BackupService for BackupServiceImpl {
             Refusal::NotScheduled(item) => Status::invalid_argument(
                 tr!("grpc_server.cleanup_not_scheduled", item = item).into_owned(),
             ),
+            Refusal::BadName => {
+                Status::invalid_argument(tr!("grpc_server.cleanup_bad_name").into_owned())
+            }
+            Refusal::NotYours(name) => Status::permission_denied(
+                tr!("grpc_server.cleanup_not_yours", name = name).into_owned(),
+            ),
+            Refusal::ProfileInUse(jobs) => Status::failed_precondition(
+                tr!("grpc_server.cleanup_profile_in_use", jobs = jobs).into_owned(),
+            ),
+            Refusal::NoProfile => {
+                Status::not_found(tr!("grpc_server.cleanup_no_profile").into_owned())
+            }
         };
         let cleaner = self.cleaner.clone();
         let (mode, items, users, options, exclude) = match op {
@@ -4532,6 +4548,23 @@ impl BackupService for BackupServiceImpl {
                     .map_err(|e| Status::internal(e.to_string()))?
                     .map_err(refused)?;
                 return json_reply(&saved);
+            }
+            Op::Profiles => return json_reply(&self.state.auto.profiles()),
+            Op::SaveNamed { profile } => {
+                let auto = self.state.auto.clone();
+                let saved = tokio::task::spawn_blocking(move || auto.save_named(&asker, profile))
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?
+                    .map_err(refused)?;
+                return json_reply(&saved);
+            }
+            Op::DeleteNamed { id } => {
+                let auto = self.state.auto.clone();
+                tokio::task::spawn_blocking(move || auto.delete_named(&asker, &id))
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?
+                    .map_err(refused)?;
+                return json_reply(&serde_json::json!({}));
             }
             Op::Cancel => {
                 cleaner.cancel();
@@ -4612,6 +4645,19 @@ fn cleanup_asker<T>(req: &Request<T>) -> crate::cleanup::Asker {
         return crate::cleanup::Asker {
             sid: Some(c.sid.clone()),
             admin: c.administrator,
+        };
+    }
+    // Linux: the window's uid over the socket; an administrator is root or
+    // a member of sudo, wheel or admin (`users::is_admin`).
+    #[cfg(unix)]
+    if let Some(c) = req
+        .extensions()
+        .get::<tonic::transport::server::UdsConnectInfo>()
+        .and_then(|info| info.peer_cred)
+    {
+        return crate::cleanup::Asker {
+            sid: Some(c.uid().to_string()),
+            admin: own_backup_cleanup::users::is_admin(c.uid()),
         };
     }
     let _ = req;

@@ -458,10 +458,13 @@ pub struct AdvancedConfig {
     pub low_priority: bool,
     /// Cap on how fast the source is read, MB/s. 0 = no cap.
     pub speed_limit_mbps: u32,
-    /// Clean the disk before the copy, by the service's automatic cleanup
-    /// set (the window's «Очистка» → «Автоочистка»): less junk copied.
-    /// Windows only; a cleanup that cannot run leaves the copy to go on.
+    /// Clean the disk before the copy: less junk copied. A cleanup that
+    /// cannot run leaves the copy to go on.
     pub cleanup_before: bool,
+    /// The cleanup profile it cleans by (its id, «Очистка» → «Сохранить
+    /// профиль как…»); empty: the automatic cleanup's set, as jobs saved
+    /// before profiles do.
+    pub cleanup_profile: String,
     // Removed on 2026-09-26, saved and never read: `backup_unallocated`,
     // `password_enabled` (encryption is the OBK format now), `pre_command` /
     // `post_command` (a command a SYSTEM service runs, from a job any
@@ -488,6 +491,7 @@ impl Default for AdvancedConfig {
             low_priority: false,
             speed_limit_mbps: 0,
             cleanup_before: false,
+            cleanup_profile: String::new(),
         }
     }
 }
