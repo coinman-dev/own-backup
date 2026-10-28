@@ -51,6 +51,7 @@
   "cl_item_admin_only": "Removed only from a window run as an administrator; its size shows anyway.",
   "cl_elevate": "Restart as administrator",
   "cl_elevate_hint": "Windows components and other users' folders are cleaned only from a window run as an administrator — as Disk Cleanup's \"Clean up system files\".",
+  "cl_elevate_ask": "Windows components are removed only from a window run as an administrator. Restart the window? Windows will ask for permission.",
   "cl_not_analyzed": "analysis needed",
   "cl_empty": "empty",
   "cl_files": "Files: {count}",

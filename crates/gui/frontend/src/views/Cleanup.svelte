@@ -281,7 +281,12 @@
       (catalog.groups.some((g) => g.items.some((i) => i.admin_only)) || catalog.users.some((u) => !u.allowed)),
   );
 
+  /** A click on an item only an administrator's window may clean: the bar
+   *  offers to start the window again as one. */
+  let askElevate = $state(false);
+
   async function elevate() {
+    askElevate = false;
     try {
       await api.relaunchElevated('cleanup');
     } catch (e) {
@@ -394,6 +399,7 @@
   function hint(): string {
     if (busy === 'analyze') return `${m.cl_hint_analyzing()} ${formatBytes(total)}`;
     if (busy === 'run') return `${m.cl_hint_cleaning()} ${formatBytes(total)}`;
+    if (askElevate) return m.cl_elevate_ask();
     if (confirming) return m.cl_confirm();
     if (chosen().length === 0) return m.cl_hint_nothing();
     const waiting = unreviewed();
@@ -458,8 +464,16 @@
                 >
                   <input
                     type="checkbox"
+                    class:locked={!allowed(it)}
                     checked={items.has(it.id) && allowed(it)}
-                    disabled={!!busy || !allowed(it)}
+                    disabled={!!busy}
+                    onclickcapture={(e) => {
+                      if (!allowed(it)) {
+                        e.preventDefault();
+                        focused = it.id;
+                        askElevate = true;
+                      }
+                    }}
                     onchange={() => toggleItem(it.id)}
                     onclick={(e) => e.stopPropagation()}
                     aria-label={it.label}
@@ -630,7 +644,10 @@
 
   <div class="footer">
     <div class="hint">{hint()}</div>
-    {#if busy}
+    {#if askElevate && !busy}
+      <button class="btn outline" onclick={() => (askElevate = false)}>{m.common_cancel()}</button>
+      <button class="btn green" onclick={elevate}>{m.cl_elevate()}</button>
+    {:else if busy}
       <button class="btn danger" onclick={cancel}>{m.common_cancel()}</button>
     {:else if confirming}
       <button class="btn outline" onclick={() => (confirming = false)}>{m.common_cancel()}</button>
@@ -674,6 +691,7 @@
   .row.item:hover { background: var(--panel2); }
   .row.item.focused { background: var(--accent-soft); }
   .row input { width: auto; margin: 0; flex: 0 0 auto; }
+  .row input.locked { opacity: .45; }
   .name { flex: 1; min-width: 0; }
   .size { font-size: 13px; color: var(--text); white-space: nowrap; }
   .muted { color: var(--text-muted); }

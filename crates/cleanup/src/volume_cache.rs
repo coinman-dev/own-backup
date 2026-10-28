@@ -86,6 +86,19 @@ mod win {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
+    /// A handler's error as the engine reads it. «The path is not found»
+    /// (`$WINDOWS.~BT`, the ESD folder) means nothing of its kind is on this
+    /// system — nothing to clean, not a failure (2026-10-28, three handlers
+    /// on the owner's machine).
+    fn failed(e: windows::core::Error) -> io::Error {
+        const FILE_NOT_FOUND: u32 = 0x8007_0002;
+        const PATH_NOT_FOUND: u32 = 0x8007_0003;
+        match e.code().0 as u32 {
+            FILE_NOT_FOUND | PATH_NOT_FOUND => io::Error::from(io::ErrorKind::NotFound),
+            _ => io::Error::other(e),
+        }
+    }
+
     /// Hears the handler's progress; answers `E_ABORT` once cancelled.
     #[implement(IEmptyVolumeCacheCallBack)]
     struct Progress {
@@ -263,7 +276,7 @@ mod win {
         take(about);
         take(button);
         // S_FALSE: nothing to clean on this volume.
-        started.map_err(io::Error::other)?;
+        started.map_err(failed)?;
 
         let freed = Arc::new(AtomicU64::new(0));
         let progress: IEmptyVolumeCacheCallBack = Progress {
@@ -276,7 +289,7 @@ mod win {
         // call.
         let measured = unsafe { cache.GetSpaceUsed(&mut used, &progress) };
         let outcome = match measured {
-            Err(e) => Err(io::Error::other(e)),
+            Err(e) => Err(failed(e)),
             Ok(()) if !remove || used == 0 => Ok(Outcome { bytes: used }),
             Ok(()) => {
                 // SAFETY: as above.
@@ -287,7 +300,7 @@ mod win {
                             bytes: if told > 0 { told } else { used },
                         })
                     }
-                    Err(e) => Err(io::Error::other(e)),
+                    Err(e) => Err(failed(e)),
                 }
             }
         };
