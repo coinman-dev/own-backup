@@ -60,6 +60,11 @@ RequestExecutionLevel admin
 ; The desktop of the boot medium. Not run on an installed system, but the
 ; service copies it from here when it builds a medium (backup/src/media_layout.rs).
 !define SHELL_EXE "own-backup-shell.exe"
+; The Total Commander plugin: files of Linux partitions, read through the
+; service (crates/tc-plugin). Only its ZIP is installed (owner, 2026-10-28):
+; opened in Total Commander, it installs the plugin into TC's own folder.
+!define TC_DIR "TotalCommander"
+!define TC_PLUGIN "OwnBackup.wfx64"
 ; own_backup_common::WINDOWS_SERVICE_NAME
 !define SERVICE_NAME "OwnBackup"
 !define SERVICE_KEY "SYSTEM\CurrentControlSet\Services\${SERVICE_NAME}"
@@ -304,6 +309,17 @@ Section "!${NAME}" SecMain
     File "THIRD-PARTY-NOTICES.txt"
     File "THIRD-PARTY-LICENSES.txt"
 
+    ; Opened in Total Commander, the ZIP installs the plugin by itself.
+    SetOutPath "$INSTDIR\${TC_DIR}"
+    File "${TC_DIR}\OwnBackup-TC-plugin.zip"
+    ; The bare DLL and its inf, as development builds before 0.1.8-beta put
+    ; them here. Total Commander may have that DLL loaded: then it goes at the
+    ; next restart.
+    Delete "$INSTDIR\${TC_DIR}\pluginst.inf"
+    Delete /REBOOTOK "$INSTDIR\${TC_DIR}\${TC_PLUGIN}.old"
+    Delete /REBOOTOK "$INSTDIR\${TC_DIR}\${TC_PLUGIN}"
+    SetOutPath "$INSTDIR"
+
     ; Before the service is touched, so that a failure below still leaves a
     ; program Windows knows how to remove.
     WriteUninstaller "$INSTDIR\uninstall.exe"
@@ -493,6 +509,11 @@ Section "Uninstall"
     Delete "$INSTDIR\COMMERCIAL-LICENSE.txt"
     Delete "$INSTDIR\THIRD-PARTY-NOTICES.txt"
     Delete "$INSTDIR\THIRD-PARTY-LICENSES.txt"
+    Delete /REBOOTOK "$INSTDIR\${TC_DIR}\${TC_PLUGIN}"
+    Delete /REBOOTOK "$INSTDIR\${TC_DIR}\${TC_PLUGIN}.old"
+    Delete "$INSTDIR\${TC_DIR}\pluginst.inf"
+    Delete "$INSTDIR\${TC_DIR}\OwnBackup-TC-plugin.zip"
+    RMDir "$INSTDIR\${TC_DIR}"
     RMDir /r "$INSTDIR\Logs"
 
     DeleteRegKey HKLM "${UNINSTALL_KEY}"

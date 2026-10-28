@@ -76,6 +76,9 @@ export XKB_DEFAULT_OPTIONS="${XKBOPTIONS:-grp:alt_shift_toggle}"
 # about it would be the first line of every log).
 export GDK_BACKEND=wayland
 export NO_AT_BRIDGE=1
+# Qt as a Wayland client too: the tools a build may add (Krusader,
+# FeatherPad) would otherwise look for an X server the medium does not have.
+export QT_QPA_PLATFORM=wayland
 
 marker=/run/own-backup-kiosk.desktop
 

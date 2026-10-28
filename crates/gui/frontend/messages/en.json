@@ -1065,6 +1065,7 @@
   "mb_tools": "Just-in-case tools",
   "mb_tools_note": "programs from this computer, along with their settings",
   "mb_tool_line": "{name} — {size} · {files}",
+  "lmb_tools_note": "Krusader, a two-panel file manager, and FeatherPad, a text editor, in the medium's Start menu. Installed from Debian's packages during the build; the medium grows by about {size}.",
   "mb_files": [
     {
       "declarations": [

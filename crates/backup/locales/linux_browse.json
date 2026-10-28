@@ -1,0 +1,27 @@
+{
+  "_version": 2,
+  "linux_browse.swap": {
+    "ru": "раздел подкачки (swap), файлов в нём нет",
+    "en": "swap space, no files"
+  },
+  "linux_browse.luks_in_luks": {
+    "ru": "зашифрованный контейнер внутри зашифрованного — не читается",
+    "en": "an encrypted container inside an encrypted one is not read"
+  },
+  "linux_browse.lvm_in_lvm": {
+    "ru": "LVM внутри тома LVM — не читается",
+    "en": "LVM inside a logical volume is not read"
+  },
+  "linux_browse.unsupported": {
+    "ru": "внутри файловая система %{what}; читаются только ext2/3/4 и btrfs",
+    "en": "it holds a %{what} filesystem; only ext2/3/4 and btrfs are read"
+  },
+  "linux_browse.empty": {
+    "ru": "внутри одни нули: раздел пуст или расшифрован не тем ключом",
+    "en": "it holds only zeros: the partition is empty or decrypted with the wrong key"
+  },
+  "linux_browse.unknown": {
+    "ru": "неизвестное содержимое: читаются только ext2/3/4, btrfs, LVM и LUKS",
+    "en": "unknown contents: only ext2/3/4, btrfs, LVM and LUKS are read"
+  }
+}

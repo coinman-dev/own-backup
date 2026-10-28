@@ -1,0 +1,5 @@
+[plugininstall]
+description=Own Backup: files of Linux partitions (ext2/3/4, btrfs, LVM, LUKS), read-only
+type=wfx
+file=OwnBackup.wfx
+defaultdir=OwnBackup

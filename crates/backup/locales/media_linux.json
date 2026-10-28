@@ -36,6 +36,10 @@
     "ru": "сохранение в папку",
     "en": "saving to the folder"
   },
+  "media_linux.unknown_tool": {
+    "ru": "Такого средства для носителя нет: %{tool}.",
+    "en": "There is no such tool for the medium: %{tool}."
+  },
   "media_linux.missing_tools": {
     "ru": "Для сборки носителя нужны пакеты debootstrap и debian-archive-keyring (нет: %{what}). Установите их: sudo apt install debootstrap debian-archive-keyring",
     "en": "Building the medium needs the debootstrap and debian-archive-keyring packages (missing: %{what}). Install them: sudo apt install debootstrap debian-archive-keyring"

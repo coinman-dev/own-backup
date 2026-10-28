@@ -7,6 +7,9 @@
 #   scripts/build-linux-media.sh                  # builds the .deb first
 #   scripts/build-linux-media.sh --deb PATH.deb   # uses that package
 #   scripts/build-linux-media.sh --clean          # drops the build tree (keeps caches)
+#   scripts/build-linux-media.sh --packages "krusader qt6-wayland breeze-icon-theme qt6-svg-plugins"
+#       # also these Debian packages: the window's "tools just in case" (the
+#       # names per tool are in crates/common/src/media_tools.rs)
 #
 # Result: target/dist/own-backup-media_<version>_amd64.iso and its .sha256
 # (OUTPUT names another file). Write it onto a stick from the window (Tools →
@@ -40,11 +43,13 @@ cd "$root"
 
 deb=""
 clean=0
+packages=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --deb) deb="$(realpath "$2")"; shift 2 ;;
         --clean) clean=1; shift ;;
-        -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
+        --packages) packages="$2"; shift 2 ;;
+        -h|--help) sed -n '2,39p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1 (see --help)" >&2; exit 2 ;;
     esac
 done
@@ -101,7 +106,9 @@ fi
 # Its own lines (OBK-*) are for the service; here they are shown as they come,
 # and OBK-ISO names the result.
 log="$work/build-output.log"
-shared_ build --config "$root/packaging/linux/media" --deb "$deb" --work "$work" | tee "$log"
+extra=()
+[[ -n $packages ]] && extra=(--packages "$packages")
+shared_ build --config "$root/packaging/linux/media" --deb "$deb" --work "$work" "${extra[@]}" | tee "$log"
 iso="$(sed -n 's/^OBK-ISO //p' "$log" | tail -1)"
 if [[ -z "$iso" ]]; then
     echo "the medium was not built (see above; OBK-ERROR names the reason)" >&2

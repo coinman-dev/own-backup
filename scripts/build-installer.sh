@@ -64,7 +64,8 @@ if [[ "$skip_build" -eq 0 ]]; then
         npm run build
     )
     cargo xwin build --locked --release --target x86_64-pc-windows-msvc \
-        -p own-backup-gui -p own-backup-service -p own-backup-cli -p own-backup-shell
+        -p own-backup-gui -p own-backup-service -p own-backup-cli -p own-backup-shell \
+        -p own-backup-tc-plugin
 fi
 
 stage="$target_dir/installer"
@@ -99,6 +100,25 @@ stage_text THIRD-PARTY-NOTICES.md THIRD-PARTY-NOTICES.txt
 # A package without any text stops the build rather than shipping a gap.
 python3 scripts/third-party-licenses.py "$target_dir/THIRD-PARTY-LICENSES.txt"
 stage_text "$target_dir/THIRD-PARTY-LICENSES.txt" THIRD-PARTY-LICENSES.txt
+# The Total Commander plugin (crates/tc-plugin), installed as a ZIP only:
+# opened in Total Commander, it offers to install the plugin itself. Inside,
+# the DLL named as TC's 64-bit file system plugins are and the description
+# TC reads when it installs one.
+if [[ ! -f "$exe_dir/own_backup_tc.dll" ]]; then
+    echo "plugin not found: $exe_dir/own_backup_tc.dll" >&2
+    exit 1
+fi
+rm -rf "$stage/TotalCommander"
+mkdir -p "$stage/TotalCommander"
+python3 - "$exe_dir/own_backup_tc.dll" crates/tc-plugin/pluginst.inf \
+    "$stage/TotalCommander/OwnBackup-TC-plugin.zip" <<'PY'
+import sys, zipfile
+dll, inf, out = sys.argv[1:]
+text = open(inf, encoding="utf-8").read().replace("\r\n", "\n").replace("\n", "\r\n")
+with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+    z.write(dll, "OwnBackup.wfx64")
+    z.writestr("pluginst.inf", text)
+PY
 cp crates/gui/icons/icon.ico "$stage/icon.ico"
 cp "$script" "$stage/own-backup.nsi"
 

@@ -38,12 +38,17 @@ hkdf = { workspace = true }
 bech32 = { workspace = true }
 crc32fast = "1"
 ntfs = "0.4.0"
+# linux_browse/: files of a Linux partition read from Windows (the Total
+# Commander plugin) — ext2/3/4, read-only, in userspace.
+ext4-view = "1"
+# … and btrfs (linux_browse/btrfs.rs): its zlib- and LZO-compressed extents
+# (zstd is above).
+flate2 = "1"
+lzokay-native = "0.1"
 tempfile = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
-# Reading back a rebuilt initramfs (initramfs_image_linux): gzip images.
-flate2 = "1"
 # systemd-logind over D-Bus (power_linux): sleep inhibitors, suspend, the
 # scheduled poweroff after a copy, shutdown and session signals.
 zbus = "6"

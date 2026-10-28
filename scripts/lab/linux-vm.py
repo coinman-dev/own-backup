@@ -826,8 +826,53 @@ def media_argv(cfg: dict, q: Qemu, args, label: str) -> list:
              '-serial', 'chardev:ser0',
              '-qmp', f"unix:{RUN / 'qmp.sock'},server=on,wait=off",
              '-monitor', f"unix:{RUN / 'monitor.sock'},server=on,wait=off",
-             '-device', 'virtio-rng-pci']
+             '-device', 'virtio-rng-pci',
+             # An absolute pointer, so the self-test's click on the strip's
+             # layout indicator lands where the strip says it is.
+             '-device', 'virtio-tablet-pci']
     return argv
+
+
+def keys(*names: str) -> None:
+    """Press these keys together on the VM's keyboard and let them go (QEMU
+    presses them in order and releases them in reverse)."""
+    qmp('send-key', {'keys': [{'type': 'qcode', 'data': n} for n in names]})
+    time.sleep(0.5)
+
+
+def click(x: int, y: int, screen: tuple) -> None:
+    """A left click at screen pixel x, y through the absolute pointer."""
+    w, h = screen
+    move = [{'type': 'abs', 'data': {'axis': 'x', 'value': x * 0x7fff // max(w - 1, 1)}},
+            {'type': 'abs', 'data': {'axis': 'y', 'value': y * 0x7fff // max(h - 1, 1)}}]
+    qmp('input-send-event', {'events': move})
+    time.sleep(0.3)
+    for down in (True, False):
+        qmp('input-send-event', {'events': [{'type': 'btn', 'data': {'down': down,
+                                                                     'button': 'left'}}]})
+        time.sleep(0.2)
+
+
+def layout_step(line: str, lines: list, screen: tuple) -> None:
+    """The host's part of the self-test's layout check (selftest: the
+    layout indicator): keys and a click, each on its own ready line."""
+    if line.startswith('OBK-SELFTEST layout_typing_ready'):
+        keys('alt', 'shift')
+        keys('f')
+        keys('ret')
+    elif line.startswith('OBK-SELFTEST layout_click_ready'):
+        at = next((m.group(1, 2) for ln in lines
+                   for m in [re.search(r'layout_at=(\d+),(\d+)', ln)] if m), None)
+        if at:
+            click(int(at[0]), int(at[1]), screen)
+            time.sleep(1)
+        keys('f')
+        keys('ret')
+    elif line.startswith('OBK-SELFTEST layout_keys_ready'):
+        keys('alt', 'shift')
+    elif line.startswith('OBK-SELFTEST layout_restart_ready'):
+        keys('f')
+        keys('ret')
 
 
 def cmd_media(args) -> int:
@@ -899,13 +944,14 @@ def cmd_media(args) -> int:
     began = time.monotonic()
     lines = []
     keys_sent = 0
+    answered = set()
     while True:
         if proc.poll() is not None:
             fail(f'QEMU exited with {proc.returncode}\n--- qemu.log\n{tail(RUN / "qemu.log")}')
         # The boot menus wait for a key when their timeout is off; Enter takes
         # the first entry. Only while a menu can be up — later the window has
         # the keyboard.
-        if keys_sent < 4 and time.monotonic() - began > 12 + 8 * keys_sent:
+        if keys_sent < 4 and time.monotonic() - began > 12 + 8 * keys_sent and not lines:
             try:
                 qmp('send-key', {'keys': [{'type': 'qcode', 'data': 'ret'}]})
             except (OSError, ValueError):
@@ -915,6 +961,13 @@ def cmd_media(args) -> int:
             f.seek(start)
             text = f.read().decode(errors='replace')
         lines = [ln.strip() for ln in text.splitlines() if ln.startswith('OBK-SELFTEST')]
+        for ln in lines:
+            if '_ready' in ln and ln not in answered:
+                answered.add(ln)
+                try:
+                    layout_step(ln, lines, args.screen)
+                except (OSError, ValueError) as error:
+                    say(f'layout step failed: {error}')
         if 'OBK-SELFTEST done' in lines:
             break
         if time.monotonic() > deadline:

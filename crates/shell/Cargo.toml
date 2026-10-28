@@ -35,5 +35,8 @@ windows = { version = "0.58", features = [
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
 pangocairo = "0.18"
+# The keyboards for the layout indicator (/dev/input, /dev/uinput):
+# src/linux/keyboard.rs. libxkbcommon itself is linked directly.
+libc = "0.2"
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }

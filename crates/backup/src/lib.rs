@@ -34,6 +34,7 @@ pub mod gpt_reader;
 pub mod gpt_writer;
 pub mod identity_clash;
 pub mod iscsi;
+pub mod linux_browse;
 pub mod luks;
 pub mod luks_rebuild;
 pub mod mbr_writer;

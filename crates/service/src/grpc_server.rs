@@ -41,6 +41,8 @@ pub struct BackupServiceImpl {
     shutdown: crate::shutdown::ShutdownSignal,
     /// Expected bearer token. Empty string means auth is disabled (dev/TCP mode).
     service_token: String,
+    /// Linux partitions opened for the Total Commander plugin.
+    linux_browse: Arc<crate::linux_browse::Sessions>,
 }
 
 /// Tells the window an operation no longer waits its turn — once, whether
@@ -78,6 +80,7 @@ impl BackupServiceImpl {
             state,
             service_token,
             shutdown,
+            linux_browse: Arc::new(crate::linux_browse::Sessions::default()),
         }
     }
 
@@ -2941,6 +2944,13 @@ impl BackupService for BackupServiceImpl {
             let p: LinuxMediaBuildDto = serde_json::from_str(&req.get_ref().json)
                 .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
             let with_stick = !p.stick_device.trim().is_empty();
+            // The tools become package names a root build installs: only
+            // ours, and refused before any password is asked.
+            if let Err(id) = own_backup_common::media_tools::linux_tool_packages(&p.tools) {
+                return Err(Status::invalid_argument(
+                    tr!("grpc_server.media_unknown_tool", tool = id).into_owned(),
+                ));
+            }
             // A .deb of the caller's runs its maintainer scripts as root in
             // the build: root's (the CLI under sudo) or a foreground
             // development run's only, and refused before any password is asked.
@@ -3025,8 +3035,10 @@ impl BackupService for BackupServiceImpl {
                 uid,
                 stick = %p.stick_device,
                 given_deb = !p.deb_path.trim().is_empty(),
+                tools = %p.tools.join(","),
                 "building the Linux boot medium"
             );
+            let tools = p.tools.clone();
             let report = tokio::task::spawn_blocking(move || {
                 let _slot = slot;
                 let _awake = keep_awake(&tr!("grpc_server.busy_media_build"));
@@ -3044,7 +3056,16 @@ impl BackupService for BackupServiceImpl {
                         },
                     );
                 };
-                build(BuildRequest { out, deb, stick }, &cancel, &mut emit)
+                build(
+                    BuildRequest {
+                        out,
+                        deb,
+                        stick,
+                        tools,
+                    },
+                    &cancel,
+                    &mut emit,
+                )
             })
             .await
             .map_err(|e| Status::internal(format!("medium build panicked: {e}")))?
@@ -3065,6 +3086,7 @@ impl BackupService for BackupServiceImpl {
                 iso_bytes: report.iso_bytes,
                 version: report.version,
                 from_installed: report.from_installed,
+                tools: report.tools,
                 warnings: report.warnings,
                 stick: report.stick.map(|s| MediaStickReportDto {
                     device,
@@ -4340,6 +4362,181 @@ impl BackupService for BackupServiceImpl {
             ))
         }
     }
+
+    async fn linux_browse(&self, req: Request<JsonRequest>) -> Result<Response<JsonReply>, Status> {
+        use crate::linux_browse::{Request as Op, SourceInfo};
+        check_auth(&req, &self.service_token)?;
+        linux_browse_allowed(&req)?;
+        let op: Op = serde_json::from_str(&req.into_inner().json)
+            .map_err(|e| Status::invalid_argument(format!("linux_browse: {e}")))?;
+        let sessions = self.linux_browse.clone();
+        let failed = |e: String| Status::failed_precondition(e);
+        match op {
+            Op::Sources => {
+                let disks = machine_disks().await?;
+                let sources =
+                    tokio::task::spawn_blocking(move || {
+                        let mut found = own_backup_backup::linux_browse::find_sources(&disks);
+                        // Development builds: image files offered as partitions
+                        // (`OBK_LINUX_BROWSE_IMAGES=a.img;b.img`) — how the
+                        // plugin is tried without a Linux disk at hand.
+                        if cfg!(debug_assertions) {
+                            if let Ok(list) = std::env::var("OBK_LINUX_BROWSE_IMAGES") {
+                                found.extend(
+                                    list.split(';').filter(|p| !p.trim().is_empty()).filter_map(
+                                        |p| own_backup_backup::linux_browse::image_source(p.trim()),
+                                    ),
+                                );
+                            }
+                        }
+                        found
+                    })
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?;
+                sessions.remember_sources(&sources);
+                let shown: Vec<SourceInfo> = sources
+                    .iter()
+                    .map(|s| SourceInfo {
+                        id: s.id.clone(),
+                        name: linux_source_name(s),
+                        encrypted: s.content == own_backup_backup::linux_browse::Content::Luks,
+                        size: s.size,
+                    })
+                    .collect();
+                info!(found = shown.len(), "gRPC: LinuxBrowse sources");
+                json_reply(&shown)
+            }
+            Op::Open { source, passphrase } => {
+                let Some(found) = sessions.source(&source) else {
+                    return Err(failed(
+                        tr!("grpc_server.linux_browse_no_source").into_owned(),
+                    ));
+                };
+                let opened = tokio::task::spawn_blocking(move || sessions.open(&found, passphrase))
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?
+                    .map_err(failed)?;
+                json_reply(&opened)
+            }
+            Op::List {
+                session,
+                root,
+                path,
+            } => {
+                let entries =
+                    tokio::task::spawn_blocking(move || sessions.list(session, root, &path))
+                        .await
+                        .map_err(|e| Status::internal(e.to_string()))?
+                        .map_err(failed)?;
+                json_reply(&entries)
+            }
+            Op::Stat {
+                session,
+                root,
+                path,
+            } => {
+                let entry =
+                    tokio::task::spawn_blocking(move || sessions.stat(session, root, &path))
+                        .await
+                        .map_err(|e| Status::internal(e.to_string()))?
+                        .map_err(failed)?;
+                json_reply(&entry)
+            }
+            Op::Close { session } => {
+                sessions.close(session);
+                json_reply(&serde_json::json!({}))
+            }
+        }
+    }
+
+    async fn linux_browse_read(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<BytesReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        linux_browse_allowed(&req)?;
+        let r: crate::linux_browse::ReadRequest = serde_json::from_str(&req.into_inner().json)
+            .map_err(|e| Status::invalid_argument(format!("linux_browse_read: {e}")))?;
+        let sessions = self.linux_browse.clone();
+        let data = tokio::task::spawn_blocking(move || sessions.read(&r))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(Status::failed_precondition)?;
+        Ok(Response::new(BytesReply { data }))
+    }
+}
+
+/// The disks of this machine, as the inventory sees them.
+async fn machine_disks() -> Result<Vec<own_backup_common::disk::DiskInfo>, Status> {
+    use own_backup_inventory::DiskInventory;
+    #[cfg(target_os = "windows")]
+    let disks = own_backup_inventory::WindowsInventory::new()
+        .map_err(|e| Status::internal(e.to_string()))?
+        .enumerate_disks()
+        .await;
+    #[cfg(target_os = "linux")]
+    let disks = own_backup_inventory::LinuxInventory::new()
+        .enumerate_disks()
+        .await;
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    let disks = own_backup_inventory::MockInventory::default()
+        .enumerate_disks()
+        .await;
+    disks.map_err(|e| Status::internal(e.to_string()))
+}
+
+/// Who may read Linux partitions raw. On Windows, whoever may call the
+/// service at all — the same people who may copy a whole disk into a backup
+/// and read it back. On Linux, root only: there the person has the system's
+/// own tools to mount a partition, and reading one past the permissions of
+/// the files on it is not something to hand to every desktop user.
+#[allow(clippy::result_large_err)] // a refusal goes back to the caller as it is
+fn linux_browse_allowed<T>(req: &Request<T>) -> Result<(), Status> {
+    #[cfg(unix)]
+    {
+        let info = req
+            .extensions()
+            .get::<tonic::transport::server::UdsConnectInfo>();
+        let (uid, _) = crate::peer_access::caller_ids(info)?;
+        if uid != 0 {
+            return Err(Status::permission_denied(
+                tr!("grpc_server.linux_browse_root_only").into_owned(),
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = req;
+    Ok(())
+}
+
+/// The folder name of a partition in the plugin: `Диск 3 · раздел 3 ·
+/// 128 ГБ · LUKS · /home`. Nothing in it Windows refuses in a name.
+fn linux_source_name(s: &own_backup_backup::linux_browse::Source) -> String {
+    use own_backup_backup::linux_browse::Content;
+    let disk = match s.disk_number {
+        Some(n) => tr!("grpc_server.linux_browse_disk", number = n).into_owned(),
+        None => s.disk.rsplit('/').next().unwrap_or(&s.disk).to_string(),
+    };
+    let what = match s.content {
+        Content::Luks => "LUKS",
+        Content::Lvm => "LVM",
+        Content::Btrfs => "btrfs",
+        _ => "ext",
+    };
+    let mut name = tr!(
+        "grpc_server.linux_browse_source",
+        disk = disk,
+        index = s.index,
+        size = own_backup_common::units::human_bytes(s.size),
+        what = what
+    )
+    .into_owned();
+    if !s.label.is_empty() {
+        name.push_str(" · ");
+        // `/home` reads as a path to Windows: the slash becomes one that is not.
+        name.push_str(&s.label.replace('/', "\u{2215}"));
+    }
+    own_backup_backup::linux_browse::names::to_display(name.as_bytes())
 }
 
 /// One boot entry as the boot page reads it — the same on both systems.
@@ -4814,6 +5011,70 @@ mod tests {
             .unwrap();
     }
 
+    /// A client whose runtime runs only during its calls, as the Total
+    /// Commander plugin's does, never answers the ping a graceful HTTP/2
+    /// close waits for. The service still stops (the installer hung on
+    /// «Остановка службы» with TC open, 2026-10-28).
+    #[tokio::test]
+    async fn a_client_that_is_not_polled_does_not_hold_up_the_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let (controller, shutdown) = crate::shutdown::create_shutdown_channel();
+        let svc = make_service_with_shutdown(dir.path(), shutdown.clone());
+        let busy = svc.state.busy.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut graceful = shutdown.clone();
+        let server = tokio::spawn(crate::shutdown::until_stopped(
+            tonic::transport::Server::builder()
+                .add_service(svc.into_service())
+                .serve_with_incoming_shutdown(
+                    tokio_stream::wrappers::TcpListenerStream::new(listener),
+                    async move { graceful.wait_for_shutdown().await },
+                ),
+            shutdown,
+            busy,
+        ));
+        let (called_tx, called_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let client = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let client = rt.block_on(async {
+                let mut c =
+                    own_backup_client::BackupClient::connect_tcp_only(format!("http://{addr}"), "")
+                        .await
+                        .unwrap();
+                c.list_jobs().await.unwrap();
+                c
+            });
+            called_tx.send(()).unwrap();
+            // Connected, and nobody drives the runtime until released.
+            let _ = release_rx.recv();
+            drop(client);
+        });
+        tokio::task::spawn_blocking(move || called_rx.recv().unwrap())
+            .await
+            .unwrap();
+        controller.trigger_shutdown();
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        assert!(
+            !server.is_finished(),
+            "the graceful close no longer waits for the client: the bound may be unneeded"
+        );
+        tokio::time::timeout(
+            crate::shutdown::CONNECTION_DRAIN + std::time::Duration::from_secs(3),
+            server,
+        )
+        .await
+        .expect("the service is still waiting for the idle client")
+        .unwrap()
+        .unwrap();
+        release_tx.send(()).unwrap();
+        client.join().unwrap();
+    }
+
     /// A job list past gRPC's default 4 MiB still travels both ways through
     /// the real client: on the stand (2026-10-17) a 6 MB list failed every
     /// request that read the jobs.
@@ -4837,7 +5098,12 @@ mod tests {
                 .unwrap();
         // Not the drive of the temporary folder: a destination on the source
         // volume is refused (on Windows that folder is on C:).
-        let source = if dir.path().to_string_lossy().to_ascii_uppercase().starts_with("C:") {
+        let source = if dir
+            .path()
+            .to_string_lossy()
+            .to_ascii_uppercase()
+            .starts_with("C:")
+        {
             "D:"
         } else {
             "C:"

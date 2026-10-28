@@ -12,7 +12,7 @@
 #   - scripts/build-linux-media.sh in the repository, through sudo, with the
 #     repository's paths.
 #
-#   build-media.sh build --config DIR --deb FILE --work DIR
+#   build-media.sh build --config DIR --deb FILE --work DIR [--packages "A B"]
 #   build-media.sh clean --work DIR   # the build tree goes; builder and package cache stay
 #   build-media.sh purge --work DIR   # DIR and everything under it goes
 #
@@ -23,6 +23,12 @@
 # cache) stay in DIR until `purge`: the service gives every build a new
 # temporary DIR and purges it afterwards; the repository's script keeps its
 # DIR, so a rebuild there downloads nothing but updates.
+#
+# --packages: Debian packages the medium carries besides its own list — the
+# "tools just in case" the window offers (Krusader, FeatherPad; the names come
+# from crates/common/src/media_tools.rs). They go into a package list of their
+# own, config/package-lists/tools.list.chroot, and the strip shows a Start
+# menu line for each program it finds.
 #
 # Needs: root, debootstrap and debian-archive-keyring on the host, network to
 # the Debian mirror (OBK_MEDIA_MIRROR, default http://deb.debian.org/debian/;
@@ -54,16 +60,22 @@ usage() {
 cmd="${1:-}"
 [[ -n $cmd ]] || usage
 shift
-config="" deb="" work=""
+config="" deb="" work="" packages=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --config) config="${2:-}"; shift 2 ;;
         --deb) deb="${2:-}"; shift 2 ;;
         --work) work="${2:-}"; shift 2 ;;
+        --packages) packages="${2:-}"; shift 2 ;;
         *) usage ;;
     esac
 done
 [[ -n $work ]] || usage
+# Package names only (Debian policy: lower case, digits, + - .): they end up
+# in a file live-build reads as root.
+for p in $packages; do
+    [[ $p =~ ^[a-z0-9][a-z0-9+.-]+$ ]] || usage
+done
 case "$cmd" in
     build) [[ -n $config && -n $deb ]] || usage ;;
     clean | purge) ;;
@@ -232,6 +244,11 @@ mkdir -p "$build"
 drop_build
 cp -a "$config/auto" "$config/config" "$build/"
 install -D -m644 "$deb" "$build/config/packages.chroot/own-backup_${pkg_version}_amd64.deb"
+if [[ -n $packages ]]; then
+    say "tools: $packages"
+    # shellcheck disable=SC2086 # one name per word, checked above
+    printf '%s\n' $packages >"$build/config/package-lists/tools.list.chroot"
+fi
 say "lb config"
 in_builder sh -c 'cd /build && lb config'
 say "lb build (long; the log is $build/build.log)"

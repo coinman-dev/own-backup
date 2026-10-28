@@ -1,0 +1,38 @@
+[package]
+name = "own-backup-tc-plugin"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+
+# A Total Commander file system plugin (WFX): the files of Linux partitions
+# (ext4, inside LVM and LUKS), read through the service, read-only. Built as
+# a DLL and shipped as OwnBackup.wfx64. The rlib is for the tests.
+[lib]
+name = "own_backup_tc"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Config, the pipe's name, the language — nothing of the engine: this is
+# loaded into Total Commander's process, and stays small.
+own-backup-common = { workspace = true }
+rust-i18n = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+zeroize = "1"
+tonic = { workspace = true }
+prost = { workspace = true }
+tokio = { workspace = true }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = { version = "0.4", features = ["util"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Storage_FileSystem",
+    # examples/wfx_harness.rs loads the built plugin as Total Commander does.
+    "Win32_System_LibraryLoader",
+] }
+
+[build-dependencies]
+tonic-build = { workspace = true }

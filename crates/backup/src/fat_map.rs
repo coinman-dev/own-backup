@@ -29,6 +29,16 @@ pub trait RawVolume {
     fn len(&self) -> u64;
 }
 
+/// A boxed volume reads as the volume: layers stack over `Box<dyn RawVolume>`.
+impl<T: RawVolume + ?Sized> RawVolume for Box<T> {
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        (**self).read_at(offset, buf)
+    }
+    fn len(&self) -> u64 {
+        (**self).len()
+    }
+}
+
 #[cfg(target_os = "windows")]
 impl RawVolume for crate::win_device::WinRawDevice {
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {

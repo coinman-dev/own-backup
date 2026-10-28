@@ -810,6 +810,39 @@ impl BackupClient {
         parse(&reply.json)
     }
 
+    /// Linux partitions read in place (the Total Commander plugin): one of
+    /// `sources`, `open`, `list`, `stat`, `close` (service/src/linux_browse.rs).
+    /// The status is kept: the plugin tells a session that has gone (opened
+    /// again) from a real refusal by it.
+    pub async fn linux_browse(
+        &mut self,
+        op: &serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, tonic::Status> {
+        let reply = self
+            .inner
+            .linux_browse(self.request(proto::JsonRequest {
+                json: op.to_string(),
+            }))
+            .await?
+            .into_inner();
+        serde_json::from_str(&reply.json).map_err(|e| tonic::Status::internal(json_err(e)))
+    }
+
+    /// A piece of a file of an opened Linux partition, at most 1 MiB.
+    pub async fn linux_browse_read(
+        &mut self,
+        req: &serde_json::Value,
+    ) -> std::result::Result<Vec<u8>, tonic::Status> {
+        Ok(self
+            .inner
+            .linux_browse_read(self.request(proto::JsonRequest {
+                json: req.to_string(),
+            }))
+            .await?
+            .into_inner()
+            .data)
+    }
+
     /// What mounting an image needs on the service's machine, and whether it
     /// is in place (JSON: { platform, iscsi | linux }).
     pub async fn mount_backend_status(&mut self) -> Result<serde_json::Value> {

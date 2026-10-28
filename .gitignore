@@ -5,6 +5,8 @@
 **/target
 **/node_modules
 **/dist
+# The patched deepmerge is used from its dist/ (vendor/deepmerge/README-OWN-BACKUP.md).
+!/vendor/deepmerge/dist
 **/.svelte-kit
 **/.vite
 **/.vite-temp
@@ -20,6 +22,13 @@
 *.pdb
 *.exe
 *.dll
+# The Total Commander plugin as built (win/), and its install archive.
+*.wfx64
+win/*.zip
+# Release files built locally into win/ (the .exe is caught above).
+win/*.deb
+win/*.iso
+win/SHA256SUMS.txt
 
 .DS_Store
 Thumbs.db

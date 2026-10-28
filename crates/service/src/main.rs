@@ -8,6 +8,7 @@ mod app_state;
 mod data_dir_acl;
 mod grpc_server;
 mod install;
+mod linux_browse;
 #[cfg(target_os = "linux")]
 mod logind_events;
 #[cfg(unix)]
@@ -1069,15 +1070,20 @@ pub async fn run_main_loop(
     #[cfg(windows)]
     let kept_token = token.clone();
     let busy = state.busy.clone();
+    let (stopping, still_busy) = (shutdown.clone(), busy.clone());
     let service = BackupServiceImpl::new(state, token, shutdown.clone()).into_service();
-    let served = Server::builder()
-        .add_service(service)
-        .serve_with_shutdown(addr, async move {
-            shutdown.wait_for_shutdown().await;
-            busy.cancel_for_stop();
-            busy.wait_until_idle().await;
-        })
-        .await;
+    let served = crate::shutdown::until_stopped(
+        Server::builder()
+            .add_service(service)
+            .serve_with_shutdown(addr, async move {
+                shutdown.wait_for_shutdown().await;
+                busy.cancel_for_stop();
+                busy.wait_until_idle().await;
+            }),
+        stopping,
+        still_busy,
+    )
+    .await;
 
     stop_worker(
         stop_tx,
@@ -1418,15 +1424,20 @@ async fn serve_uds(
     crate::sd_notify::ready();
 
     let busy = state.busy.clone();
+    let (stopping, still_busy) = (shutdown.clone(), busy.clone());
     let service = BackupServiceImpl::new(state, token, shutdown.clone()).into_service();
-    let served = Server::builder()
-        .add_service(service)
-        .serve_with_incoming_shutdown(UnixListenerStream::new(uds), async move {
-            shutdown.wait_for_shutdown().await;
-            busy.cancel_for_stop();
-            busy.wait_until_idle().await;
-        })
-        .await;
+    let served = crate::shutdown::until_stopped(
+        Server::builder()
+            .add_service(service)
+            .serve_with_incoming_shutdown(UnixListenerStream::new(uds), async move {
+                shutdown.wait_for_shutdown().await;
+                busy.cancel_for_stop();
+                busy.wait_until_idle().await;
+            }),
+        stopping,
+        still_busy,
+    )
+    .await;
 
     // Ours either way: the runtime lock is held, so no other engine has
     // published a socket or a token since.
@@ -1752,15 +1763,20 @@ async fn serve_named_pipe(
 
     let kept_token = token.clone();
     let busy = state.busy.clone();
+    let (stopping, still_busy) = (shutdown.clone(), busy.clone());
     let service = BackupServiceImpl::new(state, token, shutdown.clone()).into_service();
-    Server::builder()
-        .add_service(service)
-        .serve_with_incoming_shutdown(incoming, async move {
-            shutdown.wait_for_shutdown().await;
-            busy.cancel_for_stop();
-            busy.wait_until_idle().await;
-        })
-        .await?;
+    crate::shutdown::until_stopped(
+        Server::builder()
+            .add_service(service)
+            .serve_with_incoming_shutdown(incoming, async move {
+                shutdown.wait_for_shutdown().await;
+                busy.cancel_for_stop();
+                busy.wait_until_idle().await;
+            }),
+        stopping,
+        still_busy,
+    )
+    .await?;
 
     drop_our_token(&config, &kept_token);
     Ok(())

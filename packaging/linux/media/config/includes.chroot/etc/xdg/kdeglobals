@@ -1,0 +1,5 @@
+# KDE programs on the boot medium (Krusader, when the build was asked for the
+# tools: crates/common/src/media_tools.rs) draw their icons from Breeze, the
+# theme the build installs with them. Read only by KDE programs.
+[Icons]
+Theme=breeze

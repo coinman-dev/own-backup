@@ -39,13 +39,15 @@ fi
 
 # The Linux package and boot medium are built locally (AGENTS.md) and attached
 # to the same release; their asset names carry the Debian version with "~" as
-# a dot — the name the window looks for (media_linux.rs).
-deb_v="$(printf '%s' "$version" | sed 's/-/./')-1"
+# a dot — the name the window looks for (media_linux.rs). A release's package
+# has no Debian revision (DEB_REVISION=none in build-deb.sh); "-1" and up are
+# local test builds.
+deb_v="$(printf '%s' "$version" | sed 's/-/./')"
 
 cat <<EOF
 $kind for Windows 10/11 x64 and Linux (Ubuntu 24.04+, Debian 13+, amd64).
 
-- **own-backup-install.exe** — Windows setup wizard in English and Russian: installs the program for all users and starts its backup service; needs administrator rights. It installs over an earlier version, keeping settings and jobs.
+- **own-backup-install_${version}.exe** — Windows setup wizard in English and Russian: installs the program for all users and starts its backup service; needs administrator rights. It installs over an earlier version, keeping settings and jobs.
 - **own-backup_${deb_v}_amd64.deb** — Linux package: \`sudo apt install ./own-backup_${deb_v}_amd64.deb\` installs the program, starts its service and adds you to the \`own-backup\` group (sign in again to open the window).
 - **OwnBackup-Linux-${deb_v}_amd64.iso** — Linux boot medium (Debian 13 live): boots from a CD or a USB stick, UEFI with Secure Boot or BIOS, to back up or restore the computer's disks, Windows ones included.
 

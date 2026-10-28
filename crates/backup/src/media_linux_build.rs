@@ -59,6 +59,7 @@ use std::time::{Duration, Instant};
 use md5::{Digest, Md5};
 use own_backup_common::cancel::CancelToken;
 use own_backup_common::engine_dto::MediaStickIdentityDto;
+use own_backup_common::media_tools::{linux_tool_packages, LINUX_MEDIA_TOOLS};
 use own_backup_common::{tr, OwnBackupError, Result};
 use tracing::{info, warn};
 
@@ -1607,6 +1608,8 @@ pub struct BuildRequest {
     /// Also write the medium onto this stick, which must still be the one
     /// the list showed.
     pub stick: Option<(String, MediaStickIdentityDto)>,
+    /// Ids of [`LINUX_MEDIA_TOOLS`] to install on the medium.
+    pub tools: Vec<String>,
 }
 
 /// What the build did.
@@ -1617,6 +1620,8 @@ pub struct BuildReport {
     pub version: String,
     /// Made from the installed package (not a .deb that was given).
     pub from_installed: bool,
+    /// Names of the tools the medium carries.
+    pub tools: Vec<String>,
     pub warnings: Vec<String>,
     pub stick: Option<StickReport>,
     pub cache_dir: PathBuf,
@@ -1631,6 +1636,11 @@ pub fn build(
     cancel: &CancelToken,
     progress: &mut dyn FnMut(LinuxStage, u64, &str),
 ) -> Result<BuildReport> {
+    // Before anything is touched: a name that is not ours never reaches the
+    // package list a root build installs from.
+    linux_tool_packages(&req.tools).map_err(|id| {
+        OwnBackupError::Config(tr!("media_linux.unknown_tool", tool = id).into_owned())
+    })?;
     let paths = Paths::locate();
     paths.check()?;
     let missing = missing_tools();
@@ -1733,15 +1743,18 @@ fn build_in(
         .and_then(|_| File::create(paths.log()))
         .map_err(|e| warn!(error = %e, "no build log"))
         .ok();
-    let args = vec![
-        "build".to_string(),
-        "--config".to_string(),
-        paths.config.display().to_string(),
-        "--deb".to_string(),
-        deb.display().to_string(),
-        "--work".to_string(),
-        work.display().to_string(),
-    ];
+    let packages = linux_tool_packages(&req.tools).map_err(|id| {
+        OwnBackupError::Config(tr!("media_linux.unknown_tool", tool = id).into_owned())
+    })?;
+    let args = script_args(&paths.config, &deb, work, &packages);
+    let tools: Vec<String> = LINUX_MEDIA_TOOLS
+        .iter()
+        .filter(|t| req.tools.iter().any(|id| id == t.id))
+        .map(|t| t.name.to_string())
+        .collect();
+    if !tools.is_empty() {
+        info!(tools = %tools.join(", "), packages = %packages.join(" "), "tools for the medium");
+    }
     let mut tracker = Tracker::new();
     let ended = run_script(paths, &args, cancel, &mut log, &mut |line| {
         if let Some(p) = tracker.feed(line) {
@@ -1824,12 +1837,33 @@ fn build_in(
         iso_bytes,
         version,
         from_installed,
+        tools,
         warnings,
         stick,
         // Nothing stays: the folder is removed as this returns.
         cache_bytes: 0,
         cache_dir: paths.work_parent.clone(),
     })
+}
+
+/// The build script's arguments. `--packages` only when there are any: an
+/// older script (a development checkout's) knows nothing of it, and a build
+/// without tools must not fail on it.
+fn script_args(config: &Path, deb: &Path, work: &Path, packages: &[&str]) -> Vec<String> {
+    let mut args = vec![
+        "build".to_string(),
+        "--config".to_string(),
+        config.display().to_string(),
+        "--deb".to_string(),
+        deb.display().to_string(),
+        "--work".to_string(),
+        work.display().to_string(),
+    ];
+    if !packages.is_empty() {
+        args.push("--packages".to_string());
+        args.push(packages.join(" "));
+    }
+    args
 }
 
 /// Why the script failed, in the person's words: its own refusal when it
@@ -2419,6 +2453,34 @@ mod tests {
         let md5sums = std::fs::read_to_string(stage.join("DEBIAN/md5sums")).unwrap();
         assert!(!md5sums.contains("own-backup-tray"), "{md5sums}");
         assert!(md5sums.contains("usr/bin/own-backup-cli"), "{md5sums}");
+    }
+
+    #[test]
+    fn the_tools_reach_the_script_as_one_list_of_packages() {
+        let (c, d, w) = (Path::new("/c"), Path::new("/w/in.deb"), Path::new("/w"));
+        let plain = script_args(c, d, w, &[]);
+        assert_eq!(
+            plain,
+            [
+                "build",
+                "--config",
+                "/c",
+                "--deb",
+                "/w/in.deb",
+                "--work",
+                "/w"
+            ]
+        );
+        let packages = linux_tool_packages(&["krusader"]).unwrap();
+        let with = script_args(c, d, w, &packages);
+        assert_eq!(with[..7], plain[..]);
+        assert_eq!(
+            with[7..],
+            [
+                "--packages",
+                "krusader qt6-wayland breeze-icon-theme qt6-svg-plugins"
+            ]
+        );
     }
 
     #[test]

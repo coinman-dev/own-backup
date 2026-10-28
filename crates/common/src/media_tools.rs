@@ -135,6 +135,91 @@ pub fn tool(id: &str) -> Option<&'static MediaTool> {
     MEDIA_TOOLS.iter().find(|t| t.id == id)
 }
 
+// --- the Linux medium ----------------------------------------------------------
+
+/// A program the Linux medium may carry: a file manager and a text editor, the
+/// counterparts of Total Commander and Notepad++ on WinPE.
+///
+/// **Not copied from this machine, unlike on Windows.** The Linux medium is a
+/// Debian system built from Debian's archive, and these are Debian packages
+/// installed into it by the same build, from the same mirror, as everything
+/// else on it. The builder only adds their names to the package list; the
+/// strip on the booted medium puts a line in the Start menu when [`exe`] is
+/// there.
+///
+/// Everything on the medium runs as root (SYSTEM's place on WinPE), and that
+/// rules out KDE's own editor: Kate and KWrite refuse to start as root since
+/// 2017. FeatherPad is a Qt editor of the Notepad++ kind (tabs, syntax
+/// colours, encodings) that does not, and its Qt is Krusader's anyway.
+///
+/// [`exe`]: LinuxMediaTool::exe
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinuxMediaTool {
+    /// Stable name used in the build options and nowhere a person reads.
+    pub id: &'static str,
+    /// What the menu and the wizard call it.
+    pub name: &'static str,
+    /// Debian packages that make it work on the medium. The build installs
+    /// without Recommends, so what a program needs to be usable rather than
+    /// merely installed is named here: the Wayland platform plugin (without
+    /// it a Qt program looks for an X server the medium does not have and
+    /// does not start) and, for Krusader, an icon theme with Qt's SVG
+    /// plugins to draw it (Breeze is SVG: without them its toolbars and file
+    /// lists have no icons at all — stand, 27.10).
+    pub packages: &'static [&'static str],
+    /// What the Start menu runs, and the proof that the package is there.
+    pub exe: &'static str,
+}
+
+/// Everything the Linux medium knows how to carry, in the order the menu
+/// shows them.
+pub const LINUX_MEDIA_TOOLS: [LinuxMediaTool; 2] = [
+    LinuxMediaTool {
+        id: "krusader",
+        name: "Krusader",
+        packages: &[
+            "krusader",
+            "qt6-wayland",
+            "breeze-icon-theme",
+            "qt6-svg-plugins",
+        ],
+        exe: "/usr/bin/krusader",
+    },
+    LinuxMediaTool {
+        id: "featherpad",
+        name: "FeatherPad",
+        // `featherpad-l10n` is its Russian: a Recommends, so named.
+        packages: &["featherpad", "featherpad-l10n", "qt6-wayland"],
+        exe: "/usr/bin/featherpad",
+    },
+];
+
+/// The Linux tool with this id, if there is one.
+pub fn linux_tool(id: &str) -> Option<&'static LinuxMediaTool> {
+    LINUX_MEDIA_TOOLS.iter().find(|t| t.id == id)
+}
+
+/// The Debian packages for these tool ids, each once, in table order — or the
+/// first id nobody knows. A build is never given a package name from outside
+/// this table.
+pub fn linux_tool_packages<S: AsRef<str>>(ids: &[S]) -> Result<Vec<&'static str>, String> {
+    if let Some(unknown) = ids.iter().find(|id| linux_tool(id.as_ref()).is_none()) {
+        return Err(unknown.as_ref().to_string());
+    }
+    let mut out: Vec<&'static str> = Vec::new();
+    for tool in LINUX_MEDIA_TOOLS
+        .iter()
+        .filter(|t| ids.iter().any(|id| id.as_ref() == t.id))
+    {
+        for p in tool.packages {
+            if !out.contains(p) {
+                out.push(p);
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,5 +326,74 @@ mod tests {
     fn an_id_nobody_knows_is_not_a_tool() {
         assert!(tool("winamp").is_none());
         assert!(tool("").is_none());
+        assert!(linux_tool("winamp").is_none());
+        assert!(linux_tool("totalcmd").is_none(), "a Windows program");
+    }
+
+    /// Both together share Qt's Wayland plugin; it is installed once, and the
+    /// order is the table's whatever order the ids came in.
+    #[test]
+    fn the_linux_tools_become_package_names_each_once() {
+        assert_eq!(
+            linux_tool_packages(&["featherpad", "krusader"]).unwrap(),
+            [
+                "krusader",
+                "qt6-wayland",
+                "breeze-icon-theme",
+                "qt6-svg-plugins",
+                "featherpad",
+                "featherpad-l10n"
+            ]
+        );
+        assert_eq!(
+            linux_tool_packages(&["featherpad"]).unwrap(),
+            ["featherpad", "featherpad-l10n", "qt6-wayland"]
+        );
+        assert!(linux_tool_packages::<&str>(&[]).unwrap().is_empty());
+    }
+
+    /// The names go into the medium's package list as root: one that is not
+    /// in the table never gets that far.
+    #[test]
+    fn an_unknown_linux_tool_refuses_the_whole_list() {
+        assert_eq!(
+            linux_tool_packages(&["krusader", "evil; rm -rf /"]),
+            Err("evil; rm -rf /".to_string())
+        );
+    }
+
+    /// The Qt programs do not start without the Wayland plugin on a medium
+    /// that has no X server, and the build installs no Recommends.
+    #[test]
+    fn every_linux_tool_brings_what_it_needs_to_start() {
+        for t in LINUX_MEDIA_TOOLS {
+            assert!(t.packages.contains(&"qt6-wayland"), "{}", t.id);
+            assert!(t.exe.starts_with("/usr/bin/"), "{}", t.id);
+            assert!(
+                t.packages.iter().all(|p| p
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"+-.".contains(&b))),
+                "{}: a Debian package name",
+                t.id
+            );
+        }
+        let krusader = linux_tool("krusader").unwrap().packages;
+        assert!(krusader.contains(&"breeze-icon-theme"));
+        assert!(
+            krusader.contains(&"qt6-svg-plugins"),
+            "Breeze is SVG; without the plugins no icon is drawn"
+        );
+    }
+
+    /// Kate refuses to start as root, and everything on the medium is root.
+    #[test]
+    fn the_linux_editor_is_not_one_that_refuses_root() {
+        for t in LINUX_MEDIA_TOOLS {
+            assert!(
+                !t.packages.iter().any(|p| *p == "kate" || *p == "kwrite"),
+                "{}",
+                t.id
+            );
+        }
     }
 }

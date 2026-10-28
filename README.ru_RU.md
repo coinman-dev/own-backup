@@ -7,7 +7,7 @@
 <h1 align="center">Own Backup</h1>
 <p align="center">Резервное копирование дисков и томов Windows и Linux блок за блоком — и загрузочные носители, с которых их можно вернуть.</p>
 
-[![Релиз](https://img.shields.io/badge/release-0.1.7--beta-orange)](https://github.com/coinman-dev/own-backup/releases/tag/v0.1.7-beta)
+[![Релиз](https://img.shields.io/badge/release-0.1.8--beta-orange)](https://github.com/coinman-dev/own-backup/releases/tag/v0.1.8-beta)
 [![Сборка](https://github.com/coinman-dev/own-backup/actions/workflows/release.yml/badge.svg)](https://github.com/coinman-dev/own-backup/actions/workflows/release.yml)
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-blue)](#скачать)
 [![Linux](https://img.shields.io/badge/Linux-Ubuntu%2024.04%2B%20%2F%20Debian%2013%2B-blue)](#скачать)
@@ -20,7 +20,11 @@
 файлы, а с загрузочного носителя — и тот диск, с которого загружается сама
 Windows.
 
-> **0.1.7-beta — предварительный релиз; версия для Linux появилась в
+<p align="center">
+  <img src="doc/images/ru/backup-dashboard.png" alt="Own Backup: страница «Резервное копирование» — задания, последняя копия каждого и её версии">
+</p>
+
+> **0.1.8-beta — предварительный релиз; версия для Linux появилась в
 > 0.1.6-beta.** Важную копию проверьте восстановлением на запасной диск или в
 > виртуальную машину, прежде чем на неё полагаться, — в Linux особенно.
 
@@ -28,9 +32,9 @@ Windows.
 
 | Вариант | Скачать | Как использовать |
 |---|---|---|
-| Установщик для Windows | [own-backup-install.exe](https://github.com/coinman-dev/own-backup/releases/download/v0.1.7-beta/own-backup-install.exe) | Ставит программу для всех пользователей компьютера и запускает её службу. Нужны права администратора. |
-| Пакет для Linux | [own-backup_0.1.7.beta-1_amd64.deb](https://github.com/coinman-dev/own-backup/releases/download/v0.1.7-beta/own-backup_0.1.7.beta-1_amd64.deb) | `sudo apt install ./own-backup_0.1.7.beta-1_amd64.deb` ставит программу, запускает её службу и добавляет вас в группу `own-backup` (войдите в систему заново, чтобы открыть окно). |
-| Загрузочный носитель Linux | [OwnBackup-Linux-0.1.7.beta-1_amd64.iso](https://github.com/coinman-dev/own-backup/releases/download/v0.1.7-beta/OwnBackup-Linux-0.1.7.beta-1_amd64.iso) | Загружает компьютер с диска или флешки (UEFI с Secure Boot или BIOS), чтобы сделать копию его дисков или восстановить их, в том числе диски Windows. Окно записывает его на флешку. |
+| Установщик для Windows | [own-backup-install_0.1.8-beta.exe](https://github.com/coinman-dev/own-backup/releases/download/v0.1.8-beta/own-backup-install_0.1.8-beta.exe) | Ставит программу для всех пользователей компьютера и запускает её службу. Нужны права администратора. |
+| Пакет для Linux | [own-backup_0.1.8.beta_amd64.deb](https://github.com/coinman-dev/own-backup/releases/download/v0.1.8-beta/own-backup_0.1.8.beta_amd64.deb) | `sudo apt install ./own-backup_0.1.8.beta_amd64.deb` ставит программу, запускает её службу и добавляет вас в группу `own-backup` (войдите в систему заново, чтобы открыть окно). |
+| Загрузочный носитель Linux | [OwnBackup-Linux-0.1.8.beta_amd64.iso](https://github.com/coinman-dev/own-backup/releases/download/v0.1.8-beta/OwnBackup-Linux-0.1.8.beta_amd64.iso) | Загружает компьютер с диска или флешки (UEFI с Secure Boot или BIOS), чтобы сделать копию его дисков или восстановить их, в том числе диски Windows. Окно записывает его на флешку. |
 
 Windows 10/11, x64. Окну программы нужен Microsoft Edge WebView2 Runtime — в
 Windows 11 он есть, а если его нет в Windows 10, установщик об этом скажет.
@@ -58,8 +62,11 @@ Linux: Ubuntu 24.04 и новее, Debian 13 и новее, amd64; WebKitGTK и 
 
 - Полные, инкрементные и разностные копии томов и дисков целиком; задание
   может держать скользящее окно инкрементов — старейший вливается в базу.
-- Читаются только занятые кластеры (NTFS, ReFS, FAT32, exFAT), у работающей
-  системы — со снимка VSS.
+- Читаются только занятые кластеры (NTFS, ReFS, FAT32, exFAT, ext2/3/4, XFS,
+  btrfs). Работающая система копируется со снимка: в Windows — VSS, в Linux —
+  LVM или device-mapper.
+- Windows и Linux: копия, сделанная в одной системе, открывается,
+  проверяется и восстанавливается в другой.
 - Три формата: **VHDX** (Windows подключает его сама), **qcow2** (сжатие zstd)
   и **OBK** (zstd и AES-256-GCM, открывается паролем или ключом
   восстановления).
@@ -67,19 +74,27 @@ Linux: Ubuntu 24.04 и новее, Debian 13 и новее, amd64; WebKitGTK и 
   записи о них удаляются из файловой системы внутри образа — пустых «призраков»
   не остаётся.
 - Тома BitLocker, в том числе заблокированные, копируются расшифрованными — по
-  паролю или 48-значному ключу восстановления.
+  паролю или 48-значному ключу восстановления; тома LUKS — по их паролю.
 - Контрольные суммы xxHash64 на каждый блок, проверка после копии или по
   требованию.
 - Восстановление раздела или целого загрузочного диска вместе с записями
   загрузки UEFI; диск, с которого работает система, защищён от перезаписи.
-- Загрузочный носитель собирается из среды восстановления самой Windows этого
-  компьютера, интерфейс на нём тот же.
+- Два загрузочных носителя с тем же интерфейсом: из среды восстановления самой
+  Windows этого компьютера и носитель Linux (Debian 13 live, UEFI с Secure Boot
+  или BIOS) — его собирает окно Linux, а окно Windows скачивает готовым и
+  сверяет с контрольными суммами выпуска.
 - Копия подключается как диск через встроенный в Windows инициатор iSCSI:
   сторонние драйверы не ставятся.
+- **Разделы Linux в Total Commander** (Windows): плагин показывает файлы
+  разделов ext2/3/4 и btrfs этого компьютера, в том числе внутри LVM и LUKS, —
+  только для чтения и на месте: остальные разделы того же диска продолжают
+  работать.
 - Расписания и события (вход в систему, запуск, подключение диска назначения),
-  повторы, пробуждение из сна, выключение после копии.
-- Окно, командная строка и служба: служба работает от LocalSystem и отвечает
-  по именованному каналу с ограниченным доступом.
+  повторы, пробуждение из сна, выключение после копии. Действие, чьи диски или
+  папка заняты, ждёт в очереди, а не получает отказ.
+- Окно, командная строка и служба: в Windows служба работает от LocalSystem и
+  отвечает по именованному каналу с ограниченным доступом; в Linux это юнит
+  systemd за сокетом Unix, открытым группе `own-backup`.
 
 ## Текущие границы
 
@@ -128,7 +143,7 @@ own-backup-cli.exe verify D:\Backups\disk.vhdx
 own-backup-service.exe /status
 ```
 
-`own-backup-install.exe /S` ставит программу без вопросов; `/D=<папка>`
+`own-backup-install_<версия>.exe /S` ставит программу без вопросов; `/D=<папка>`
 последним аргументом выбирает папку первой установки.
 
 ## Сборка

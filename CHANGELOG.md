@@ -2,6 +2,42 @@
 
 # Changelog
 
+## 0.1.8-beta — 2026-10-28
+
+### Added
+
+- **Windows: Linux partitions in Total Commander.** A file system plugin
+  shows the files of this computer's Linux partitions — ext2/3/4 and btrfs,
+  also inside LVM and LUKS encryption (an Ubuntu installed with disk
+  encryption) — read-only, in place: nothing is attached, and the other
+  partitions of the same disk stay in use. Total Commander asks for the
+  encryption passphrase. btrfs is shown the way the system sees it after
+  boot, by its `/etc/fstab` (`@` is the root, `@home` is `\home`);
+  compressed files (zstd, zlib, LZO) are read as they are. The installer
+  puts the plugin's archive into
+  `C:\Program Files\OwnBackup\TotalCommander\OwnBackup-TC-plugin.zip`:
+  opened in Total Commander, it installs the plugin. The service does the
+  reading, so it must be running.
+- **Linux boot medium:** the keyboard layout indicator on the taskbar. When
+  the medium is built in the Linux window, the "Tools just in case" box, as
+  for the Windows medium, adds the Krusader file manager and the FeatherPad
+  editor (the ready ISO from GitHub has neither).
+
+### Fixed
+
+- The service no longer waits forever, when it is stopped, for a client
+  that keeps its connection open without answering (Total Commander with
+  the plugin): the installer hung on "Stopping the Own Backup service".
+  Open connections now get 3 seconds to close.
+
+### Changed
+
+- Release files carry the version in their names:
+  `own-backup-install_0.1.8-beta.exe`, `own-backup_0.1.8.beta_amd64.deb`,
+  `OwnBackup-Linux-0.1.8.beta_amd64.iso`. The release package has no Debian
+  revision (`0.1.8~beta`); the window still finds the media of earlier
+  releases, named with one.
+
 ## 0.1.7-beta — 2026-10-26
 
 ### Added

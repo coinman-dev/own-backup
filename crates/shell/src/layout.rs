@@ -239,6 +239,69 @@ pub fn layout_label(langid: u16) -> String {
     known.to_string()
 }
 
+/// The layout codes of `XKB_DEFAULT_LAYOUT` (`us,ru`), in xkb's order: the
+/// layout xkb calls *n* is the *n*-th of these. Empty means xkb's default,
+/// which is `us`.
+#[cfg_attr(windows, allow(dead_code))]
+pub fn xkb_layout_codes(var: &str) -> Vec<String> {
+    let codes: Vec<String> = var
+        .split(',')
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty())
+        .collect();
+    if codes.is_empty() {
+        vec!["us".to_string()]
+    } else {
+        codes
+    }
+}
+
+/// The Linux medium's indicator for an xkb layout code: the same letters the
+/// WinPE strip shows for the same language ([`layout_label`]), so `us` is
+/// "EN" on both. A code not in the table is shown as itself, in capitals —
+/// it is already a short name, and the honest one.
+#[cfg_attr(windows, allow(dead_code))]
+pub fn xkb_label(code: &str) -> String {
+    let known = match code {
+        "us" | "gb" => "EN",
+        "ru" => "RU",
+        "ua" => "UK",
+        "by" => "BE",
+        "de" => "DE",
+        "fr" => "FR",
+        "es" => "ES",
+        "it" => "IT",
+        "pl" => "PL",
+        "tr" => "TR",
+        "cn" => "ZH",
+        "jp" => "JA",
+        "kr" => "KO",
+        _ => return code.to_ascii_uppercase(),
+    };
+    known.to_string()
+}
+
+/// The label of layout `index` of these codes; nothing for one xkb has and
+/// the variable does not name.
+#[cfg_attr(windows, allow(dead_code))]
+pub fn xkb_label_at(codes: &[String], index: u32) -> String {
+    codes
+        .get(index as usize)
+        .map(|c| xkb_label(c))
+        .unwrap_or_default()
+}
+
+/// The layout a strip saved (`<labwc pid> <layout> <label>`), if it was saved
+/// under this same labwc: a new labwc starts on the first layout whatever an
+/// earlier one had.
+#[cfg_attr(windows, allow(dead_code))]
+pub fn saved_layout(text: &str, labwc: &str) -> Option<u32> {
+    let mut words = text.split_whitespace();
+    let pid = words.next()?;
+    let layout = words.next()?.parse().ok()?;
+    (!labwc.is_empty() && pid == labwc).then_some(layout)
+}
+
 /// The clock, as the strip shows it.
 ///
 /// Hours and minutes only. A ticking seconds field would repaint the strip
@@ -483,6 +546,27 @@ mod tests {
         assert_eq!(layout_label(0x0419), "RU");
         // Sub-language does not change the answer: en-GB is still English.
         assert_eq!(layout_label(0x0809), "EN");
+    }
+
+    #[test]
+    fn the_linux_medium_names_its_layouts_as_winpe_does() {
+        let codes = xkb_layout_codes("us,ru");
+        assert_eq!(xkb_label_at(&codes, 0), "EN");
+        assert_eq!(xkb_label_at(&codes, 1), "RU");
+        assert_eq!(xkb_label_at(&codes, 2), "", "xkb has no third");
+        assert_eq!(xkb_label("ua"), layout_label(0x0422), "Ukrainian alike");
+        assert_eq!(xkb_label("ee"), "EE", "an unknown code is itself");
+        assert_eq!(xkb_layout_codes(""), ["us"], "xkb's default");
+        assert_eq!(xkb_layout_codes(" us , ru ,"), ["us", "ru"]);
+    }
+
+    #[test]
+    fn a_saved_layout_counts_only_under_the_same_labwc() {
+        assert_eq!(saved_layout("812 1 RU\n", "812"), Some(1));
+        assert_eq!(saved_layout("812 1 RU\n", "990"), None, "a new labwc");
+        assert_eq!(saved_layout(" 1 RU", ""), None);
+        assert_eq!(saved_layout("812 x RU", "812"), None);
+        assert_eq!(saved_layout("", "812"), None);
     }
 
     #[test]

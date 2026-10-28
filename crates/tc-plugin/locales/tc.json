@@ -1,0 +1,27 @@
+{
+  "_version": 2,
+  "tc.title": {
+    "ru": "Own Backup — разделы Linux",
+    "en": "Own Backup — Linux partitions"
+  },
+  "tc.passphrase": {
+    "ru": "Пароль шифрования раздела %{name}:",
+    "en": "Encryption passphrase of %{name}:"
+  },
+  "tc.passphrase_again": {
+    "ru": "Пароль не подошёл. Пароль шифрования раздела %{name}:",
+    "en": "Wrong passphrase. Encryption passphrase of %{name}:"
+  },
+  "tc.no_service": {
+    "ru": "Нет связи со службой Own Backup: %{error}. Служба должна быть установлена и запущена.",
+    "en": "Cannot reach the Own Backup service: %{error}. The service must be installed and running."
+  },
+  "tc.not_found": {
+    "ru": "Нет такого раздела или папки: %{path}",
+    "en": "No such partition or folder: %{path}"
+  },
+  "tc.read_only": {
+    "ru": "Разделы Linux открыты только для чтения: изменить на них ничего нельзя.",
+    "en": "Linux partitions are open read-only: nothing on them can be changed."
+  }
+}

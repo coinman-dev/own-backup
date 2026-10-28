@@ -3,7 +3,9 @@
 //! Тот же поиск, который мастер сборки показывает галочками, — здесь он
 //! доступен отдельно, чтобы ответ можно было получить без интерфейса и без
 //! сборки образа. Ничего не копируется и не скачивается: команда только
-//! смотрит, что на машине установлено.
+//! смотрит, что на машине установлено. В Linux искать нечего: носитель —
+//! Debian, и средства ставятся при сборке из его пакетов; команда показывает
+//! их список.
 
 use clap::Args;
 use own_backup_common::Result;
@@ -16,10 +18,38 @@ pub struct MediaToolsArgs {
 }
 
 pub async fn run(args: MediaToolsArgs) -> Result<()> {
+    // Linux: nothing is looked for on this machine. The medium is Debian, and
+    // these are Debian's packages, installed by the build itself.
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = args;
-        println!("Сторонние средства ищутся только на Windows.");
+        use own_backup_common::media_tools::LINUX_MEDIA_TOOLS;
+        if args.json {
+            let rows: Vec<_> = LINUX_MEDIA_TOOLS
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "id": t.id,
+                        "name": t.name,
+                        "packages": t.packages,
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&rows).unwrap_or_default()
+            );
+            return Ok(());
+        }
+        println!("Средства, которые можно положить на носитель Linux");
+        println!();
+        println!("  {:<12}  {:<12}  Пакеты Debian", "Код", "Название");
+        println!("  {:-<12}  {:-<12}  {:-<40}", "", "", "");
+        for t in LINUX_MEDIA_TOOLS {
+            println!("  {:<12}  {:<12}  {}", t.id, t.name, t.packages.join(" "));
+        }
+        println!();
+        println!("  Ставятся из архива Debian при сборке носителя:");
+        println!("  own-backup-cli media build-linux --out DIR --tools krusader,featherpad");
         return Ok(());
     }
 
