@@ -4374,24 +4374,25 @@ impl BackupService for BackupServiceImpl {
         match op {
             Op::Sources => {
                 let disks = machine_disks().await?;
-                let sources = tokio::task::spawn_blocking(move || {
-                    let mut found = own_backup_backup::linux_browse::find_sources(&disks);
-                    // Development builds: image files offered as partitions
-                    // (`OBK_LINUX_BROWSE_IMAGES=a.img;b.img`) — how the
-                    // plugin is tried without a Linux disk at hand.
-                    if cfg!(debug_assertions) {
-                        if let Ok(list) = std::env::var("OBK_LINUX_BROWSE_IMAGES") {
-                            found.extend(
-                                list.split(';')
-                                    .filter(|p| !p.trim().is_empty())
-                                    .filter_map(|p| own_backup_backup::linux_browse::image_source(p.trim())),
-                            );
+                let sources =
+                    tokio::task::spawn_blocking(move || {
+                        let mut found = own_backup_backup::linux_browse::find_sources(&disks);
+                        // Development builds: image files offered as partitions
+                        // (`OBK_LINUX_BROWSE_IMAGES=a.img;b.img`) — how the
+                        // plugin is tried without a Linux disk at hand.
+                        if cfg!(debug_assertions) {
+                            if let Ok(list) = std::env::var("OBK_LINUX_BROWSE_IMAGES") {
+                                found.extend(
+                                    list.split(';').filter(|p| !p.trim().is_empty()).filter_map(
+                                        |p| own_backup_backup::linux_browse::image_source(p.trim()),
+                                    ),
+                                );
+                            }
                         }
-                    }
-                    found
-                })
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+                        found
+                    })
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?;
                 sessions.remember_sources(&sources);
                 let shown: Vec<SourceInfo> = sources
                     .iter()
@@ -4407,7 +4408,9 @@ impl BackupService for BackupServiceImpl {
             }
             Op::Open { source, passphrase } => {
                 let Some(found) = sessions.source(&source) else {
-                    return Err(failed(tr!("grpc_server.linux_browse_no_source").into_owned()));
+                    return Err(failed(
+                        tr!("grpc_server.linux_browse_no_source").into_owned(),
+                    ));
                 };
                 let opened = tokio::task::spawn_blocking(move || sessions.open(&found, passphrase))
                     .await
@@ -4432,10 +4435,11 @@ impl BackupService for BackupServiceImpl {
                 root,
                 path,
             } => {
-                let entry = tokio::task::spawn_blocking(move || sessions.stat(session, root, &path))
-                    .await
-                    .map_err(|e| Status::internal(e.to_string()))?
-                    .map_err(failed)?;
+                let entry =
+                    tokio::task::spawn_blocking(move || sessions.stat(session, root, &path))
+                        .await
+                        .map_err(|e| Status::internal(e.to_string()))?
+                        .map_err(failed)?;
                 json_reply(&entry)
             }
             Op::Close { session } => {
@@ -5007,6 +5011,70 @@ mod tests {
             .unwrap();
     }
 
+    /// A client whose runtime runs only during its calls, as the Total
+    /// Commander plugin's does, never answers the ping a graceful HTTP/2
+    /// close waits for. The service still stops (the installer hung on
+    /// «Остановка службы» with TC open, 2026-10-28).
+    #[tokio::test]
+    async fn a_client_that_is_not_polled_does_not_hold_up_the_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let (controller, shutdown) = crate::shutdown::create_shutdown_channel();
+        let svc = make_service_with_shutdown(dir.path(), shutdown.clone());
+        let busy = svc.state.busy.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut graceful = shutdown.clone();
+        let server = tokio::spawn(crate::shutdown::until_stopped(
+            tonic::transport::Server::builder()
+                .add_service(svc.into_service())
+                .serve_with_incoming_shutdown(
+                    tokio_stream::wrappers::TcpListenerStream::new(listener),
+                    async move { graceful.wait_for_shutdown().await },
+                ),
+            shutdown,
+            busy,
+        ));
+        let (called_tx, called_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let client = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let client = rt.block_on(async {
+                let mut c =
+                    own_backup_client::BackupClient::connect_tcp_only(format!("http://{addr}"), "")
+                        .await
+                        .unwrap();
+                c.list_jobs().await.unwrap();
+                c
+            });
+            called_tx.send(()).unwrap();
+            // Connected, and nobody drives the runtime until released.
+            let _ = release_rx.recv();
+            drop(client);
+        });
+        tokio::task::spawn_blocking(move || called_rx.recv().unwrap())
+            .await
+            .unwrap();
+        controller.trigger_shutdown();
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        assert!(
+            !server.is_finished(),
+            "the graceful close no longer waits for the client: the bound may be unneeded"
+        );
+        tokio::time::timeout(
+            crate::shutdown::CONNECTION_DRAIN + std::time::Duration::from_secs(3),
+            server,
+        )
+        .await
+        .expect("the service is still waiting for the idle client")
+        .unwrap()
+        .unwrap();
+        release_tx.send(()).unwrap();
+        client.join().unwrap();
+    }
+
     /// A job list past gRPC's default 4 MiB still travels both ways through
     /// the real client: on the stand (2026-10-17) a 6 MB list failed every
     /// request that read the jobs.
@@ -5030,7 +5098,12 @@ mod tests {
                 .unwrap();
         // Not the drive of the temporary folder: a destination on the source
         // volume is refused (on Windows that folder is on C:).
-        let source = if dir.path().to_string_lossy().to_ascii_uppercase().starts_with("C:") {
+        let source = if dir
+            .path()
+            .to_string_lossy()
+            .to_ascii_uppercase()
+            .starts_with("C:")
+        {
             "D:"
         } else {
             "C:"
