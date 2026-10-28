@@ -19,6 +19,9 @@
 
   const ITEMS_KEY = 'ob.cleanup.items';
   const USERS_KEY = 'ob.cleanup.users';
+  const HISTORY_KEY = 'ob.cleanup.historyDays';
+  /** «Хранить историю»: 0 removes it all; a week unless chosen otherwise. */
+  const KEEP_CHOICES = [0, 1, 7, 30] as const;
 
   let catalog = $state<CleanupCatalog | null>(null);
   let loadError = $state<string | null>(null);
@@ -38,6 +41,28 @@
   /** The ticks changed after an analysis: its numbers and its list no longer
    *  say what the cleanup would remove. */
   let stale = $state(false);
+  let keepDays = $state(
+    ((): number => {
+      const v = Number(localStorage.getItem(HISTORY_KEY));
+      return (KEEP_CHOICES as readonly number[]).includes(v) && localStorage.getItem(HISTORY_KEY) !== null ? v : 7;
+    })(),
+  );
+
+  function keepLabel(days: number): string {
+    return days === 0
+      ? m.cl_keep_none()
+      : days === 1
+        ? m.cl_keep_day()
+        : days === 7
+          ? m.cl_keep_week()
+          : m.cl_keep_month();
+  }
+
+  function setKeep(days: number) {
+    keepDays = days;
+    localStorage.setItem(HISTORY_KEY, String(days));
+    changed();
+  }
 
   function remembered(key: string): string[] | null {
     try {
@@ -85,7 +110,7 @@
     if (next.has(id)) next.delete(id);
     else next.add(id);
     items = next;
-    changed();
+    ticked();
   }
 
   function toggleGroup(groupItems: CleanupItem[]) {
@@ -96,7 +121,7 @@
       else next.add(i.id);
     }
     items = next;
-    changed();
+    ticked();
   }
 
   function toggleUser(sid: string) {
@@ -107,8 +132,16 @@
     changed();
   }
 
-  /** After a change of ticks an analysis says nothing about the new choice:
-   *  its numbers go, and the cleanup is no longer held to its list. */
+  /** Ticks do not touch an analysis: it measured every item, and the cleanup
+   *  takes the ticked ones out of it. */
+  function ticked() {
+    confirming = false;
+    remember();
+  }
+
+  /** After a change of users or of the days of history kept an analysis says
+   *  nothing about the new choice: its numbers go, and the cleanup is no
+   *  longer held to its list. */
   function changed() {
     confirming = false;
     remember();
@@ -125,8 +158,15 @@
     return (catalog?.groups ?? []).flatMap((g) => g.items).filter((i) => items.has(i.id)).map((i) => i.id);
   }
 
+  /** Every item of the catalogue, in its order. */
+  function every(): string[] {
+    return (catalog?.groups ?? []).flatMap((g) => g.items).map((i) => i.id);
+  }
+
+  /** An analysis measures every item, so an unticked one shows its size too;
+   *  a cleanup takes the ticked ones. */
   async function go(mode: 'analyze' | 'run') {
-    const list = chosen();
+    const list = mode === 'analyze' ? every() : chosen();
     if (list.length === 0) return;
     confirming = false;
     error = null;
@@ -138,8 +178,8 @@
     try {
       const r =
         mode === 'analyze'
-          ? await api.cleanupAnalyze(list, [...users])
-          : await api.cleanupRun(list, [...users]);
+          ? await api.cleanupAnalyze(list, [...users], { history_keep_days: keepDays })
+          : await api.cleanupRun(list, [...users], { history_keep_days: keepDays });
       report = r;
       tallies = Object.fromEntries(r.items.map((i) => [i.id, i]));
     } catch (e) {
@@ -156,13 +196,16 @@
   function sizeText(id: string): string {
     const t = tallies[id];
     if (!t) {
-      if (busy && items.has(id)) return '…';
+      if (busy === 'analyze' || (busy && items.has(id))) return '…';
       return m.cl_not_analyzed();
     }
-    if (t.files === 0 && t.left_files === 0 && !t.running?.length) return m.cl_empty();
+    const records = t.records ?? 0;
+    if (t.files === 0 && t.left_files === 0 && !t.running?.length && records === 0) return m.cl_empty();
+    if (t.files === 0 && records > 0 && t.left_files === 0) return m.cl_records({ count: records });
     const left = t.left_files > 0 ? ` · ${m.cl_left({ size: formatBytes(t.left_bytes) })}` : '';
     const open = t.running?.length ? ` · ${m.cl_close({ names: t.running.join(', ') })}` : '';
-    return formatBytes(t.bytes) + left + open;
+    const rec = records > 0 ? ` · ${m.cl_records({ count: records })}` : '';
+    return formatBytes(t.bytes) + rec + left + open;
   }
 
   function groupBytes(groupItems: CleanupItem[]): number | null {
@@ -244,7 +287,7 @@
                   <span class="name">{it.label}</span>
                   <span
                     class="size"
-                    class:muted={!tallies[it.id]}
+                    class:muted={!tallies[it.id] || !items.has(it.id)}
                     title={tallies[it.id] ? m.cl_files({ count: tallies[it.id].files }) : ''}
                     >{sizeText(it.id)}</span
                   >
@@ -271,6 +314,19 @@
               <div class="about-name">{focusedItem.label}</div>
               <p class="about">{focusedItem.about}</p>
               {#if focusedItem.per_user}<p class="about muted">{m.cl_per_user()}</p>{/if}
+              {#if focusedItem.id === 'browser_history'}
+                <label class="keep">
+                  <span>{m.cl_keep_history()}</span>
+                  <select
+                    class="form-input"
+                    value={keepDays}
+                    disabled={!!busy}
+                    onchange={(e) => setKeep(Number((e.currentTarget as HTMLSelectElement).value))}
+                  >
+                    {#each KEEP_CHOICES as d (d)}<option value={d}>{keepLabel(d)}</option>{/each}
+                  </select>
+                </label>
+              {/if}
             {:else}
               <p class="about muted">{m.cl_pick_item()}</p>
             {/if}
@@ -311,7 +367,7 @@
       <button class="btn outline" onclick={() => (confirming = false)}>{m.common_cancel()}</button>
       <button class="btn green" onclick={() => go('run')}>{m.cl_confirm_yes()}</button>
     {:else}
-      <button class="btn outline" disabled={!catalog || chosen().length === 0} onclick={() => go('analyze')}
+      <button class="btn outline" disabled={!catalog} onclick={() => go('analyze')}
         >{m.cl_analyze()}</button
       >
       <button class="btn green" disabled={!catalog || chosen().length === 0} onclick={() => (confirming = true)}
@@ -345,6 +401,7 @@
   .cap { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted); margin-bottom: 8px; }
   .about-name { font-size: 14px; font-weight: 600; color: var(--head); margin-bottom: 6px; }
   .about { font-size: 13px; line-height: 1.5; color: var(--text); margin: 0 0 6px; }
+  .keep { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; font-size: 13px; color: var(--text); }
   .user { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text); padding: 4px 0; cursor: pointer; }
   .user input { width: auto; margin: 0; }
   .user.off { cursor: default; }

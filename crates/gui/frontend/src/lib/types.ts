@@ -1381,6 +1381,8 @@ export interface CleanupTally {
   bytes: number;
   left_files: number;
   left_bytes: number;
+  /** History entries removed (or to be) from a database cut to its last days. */
+  records?: number;
 }
 
 export interface CleanupReport {
@@ -1404,4 +1406,10 @@ export interface CleanupFilesPage {
   /** The analysis found more than it lists. */
   truncated: boolean;
   files: { path: string; size: number; modified: string | null }[];
+}
+
+/** What a cleanup is asked besides the items. */
+export interface CleanupOptions {
+  /** Keep this many last days of browser history (0: remove it all). */
+  history_keep_days: number;
 }

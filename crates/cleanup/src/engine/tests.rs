@@ -15,6 +15,7 @@ const fn t(base: Base, path: &'static str, recursive: bool, age: u32) -> Target 
         min_age_hours: age,
         keep: &[],
         programs: &[],
+        trim: None,
     }
 }
 
@@ -158,6 +159,7 @@ fn masks_and_flat_targets_take_only_their_files() {
                 min_age_hours: 0,
                 keep: &[],
                 programs: &[],
+                trim: None,
             },
             Target {
                 base: Base::Windows,
@@ -167,6 +169,7 @@ fn masks_and_flat_targets_take_only_their_files() {
                 min_age_hours: 0,
                 keep: &[],
                 programs: &[],
+                trim: None,
             },
         ],
     };
@@ -203,6 +206,7 @@ fn the_recycle_bin_is_emptied_on_every_volume_but_its_desktop_ini() {
             min_age_hours: 0,
             keep: &["desktop.ini"],
             programs: &[],
+            trim: None,
         }],
     };
     let dir = tempfile::tempdir().unwrap();
@@ -292,6 +296,7 @@ fn folders_are_per_user_and_per_volume_where_they_should_be() {
         min_age_hours: 0,
         keep: &[],
         programs: &[],
+        trim: None,
     };
     let got = folders(&bin, &r, std::slice::from_ref(&u));
     assert_eq!(got.len(), 2);
@@ -324,6 +329,7 @@ fn the_cleanup_removes_only_what_the_analysis_listed() {
         &roots(dir.path()),
         &[user(dir.path())],
         Mode::Remove,
+        Options::default(),
         &AtomicBool::new(false),
         |_, _| {},
         SystemTime::now() + TWO_DAYS,
@@ -401,4 +407,62 @@ fn browser_profiles_are_found_and_an_open_browser_is_left() {
     assert_eq!(gone.total.files, 1);
     assert!(!ud.join("Default/History").exists());
     assert!(ud.join("Default/Bookmarks").exists(), "bookmarks stay");
+}
+
+/// Keeping the last days: the history database stays, cut down; what is
+/// derived from it goes; the bookmarks are not touched.
+#[test]
+fn history_keeps_its_last_days_when_asked() {
+    use rusqlite::Connection;
+    let dir = tempfile::tempdir().unwrap();
+    let profile = dir
+        .path()
+        .join(r"Users/u/AppData/Local/Vivaldi/User Data/Default");
+    std::fs::create_dir_all(&profile).unwrap();
+    let db = profile.join("History");
+    let now = SystemTime::now();
+    let old = crate::history::chromium_time(now - Duration::from_secs(30 * 86400));
+    let new = crate::history::chromium_time(now - Duration::from_secs(3600));
+    Connection::open(&db)
+        .unwrap()
+        .execute_batch(&format!(
+            "CREATE TABLE urls (id INTEGER PRIMARY KEY, url TEXT);
+             CREATE TABLE visits (id INTEGER PRIMARY KEY, url INTEGER, visit_time INTEGER);
+             INSERT INTO urls VALUES (1, 'a'), (2, 'b');
+             INSERT INTO visits VALUES (1, 1, {old}), (2, 2, {new});"
+        ))
+        .unwrap();
+    write(&profile.join("Visited Links"), 3);
+    write(&profile.join("Bookmarks"), 9);
+
+    let history = crate::catalog::item("browser_history").unwrap();
+    let keep = Options {
+        history_keep_days: 7,
+    };
+    let go = |mode| {
+        run_at_with(
+            &[history],
+            &roots(dir.path()),
+            &[user(dir.path())],
+            mode,
+            keep,
+            &AtomicBool::new(false),
+            |_, _| {},
+            now,
+            None,
+        )
+    };
+    let seen = go(Mode::Analyze);
+    assert_eq!(seen.total.records, 1, "one visit is older than a week");
+    assert_eq!(seen.total.files, 1, "Visited Links");
+    let done = go(Mode::Remove);
+    assert_eq!(done.total.records, 1);
+    assert!(db.exists(), "the database stays");
+    let left: i64 = Connection::open(&db)
+        .unwrap()
+        .query_row("SELECT count(*) FROM visits", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(left, 1);
+    assert!(!profile.join("Visited Links").exists());
+    assert!(profile.join("Bookmarks").exists());
 }

@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use own_backup_cleanup::{catalog, engine, users, Listing, Mode, Report, Roots, User};
+use own_backup_cleanup::{catalog, engine, users, Listing, Mode, Options, Report, Roots, User};
 use serde::{Deserialize, Serialize};
 
 /// What the window asks.
@@ -27,10 +27,14 @@ pub enum Request {
     Analyze {
         items: Vec<String>,
         users: Vec<String>,
+        #[serde(default)]
+        options: Options,
     },
     Run {
         items: Vec<String>,
         users: Vec<String>,
+        #[serde(default)]
+        options: Options,
     },
     /// A page of the files the last analysis found for one item.
     Files {
@@ -77,6 +81,7 @@ struct Analysis {
     asker: Option<String>,
     items: Vec<String>,
     users: Vec<String>,
+    options: Options,
     /// Files counted per item, listed or not.
     counted: std::collections::HashMap<String, u64>,
     listing: Listing,
@@ -271,6 +276,7 @@ impl Cleaner {
         items: &[&catalog::Item],
         people: &[User],
         mode: Mode,
+        options: Options,
         mut progress: impl FnMut(Progress),
     ) -> Result<Report, Refusal> {
         let flag = {
@@ -299,9 +305,10 @@ impl Cleaner {
         };
         let report = match mode {
             Mode::Analyze => {
-                let mut report = engine::run(items, &roots, people, mode, &flag, progress);
+                let mut report = engine::run(items, &roots, people, mode, options, &flag, progress);
                 *self.last.lock().unwrap() = Some(Analysis {
                     asker: asker.sid.clone(),
+                    options,
                     items: key(&ids),
                     users: key(&sids),
                     counted: report
@@ -314,11 +321,13 @@ impl Cleaner {
                 report
             }
             Mode::Remove => {
-                let held = self.analysed_files(asker, &ids, &sids);
+                let held = self.analysed_files(asker, &ids, &sids, options);
                 tracing::info!(held_to_analysis = held.is_some(), "cleanup run");
                 let report = match &held {
-                    Some(only) => engine::run_only(items, &roots, people, &flag, progress, only),
-                    None => engine::run(items, &roots, people, mode, &flag, progress),
+                    Some(only) => {
+                        engine::run_only(items, &roots, people, options, &flag, progress, only)
+                    }
+                    None => engine::run(items, &roots, people, mode, options, &flag, progress),
                 };
                 // What was analysed is gone or left now: a second cleanup
                 // walks again.
@@ -336,6 +345,7 @@ impl Cleaner {
         asker: &Asker,
         ids: &[String],
         sids: &[String],
+        options: Options,
     ) -> Option<HashSet<PathBuf>> {
         let last = self.last.lock().unwrap();
         let a = last.as_ref()?;
@@ -344,13 +354,21 @@ impl Cleaner {
             (None, None) => true,
             _ => false,
         };
-        if !same_asker || a.items != key(ids) || a.users != key(sids) {
+        // The window analyses every item and cleans the ticked ones: held when
+        // each of them was analysed, for the same users and options.
+        let wanted = key(ids);
+        if !same_asker
+            || !wanted.iter().all(|id| a.items.contains(id))
+            || a.users != key(sids)
+            || a.options != options
+        {
             return None;
         }
         Some(
             a.listing
-                .values()
-                .flatten()
+                .iter()
+                .filter(|(id, _)| wanted.contains(&id.to_ascii_lowercase()))
+                .flat_map(|(_, files)| files)
                 .map(|f| f.path.clone())
                 .collect(),
         )
@@ -412,7 +430,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            matches!(r, Request::Run { items, users } if items == ["temp_user"] && users.len() == 1)
+            matches!(r, Request::Run { items, users, .. } if items == ["temp_user"] && users.len() == 1)
         );
     }
 
@@ -446,6 +464,7 @@ mod tests {
         let cleaner = Cleaner::default();
         *cleaner.last.lock().unwrap() = Some(Analysis {
             asker: Some(asker.into()),
+            options: Options::default(),
             items: key(&["temp_user".into(), "recycle_bin".into()]),
             users: key(&["S-1-5-21-1-1001".into()]),
             counted: [("temp_user".to_string(), 3), ("recycle_bin".to_string(), 1)].into(),
@@ -475,24 +494,51 @@ mod tests {
         }
     }
 
-    /// A cleanup of what was analysed is held to its list; of anything else —
-    /// other items, other users, another person's analysis — it walks anew.
+    /// A cleanup of analysed items is held to their list — the ticked ones
+    /// out of all the window analysed; of anything else — an item not
+    /// analysed, other users, other options, another person's analysis — it
+    /// walks anew.
     #[test]
     fn a_cleanup_is_held_to_the_analysis_of_the_same_request() {
         let c = analysed("S-1-5-21-1-1001");
         let items = ["recycle_bin".to_string(), "TEMP_USER".to_string()];
         let users = ["s-1-5-21-1-1001".to_string()];
-        let held = c.analysed_files(&me(), &items, &users).unwrap();
+        let held = c
+            .analysed_files(&me(), &items, &users, Options::default())
+            .unwrap();
         assert_eq!(held.len(), 4);
-        assert!(c.analysed_files(&me(), &items[..1], &users).is_none());
+        let only_bin = c
+            .analysed_files(&me(), &items[..1], &users, Options::default())
+            .unwrap();
+        assert_eq!(only_bin.len(), 1, "only the ticked item's files");
         assert!(c
-            .analysed_files(&me(), &items, &["S-1-5-21-1-1002".into()])
+            .analysed_files(&me(), &["shader_cache".into()], &users, Options::default())
+            .is_none());
+        assert!(c
+            .analysed_files(
+                &me(),
+                &items,
+                &users,
+                Options {
+                    history_keep_days: 7
+                }
+            )
+            .is_none());
+        assert!(c
+            .analysed_files(
+                &me(),
+                &items,
+                &["S-1-5-21-1-1002".into()],
+                Options::default()
+            )
             .is_none());
         let other = Asker {
             sid: Some("S-1-5-21-1-1002".into()),
             admin: false,
         };
-        assert!(c.analysed_files(&other, &items, &users).is_none());
+        assert!(c
+            .analysed_files(&other, &items, &users, Options::default())
+            .is_none());
     }
 
     #[test]
@@ -551,6 +597,7 @@ mod tests {
                     bytes: 30,
                     left_files: 1,
                     left_bytes: 5,
+                    records: 0,
                 },
                 running: vec![],
             }],
@@ -559,6 +606,7 @@ mod tests {
                 bytes: 30,
                 left_files: 1,
                 left_bytes: 5,
+                records: 0,
             },
             cancelled: false,
             listing: Default::default(),

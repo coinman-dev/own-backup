@@ -60,7 +60,7 @@
   }
 </script>
 
-<Modal open wide title={m.clf_title({ item: label })} {onClose} cancelLabel={m.common_close()}>
+<Modal open xwide title={m.clf_title({ item: label })} {onClose} cancelLabel={m.common_close()}>
   <div class="head">
     <input
       type="text"
@@ -116,12 +116,12 @@
   .summary { font-size: 13px; color: var(--text-secondary); margin-bottom: 8px; }
   .warn { color: var(--warning-text, var(--text-secondary)); margin-left: 8px; }
   .err { font-size: 13px; color: var(--error-text); margin-bottom: 8px; }
-  .list { max-height: 48vh; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
+  .list { max-height: 50vh; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
   .row { display: flex; gap: 12px; padding: 5px 10px; font-size: 12.5px; border-bottom: 1px solid var(--border); }
   .row:last-child { border-bottom: none; }
   .path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; color: var(--text); }
-  .size { width: 80px; text-align: right; white-space: nowrap; color: var(--text); }
-  .date { width: 150px; text-align: right; white-space: nowrap; color: var(--text-muted); }
+  .size { width: 90px; text-align: right; white-space: nowrap; color: var(--text); }
+  .date { width: 170px; text-align: right; white-space: nowrap; color: var(--text-muted); }
   .empty { padding: 14px; font-size: 13px; color: var(--text-muted); }
   .more { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; font-size: 13px; color: var(--text-secondary); }
   .btn-more { background: transparent; border: 1px solid var(--primary); color: var(--accent-text); border-radius: 6px; padding: 6px 14px; font-size: 13px; font-weight: 600; cursor: pointer; font-family: var(--font); }

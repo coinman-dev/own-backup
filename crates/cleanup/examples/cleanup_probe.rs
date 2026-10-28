@@ -5,6 +5,9 @@
 //!       removed. Run as the user (system folders the user may not read come
 //!       out smaller than the service would see).
 //!
+//!   cleanup_probe trim <copy of History> <days>
+//!       Cut a copy of a Chromium history database to its last days.
+//!
 //!   cleanup_probe selftest <empty folder>
 //!       Builds a profile and a Windows folder inside <folder> with junk, a
 //!       junction to a folder of "documents", a file held open and a fresh
@@ -32,12 +35,30 @@ mod win {
         let args: Vec<String> = std::env::args().skip(1).collect();
         match args.first().map(String::as_str) {
             Some("analyze") => analyze(),
+            Some("trim") if args.len() == 3 => trim(Path::new(&args[1]), args[2].parse().unwrap()),
             Some("selftest") if args.len() == 2 => selftest(Path::new(&args[1])),
             _ => {
                 eprintln!("cleanup_probe analyze | selftest <empty folder>");
                 std::process::exit(2);
             }
         }
+    }
+
+    /// Cut a COPY of a history database to its last `days`: how many visits
+    /// go, and what is left. Never point it at a browser's own file.
+    fn trim(db: &Path, days: u64) {
+        use own_backup_cleanup::history;
+        let before = std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86400);
+        println!(
+            "older than {days} days: {:?}",
+            history::count_old(db, before)
+        );
+        println!("trim: {:?}", history::trim(db, before));
+        println!("older now: {:?}", history::count_old(db, before));
+        println!(
+            "all since: {:?}",
+            history::count_old(db, std::time::SystemTime::now())
+        );
     }
 
     fn mib(b: u64) -> f64 {
@@ -68,6 +89,9 @@ mod win {
             &roots,
             &mine,
             Mode::Analyze,
+            own_backup_cleanup::Options {
+                history_keep_days: 7,
+            },
             &AtomicBool::new(false),
             |_, _| {},
         );
@@ -79,6 +103,12 @@ mod win {
                 mib(i.tally.bytes),
                 catalog::label(&i.id)
             );
+            if i.tally.records > 0 {
+                println!(
+                    "{:<16} {} history entries older than a week",
+                    "", i.tally.records
+                );
+            }
             if !i.running.is_empty() {
                 println!("{:<16} left, open: {}", "", i.running.join(", "));
             }
@@ -192,6 +222,7 @@ mod win {
             &roots,
             std::slice::from_ref(&user),
             Mode::Analyze,
+            own_backup_cleanup::Options::default(),
             &AtomicBool::new(false),
             |_, _| {},
         );
@@ -202,6 +233,7 @@ mod win {
             &roots,
             &[user],
             Mode::Remove,
+            own_backup_cleanup::Options::default(),
             &AtomicBool::new(false),
             |_, _| {},
         );

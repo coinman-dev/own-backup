@@ -44,6 +44,7 @@ import type {
   LinuxMediaRelease,
   CleanupCatalog,
   CleanupFilesPage,
+  CleanupOptions,
   CleanupReport,
   LinuxMediaDownload,
   ServiceStatus,
@@ -88,10 +89,10 @@ export const api = {
   /** «Очистка» (Windows): the catalogue, an analysis, the cleanup, its cancel.
    *  Progress comes on `cleanup-progress`. */
   cleanupCatalog: () => invoke<CleanupCatalog>('cleanup', { op: { op: 'catalog' } }),
-  cleanupAnalyze: (items: string[], users: string[]) =>
-    invoke<CleanupReport>('cleanup', { op: { op: 'analyze', items, users } }),
-  cleanupRun: (items: string[], users: string[]) =>
-    invoke<CleanupReport>('cleanup', { op: { op: 'run', items, users } }),
+  cleanupAnalyze: (items: string[], users: string[], options: CleanupOptions) =>
+    invoke<CleanupReport>('cleanup', { op: { op: 'analyze', items, users, options } }),
+  cleanupRun: (items: string[], users: string[], options: CleanupOptions) =>
+    invoke<CleanupReport>('cleanup', { op: { op: 'run', items, users, options } }),
   cleanupCancel: () => invoke<unknown>('cleanup', { op: { op: 'cancel' } }),
   cleanupFiles: (item: string, offset: number, limit: number, sort: 'size' | 'path', filter: string) =>
     invoke<CleanupFilesPage>('cleanup', { op: { op: 'files', item, offset, limit, sort, filter } }),

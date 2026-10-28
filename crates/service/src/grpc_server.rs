@@ -4495,7 +4495,7 @@ impl BackupService for BackupServiceImpl {
             }
         };
         let cleaner = self.cleaner.clone();
-        let (mode, items, users) = match op {
+        let (mode, items, users, options) = match op {
             Op::Catalog => return json_reply(&cleaner.catalog(&asker)),
             Op::Cancel => {
                 cleaner.cancel();
@@ -4516,8 +4516,16 @@ impl BackupService for BackupServiceImpl {
                 .map_err(refused)?;
                 return json_reply(&page);
             }
-            Op::Analyze { items, users } => (Mode::Analyze, items, users),
-            Op::Run { items, users } => (Mode::Remove, items, users),
+            Op::Analyze {
+                items,
+                users,
+                options,
+            } => (Mode::Analyze, items, users, options),
+            Op::Run {
+                items,
+                users,
+                options,
+            } => (Mode::Remove, items, users, options),
         };
         let (chosen, people) = Cleaner::resolve(&asker, &items, &users).map_err(refused)?;
         info!(?mode, items = ?items, users = people.len(), "gRPC: Cleanup");
@@ -4525,7 +4533,7 @@ impl BackupService for BackupServiceImpl {
         let started = chrono::Utc::now();
         let report = tokio::task::spawn_blocking(move || {
             let mut last: Option<std::time::Instant> = None;
-            cleaner.go(&asker, &chosen, &people, mode, |p| {
+            cleaner.go(&asker, &chosen, &people, mode, options, |p| {
                 if last.is_none_or(|t| t.elapsed().as_millis() >= 200) {
                     last = Some(std::time::Instant::now());
                     emit_engine(&events, "cleanup", &p);

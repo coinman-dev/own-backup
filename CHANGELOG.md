@@ -21,6 +21,9 @@
   tabs (off by default). A browser that is open is left and the item says to
   close it; passwords, bookmarks and autofill are never touched, nor
   Firefox's history, which shares a database with the bookmarks.
+  Browser history can keep its last day, week or month: only older visits
+  are removed from the history database, edited on a copy, checked and then
+  put in place.
 
 ### Changed
 

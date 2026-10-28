@@ -9,12 +9,15 @@ and the users' are within its reach. There is no such section on Linux yet.
 
 1. Tick the items. On the left are the groups and items, on the right the
    chosen item's description and the users whose folders are cleaned.
-2. Press **Analyse**: each item shows its size, the bar at the bottom how much
-   can be freed in all. Nothing is removed. The **Files** button of an item
-   opens the list of what will be removed: path, size, date, search, largest
-   first or by path. The cleanup removes exactly that list: files that turned
-   up after the analysis stay. Changing the ticks or the users clears the
-   analysis — press **Analyse** again.
+2. Press **Analyse**: every item shows its size, unticked ones too, and the
+   bar at the bottom how much the ticked ones free. Nothing is removed. The
+   **Files** button of an item opens the list of what will be removed: path,
+   size, date, search, largest first or by path. The cleanup removes exactly
+   that list for the ticked items: files that turned up after the analysis
+   stay. The ticks may change after the analysis; changing the users or the
+   days of history kept clears it — press **Analyse** again. For **Browser
+   history** the description chooses how much history to keep: none, the last
+   day, week or month.
 3. Press **Clean up** and confirm with **Remove**. The items show the progress;
    the bar at the bottom shows the result — how much was freed and how many
    files stayed because programs hold them open. The result is recorded in
@@ -37,7 +40,7 @@ The chosen items and users are remembered.
 | Thumbnail cache (off by default) | `AppData\Local\Microsoft\Windows\Explorer` | files Explorer holds |
 | Prefetch (off by default) | `Windows\Prefetch` | — |
 | Browser cache | the caches of Chrome, Edge, Vivaldi, Brave, Yandex, Opera, Firefox, Thunderbird in every profile | a browser that is open |
-| Browser history (off by default) | `History`, `Visited Links`, `Top Sites`, `Shortcuts` of Chromium browsers | bookmarks, passwords; Firefox history (it shares a database with the bookmarks) |
+| Browser history (off by default) | `History` of Chromium browsers — whole, or what is older than the days kept (the database is edited on a copy and checked); `Visited Links`, `Top Sites`, `Shortcuts` | bookmarks, passwords; Firefox history (it shares a database with the bookmarks); a database left with a crash journal |
 | Browser cookies (off by default) | `Cookies` of Chromium browsers, `cookies.sqlite` of Firefox and Thunderbird | a browser that is open |
 | Saved tabs (off by default) | `Sessions` of Chromium browsers, Firefox `sessionstore` | a browser that is open |
 

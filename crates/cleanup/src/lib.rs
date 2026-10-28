@@ -21,8 +21,9 @@ rust_i18n::i18n!("locales", fallback = "ru");
 
 pub mod catalog;
 pub mod engine;
+pub mod history;
 pub mod users;
 
 pub use catalog::{catalog, Base, Item, Target};
-pub use engine::{run, run_only, Found, Listing, Mode, Report, Roots, Tally};
+pub use engine::{run, run_only, Found, Listing, Mode, Options, Report, Roots, Tally};
 pub use users::User;

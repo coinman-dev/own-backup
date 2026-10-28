@@ -101,8 +101,8 @@
     "en": "Browser history"
   },
   "cleanup.browser_history_about": {
-    "ru": "Посещённые сайты, часто посещаемые и подсказки адресной строки в браузерах на Chromium (Chrome, Edge, Vivaldi, Brave, Яндекс, Opera). История Firefox хранится вместе с закладками и не удаляется. Закладки и пароли не затрагиваются.",
-    "en": "Visited sites, the most visited and the address bar's suggestions in Chromium browsers (Chrome, Edge, Vivaldi, Brave, Yandex, Opera). Firefox keeps its history together with the bookmarks, so it is not removed. Bookmarks and passwords are not touched."
+    "ru": "Посещённые сайты, загрузки, часто посещаемые и подсказки адресной строки в браузерах на Chromium (Chrome, Edge, Vivaldi, Brave, Яндекс, Opera). Можно хранить последние день, неделю или месяц — тогда из базы истории удаляется только то, что старше. История Firefox хранится вместе с закладками и не удаляется. Закладки и пароли не затрагиваются.",
+    "en": "Visited sites, downloads, the most visited and the address bar's suggestions in Chromium browsers (Chrome, Edge, Vivaldi, Brave, Yandex, Opera). The last day, week or month can be kept â then only what is older is removed from the history database. Firefox keeps its history together with the bookmarks, so it is not removed. Bookmarks and passwords are not touched."
   },
   "cleanup.browser_cookies": {
     "ru": "Cookie браузеров",

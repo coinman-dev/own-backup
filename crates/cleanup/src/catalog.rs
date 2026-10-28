@@ -58,6 +58,16 @@ pub struct Target {
     /// Programs (`chrome.exe`) whose files these are: while one runs, the
     /// folder is left — its databases are open and in use.
     pub programs: &'static [&'static str],
+    /// The file is edited rather than removed when the run asks to keep its
+    /// last days ([`crate::engine::Options`]).
+    pub trim: Option<Trim>,
+}
+
+/// How a database is cut down instead of removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trim {
+    /// A Chromium browser's `History` ([`crate::history`]).
+    ChromiumHistory,
 }
 
 const fn tree(base: Base, path: &'static str, min_age_hours: u32) -> Target {
@@ -69,6 +79,7 @@ const fn tree(base: Base, path: &'static str, min_age_hours: u32) -> Target {
         min_age_hours,
         keep: &[],
         programs: &[],
+        trim: None,
     }
 }
 
@@ -86,6 +97,7 @@ const fn files(
         min_age_hours,
         keep: &[],
         programs: &[],
+        trim: None,
     }
 }
 
@@ -140,6 +152,7 @@ static ITEMS: &[Item] = &[
             min_age_hours: 0,
             keep: &["desktop.ini"],
             programs: &[],
+            trim: None,
         }],
     },
     // --- reports, dumps and logs -----------------------------------------
@@ -308,11 +321,13 @@ static BROWSERS: [Browser; 9] = [
     },
 ];
 
-/// Chromium's history: the database, its journal, and what is derived from
-/// it (most visited, the address bar's suggestions).
+/// Chromium's history database and its journal: removed, or cut down to
+/// the last days ([`Trim::ChromiumHistory`]) — then both stay as they are
+/// but for the old rows.
+const CHROMIUM_HISTORY_DB: &[&str] = &["History", "History-journal"];
+/// What is derived from the history (visited links, most visited, the
+/// address bar's suggestions): removed either way, the browser rebuilds it.
 const CHROMIUM_HISTORY: &[&str] = &[
-    "History",
-    "History-journal",
     "Visited Links",
     "Top Sites",
     "Top Sites-journal",
@@ -352,6 +367,16 @@ fn of(b: &'static Browser, base: Base, path: String, masks: &'static [&'static s
         min_age_hours: 0,
         keep: &[],
         programs: std::slice::from_ref(&b.exe),
+        trim: None,
+    }
+}
+
+/// A history database target that is cut down, not removed, when the last
+/// days are kept.
+fn trimmed(t: Target) -> Target {
+    Target {
+        trim: Some(Trim::ChromiumHistory),
+        ..t
     }
 }
 
@@ -375,6 +400,7 @@ fn browser_items() -> Vec<Item> {
                 for sub in ["ShaderCache", "GrShaderCache", "GraphiteDawnCache"] {
                     cache.push(of(b, local, format!(r"{user_data}\{sub}"), &[]));
                 }
+                history.push(trimmed(of(b, local, profile.clone(), CHROMIUM_HISTORY_DB)));
                 history.push(of(b, local, profile.clone(), CHROMIUM_HISTORY));
                 cookies.push(of(
                     b,
@@ -397,6 +423,12 @@ fn browser_items() -> Vec<Item> {
                 ] {
                     cache.push(of(b, roaming, format!(r"{dir}\{sub}"), &[]));
                 }
+                history.push(trimmed(of(
+                    b,
+                    roaming,
+                    dir.to_string(),
+                    CHROMIUM_HISTORY_DB,
+                )));
                 history.push(of(b, roaming, dir.to_string(), CHROMIUM_HISTORY));
                 cookies.push(of(b, roaming, format!(r"{dir}\Network"), CHROMIUM_COOKIES));
                 cookies.push(of(b, roaming, dir.to_string(), CHROMIUM_COOKIES));

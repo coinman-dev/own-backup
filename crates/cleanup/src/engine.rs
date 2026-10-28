@@ -24,7 +24,7 @@ use std::time::{Duration, SystemTime};
 
 use serde::Serialize;
 
-use crate::catalog::{Base, Item, Target};
+use crate::catalog::{Base, Item, Target, Trim};
 use crate::users::User;
 
 /// Count, or remove.
@@ -32,6 +32,14 @@ use crate::users::User;
 pub enum Mode {
     Analyze,
     Remove,
+}
+
+/// What a run is asked besides the items.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(default)]
+pub struct Options {
+    /// Keep this many last days of browser history (0: remove it all).
+    pub history_keep_days: u32,
 }
 
 /// What one item came to.
@@ -43,10 +51,14 @@ pub struct Tally {
     /// Files that matched but could not be removed — in use, refused.
     pub left_files: u64,
     pub left_bytes: u64,
+    /// History entries removed (or, in an analysis, to be removed) from a
+    /// database cut down to its last days.
+    pub records: u64,
 }
 
 impl Tally {
     pub fn add(&mut self, other: &Tally) {
+        self.records += other.records;
         self.files += other.files;
         self.bytes += other.bytes;
         self.left_files += other.left_files;
@@ -179,6 +191,7 @@ pub fn run(
     roots: &Roots,
     users: &[User],
     mode: Mode,
+    options: Options,
     cancel: &AtomicBool,
     progress: impl FnMut(&str, &Tally),
 ) -> Report {
@@ -187,6 +200,7 @@ pub fn run(
         roots,
         users,
         mode,
+        options,
         cancel,
         progress,
         SystemTime::now(),
@@ -202,6 +216,7 @@ pub fn run_only(
     items: &[&Item],
     roots: &Roots,
     users: &[User],
+    options: Options,
     cancel: &AtomicBool,
     progress: impl FnMut(&str, &Tally),
     only: &HashSet<PathBuf>,
@@ -211,6 +226,7 @@ pub fn run_only(
         roots,
         users,
         Mode::Remove,
+        options,
         cancel,
         progress,
         SystemTime::now(),
@@ -229,7 +245,17 @@ pub(crate) fn run_at(
     progress: impl FnMut(&str, &Tally),
     now: SystemTime,
 ) -> Report {
-    run_at_with(items, roots, users, mode, cancel, progress, now, None)
+    run_at_with(
+        items,
+        roots,
+        users,
+        mode,
+        Options::default(),
+        cancel,
+        progress,
+        now,
+        None,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -238,6 +264,7 @@ pub(crate) fn run_at_with(
     roots: &Roots,
     users: &[User],
     mode: Mode,
+    options: Options,
     cancel: &AtomicBool,
     mut progress: impl FnMut(&str, &Tally),
     now: SystemTime,
@@ -276,6 +303,7 @@ pub(crate) fn run_at_with(
                     progress: &mut |t| progress(item.id, t),
                     only,
                     found: (mode == Mode::Analyze).then_some(&mut found),
+                    options,
                 };
                 walk.root(&folder);
             }
@@ -318,6 +346,7 @@ struct Walk<'a> {
     only: Option<&'a HashSet<PathBuf>>,
     /// Analysis: where the files found go.
     found: Option<&'a mut Vec<Found>>,
+    options: Options,
 }
 
 impl Walk<'_> {
@@ -367,6 +396,14 @@ impl Walk<'_> {
             }
             let name = entry.file_name();
             let name = name.to_string_lossy();
+            if self.wanted(&name) && self.trims() {
+                // The database stays, cut down; its journal is not touched.
+                if name.eq_ignore_ascii_case("History") {
+                    self.trim(&path);
+                }
+                left = true;
+                continue;
+            }
             if !self.wanted(&name)
                 || !self.old_enough(&meta)
                 || self.only.is_some_and(|only| !only.contains(&path))
@@ -408,6 +445,29 @@ impl Walk<'_> {
             }
         }
         !left
+    }
+
+    /// This target's database is cut down to its last days, not removed.
+    fn trims(&self) -> bool {
+        self.target.trim == Some(Trim::ChromiumHistory) && self.options.history_keep_days > 0
+    }
+
+    /// Count (analysis) or remove (cleanup) the history older than the days
+    /// kept; a database that cannot be edited safely is left and counted so.
+    fn trim(&mut self, db: &Path) {
+        let days = u64::from(self.options.history_keep_days);
+        let before = self.now - Duration::from_secs(days * 24 * 3600);
+        let done = match self.mode {
+            Mode::Analyze => crate::history::count_old(db, before),
+            Mode::Remove => crate::history::trim(db, before),
+        };
+        match done {
+            Ok(n) => self.tally.records += n,
+            Err(e) => {
+                tracing::info!(db = %db.display(), error = %e, "cleanup: history left as it is");
+                self.tally.left_files += 1;
+            }
+        }
     }
 
     fn wanted(&self, name: &str) -> bool {
