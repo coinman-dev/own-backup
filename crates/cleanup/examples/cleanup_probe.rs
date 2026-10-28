@@ -13,6 +13,12 @@
 //!       junction to a folder of "documents", a file held open and a fresh
 //!       file; removes the junk through the real engine on NTFS, and checks
 //!       that the documents, the open file and the fresh file are still there.
+//!
+//!   cleanup_probe regtest <empty folder>
+//!       Makes a registry hive file `<folder>\NTUSER.DAT` with traces and
+//!       settings, as a user who is not signed in has; the real engine
+//!       loads it privately, lists and removes the traces; checks that the
+//!       settings stay and that a hive held by someone else is left.
 
 #[cfg(not(windows))]
 fn main() {
@@ -37,8 +43,11 @@ mod win {
             Some("analyze") => analyze(),
             Some("trim") if args.len() == 3 => trim(Path::new(&args[1]), args[2].parse().unwrap()),
             Some("selftest") if args.len() == 2 => selftest(Path::new(&args[1])),
+            Some("regtest") if args.len() == 2 => regtest(Path::new(&args[1])),
             _ => {
-                eprintln!("cleanup_probe analyze | selftest <empty folder>");
+                eprintln!(
+                    "cleanup_probe analyze | selftest <empty folder> | regtest <empty folder>"
+                );
                 std::process::exit(2);
             }
         }
@@ -108,6 +117,13 @@ mod win {
                     "{:<16} {} history entries older than a week",
                     "", i.tally.records
                 );
+            }
+            if i.tally.entries > 0 {
+                println!("{:<16} {} registry entries", "", i.tally.entries);
+                let found = report.listing.get(&i.id).into_iter().flatten();
+                for f in found.filter(|f| f.path.starts_with("HKEY_USERS")).take(12) {
+                    println!("{:<16}   {}", "", f.path.display());
+                }
             }
             if !i.running.is_empty() {
                 println!("{:<16} left, open: {}", "", i.running.join(", "));
@@ -210,6 +226,7 @@ mod win {
             program_data: dir.join("ProgramData"),
             volumes: vec![],
             running: Default::default(),
+            hives: own_backup_cleanup::registry::open_user,
         };
         let user = User {
             sid: "S-1-5-21-0-0-0-1001".into(),
@@ -260,6 +277,283 @@ mod win {
         check(temp.is_dir(), "Temp itself stays");
         drop(open);
         let _ = std::fs::remove_dir(&junction);
+        let _ = std::fs::remove_dir_all(dir);
+        println!(
+            "{}",
+            if failures == 0 {
+                "ALL PASS"
+            } else {
+                "FAILURES"
+            }
+        );
+        std::process::exit(if failures == 0 { 0 } else { 1 });
+    }
+
+    mod hive {
+        use std::path::Path;
+
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::ERROR_SUCCESS;
+        use windows::Win32::System::Registry::{
+            RegCloseKey, RegCreateKeyExW, RegLoadAppKeyW, RegOpenKeyExW, RegSetValueExW, HKEY,
+            KEY_ALL_ACCESS, KEY_READ, REG_BINARY, REG_DWORD, REG_OPTION_NON_VOLATILE,
+            REG_PROCESS_APPKEY, REG_SZ, REG_VALUE_TYPE,
+        };
+
+        fn wide(s: &str) -> Vec<u16> {
+            s.encode_utf16().chain(std::iter::once(0)).collect()
+        }
+
+        pub fn utf16(s: &str) -> Vec<u8> {
+            s.encode_utf16()
+                .chain([0])
+                .flat_map(u16::to_le_bytes)
+                .collect()
+        }
+
+        /// The hive file loaded (made, if there is none) for this process.
+        pub fn load(file: &Path) -> HKEY {
+            let name = wide(&file.to_string_lossy());
+            let mut root = HKEY::default();
+            // SAFETY: the name outlives the call; `root` is an out-parameter.
+            let status = unsafe {
+                RegLoadAppKeyW(
+                    PCWSTR(name.as_ptr()),
+                    &mut root,
+                    KEY_ALL_ACCESS.0,
+                    REG_PROCESS_APPKEY,
+                    0,
+                )
+            };
+            assert_eq!(status, ERROR_SUCCESS, "RegLoadAppKeyW {}", file.display());
+            root
+        }
+
+        pub fn close(key: HKEY) {
+            // SAFETY: a key we opened, closed once.
+            unsafe {
+                let _ = RegCloseKey(key);
+            }
+        }
+
+        pub fn set(root: HKEY, path: &str, name: &str, kind: REG_VALUE_TYPE, data: &[u8]) {
+            let sub = wide(path);
+            let mut key = HKEY::default();
+            // SAFETY: names and data outlive the calls; the key is closed.
+            unsafe {
+                let status = RegCreateKeyExW(
+                    root,
+                    PCWSTR(sub.as_ptr()),
+                    0,
+                    PCWSTR::null(),
+                    REG_OPTION_NON_VOLATILE,
+                    KEY_ALL_ACCESS,
+                    None,
+                    &mut key,
+                    None,
+                );
+                assert_eq!(status, ERROR_SUCCESS, "create {path}");
+                let n = wide(name);
+                let status = RegSetValueExW(key, PCWSTR(n.as_ptr()), 0, kind, Some(data));
+                assert_eq!(status, ERROR_SUCCESS, "set {path}\\{name}");
+                let _ = RegCloseKey(key);
+            }
+        }
+
+        pub fn text(root: HKEY, path: &str, name: &str, value: &str) {
+            set(root, path, name, REG_SZ, &utf16(value));
+        }
+
+        pub fn dword(root: HKEY, path: &str, name: &str) {
+            set(root, path, name, REG_DWORD, &1u32.to_le_bytes());
+        }
+
+        pub fn binary(root: HKEY, path: &str, name: &str, data: &[u8]) {
+            set(root, path, name, REG_BINARY, data);
+        }
+
+        /// The value names of a key, None when the key is not there.
+        pub fn names(root: HKEY, path: &str) -> Option<Vec<String>> {
+            let sub = wide(path);
+            let mut key = HKEY::default();
+            // SAFETY: the name outlives the call; the key is closed below.
+            let status =
+                unsafe { RegOpenKeyExW(root, PCWSTR(sub.as_ptr()), 0, KEY_READ, &mut key) };
+            if status != ERROR_SUCCESS {
+                return None;
+            }
+            let mut out = Vec::new();
+            for index in 0.. {
+                let mut name = [0u16; 512];
+                let mut len = name.len() as u32;
+                // SAFETY: the buffer and its length are live.
+                let status = unsafe {
+                    windows::Win32::System::Registry::RegEnumValueW(
+                        key,
+                        index,
+                        windows::core::PWSTR(name.as_mut_ptr()),
+                        &mut len,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                };
+                if status != ERROR_SUCCESS {
+                    break;
+                }
+                out.push(String::from_utf16_lossy(&name[..len as usize]));
+            }
+            close(key);
+            Some(out)
+        }
+    }
+
+    fn regtest(dir: &Path) {
+        use own_backup_cleanup::Tally;
+
+        let mut failures = 0;
+        let mut check = |ok: bool, what: &str| {
+            println!("{} {what}", if ok { "PASS" } else { "FAIL" });
+            if !ok {
+                failures += 1;
+            }
+        };
+        assert!(
+            !dir.exists() || std::fs::read_dir(dir).unwrap().next().is_none(),
+            "the folder must be empty"
+        );
+        std::fs::create_dir_all(dir).unwrap();
+        let file = dir.join("NTUSER.DAT");
+        let explorer = r"Software\Microsoft\Windows\CurrentVersion\Explorer";
+        let run = format!(r"{explorer}\RunMRU");
+        let recent = format!(r"{explorer}\RecentDocs");
+        let tsc = r"Software\Microsoft\Terminal Server Client";
+
+        let root = hive::load(&file);
+        hive::text(root, &run, "", "the key's own");
+        hive::text(root, &run, "a", r"cmd\1");
+        hive::text(root, &run, "b", r"regedit\1");
+        hive::text(root, &run, "MRUList", "ba");
+        let mut doc = hive::utf16("Отчёт.docx");
+        doc.extend([0x14, 0, 0x1f, 0x50]);
+        hive::binary(root, &recent, "0", &doc);
+        hive::binary(root, &format!(r"{recent}\.docx"), "0", &doc);
+        hive::dword(root, &format!(r"{explorer}\Advanced"), "Hidden");
+        hive::text(root, &format!(r"{tsc}\Default"), "MRU0", "host.example");
+        hive::dword(root, &format!(r"{tsc}\Default"), "Other");
+        hive::text(
+            root,
+            &format!(r"{tsc}\Servers\host.example"),
+            "UsernameHint",
+            r"HOST\me",
+        );
+        hive::close(root);
+
+        // Not signed in: no HKEY_USERS\<SID>, the profile's file.
+        let user = User {
+            sid: "S-1-5-21-0-0-0-4242".into(),
+            name: "tester".into(),
+            profile: dir.to_path_buf(),
+        };
+        let roots = Roots {
+            windows: dir.join("Windows"),
+            program_data: dir.join("ProgramData"),
+            volumes: vec![],
+            running: Default::default(),
+            hives: own_backup_cleanup::registry::open_user,
+        };
+        let items: Vec<_> = ["run_history", "recent_docs", "rdp_history"]
+            .iter()
+            .map(|id| catalog::item(id).unwrap())
+            .collect();
+        let go = |mode| {
+            engine::run(
+                &items,
+                &roots,
+                std::slice::from_ref(&user),
+                mode,
+                own_backup_cleanup::Options::default(),
+                &AtomicBool::new(false),
+                |_, _| {},
+            )
+        };
+        let seen = go(Mode::Analyze);
+        for f in seen.listing.values().flatten() {
+            println!("  listed: {}  ({} bytes)", f.path.display(), f.size);
+        }
+        println!("analysis: {:?}", seen.total);
+        check(
+            seen.total.entries == 7,
+            "analysis: a, b, MRUList; RecentDocs 0 and .docx; MRU0; the server",
+        );
+        let listed: Vec<String> = seen
+            .listing
+            .values()
+            .flatten()
+            .map(|f| f.path.display().to_string())
+            .collect();
+        check(
+            listed.iter().any(|p| p.ends_with(r"RunMRU\a = cmd\1")),
+            "the Run box's command is listed with its text",
+        );
+        check(
+            listed
+                .iter()
+                .any(|p| p.ends_with(r"RecentDocs\0 = Отчёт.docx")),
+            "the recent document is listed by its name",
+        );
+
+        // Someone else holds the file: the hive is left, and said so.
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let held = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&file)
+                .unwrap();
+            let refused = go(Mode::Remove);
+            check(
+                refused.total.entries == 0 && refused.total.left_files == 3,
+                "a hive held by another is left (once per item)",
+            );
+            drop(held);
+        }
+
+        let done = go(Mode::Remove);
+        println!("removal: {:?}", done.total);
+        check(
+            done.total.entries == seen.total.entries && done.total.left_files == 0,
+            "removed what the analysis counted",
+        );
+        let root = hive::load(&file);
+        check(
+            hive::names(root, &run) == Some(vec![String::new()]),
+            "RunMRU: only the key's own value is left",
+        );
+        check(
+            hive::names(root, &recent) == Some(vec![]),
+            "RecentDocs: empty, the key stays",
+        );
+        check(
+            hive::names(root, &format!(r"{recent}\.docx")).is_none(),
+            "RecentDocs\\.docx is gone",
+        );
+        check(
+            hive::names(root, &format!(r"{explorer}\Advanced")) == Some(vec!["Hidden".into()]),
+            "Explorer's settings stay",
+        );
+        check(
+            hive::names(root, &format!(r"{tsc}\Default")) == Some(vec!["Other".into()]),
+            "Remote Desktop: MRU0 gone, another value stays",
+        );
+        check(
+            hive::names(root, &format!(r"{tsc}\Servers\host.example")).is_none(),
+            "Remote Desktop: the server is gone",
+        );
+        hive::close(root);
+        let again = go(Mode::Analyze);
+        check(again.total == Tally::default(), "nothing left to clean");
         let _ = std::fs::remove_dir_all(dir);
         println!(
             "{}",

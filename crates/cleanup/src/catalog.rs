@@ -26,6 +26,8 @@ pub enum Base {
     RoamingAppData,
     /// A user's recycle bin on every volume (`X:\$Recycle.Bin\<SID>`).
     RecycleBin,
+    /// A user's profile folder (`C:\Users\<name>`).
+    Profile,
 }
 
 impl Base {
@@ -33,8 +35,29 @@ impl Base {
     pub fn per_user(self) -> bool {
         matches!(
             self,
-            Base::LocalAppData | Base::RoamingAppData | Base::RecycleBin
+            Base::LocalAppData | Base::RoamingAppData | Base::RecycleBin | Base::Profile
         )
+    }
+}
+
+/// A key of each chosen user's registry ([`crate::registry`]) whose values —
+/// and, if asked, subkeys — go. The key itself stays.
+#[derive(Debug, Clone, Copy)]
+pub struct RegTarget {
+    /// Below the user's hive (`Software\Microsoft\…\Explorer\RunMRU`).
+    pub path: &'static str,
+    /// Value names that go (`*` and `?`); empty — every value but the
+    /// default one, which is never touched.
+    pub values: &'static [&'static str],
+    /// Its subkeys go as well, whole.
+    pub subkeys: bool,
+}
+
+const fn reg(path: &'static str, subkeys: bool) -> RegTarget {
+    RegTarget {
+        path,
+        values: &[],
+        subkeys,
     }
 }
 
@@ -114,17 +137,19 @@ pub struct Item {
     /// Ticked when nothing was chosen before.
     pub default_on: bool,
     pub targets: &'static [Target],
+    /// Registry keys of each chosen user.
+    pub keys: &'static [RegTarget],
 }
 
 impl Item {
-    /// Cleaned in each chosen user's folders (as well).
+    /// Cleaned in each chosen user's folders or registry (as well).
     pub fn per_user(&self) -> bool {
-        self.targets.iter().any(|t| t.base.per_user())
+        !self.keys.is_empty() || self.targets.iter().any(|t| t.base.per_user())
     }
 }
 
 /// Groups, in the order the window shows them.
-pub const GROUPS: &[&str] = &["temp", "reports", "caches", "browsers"];
+pub const GROUPS: &[&str] = &["temp", "reports", "caches", "browsers", "traces"];
 
 static ITEMS: &[Item] = &[
     // --- temporary files -------------------------------------------------
@@ -132,18 +157,21 @@ static ITEMS: &[Item] = &[
         id: "temp_user",
         group: "temp",
         default_on: true,
+        keys: &[],
         targets: &[tree(Base::LocalAppData, "Temp", DAY)],
     },
     Item {
         id: "temp_windows",
         group: "temp",
         default_on: true,
+        keys: &[],
         targets: &[tree(Base::Windows, "Temp", DAY)],
     },
     Item {
         id: "recycle_bin",
         group: "temp",
         default_on: true,
+        keys: &[],
         targets: &[Target {
             base: Base::RecycleBin,
             path: "",
@@ -160,6 +188,7 @@ static ITEMS: &[Item] = &[
         id: "error_reports",
         group: "reports",
         default_on: true,
+        keys: &[],
         targets: &[
             tree(Base::ProgramData, r"Microsoft\Windows\WER\ReportArchive", 0),
             tree(Base::ProgramData, r"Microsoft\Windows\WER\ReportQueue", 0),
@@ -171,6 +200,7 @@ static ITEMS: &[Item] = &[
         id: "crash_dumps",
         group: "reports",
         default_on: true,
+        keys: &[],
         targets: &[
             files(Base::Windows, "Minidump", &["*.dmp"], 0),
             files(Base::Windows, "", &["MEMORY.DMP"], 0),
@@ -181,6 +211,7 @@ static ITEMS: &[Item] = &[
         id: "windows_logs",
         group: "reports",
         default_on: true,
+        keys: &[],
         targets: &[
             files(Base::Windows, r"Logs\CBS", &["*.log", "*.cab"], WEEK),
             files(Base::Windows, r"Logs\DISM", &["*.log"], WEEK),
@@ -192,12 +223,14 @@ static ITEMS: &[Item] = &[
         id: "inet_cache",
         group: "caches",
         default_on: true,
+        keys: &[],
         targets: &[tree(Base::LocalAppData, r"Microsoft\Windows\INetCache", 0)],
     },
     Item {
         id: "shader_cache",
         group: "caches",
         default_on: true,
+        keys: &[],
         targets: &[
             tree(Base::LocalAppData, "D3DSCache", 0),
             tree(Base::LocalAppData, r"NVIDIA\DXCache", 0),
@@ -212,6 +245,7 @@ static ITEMS: &[Item] = &[
         id: "thumbnails",
         group: "caches",
         default_on: false,
+        keys: &[],
         targets: &[files(
             Base::LocalAppData,
             r"Microsoft\Windows\Explorer",
@@ -223,7 +257,108 @@ static ITEMS: &[Item] = &[
         id: "prefetch",
         group: "caches",
         default_on: false,
+        keys: &[],
         targets: &[files(Base::Windows, "Prefetch", &["*.pf"], 0)],
+    },
+    // --- Windows traces ----------------------------------------------------
+    //
+    // What a user opened, typed and connected to. Nothing here frees space,
+    // and the lists are the user's own convenience: off unless chosen.
+    Item {
+        id: "recent_docs",
+        group: "traces",
+        default_on: false,
+        targets: &[files(
+            Base::RoamingAppData,
+            r"Microsoft\Windows\Recent",
+            &["*.lnk"],
+            0,
+        )],
+        keys: &[
+            reg(
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\RecentDocs",
+                true,
+            ),
+            reg(
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\ComDlg32\OpenSavePidlMRU",
+                true,
+            ),
+            reg(
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\ComDlg32\OpenSaveMRU",
+                true,
+            ),
+            reg(
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\ComDlg32\LastVisitedPidlMRU",
+                false,
+            ),
+            reg(
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\ComDlg32\LastVisitedPidlMRULegacy",
+                false,
+            ),
+        ],
+    },
+    Item {
+        id: "jump_lists",
+        group: "traces",
+        default_on: false,
+        targets: &[
+            Target {
+                base: Base::RoamingAppData,
+                path: r"Microsoft\Windows\Recent\AutomaticDestinations",
+                masks: &["*.automaticDestinations-ms"],
+                recursive: false,
+                min_age_hours: 0,
+                // Explorer's: the folders pinned to Quick access.
+                keep: &[
+                    "f01b4d95cf55d32a.automaticDestinations-ms",
+                    "5f7b5f1e01b83767.automaticDestinations-ms",
+                ],
+                programs: &[],
+                trim: None,
+            },
+            files(
+                Base::RoamingAppData,
+                r"Microsoft\Windows\Recent\CustomDestinations",
+                &["*.customDestinations-ms"],
+                0,
+            ),
+        ],
+        keys: &[],
+    },
+    Item {
+        id: "run_history",
+        group: "traces",
+        default_on: false,
+        targets: &[],
+        keys: &[
+            reg(
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU",
+                false,
+            ),
+            reg(
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\TypedPaths",
+                false,
+            ),
+            reg(
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\WordWheelQuery",
+                true,
+            ),
+        ],
+    },
+    Item {
+        id: "rdp_history",
+        group: "traces",
+        default_on: false,
+        // The last connection's settings; the window makes a new one.
+        targets: &[files(Base::Profile, "Documents", &["Default.rdp"], 0)],
+        keys: &[
+            RegTarget {
+                path: r"Software\Microsoft\Terminal Server Client\Default",
+                values: &["MRU*"],
+                subkeys: false,
+            },
+            reg(r"Software\Microsoft\Terminal Server Client\Servers", true),
+        ],
     },
 ];
 
@@ -381,8 +516,8 @@ fn trimmed(t: Target) -> Target {
 }
 
 fn browser_items() -> Vec<Item> {
-    let (mut cache, mut history, mut cookies, mut sessions) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut cache, mut history, mut cookies, mut sessions, mut crashes) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for b in &BROWSERS {
         match b.layout {
             Layout::Chromium { user_data } => {
@@ -411,6 +546,7 @@ fn browser_items() -> Vec<Item> {
                 cookies.push(of(b, local, profile.clone(), CHROMIUM_COOKIES));
                 sessions.push(of(b, local, format!(r"{profile}\Sessions"), &[]));
                 sessions.push(of(b, local, profile, CHROMIUM_OLD_SESSIONS));
+                crashes.push(of(b, local, format!(r"{user_data}\Crashpad\reports"), &[]));
             }
             Layout::Opera { dir } => {
                 let roaming = Base::RoamingAppData;
@@ -448,6 +584,12 @@ fn browser_items() -> Vec<Item> {
                     format!(r"{profile}\sessionstore-backups"),
                     &[],
                 ));
+                // `Crash Reports` is beside `Profiles`.
+                let app = dir.rsplit_once('\\').map_or(dir, |(app, _)| app);
+                for sub in ["pending", "submitted"] {
+                    crashes.push(of(b, roaming, format!(r"{app}\Crash Reports\{sub}"), &[]));
+                }
+                crashes.push(of(b, roaming, format!(r"{profile}\minidumps"), &[]));
             }
         }
     }
@@ -456,12 +598,14 @@ fn browser_items() -> Vec<Item> {
         group: "browsers",
         default_on,
         targets: Box::leak(targets.into_boxed_slice()),
+        keys: &[],
     };
     vec![
         item("browser_cache", true, cache),
         item("browser_history", false, history),
         item("browser_cookies", false, cookies),
         item("browser_sessions", false, sessions),
+        item("browser_crashes", true, crashes),
     ]
 }
 
@@ -517,6 +661,11 @@ pub fn label_both(id: &str) -> Localized {
         "browser_history" => tr_both!("cleanup.browser_history"),
         "browser_cookies" => tr_both!("cleanup.browser_cookies"),
         "browser_sessions" => tr_both!("cleanup.browser_sessions"),
+        "browser_crashes" => tr_both!("cleanup.browser_crashes"),
+        "recent_docs" => tr_both!("cleanup.recent_docs"),
+        "jump_lists" => tr_both!("cleanup.jump_lists"),
+        "run_history" => tr_both!("cleanup.run_history"),
+        "rdp_history" => tr_both!("cleanup.rdp_history"),
         _ => Localized::plain(id),
     }
 }
@@ -538,6 +687,11 @@ pub fn about(id: &str) -> String {
         "browser_history" => tr!("cleanup.browser_history_about"),
         "browser_cookies" => tr!("cleanup.browser_cookies_about"),
         "browser_sessions" => tr!("cleanup.browser_sessions_about"),
+        "browser_crashes" => tr!("cleanup.browser_crashes_about"),
+        "recent_docs" => tr!("cleanup.recent_docs_about"),
+        "jump_lists" => tr!("cleanup.jump_lists_about"),
+        "run_history" => tr!("cleanup.run_history_about"),
+        "rdp_history" => tr!("cleanup.rdp_history_about"),
         _ => return String::new(),
     }
     .into_owned()
@@ -550,6 +704,7 @@ pub fn group_label(id: &str) -> String {
         "reports" => tr!("cleanup.group_reports"),
         "caches" => tr!("cleanup.group_caches"),
         "browsers" => tr!("cleanup.group_browsers"),
+        "traces" => tr!("cleanup.group_traces"),
         _ => return id.to_string(),
     }
     .into_owned()
@@ -606,7 +761,11 @@ mod tests {
             assert!(GROUPS.contains(&i.group), "{}: group {}", i.id, i.group);
             assert_ne!(label(i.id), i.id, "{} has no name", i.id);
             assert!(!about(i.id).is_empty(), "{} has no description", i.id);
-            assert!(!i.targets.is_empty(), "{} has no targets", i.id);
+            assert!(
+                !i.targets.is_empty() || !i.keys.is_empty(),
+                "{} has no targets",
+                i.id
+            );
         }
         for g in GROUPS {
             assert_ne!(group_label(g), *g);

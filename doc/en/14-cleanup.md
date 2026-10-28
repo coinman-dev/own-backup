@@ -1,8 +1,9 @@
 # Disk cleanup (Windows)
 
 The **Cleanup** section removes what programs and Windows leave behind:
-temporary files, error reports, crash dumps, setup logs, caches and the
-Recycle Bin. The Own Backup service does the work, so both the system's folders
+temporary files, error reports, crash dumps, setup logs, caches, the
+Recycle Bin and the traces of work — browser history, recent documents. The
+Own Backup service does the work, so both the system's folders
 and the users' are within its reach. There is no such section on Linux yet.
 
 ## How to use it
@@ -12,7 +13,8 @@ and the users' are within its reach. There is no such section on Linux yet.
 2. Press **Analyse**: every item shows its size, unticked ones too, and the
    bar at the bottom how much the ticked ones free. Nothing is removed. The
    **Files** button of an item opens the list of what will be removed: path,
-   size, date, search, largest first or by path. The cleanup removes exactly
+   size, date, search, largest first or by path; for Windows traces, the
+   registry entries too. The cleanup removes exactly
    that list for the ticked items: files that turned up after the analysis
    stay. The ticks may change after the analysis; changing the users or the
    days of history kept clears it — press **Analyse** again. For **Browser
@@ -42,7 +44,12 @@ The chosen items and users are remembered.
 | Browser cache | the caches of Chrome, Edge, Vivaldi, Brave, Yandex, Opera, Firefox, Thunderbird in every profile | a browser that is open |
 | Browser history (off by default) | `History` of Chromium browsers — whole, or what is older than the days kept (the database is edited on a copy and checked); `Visited Links`, `Top Sites`, `Shortcuts` | bookmarks, passwords; Firefox history (it shares a database with the bookmarks); a database left with a crash journal |
 | Browser cookies (off by default) | `Cookies` of Chromium browsers, `cookies.sqlite` of Firefox and Thunderbird | a browser that is open |
-| Saved tabs (off by default) | `Sessions` of Chromium browsers, Firefox `sessionstore` | a browser that is open |
+| Browser sessions — open tabs (off by default) | `Sessions` of Chromium browsers, Firefox `sessionstore` | cookies (a separate item); a browser that is open. Firefox keeps its until-closed cookies in the session — sites that keep you signed in only with those ask you to sign in again |
+| Browser crash reports | `Crashpad\reports` of Chromium browsers; `Crash Reports\pending`, `submitted` and `minidumps` of Firefox and Thunderbird | a browser that is open |
+| Recent documents (off by default) | the shortcuts `AppData\Roaming\Microsoft\Windows\Recent\*.lnk`; in the registry `Explorer\RecentDocs`, `ComDlg32\OpenSavePidlMRU`, `OpenSaveMRU`, `LastVisitedPidlMRU` | the documents themselves |
+| Jump lists (off by default) | `Recent\AutomaticDestinations`, `Recent\CustomDestinations` | the folders pinned to Explorer's Quick access |
+| Run and Explorer history (off by default) | in the registry `Explorer\RunMRU`, `TypedPaths`, `WordWheelQuery` | — |
+| Remote Desktop connections (off by default) | in the registry `Terminal Server Client\Default` (`MRU*`), `Servers`; `Documents\Default.rdp` | saved passwords (Credential Manager), other `.rdp` files |
 
 ## What is guaranteed
 
@@ -66,3 +73,11 @@ The chosen items and users are remembered.
   closed — then turn off "Continue running background extensions and apps"
   in its settings.
 - Browsers' passwords, bookmarks and autofill are never removed.
+- **In the registry, only the lists named.** The values and subkeys of those
+  keys go; the keys themselves and their default values stay. The service
+  opens a signed-in user's registry in `HKEY_USERS`; for a user who is not
+  signed in it loads their `NTUSER.DAT` for itself alone and only for the
+  time the reading or removal takes. If the file is in use (the user is
+  signing in just then), the item is left and counted apart. In the **Files**
+  list an entry reads `HKEY_USERS\<SID>\…\RunMRU\a = cmd\1` — after `=` is
+  what it holds.

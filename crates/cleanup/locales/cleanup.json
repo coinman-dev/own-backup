@@ -102,23 +102,67 @@
   },
   "cleanup.browser_history_about": {
     "ru": "Посещённые сайты, загрузки, часто посещаемые и подсказки адресной строки в браузерах на Chromium (Chrome, Edge, Vivaldi, Brave, Яндекс, Opera). Можно хранить последние день, неделю или месяц — тогда из базы истории удаляется только то, что старше. История Firefox хранится вместе с закладками и не удаляется. Закладки и пароли не затрагиваются.",
-    "en": "Visited sites, downloads, the most visited and the address bar's suggestions in Chromium browsers (Chrome, Edge, Vivaldi, Brave, Yandex, Opera). The last day, week or month can be kept â then only what is older is removed from the history database. Firefox keeps its history together with the bookmarks, so it is not removed. Bookmarks and passwords are not touched."
+    "en": "Visited sites, downloads, the most visited and the address bar's suggestions in Chromium browsers (Chrome, Edge, Vivaldi, Brave, Yandex, Opera). The last day, week or month can be kept — then only what is older is removed from the history database. Firefox keeps its history together with the bookmarks, so it is not removed. Bookmarks and passwords are not touched."
   },
   "cleanup.browser_cookies": {
     "ru": "Cookie браузеров",
     "en": "Browser cookies"
   },
   "cleanup.browser_cookies_about": {
-    "ru": "Cookie сайтов во всех браузерах и Thunderbird. После очистки придётся заново войти на сайты, где вы были залогинены.",
-    "en": "Sites' cookies in every browser and Thunderbird. After the cleanup you have to sign in again to the sites you were signed in to."
+    "ru": "Cookie сайтов во всех браузерах и Thunderbird — в них браузер помнит вход на сайты. После очистки придётся заново войти на все сайты, где вы были залогинены. Сессии (открытые вкладки) — отдельный пункт.",
+    "en": "Sites' cookies in every browser and Thunderbird — where a browser remembers that you are signed in. After the cleanup you have to sign in again to every site you were signed in to. Sessions (open tabs) are a separate item."
   },
   "cleanup.browser_sessions": {
-    "ru": "Сохранённые вкладки",
-    "en": "Saved tabs"
+    "ru": "Сессии браузеров (открытые вкладки)",
+    "en": "Browser sessions (open tabs)"
   },
   "cleanup.browser_sessions_about": {
-    "ru": "Сессии браузеров — вкладки, которые браузер откроет при следующем запуске или восстановит после сбоя. После очистки браузер начнёт с чистого окна.",
-    "en": "Browsers' sessions — the tabs a browser opens at its next start or brings back after a crash. After the cleanup the browser starts with a clean window."
+    "ru": "Вкладки, которые браузер откроет при следующем запуске или восстановит после сбоя. После очистки браузер начнёт с чистого окна. Cookie — отдельный пункт, и в браузерах на Chromium вход на сайты остаётся. Но Firefox хранит в сессии ещё и cookie «до закрытия браузера» — на сайтах, где вход держится только на них, придётся войти заново.",
+    "en": "The tabs a browser opens at its next start or brings back after a crash. After the cleanup the browser starts with a clean window. Cookies are a separate item, and Chromium browsers stay signed in to sites. Firefox, though, keeps its until-closed cookies in the session as well — sites that keep you signed in only with those will ask you to sign in again."
+  },
+  "cleanup.browser_crashes": {
+    "ru": "Отчёты о сбоях браузеров",
+    "en": "Browser crash reports"
+  },
+  "cleanup.browser_crashes_about": {
+    "ru": "Отчёты и дампы, которые браузеры (Chrome, Edge, Vivaldi, Brave, Яндекс, Firefox, Thunderbird) собирают при сбоях, отправленные и ждущие отправки.",
+    "en": "Reports and dumps browsers (Chrome, Edge, Vivaldi, Brave, Yandex, Firefox, Thunderbird) collect when they crash, sent and waiting to be sent."
+  },
+  "cleanup.group_traces": {
+    "ru": "Следы Windows",
+    "en": "Windows traces"
+  },
+  "cleanup.recent_docs": {
+    "ru": "Недавние документы",
+    "en": "Recent documents"
+  },
+  "cleanup.recent_docs_about": {
+    "ru": "Ярлыки недавних документов (Recent) и их списки в реестре: недавние файлы Проводника и окон «Открыть» и «Сохранить как». Сами документы не затрагиваются. Место почти не освобождается — это следы того, что вы открывали.",
+    "en": "Shortcuts to recent documents (Recent) and their lists in the registry: Explorer's recent files and those of the Open and Save As dialogs. The documents themselves are not touched. Hardly any space is freed — these are traces of what you opened."
+  },
+  "cleanup.jump_lists": {
+    "ru": "Списки переходов",
+    "en": "Jump lists"
+  },
+  "cleanup.jump_lists_about": {
+    "ru": "Недавние файлы, которые показывают значки программ на панели задач и в меню «Пуск» (правая кнопка мыши). Закреплённые в этих списках пункты тоже пропадут; папки, закреплённые на панели быстрого доступа Проводника, остаются.",
+    "en": "The recent files the programs' icons on the taskbar and in Start show (right click). Items pinned in those lists go too; the folders pinned to Explorer's Quick access stay."
+  },
+  "cleanup.run_history": {
+    "ru": "История «Выполнить» и Проводника",
+    "en": "Run and Explorer history"
+  },
+  "cleanup.run_history_about": {
+    "ru": "Команды, набранные в окне «Выполнить» (Win+R), пути, набранные в адресной строке Проводника, и его поисковые запросы.",
+    "en": "Commands typed in the Run box (Win+R), paths typed in Explorer's address bar, and its searches."
+  },
+  "cleanup.rdp_history": {
+    "ru": "Подключения к удалённому рабочему столу",
+    "en": "Remote Desktop connections"
+  },
+  "cleanup.rdp_history_about": {
+    "ru": "Список компьютеров, к которым вы подключались (mstsc), запомненные имена пользователей для них и файл последнего подключения Default.rdp — его настройки вернутся к стандартным. Сохранённые пароли (диспетчер учётных данных) не удаляются.",
+    "en": "The computers you connected to (mstsc), the user names remembered for them and the last connection's file Default.rdp — its settings return to the defaults. Saved passwords (Credential Manager) are not removed."
   },
   "cleanup.prefetch": {
     "ru": "Prefetch",

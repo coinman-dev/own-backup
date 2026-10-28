@@ -200,12 +200,28 @@
       return m.cl_not_analyzed();
     }
     const records = t.records ?? 0;
-    if (t.files === 0 && t.left_files === 0 && !t.running?.length && records === 0) return m.cl_empty();
-    if (t.files === 0 && records > 0 && t.left_files === 0) return m.cl_records({ count: records });
-    const left = t.left_files > 0 ? ` · ${m.cl_left({ size: formatBytes(t.left_bytes) })}` : '';
-    const open = t.running?.length ? ` · ${m.cl_close({ names: t.running.join(', ') })}` : '';
-    const rec = records > 0 ? ` · ${m.cl_records({ count: records })}` : '';
-    return formatBytes(t.bytes) + rec + left + open;
+    const entries = t.entries ?? 0;
+    if (t.files === 0 && t.left_files === 0 && !t.running?.length && records === 0 && entries === 0)
+      return m.cl_empty();
+    const parts: string[] = [];
+    if (t.files > 0 || (records === 0 && entries === 0)) parts.push(formatBytes(t.bytes));
+    if (records > 0) parts.push(m.cl_records({ count: records }));
+    if (entries > 0) parts.push(m.cl_entries({ count: entries }));
+    // A history database or a registry left has no size of its own.
+    if (t.left_files > 0)
+      parts.push(
+        t.left_bytes > 0
+          ? m.cl_left({ size: formatBytes(t.left_bytes) })
+          : m.cl_left_count({ count: t.left_files }),
+      );
+    if (t.running?.length) parts.push(m.cl_close({ names: t.running.join(', ') }));
+    return parts.join(' · ');
+  }
+
+  /** Whether the analysis listed anything of the item to look through. */
+  function listed(id: string): boolean {
+    const t = tallies[id];
+    return !!t && (t.files > 0 || (t.entries ?? 0) > 0);
   }
 
   function groupBytes(groupItems: CleanupItem[]): number | null {
@@ -291,7 +307,7 @@
                     title={tallies[it.id] ? m.cl_files({ count: tallies[it.id].files }) : ''}
                     >{sizeText(it.id)}</span
                   >
-                  {#if shown === 'analyze' && !busy && (tallies[it.id]?.files ?? 0) > 0}
+                  {#if shown === 'analyze' && !busy && listed(it.id)}
                     <button
                       class="files-btn"
                       title={m.cl_files_title()}

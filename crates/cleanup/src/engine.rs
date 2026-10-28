@@ -24,7 +24,8 @@ use std::time::{Duration, SystemTime};
 
 use serde::Serialize;
 
-use crate::catalog::{Base, Item, Target, Trim};
+use crate::catalog::{Base, Item, RegTarget, Target, Trim};
+use crate::registry::{Hive, OpenHive};
 use crate::users::User;
 
 /// Count, or remove.
@@ -54,11 +55,14 @@ pub struct Tally {
     /// History entries removed (or, in an analysis, to be removed) from a
     /// database cut down to its last days.
     pub records: u64,
+    /// Registry values and keys removed (or to be removed).
+    pub entries: u64,
 }
 
 impl Tally {
     pub fn add(&mut self, other: &Tally) {
         self.records += other.records;
+        self.entries += other.entries;
         self.files += other.files;
         self.bytes += other.bytes;
         self.left_files += other.left_files;
@@ -114,6 +118,8 @@ pub struct Roots {
     /// Programs running now, lower-case (`chrome.exe`): their folders are
     /// left.
     pub running: HashSet<String>,
+    /// How a user's registry is reached ([`crate::registry::open_user`]).
+    pub hives: OpenHive,
 }
 
 impl Roots {
@@ -129,6 +135,7 @@ impl Roots {
             program_data: env("ProgramData", r"C:\ProgramData"),
             volumes: crate::users::fixed_volumes(),
             running: crate::users::running_programs(),
+            hives: crate::registry::open_user,
         }
     }
 }
@@ -172,6 +179,10 @@ pub fn folders(target: &Target, roots: &Roots, users: &[User]) -> Vec<PathBuf> {
         Base::ProgramData => below(&roots.program_data, target.path),
         Base::LocalAppData => per_user("Local"),
         Base::RoamingAppData => per_user("Roaming"),
+        Base::Profile => users
+            .iter()
+            .flat_map(|u| below(&u.profile, target.path))
+            .collect(),
         Base::RecycleBin => users
             .iter()
             .flat_map(|u| {
@@ -308,6 +319,18 @@ pub(crate) fn run_at_with(
                 walk.root(&folder);
             }
         }
+        if !item.keys.is_empty() {
+            let mut reg = Registry {
+                mode,
+                cancel,
+                tally: &mut tally,
+                only,
+                found: (mode == Mode::Analyze).then_some(&mut found),
+            };
+            for user in users {
+                reg.user(item.keys, user, roots.hives);
+            }
+        }
         if mode == Mode::Analyze {
             report.listing.insert(item.id.to_string(), found);
         }
@@ -318,6 +341,7 @@ pub(crate) fn run_at_with(
             files = tally.files,
             bytes = tally.bytes,
             left = tally.left_files,
+            entries = tally.entries,
             "cleanup item done"
         );
         report.total.add(&tally);
@@ -494,6 +518,96 @@ impl Walk<'_> {
                 .is_ok_and(|age| age >= Duration::from_secs(u64::from(hours) * 3600)),
             // Nothing says how old it is: it stays.
             None => false,
+        }
+    }
+}
+
+/// An item's registry keys of one user after another: counted and listed, or
+/// emptied. An entry is listed as `HKEY_USERS\<SID>\<key>\<name>` (a subkey
+/// with a `\` after it), followed by ` = <text>` where its data reads as
+/// text — the same line a cleanup held to the list looks for, so an entry
+/// whose text changed since the analysis stays.
+struct Registry<'a> {
+    mode: Mode,
+    cancel: &'a AtomicBool,
+    tally: &'a mut Tally,
+    only: Option<&'a HashSet<PathBuf>>,
+    found: Option<&'a mut Vec<Found>>,
+}
+
+impl Registry<'_> {
+    fn user(&mut self, keys: &[RegTarget], user: &User, open: OpenHive) {
+        if self.cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        let hive = match open(user, self.mode == Mode::Remove) {
+            Ok(hive) => hive,
+            // No hive: nothing of this user's to clean.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(e) => {
+                tracing::info!(sid = %user.sid, error = %e, "cleanup: registry not reached, left");
+                self.tally.left_files += 1;
+                return;
+            }
+        };
+        let root = format!(r"HKEY_USERS\{}", user.sid);
+        for key in keys {
+            self.key(hive.as_ref(), &root, key);
+        }
+    }
+
+    fn key(&mut self, hive: &dyn Hive, root: &str, key: &RegTarget) {
+        let at = format!(r"{root}\{}", key.path);
+        for v in hive.values(key.path) {
+            // The default value is the key's own.
+            let wanted = !v.name.is_empty()
+                && (key.values.is_empty() || key.values.iter().any(|m| matches_mask(m, &v.name)));
+            if !wanted {
+                continue;
+            }
+            let shown = match &v.text {
+                Some(text) => format!(r"{at}\{} = {text}", v.name),
+                None => format!(r"{at}\{}", v.name),
+            };
+            self.one(PathBuf::from(shown), v.size, || {
+                hive.delete_value(key.path, &v.name)
+            });
+        }
+        if key.subkeys {
+            for s in hive.subkeys(key.path) {
+                let shown = format!(r"{at}\{}\", s.name);
+                self.one(PathBuf::from(shown), s.size, || {
+                    hive.delete_subkey(key.path, &s.name)
+                });
+            }
+        }
+    }
+
+    /// One value or subkey: counted and listed, or removed.
+    fn one(&mut self, shown: PathBuf, size: u64, remove: impl FnOnce() -> std::io::Result<()>) {
+        if self.only.is_some_and(|only| !only.contains(&shown)) {
+            return;
+        }
+        match self.mode {
+            Mode::Analyze => {
+                self.tally.entries += 1;
+                if let Some(found) = self.found.as_deref_mut() {
+                    if found.len() < LIST_CAP {
+                        found.push(Found {
+                            path: shown,
+                            size,
+                            modified: None,
+                        });
+                    }
+                }
+            }
+            Mode::Remove => match remove() {
+                Ok(()) => self.tally.entries += 1,
+                Err(e) => {
+                    tracing::debug!(entry = %shown.display(), error = %e, "cleanup: left");
+                    self.tally.left_files += 1;
+                }
+            },
         }
     }
 }

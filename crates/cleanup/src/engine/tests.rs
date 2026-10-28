@@ -1,5 +1,6 @@
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime};
 
@@ -30,6 +31,7 @@ fn roots(dir: &Path) -> Roots {
         program_data: dir.join("ProgramData"),
         volumes: vec![dir.join("C"), dir.join("D")],
         running: Default::default(),
+        hives: fake_hives,
     }
 }
 
@@ -60,6 +62,7 @@ static TEMP: Item = Item {
     id: "temp_user",
     group: "temp",
     default_on: true,
+    keys: &[],
     targets: &[t(Base::LocalAppData, "Temp", true, 24)],
 };
 
@@ -150,6 +153,7 @@ fn masks_and_flat_targets_take_only_their_files() {
         id: "crash_dumps",
         group: "reports",
         default_on: true,
+        keys: &[],
         targets: &[
             Target {
                 base: Base::Windows,
@@ -198,6 +202,7 @@ fn the_recycle_bin_is_emptied_on_every_volume_but_its_desktop_ini() {
         id: "recycle_bin",
         group: "temp",
         default_on: true,
+        keys: &[],
         targets: &[Target {
             base: Base::RecycleBin,
             path: "",
@@ -465,4 +470,339 @@ fn history_keeps_its_last_days_when_asked() {
     assert_eq!(left, 1);
     assert!(!profile.join("Visited Links").exists());
     assert!(profile.join("Bookmarks").exists());
+}
+
+// --- the registry -------------------------------------------------------
+
+type Keys = std::collections::BTreeMap<String, Vec<crate::registry::Value>>;
+
+thread_local! {
+    /// The users' registries of a test: SID → key → its values.
+    static HIVES: std::cell::RefCell<HashMap<String, Keys>> = Default::default();
+}
+
+/// A user whose registry cannot be reached (held by another process).
+const REFUSED: &str = "S-1-5-21-9-9-9-1009";
+
+struct FakeHive(String);
+
+impl FakeHive {
+    fn with<T>(&self, f: impl FnOnce(&mut Keys) -> T) -> T {
+        HIVES.with(|h| f(h.borrow_mut().entry(self.0.clone()).or_default()))
+    }
+}
+
+impl crate::registry::Hive for FakeHive {
+    fn values(&self, key: &str) -> Vec<crate::registry::Value> {
+        self.with(|keys| keys.get(key).cloned().unwrap_or_default())
+    }
+
+    fn subkeys(&self, key: &str) -> Vec<crate::registry::Subkey> {
+        let prefix = format!(r"{key}\");
+        self.with(|keys| {
+            let mut subs: std::collections::BTreeMap<String, u64> = Default::default();
+            for (path, values) in keys.iter() {
+                if let Some(rest) = path.strip_prefix(&prefix) {
+                    let name = rest.split('\\').next().unwrap().to_string();
+                    *subs.entry(name).or_default() += values.iter().map(|v| v.size).sum::<u64>();
+                }
+            }
+            subs.into_iter()
+                .map(|(name, size)| crate::registry::Subkey { name, size })
+                .collect()
+        })
+    }
+
+    fn delete_value(&self, key: &str, name: &str) -> std::io::Result<()> {
+        self.with(|keys| {
+            let values = keys.get_mut(key).ok_or(std::io::ErrorKind::NotFound)?;
+            let before = values.len();
+            values.retain(|v| v.name != name);
+            if values.len() == before {
+                return Err(std::io::ErrorKind::NotFound.into());
+            }
+            Ok(())
+        })
+    }
+
+    fn delete_subkey(&self, key: &str, name: &str) -> std::io::Result<()> {
+        let gone = format!(r"{key}\{name}");
+        let below = format!(r"{gone}\");
+        self.with(|keys| keys.retain(|path, _| path != &gone && !path.starts_with(&below)));
+        Ok(())
+    }
+}
+
+fn fake_hives(user: &User, _write: bool) -> std::io::Result<Box<dyn crate::registry::Hive>> {
+    if user.sid == REFUSED {
+        return Err(std::io::ErrorKind::PermissionDenied.into());
+    }
+    if HIVES.with(|h| h.borrow().contains_key(&user.sid)) {
+        Ok(Box::new(FakeHive(user.sid.clone())))
+    } else {
+        Err(std::io::ErrorKind::NotFound.into())
+    }
+}
+
+const EXPLORER: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer";
+
+fn value(name: &str, size: u64, text: Option<&str>) -> crate::registry::Value {
+    crate::registry::Value {
+        name: name.into(),
+        size,
+        text: text.map(Into::into),
+    }
+}
+
+/// Put `values` in a key of a user's registry.
+fn set_key(sid: &str, key: &str, values: Vec<crate::registry::Value>) {
+    HIVES.with(|h| {
+        h.borrow_mut()
+            .entry(sid.to_string())
+            .or_default()
+            .insert(key.to_string(), values)
+    });
+}
+
+fn key_values(sid: &str, key: &str) -> Vec<String> {
+    HIVES.with(|h| {
+        h.borrow()
+            .get(sid)
+            .and_then(|k| k.get(key))
+            .map(|v| v.iter().map(|v| v.name.clone()).collect())
+            .unwrap_or_default()
+    })
+}
+
+fn key_exists(sid: &str, key: &str) -> bool {
+    HIVES.with(|h| h.borrow().get(sid).is_some_and(|k| k.contains_key(key)))
+}
+
+fn traces(ids: &[&str], dir: &Path, mode: Mode, only: Option<&HashSet<PathBuf>>) -> Report {
+    let items: Vec<&Item> = ids
+        .iter()
+        .map(|id| crate::catalog::item(id).unwrap())
+        .collect();
+    run_at_with(
+        &items,
+        &roots(dir),
+        &[user(dir)],
+        mode,
+        Options::default(),
+        &AtomicBool::new(false),
+        |_, _| {},
+        SystemTime::now(),
+        only,
+    )
+}
+
+/// The Run box's and the recent documents' lists: the analysis counts and
+/// lists them with what they say, the cleanup empties them; the keys
+/// themselves, their default values and the keys around them stay.
+#[test]
+fn registry_traces_are_listed_then_removed_and_nothing_else() {
+    let dir = tempfile::tempdir().unwrap();
+    let sid = user(dir.path()).sid;
+    let run = format!(r"{EXPLORER}\RunMRU");
+    let recent = format!(r"{EXPLORER}\RecentDocs");
+    set_key(
+        &sid,
+        &run,
+        vec![
+            value("", 4, Some("default")),
+            value("a", 12, Some(r"cmd\1")),
+            value("b", 18, Some(r"regedit\1")),
+            value("MRUList", 6, Some("ba")),
+        ],
+    );
+    set_key(
+        &sid,
+        &recent,
+        vec![
+            value("0", 90, Some("Отчёт.docx")),
+            value("MRUListEx", 8, None),
+        ],
+    );
+    set_key(
+        &sid,
+        &format!(r"{recent}\.docx"),
+        vec![value("0", 90, Some("Отчёт.docx"))],
+    );
+    set_key(
+        &sid,
+        &format!(r"{EXPLORER}\Advanced"),
+        vec![value("Hidden", 4, None)],
+    );
+    write(
+        &dir.path()
+            .join("Users/u/AppData/Roaming/Microsoft/Windows/Recent/Отчёт.docx.lnk"),
+        500,
+    );
+
+    let seen = traces(
+        &["run_history", "recent_docs"],
+        dir.path(),
+        Mode::Analyze,
+        None,
+    );
+    assert_eq!(
+        seen.items[0].tally.entries, 3,
+        "a, b, MRUList; not the default"
+    );
+    assert_eq!(seen.items[1].tally.entries, 3, "0, MRUListEx and .docx");
+    assert_eq!(seen.items[1].tally.files, 1, "the shortcut in Recent");
+    let listed: Vec<String> = seen.listing["run_history"]
+        .iter()
+        .map(|f| f.path.to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        listed.contains(&format!(r"HKEY_USERS\{sid}\{run}\a = cmd\1")),
+        "{listed:?}"
+    );
+    assert!(seen.listing["recent_docs"]
+        .iter()
+        .any(|f| f.path.to_string_lossy() == format!(r"HKEY_USERS\{sid}\{recent}\.docx\")));
+    assert_eq!(key_values(&sid, &run).len(), 4, "analysis removes nothing");
+
+    let done = traces(
+        &["run_history", "recent_docs"],
+        dir.path(),
+        Mode::Remove,
+        None,
+    );
+    assert_eq!(done.total.entries, 6);
+    assert_eq!(done.total.left_files, 0);
+    assert_eq!(
+        key_values(&sid, &run),
+        vec![String::new()],
+        "the default value stays"
+    );
+    assert!(key_values(&sid, &recent).is_empty());
+    assert!(!key_exists(&sid, &format!(r"{recent}\.docx")));
+    assert_eq!(
+        key_values(&sid, &format!(r"{EXPLORER}\Advanced")),
+        vec!["Hidden"]
+    );
+}
+
+/// A cleanup held to the analysis removes the entries it listed: one whose
+/// text changed since (the Run box's `a`, now another command) and one that
+/// turned up stay.
+#[test]
+fn registry_cleanup_is_held_to_what_the_analysis_showed() {
+    let dir = tempfile::tempdir().unwrap();
+    let sid = user(dir.path()).sid;
+    let run = format!(r"{EXPLORER}\RunMRU");
+    set_key(
+        &sid,
+        &run,
+        vec![
+            value("a", 12, Some(r"cmd\1")),
+            value("b", 18, Some(r"regedit\1")),
+        ],
+    );
+    let seen = traces(&["run_history"], dir.path(), Mode::Analyze, None);
+    let only: HashSet<PathBuf> = seen.listing["run_history"]
+        .iter()
+        .map(|f| f.path.clone())
+        .collect();
+
+    set_key(
+        &sid,
+        &run,
+        vec![
+            value("a", 20, Some(r"powershell\1")),
+            value("b", 18, Some(r"regedit\1")),
+            value("c", 10, Some(r"calc\1")),
+        ],
+    );
+    let done = traces(&["run_history"], dir.path(), Mode::Remove, Some(&only));
+    assert_eq!(done.total.entries, 1);
+    assert_eq!(key_values(&sid, &run), vec!["a", "c"]);
+}
+
+/// Remote Desktop: the servers' list and the last connection's file go; a
+/// value of the key that is not a list entry, and a saved connection, stay.
+#[test]
+fn remote_desktop_history_goes_but_other_settings_stay() {
+    let dir = tempfile::tempdir().unwrap();
+    let sid = user(dir.path()).sid;
+    let tsc = r"Software\Microsoft\Terminal Server Client";
+    set_key(
+        &sid,
+        &format!(r"{tsc}\Default"),
+        vec![
+            value("MRU0", 30, Some("host.example")),
+            value("MRU1", 30, Some("10.0.0.5")),
+            value("Other", 4, None),
+        ],
+    );
+    set_key(
+        &sid,
+        &format!(r"{tsc}\Servers\host.example"),
+        vec![value("UsernameHint", 20, Some(r"HOST\me"))],
+    );
+    let documents = dir.path().join("Users/u/Documents");
+    write(&documents.join("Default.rdp"), 2000);
+    write(&documents.join("work.rdp"), 2000);
+
+    let done = traces(&["rdp_history"], dir.path(), Mode::Remove, None);
+    assert_eq!(done.total.entries, 3, "MRU0, MRU1, the server");
+    assert_eq!(done.total.files, 1);
+    assert_eq!(key_values(&sid, &format!(r"{tsc}\Default")), vec!["Other"]);
+    assert!(!key_exists(&sid, &format!(r"{tsc}\Servers\host.example")));
+    assert!(!documents.join("Default.rdp").exists());
+    assert!(
+        documents.join("work.rdp").exists(),
+        "a saved connection stays"
+    );
+}
+
+/// A registry that cannot be reached is counted as left; a user with none
+/// has nothing to clean.
+#[test]
+fn an_unreachable_registry_is_left_and_said_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let refused = User {
+        sid: REFUSED.into(),
+        ..user(dir.path())
+    };
+    let none = User {
+        sid: "S-1-5-21-8-8-8-1008".into(),
+        ..user(dir.path())
+    };
+    let report = run_at_with(
+        &[crate::catalog::item("run_history").unwrap()],
+        &roots(dir.path()),
+        &[refused, none],
+        Mode::Remove,
+        Options::default(),
+        &AtomicBool::new(false),
+        |_, _| {},
+        SystemTime::now(),
+        None,
+    );
+    assert_eq!(report.total.left_files, 1);
+    assert_eq!(report.total.entries, 0);
+}
+
+/// Jump lists go but Explorer's own, which keep the folders pinned to Quick
+/// access.
+#[test]
+fn jump_lists_go_but_quick_access_pins_stay() {
+    let dir = tempfile::tempdir().unwrap();
+    let auto = dir
+        .path()
+        .join("Users/u/AppData/Roaming/Microsoft/Windows/Recent/AutomaticDestinations");
+    write(&auto.join("9b9cdc69c1c24e2b.automaticDestinations-ms"), 100);
+    write(&auto.join("f01b4d95cf55d32a.automaticDestinations-ms"), 100);
+    write(&auto.join("5f7b5f1e01b83767.automaticDestinations-ms"), 100);
+    let done = traces(&["jump_lists"], dir.path(), Mode::Remove, None);
+    assert_eq!(done.total.files, 1);
+    assert!(auto
+        .join("f01b4d95cf55d32a.automaticDestinations-ms")
+        .exists());
+    assert!(auto
+        .join("5f7b5f1e01b83767.automaticDestinations-ms")
+        .exists());
 }

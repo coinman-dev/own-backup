@@ -1344,6 +1344,8 @@ export interface CleanupSummary {
   bytes: number;
   left_files: number;
   left_bytes: number;
+  /** Registry entries removed. */
+  entries?: number;
   items: Localized[];
 }
 
@@ -1383,6 +1385,8 @@ export interface CleanupTally {
   left_bytes: number;
   /** History entries removed (or to be) from a database cut to its last days. */
   records?: number;
+  /** Registry entries removed (or to be): the Run box's list, recent documents. */
+  entries?: number;
 }
 
 export interface CleanupReport {

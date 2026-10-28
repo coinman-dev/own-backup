@@ -407,6 +407,7 @@ pub fn activity_record(
             bytes: report.total.bytes,
             left_files: report.total.left_files,
             left_bytes: report.total.left_bytes,
+            entries: report.total.entries,
             items: report
                 .items
                 .iter()
@@ -598,6 +599,7 @@ mod tests {
                     left_files: 1,
                     left_bytes: 5,
                     records: 0,
+                    entries: 2,
                 },
                 running: vec![],
             }],
@@ -607,6 +609,7 @@ mod tests {
                 left_files: 1,
                 left_bytes: 5,
                 records: 0,
+                entries: 2,
             },
             cancelled: false,
             listing: Default::default(),
@@ -616,8 +619,13 @@ mod tests {
         assert_eq!(run.status, "success");
         let summary = run.cleanup.unwrap();
         assert_eq!(
-            (summary.files, summary.bytes, summary.left_files),
-            (3, 30, 1)
+            (
+                summary.files,
+                summary.bytes,
+                summary.left_files,
+                summary.entries
+            ),
+            (3, 30, 1, 2)
         );
         assert_eq!(summary.items[0].ru, "Корзина");
         assert_eq!(summary.items[0].en, "Recycle Bin");

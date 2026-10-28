@@ -13,7 +13,9 @@
 //! count of what was left.
 //!
 //! [`users`] finds the profiles of this computer, whose folders the user items
-//! clean, and the volumes whose recycle bins they empty.
+//! clean, and the volumes whose recycle bins they empty. [`registry`] reaches
+//! a user's hive for the Windows traces — the lists of recent documents, the
+//! Run box's commands, Remote Desktop's servers.
 
 // Item names and descriptions in Russian and English (locales/cleanup.json),
 // through own_backup_common::tr! — the language the window was set to.
@@ -22,6 +24,7 @@ rust_i18n::i18n!("locales", fallback = "ru");
 pub mod catalog;
 pub mod engine;
 pub mod history;
+pub mod registry;
 pub mod users;
 
 pub use catalog::{catalog, Base, Item, Target};

@@ -16,14 +16,22 @@
   folders of the items are touched, never a mask over a whole disk; files
   younger than a day in the temporary folders, files in use, links and
   junctions stay. The result goes into Activity.
-- **Cleanup: browsers.** The caches of Chrome, Edge, Vivaldi, Brave, Yandex,
-  Opera, Firefox and Thunderbird in every profile; history, cookies and saved
-  tabs (off by default). A browser that is open is left and the item says to
+- **Cleanup: browsers.** The caches and crash reports of Chrome, Edge,
+  Vivaldi, Brave, Yandex, Opera, Firefox and Thunderbird in every profile;
+  history, cookies and sessions — open tabs (off by default; cookies and
+  sessions are separate items, sign-ins live in the cookies). A browser that is open is left and the item says to
   close it; passwords, bookmarks and autofill are never touched, nor
   Firefox's history, which shares a database with the bookmarks.
   Browser history can keep its last day, week or month: only older visits
   are removed from the history database, edited on a copy, checked and then
   put in place.
+- **Cleanup: Windows traces** (off by default): recent documents (shortcuts
+  and the registry's lists, the Open and Save As dialogs' too), jump lists
+  (the folders pinned to Quick access stay), the Run box's, Explorer's
+  address bar's and search history, Remote Desktop connections (saved
+  passwords stay). A user who is not signed in has their registry loaded by
+  the service for itself alone and only for the cleanup; the **Files** list
+  shows what each registry entry holds.
 
 ### Changed
 

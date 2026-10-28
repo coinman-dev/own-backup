@@ -188,6 +188,9 @@
               <div class="stats">
                 <div><span class="k">{m.act_cleanup_freed()}</span><span class="v">{formatBytes(c.bytes)}</span></div>
                 <div><span class="k">{m.act_cleanup_files()}</span><span class="v">{c.files}</span></div>
+                {#if (c.entries ?? 0) > 0}
+                  <div><span class="k">{m.act_cleanup_entries()}</span><span class="v">{c.entries}</span></div>
+                {/if}
                 {#if c.left_files > 0}
                   <div><span class="k">{m.act_cleanup_left()}</span><span class="v">{c.left_files} ({formatBytes(c.left_bytes)})</span></div>
                 {/if}

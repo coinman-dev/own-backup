@@ -523,6 +523,8 @@ pub struct CleanupSummary {
     /// Files that were to go but could not — in use, refused.
     pub left_files: u64,
     pub left_bytes: u64,
+    /// Registry entries removed (the Run box's list, recent documents).
+    pub entries: u64,
     /// The items cleaned, in both languages: the history is read later, by a
     /// window that may speak the other one.
     pub items: Vec<own_backup_common::lang::Localized>,
