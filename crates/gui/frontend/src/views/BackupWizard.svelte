@@ -141,10 +141,31 @@
       { key: 'source', label: m.wiz_tab_source() },
       { key: 'schedule', label: m.wiz_tab_schedule() },
       { key: 'scheme', label: m.wiz_tab_scheme() },
+      { key: 'cleanup', label: m.wiz_tab_cleanup() },
       { key: 'exclusions', label: m.wiz_tab_exclusions() },
       { key: 'advanced', label: m.wiz_tab_advanced() },
-    ].filter((s) => !(media.active && s.key === 'schedule')),
+    ].filter(
+      (s) =>
+        !(media.active && s.key === 'schedule') &&
+        // The disk cleanup is the Windows service's, and not the medium's.
+        !(s.key === 'cleanup' && (media.active || !isWindows())),
+    ),
   );
+
+  // «Очистка»: what the service's automatic cleanup set holds — the cleanup
+  // before the copy runs it. Read when the step is first shown.
+  let cleanupSet = $state<{ items: string[]; users: number; empty: boolean } | null>(null);
+  let cleanupSetError = $state<string | null>(null);
+  $effect(() => {
+    if (stepKey !== 'cleanup' || cleanupSet || cleanupSetError) return;
+    Promise.all([api.cleanupProfile(), api.cleanupCatalog()])
+      .then(([p, c]) => {
+        const names = new Map(c.groups.flatMap((g) => g.items).map((i) => [i.id, i.label]));
+        const items = (p?.items ?? []).map((id) => names.get(id) ?? id);
+        cleanupSet = { items, users: p?.users?.length ?? 0, empty: items.length === 0 };
+      })
+      .catch((e) => (cleanupSetError = String(e)));
+  });
   // The tab list is filtered (no schedule on the boot medium), so the body must
   // be keyed by the step's KEY, never by its index: on the medium index 2 said
   // «Схема» in the tab bar and drew the exclusions, and «Дополнительно» — the
@@ -2105,6 +2126,31 @@
         {/if}
       {/if}
 
+      <!-- cleanup before the copy -->
+      {#if stepKey === 'cleanup'}
+        <div class="cleanup-step">
+          <label class="chk big">
+            <input type="checkbox" bind:checked={job.advanced.cleanup_before} />
+            {m.wiz_adv_cleanup_before()}
+          </label>
+          <div class="adv-hint">{m.wiz_adv_cleanup_before_hint()}</div>
+          <div class="adv-title">{m.wiz_cleanup_set()}</div>
+          {#if cleanupSetError}
+            <div class="note warn">{cleanupSetError}</div>
+          {:else if !cleanupSet}
+            <div class="adv-hint">…</div>
+          {:else if cleanupSet.empty}
+            <div class="note warn">{m.wiz_cleanup_set_empty()}</div>
+          {:else}
+            <ul class="cleanup-list">
+              {#each cleanupSet.items as name (name)}<li>{name}</li>{/each}
+            </ul>
+            <div class="adv-hint">{m.wiz_cleanup_set_users({ count: cleanupSet.users })}</div>
+          {/if}
+          <div class="adv-hint">{m.wiz_cleanup_set_where()}</div>
+        </div>
+      {/if}
+
       <!-- exclusions -->
       {#if stepKey === 'exclusions'}
         {#if !cap.exclusions}
@@ -2311,16 +2357,6 @@
               {m.wiz_mb_s()}
             </label>
             {/if}
-          </div>
-          {/if}
-          {#if isWindows()}
-          <div class="adv-group">
-            <div class="adv-title">{m.wiz_adv_cleanup()}</div>
-            <label class="chk">
-              <input type="checkbox" bind:checked={job.advanced.cleanup_before} />
-              {m.wiz_adv_cleanup_before()}
-            </label>
-            <div class="adv-hint">{m.wiz_adv_cleanup_before_hint()}</div>
           </div>
           {/if}
           {#if !cap.after_backup || !cap.low_priority || !cap.speed_limit}
@@ -2613,4 +2649,9 @@
   .btn.primary:hover:not(:disabled) { background: var(--primary-hover); }
   .btn.green { background: var(--green); color: #fff; }
   .btn.green:hover:not(:disabled) { background: var(--green-hover); }
+  .cleanup-step { display: flex; flex-direction: column; gap: 8px; max-width: 760px; }
+  .cleanup-step .adv-title { margin-top: 14px; }
+  .chk.big { font-size: 15px; font-weight: 600; }
+  .cleanup-list { margin: 0; padding-left: 20px; font-size: 13px; color: var(--text); columns: 2; column-gap: 32px; }
+  .cleanup-list li { margin: 2px 0; break-inside: avoid; }
 </style>

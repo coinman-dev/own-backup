@@ -32,7 +32,7 @@ The chosen items and users are remembered.
 Below the list is **Automatic cleanup** with a **Set up…** button. The
 service cleans by itself, with no window: on a schedule (daily, weekly on
 chosen days, monthly; a missed cleanup can run after the computer starts)
-and before the copy of jobs whose advanced settings tick **"Clean the disk
+and before the copy of jobs whose Cleanup tab (in the backup settings) ticks **"Clean the disk
 before the copy"**. What is ticked on the page when Save is pressed is
 cleaned, for the ticked users, with the same ages. **Files by masks are
 not part of it** — they go only after their list was looked through. The
