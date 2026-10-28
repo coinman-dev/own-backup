@@ -66,18 +66,24 @@ cleanup
 loop="" mapped=""
 trap - EXIT
 
-# btrfs in LUKS, the files put in by mkfs.btrfs itself.
+# btrfs in LUKS, the files put in by mkfs.btrfs itself — homes in @home,
+# and @/etc/fstab mounting @ at / and @home at /home, as Ubuntu's does.
+fsid=0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0
 src=$(mktemp -d)
-mkdir -p "$src/@" "$src/@home/user"
+mkdir -p "$src/@"
 fill "$src/@"
+mv "$src/@/home" "$src/@home"
+mkdir "$src/@/home"
 printf 'home subvolume\n' >"$src/@home/user/note.txt"
+printf 'UUID=%s /     btrfs defaults,subvol=@ 0 1\nUUID=%s /home btrfs defaults,subvol=@home 0 2\n' \
+    "$fsid" "$fsid" >"$src/@/etc/fstab"
 truncate -s 160M luks-btrfs.img
 loop=$(losetup -f --show luks-btrfs.img)
 trap cleanup EXIT
 printf '%s' "$pw" | cryptsetup luksFormat -q --type luks2 --pbkdf argon2id --key-file - "$loop"
 printf '%s' "$pw" | cryptsetup open --key-file - "$loop" obk-browse-test
 mapped=1
-mkfs.btrfs -q -f -L obk-btrfs --rootdir "$src" --subvol rw:@ --subvol rw:@home \
+mkfs.btrfs -q -f -L obk-btrfs -U "$fsid" --rootdir "$src" --subvol rw:@ --subvol rw:@home \
     --compress zstd /dev/mapper/obk-browse-test
 cleanup
 loop="" mapped=""

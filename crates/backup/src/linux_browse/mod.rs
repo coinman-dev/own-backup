@@ -278,7 +278,7 @@ fn load_ext(vol: Box<dyn RawVolume>) -> std::result::Result<Fs, String> {
 
 fn load_btrfs(vol: Box<dyn RawVolume>) -> std::result::Result<Fs, String> {
     btrfs::Btrfs::load(vol)
-        .map(Fs::Btrfs)
+        .map(|b| Fs::Btrfs(Box::new(b)))
         .map_err(|e| format!("the btrfs filesystem cannot be read: {e}"))
 }
 
@@ -502,9 +502,9 @@ pub struct Entry {
 
 /// A readable filesystem: ext2/3/4 or btrfs.
 pub enum Fs {
-    // Boxed: an open ext4 file is the bulk of it.
+    // Boxed: both are hundreds of bytes, and the size of the larger.
     Ext(Box<ExtFs>),
-    Btrfs(btrfs::Btrfs),
+    Btrfs(Box<btrfs::Btrfs>),
 }
 
 impl Fs {

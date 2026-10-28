@@ -286,25 +286,26 @@ mod win {
             &mut fails,
         );
 
-        // btrfs straight inside LUKS, Ubuntu's subvolumes as folders.
+        // btrfs straight inside LUKS, shown as it boots: @ is \, @home \home.
         if let Some(b) = top.iter().find(|(n, _, _)| n.contains("luks-btrfs")) {
             *PASSWORDS.lock().unwrap() = vec![pw.clone()];
             let root = format!("\\{}", b.0);
             let top = plugin.list(&root);
             println!("{root}: {top:?}");
             check(
-                top.iter().any(|(n, d, _)| n == "@" && *d)
-                    && top.iter().any(|(n, d, _)| n == "@home" && *d),
-                "btrfs: the subvolumes @ and @home as folders",
+                top.iter().any(|(n, d, _)| n == "etc" && *d)
+                    && top.iter().any(|(n, d, _)| n == "home" && *d)
+                    && !top.iter().any(|(n, _, _)| n == "@"),
+                "btrfs: the system as it boots (fstab: @ at \\, @home at \\home)",
                 &mut fails,
             );
-            let user = format!("{root}\\@\\home\\user");
+            let user = format!("{root}\\home\\user");
             let files = plugin.list(&user);
             check(
                 files
                     .iter()
                     .any(|(n, _, s)| n == "big.bin" && *s == 5 * 1024 * 1024 + 123),
-                "btrfs: big.bin in @",
+                "btrfs: big.bin in \\home\\user (the subvolume @home)",
                 &mut fails,
             );
             let local = format!("{out_dir}\\btrfs-big.bin");
@@ -325,7 +326,7 @@ mod win {
             let note = format!("{out_dir}\\note.txt");
             let code = unsafe {
                 (plugin.get)(
-                    wide(&format!("{root}\\@home\\user\\note.txt")).as_ptr(),
+                    wide(&format!("{user}\\note.txt")).as_ptr(),
                     wide(&note).as_ptr(),
                     1,
                     std::ptr::null(),

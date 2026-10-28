@@ -84,9 +84,11 @@ must be installed and running.
 **Use it:** open **Network Neighborhood** (`\\\`) → **Own Backup Linux**. It
 lists partitions such as "Disk 3 · partition 3 · 128 GB · LUKS". For an
 encrypted one Total Commander asks for its encryption passphrase; with LVM
-inside, its volumes appear (`vgubuntu-root`), swap is not shown. btrfs
-subvolumes are ordinary folders: on Ubuntu the system is in `@`, the home
-folders in `@home`; compressed files (zstd, zlib, LZO) read as they are. Files are
+inside, its volumes appear (`vgubuntu-root`), swap is not shown. btrfs is
+shown the way the system sees it once booted: by its `/etc/fstab` the
+subvolume `@` is the root, `@home` the folder `\home`, and so on. Without
+such an fstab the subvolumes are separate folders (`@`, `@home`). Compressed
+files (zstd, zlib, LZO) read as they are. Files are
 copied (F5), viewed (F3) and opened (Enter) as usual; nothing on the partition
 can be changed, deleted or moved.
 

@@ -306,15 +306,32 @@ mod real {
         check_sample(p.roots[0].fs.as_mut().unwrap(), "");
     }
 
+    pub(super) const FSID: &str = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+
     /// btrfs as Ubuntu lays it out — the system in the subvolume `@`, homes in
     /// `@home` — made by mkfs.btrfs from a folder, compressed with
-    /// `compress` (`no`, `zlib`, `lzo`, `zstd`), or `None` without it.
-    pub(super) fn btrfs_image(compress: &str) -> Option<Vec<u8>> {
+    /// `compress` (`no`, `zlib`, `lzo`, `zstd`), or `None` without it. With
+    /// `fstab` the homes are in `@home` and `@/etc/fstab` mounts it at
+    /// `/home`, as Ubuntu's does; without it they stay in `@`.
+    pub(super) fn btrfs_image(compress: &str, fstab: bool) -> Option<Vec<u8>> {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
         std::fs::create_dir_all(src.join("@")).unwrap();
-        std::fs::create_dir_all(src.join("@home/user")).unwrap();
         sample_tree(&src.join("@"));
+        if fstab {
+            std::fs::rename(src.join("@/home"), src.join("@home")).unwrap();
+            std::fs::create_dir(src.join("@/home")).unwrap();
+            std::fs::write(
+                src.join("@/etc/fstab"),
+                format!(
+                    "UUID={FSID} /     btrfs defaults,subvol=@ 0 1\n\
+                     UUID={FSID} /home btrfs defaults,subvol=@home 0 2\n"
+                ),
+            )
+            .unwrap();
+        } else {
+            std::fs::create_dir_all(src.join("@home/user")).unwrap();
+        }
         std::fs::write(src.join("@home/user/note.txt"), "home subvolume\n").unwrap();
         let img = dir.path().join("fs.img");
         std::fs::File::create(&img)
@@ -322,7 +339,7 @@ mod real {
             .set_len(512 * MIB as u64)
             .unwrap();
         let ok = Command::new("mkfs.btrfs")
-            .args(["-q", "-f", "-L", "obk-btrfs", "--rootdir"])
+            .args(["-q", "-f", "-L", "obk-btrfs", "-U", FSID, "--rootdir"])
             .arg(&src)
             .args([
                 "--subvol",
@@ -344,32 +361,46 @@ mod real {
         Some(std::fs::read(&img).unwrap())
     }
 
-    pub(super) fn check_btrfs(p: &mut Partition) {
+    pub(super) fn check_btrfs(p: &mut Partition, fstab: bool) {
         let info = p.info();
         assert_eq!(info.len(), 1, "one filesystem: {info:?}");
         assert_eq!(info[0].label, "obk-btrfs");
         let fs = p.roots[0].fs.as_mut().unwrap();
         let top: Vec<String> = fs.list(b"/").unwrap().into_iter().map(|e| e.name).collect();
-        assert!(
-            top.contains(&"@".to_string()) && top.contains(&"@home".to_string()),
-            "{top:?}"
-        );
-        check_sample(fs, "\\@");
-        let note = names::path_from_display("\\@home\\user\\note.txt");
-        assert_eq!(fs.read(&note, 0, 100).unwrap(), b"home subvolume\n");
+        let has = |n: &str| top.iter().any(|t| t == n);
+        if fstab {
+            // The system as it boots: @ is /, @home is /home.
+            assert!(has("etc") && has("home") && !has("@"), "{top:?}");
+            check_sample(fs, "");
+            let note = names::path_from_display("\\home\\user\\note.txt");
+            assert_eq!(fs.read(&note, 0, 100).unwrap(), b"home subvolume\n");
+        } else {
+            // No fstab: the top level, subvolumes as folders.
+            assert!(has("@") && has("@home"), "{top:?}");
+            check_sample(fs, "\\@");
+            let note = names::path_from_display("\\@home\\user\\note.txt");
+            assert_eq!(fs.read(&note, 0, 100).unwrap(), b"home subvolume\n");
+        }
     }
 
     /// Every compression btrfs has, inline and regular extents, holes,
     /// links across the tree, the subvolumes entered like folders.
     #[test]
     fn btrfs_shows_ubuntus_subvolumes_and_reads_every_compression() {
-        for compress in ["no", "zlib", "lzo", "zstd"] {
-            let Some(img) = btrfs_image(compress) else {
+        let cases = [
+            ("no", false),
+            ("no", true),
+            ("zlib", true),
+            ("lzo", true),
+            ("zstd", true),
+        ];
+        for (compress, fstab) in cases {
+            let Some(img) = btrfs_image(compress, fstab) else {
                 return;
             };
             let mut p =
                 open(Box::new(MemVolume(img)), None).unwrap_or_else(|e| panic!("{compress}: {e}"));
-            check_btrfs(&mut p);
+            check_btrfs(&mut p, fstab);
         }
     }
 
@@ -427,7 +458,7 @@ mod real {
     #[test]
     #[ignore]
     fn btrfs_inside_luks_opens_with_its_passphrase() {
-        let Some(img) = btrfs_image("zstd") else {
+        let Some(img) = btrfs_image("zstd", true) else {
             return;
         };
         let pw = "correct horse battery";
@@ -438,7 +469,7 @@ mod real {
         );
         let mut p = open(Box::new(MemVolume(disk)), Some(pw.as_bytes())).unwrap();
         assert!(p.encrypted);
-        check_btrfs(&mut p);
+        check_btrfs(&mut p, true);
     }
 
     /// The whole of an encrypted Ubuntu: LUKS2 as cryptsetup writes it

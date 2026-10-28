@@ -1,8 +1,11 @@
 //! A btrfs filesystem, read for its files: what `ext4-view` is for ext4.
 //!
-//! The view is the one a mount of the top-level subvolume (id 5) gives:
-//! subvolumes appear as the folders they are in the tree — on Ubuntu `@`
-//! (the system) and `@home` — and are entered like any other folder. The
+//! The view is the system as it boots: the subvolume `/etc/fstab` mounts at
+//! `/` is the root, and those it mounts elsewhere (`@home` at `/home`,
+//! `@swap` at `/swap`) are in their places — the fstab of the subvolume
+//! itself says so, for this filesystem (its UUID). Without such an fstab the
+//! view is the top-level subvolume (id 5), subvolumes as the folders they
+//! are in it (`@`, `@home`). The
 //! structures come from the backup engine's btrfs code (`btrfs_map`: the
 //! superblock's chunks, the chunk tree, tree blocks); what is added here is
 //! looking things up by key instead of walking whole trees, so a listing
@@ -95,6 +98,15 @@ pub struct Btrfs {
     nodes: HashMap<u64, Rc<Vec<u8>>>,
     /// The extent last decompressed: (disk bytenr, its bytes).
     unpacked: Option<(u64, Rc<Vec<u8>>)>,
+    /// The filesystem's UUID, as fstab names it.
+    fsid: String,
+    /// What `/` is: the root subvolume's root directory, or the top level's.
+    view_root: Ino,
+    /// Subvolumes mounted elsewhere in the view: their path, their root.
+    mounts: Vec<(Vec<u8>, Ino)>,
+    /// The view comes from fstab (an absolute link starts at `/`); without
+    /// it a link starts at the root of the subvolume it lies in.
+    from_fstab: bool,
 }
 
 impl Btrfs {
@@ -170,7 +182,8 @@ impl Btrfs {
         if !trees.contains_key(&TOP_LEVEL) {
             return Err(bad("no top-level subvolume"));
         }
-        Ok(Self {
+        let fsid = uuid_text(&sb[0x20..0x30]);
+        let mut fs = Self {
             vol,
             chunks,
             nodesize,
@@ -178,7 +191,88 @@ impl Btrfs {
             trees,
             nodes: HashMap::new(),
             unpacked: None,
-        })
+            fsid,
+            view_root: Ino {
+                tree: TOP_LEVEL,
+                ino: ROOT_DIR,
+            },
+            mounts: Vec::new(),
+            from_fstab: false,
+        };
+        fs.arrange_as_booted();
+        Ok(fs)
+    }
+
+    /// Make the view the system as it boots, when a subvolume's own fstab
+    /// says which is `/` and where the others go. `@` is asked first.
+    fn arrange_as_booted(&mut self) {
+        let top = Ino {
+            tree: TOP_LEVEL,
+            ino: ROOT_DIR,
+        };
+        let Ok(entries) = self.dir_entries(top) else {
+            return;
+        };
+        let mut subvols: Vec<(Vec<u8>, Ino)> = entries
+            .into_iter()
+            .filter(|(_, i)| i.tree != TOP_LEVEL)
+            .collect();
+        subvols.sort_by_key(|(n, _)| n.as_slice() != b"@");
+        for (name, at) in &subvols {
+            self.view_root = *at;
+            self.mounts.clear();
+            let Ok((ino, node, _)) = self.resolve(b"/etc/fstab") else {
+                continue;
+            };
+            if node.kind() != S_IFREG {
+                continue;
+            }
+            let Ok(text) = self.read_inode(ino, &node, 0, 64 * 1024) else {
+                continue;
+            };
+            let lines = fstab_subvols(&text, &self.fsid);
+            let is_this = |l: &FstabSubvol| {
+                l.subvolid == Some(at.tree)
+                    || l.subvol
+                        .as_deref()
+                        .map(|s| s.trim_start_matches('/').as_bytes())
+                        == Some(name.as_slice())
+            };
+            if !lines.iter().any(|l| l.mountpoint == b"/" && is_this(l)) {
+                continue;
+            }
+            let mut mounts = Vec::new();
+            for l in lines.iter().filter(|l| l.mountpoint != b"/") {
+                let root = match (l.subvolid, &l.subvol) {
+                    (Some(id), _) if self.trees.contains_key(&id) => Some(Ino {
+                        tree: id,
+                        ino: ROOT_DIR,
+                    }),
+                    (_, Some(s)) => {
+                        let s = s.trim_start_matches('/').as_bytes();
+                        subvols
+                            .iter()
+                            .find(|(n, _)| n.as_slice() == s)
+                            .map(|(_, i)| *i)
+                    }
+                    _ => None,
+                };
+                if let Some(root) = root {
+                    mounts.push((l.mountpoint.clone(), root));
+                }
+            }
+            tracing::info!(
+                root = %String::from_utf8_lossy(name),
+                mounts = mounts.len(),
+                "btrfs: shown as booted, from the subvolume's fstab"
+            );
+            self.mounts = mounts;
+            self.from_fstab = true;
+            return;
+        }
+        self.view_root = top;
+        self.mounts.clear();
+        self.from_fstab = false;
     }
 
     pub fn label(&self) -> String {
@@ -367,23 +461,23 @@ impl Btrfs {
         Ok(out)
     }
 
-    fn root(&self) -> Ino {
-        Ino {
-            tree: TOP_LEVEL,
-            ino: ROOT_DIR,
-        }
+    /// The root of the subvolume mounted at `path` in the view, if any.
+    fn mount_at(&self, path: &[u8]) -> Option<Ino> {
+        self.mounts.iter().find(|(p, _)| p == path).map(|(_, i)| *i)
     }
 
-    /// Follow `path` (absolute, bytes) to an inode, symbolic links included.
-    /// A link to an absolute path is taken from the root of the subvolume it
-    /// lies in — on Ubuntu that subvolume (`@`) is what was `/`.
-    fn resolve(&mut self, path: &[u8]) -> Result<(Ino, Inode)> {
+    /// Follow `path` (absolute, bytes) to an inode, symbolic links and the
+    /// subvolumes mounted in the view included; also the path it ends at.
+    /// A link to an absolute path starts at `/` of the view — or, when the
+    /// view is the top level, at the root of the subvolume the link is in
+    /// (on Ubuntu `@` is what was `/`).
+    fn resolve(&mut self, path: &[u8]) -> Result<(Ino, Inode, Vec<u8>)> {
         let mut todo: Vec<Vec<u8>> = split(path).into_iter().rev().collect();
-        // The directories walked, for `..`.
-        let mut trail: Vec<Ino> = vec![self.root()];
+        // The directories walked and their paths, for `..`.
+        let mut trail: Vec<(Ino, Vec<u8>)> = vec![(self.view_root, Vec::new())];
         let mut links = 0;
         while let Some(part) = todo.pop() {
-            let here = *trail.last().unwrap();
+            let (here, here_path) = trail.last().cloned().unwrap();
             if part == b"." {
                 continue;
             }
@@ -393,12 +487,18 @@ impl Btrfs {
                 }
                 continue;
             }
-            let next = self
-                .dir_entries(here)?
-                .into_iter()
-                .find(|(n, _)| *n == part)
-                .map(|(_, to)| to)
-                .ok_or_else(|| bad("not found"))?;
+            let mut child_path = here_path;
+            child_path.push(b'/');
+            child_path.extend_from_slice(&part);
+            let next = match self.mount_at(&child_path) {
+                Some(root) => root,
+                None => self
+                    .dir_entries(here)?
+                    .into_iter()
+                    .find(|(n, _)| *n == part)
+                    .map(|(_, to)| to)
+                    .ok_or_else(|| bad("not found"))?,
+            };
             let node = self.inode(next)?;
             if node.kind() == S_IFLNK {
                 links += 1;
@@ -407,19 +507,25 @@ impl Btrfs {
                 }
                 let target = self.read_inode(next, &node, 0, 4096)?;
                 if target.starts_with(b"/") {
-                    // Back to the root of the subvolume the link is in: the
-                    // first directory of the walk in its tree.
-                    let subvol_root = trail.iter().position(|i| i.tree == here.tree).unwrap_or(0);
-                    trail.truncate(subvol_root + 1);
+                    let keep = if self.from_fstab {
+                        0
+                    } else {
+                        // The first directory of the walk in the link's tree.
+                        trail
+                            .iter()
+                            .position(|(i, _)| i.tree == here.tree)
+                            .unwrap_or(0)
+                    };
+                    trail.truncate(keep + 1);
                 }
                 todo.extend(split(&target).into_iter().rev());
                 continue;
             }
-            trail.push(next);
+            trail.push((next, child_path));
         }
-        let at = *trail.last().unwrap();
+        let (at, at_path) = trail.pop().unwrap();
         let node = self.inode(at)?;
-        Ok((at, node))
+        Ok((at, node, at_path))
     }
 
     fn entry(name: &[u8], node: &Inode) -> Entry {
@@ -436,12 +542,17 @@ impl Btrfs {
     /// The entries of the directory at `path`, links shown as what they
     /// point to; links to nowhere and special files left out.
     pub fn list(&mut self, path: &[u8]) -> std::result::Result<Vec<Entry>, String> {
-        let (dir, node) = self.resolve(path).map_err(|e| e.to_string())?;
+        let (dir, node, dir_path) = self.resolve(path).map_err(|e| e.to_string())?;
         if node.kind() != S_IFDIR {
             return Err("not a directory".into());
         }
         let mut out = Vec::new();
         for (name, to) in self.dir_entries(dir).map_err(|e| e.to_string())? {
+            // A folder another subvolume is mounted on shows that subvolume.
+            let mut child = dir_path.clone();
+            child.push(b'/');
+            child.extend_from_slice(&name);
+            let to = self.mount_at(&child).unwrap_or(to);
             let Ok(mut node) = self.inode(to) else {
                 continue;
             };
@@ -452,7 +563,7 @@ impl Btrfs {
                 }
                 full.extend_from_slice(&name);
                 match self.resolve(&full) {
-                    Ok((_, target)) => node = target,
+                    Ok((_, target, _)) => node = target,
                     Err(_) => continue,
                 }
             }
@@ -466,7 +577,7 @@ impl Btrfs {
     }
 
     pub fn stat(&mut self, path: &[u8]) -> std::result::Result<Entry, String> {
-        let (_, node) = self.resolve(path).map_err(|e| e.to_string())?;
+        let (_, node, _) = self.resolve(path).map_err(|e| e.to_string())?;
         let name = path.rsplit(|&b| b == b'/').next().unwrap_or_default();
         Ok(Self::entry(name, &node))
     }
@@ -477,7 +588,7 @@ impl Btrfs {
         offset: u64,
         len: usize,
     ) -> std::result::Result<Vec<u8>, String> {
-        let (at, node) = self.resolve(path).map_err(|e| e.to_string())?;
+        let (at, node, _) = self.resolve(path).map_err(|e| e.to_string())?;
         if node.kind() != S_IFREG {
             return Err("not a file".into());
         }
@@ -603,6 +714,91 @@ impl Btrfs {
     }
 }
 
+/// A UUID as fstab writes it: `8-4-4-4-12`, lower case.
+fn uuid_text(b: &[u8]) -> String {
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..32]
+    )
+}
+
+/// An fstab line that mounts a subvolume of a btrfs filesystem.
+#[derive(Debug, PartialEq, Eq)]
+struct FstabSubvol {
+    mountpoint: Vec<u8>,
+    subvol: Option<String>,
+    subvolid: Option<u64>,
+}
+
+/// The lines of `fstab` mounting subvolumes of the btrfs filesystem `fsid`.
+/// A line naming its filesystem by UUID must name this one; a line naming
+/// it otherwise (`LABEL=`, a device) is taken only when no line names a
+/// btrfs by UUID — then there is nothing to tell them apart by.
+fn fstab_subvols(fstab: &[u8], fsid: &str) -> Vec<FstabSubvol> {
+    let text = String::from_utf8_lossy(fstab);
+    let mut by_uuid = Vec::new();
+    let mut other = Vec::new();
+    let mut any_uuid = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 4 || f[2] != "btrfs" {
+            continue;
+        }
+        let spec = f[0].trim_matches('"');
+        let uuid = spec
+            .strip_prefix("UUID=")
+            .or_else(|| spec.strip_prefix("/dev/disk/by-uuid/"))
+            .map(|u| u.trim_matches('"').to_ascii_lowercase());
+        let (mut subvol, mut subvolid) = (None, None);
+        for o in f[3].split(',') {
+            if let Some(v) = o.strip_prefix("subvol=") {
+                subvol = Some(v.to_string());
+            } else if let Some(v) = o.strip_prefix("subvolid=") {
+                subvolid = v.parse().ok();
+            }
+        }
+        if subvol.is_none() && subvolid.is_none() {
+            continue;
+        }
+        // fstab writes a space in a path as \040.
+        let mountpoint = f[1].replace("\\040", " ");
+        let mountpoint = mountpoint.trim_end_matches('/');
+        let mountpoint = if mountpoint.is_empty() {
+            "/"
+        } else {
+            mountpoint
+        };
+        let line = FstabSubvol {
+            mountpoint: mountpoint.as_bytes().to_vec(),
+            subvol,
+            subvolid,
+        };
+        match uuid {
+            Some(u) => {
+                any_uuid = true;
+                if u == fsid {
+                    by_uuid.push(line);
+                }
+            }
+            None => other.push(line),
+        }
+    }
+    if any_uuid {
+        by_uuid
+    } else {
+        other
+    }
+}
+
 fn split(path: &[u8]) -> Vec<Vec<u8>> {
     path.split(|&b| b == b'/')
         .filter(|p| !p.is_empty())
@@ -681,4 +877,49 @@ fn lzo(data: &[u8], size: usize) -> Result<Vec<u8>> {
         pos += seg;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ID: &str = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+
+    #[test]
+    fn fstab_says_which_subvolume_goes_where() {
+        let fstab = format!(
+            "# /etc/fstab: static file system information.\n\
+             UUID={ID} /     btrfs defaults,subvol=@     0 1\n\
+             UUID={ID} /home btrfs defaults,subvol=/@home 0 2\n\
+             UUID={ID} /swap btrfs defaults,subvolid=258 0 0\n\
+             UUID=AAAA-BBBB /boot/efi vfat umask=0077 0 1\n\
+             UUID=11111111-2222-3333-4444-555555555555 /data btrfs subvol=@data 0 0\n\
+             UUID={ID} /mnt/no\\040sub btrfs defaults 0 0\n"
+        );
+        let lines = fstab_subvols(fstab.as_bytes(), ID);
+        let points: Vec<&[u8]> = lines.iter().map(|l| l.mountpoint.as_slice()).collect();
+        assert_eq!(
+            points,
+            [&b"/"[..], b"/home", b"/swap"],
+            "another filesystem's and a line without a subvolume left out"
+        );
+        assert_eq!(lines[1].subvol.as_deref(), Some("/@home"));
+        assert_eq!(lines[2].subvolid, Some(258));
+    }
+
+    #[test]
+    fn without_uuids_the_btrfs_lines_are_taken() {
+        let lines = fstab_subvols(
+            b"LABEL=root / btrfs subvol=@ 0 1\n/dev/sda2 /home/ btrfs subvol=@home 0 2\n",
+            ID,
+        );
+        let points: Vec<&[u8]> = lines.iter().map(|l| l.mountpoint.as_slice()).collect();
+        assert_eq!(points, [&b"/"[..], b"/home"]);
+    }
+
+    #[test]
+    fn a_uuid_reads_as_fstab_writes_it() {
+        let raw: Vec<u8> = (0..16u8).collect();
+        assert_eq!(uuid_text(&raw), "00010203-0405-0607-0809-0a0b0c0d0e0f");
+    }
 }
