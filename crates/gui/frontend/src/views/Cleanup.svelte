@@ -9,6 +9,7 @@
   import { formatBytes } from '../lib/format';
   import { m } from '../lib/paraglide/messages';
   import CleanupFilesModal from '../components/CleanupFilesModal.svelte';
+  import Modal from '../components/Modal.svelte';
   import CleanupMasksModal from '../components/CleanupMasksModal.svelte';
   import CleanupAutoModal from '../components/CleanupAutoModal.svelte';
   import CleanupProfileModal from '../components/CleanupProfileModal.svelte';
@@ -526,7 +527,6 @@
     if (cleanupState.busy === 'analyze') return `${m.cl_hint_analyzing()} ${formatBytes(total)}`;
     if (cleanupState.busy === 'run') return `${m.cl_hint_cleaning()} ${formatBytes(total)}`;
     if (askElevate) return isWindows() ? m.cl_elevate_ask() : m.cl_admin_hint_linux();
-    if (confirming) return m.cl_confirm();
     if (chosen().length === 0) return m.cl_hint_nothing();
     const waiting = unreviewed();
     if (waiting.length > 0 && cleanupState.shown !== 'run') {
@@ -853,6 +853,34 @@
     />
   {/if}
 
+  {#if confirming && catalog}
+    {@const names = catalog.groups.flatMap((g) => g.items).filter((i) => chosen().includes(i.id))}
+    <Modal
+      open
+      danger
+      title={m.cl_confirm_title()}
+      onClose={() => (confirming = false)}
+      cancelLabel={m.common_cancel()}
+      confirmLabel={m.cl_confirm_yes()}
+      onConfirm={() => go('run')}
+    >
+      <p class="confirm-lead">{m.cl_confirm()}</p>
+      {#if cleanupState.shown === 'analyze' && total > 0}
+        <p class="confirm-size">{m.cl_hint_found({ size: formatBytes(total) })}</p>
+      {/if}
+      <ul class="confirm-list">
+        {#each names as it (it.id)}
+          <li>
+            <span>{it.label}</span>
+            {#if cleanupState.shown === 'analyze' && cleanupState.tallies[it.id]}
+              <span class="muted">{sizeText(it.id)}</span>
+            {/if}
+          </li>
+        {/each}
+      </ul>
+    </Modal>
+  {/if}
+
   <div class="footer">
     <div class="hint">{hint()}</div>
     {#if askElevate && !cleanupState.busy}
@@ -860,9 +888,6 @@
       {#if isWindows()}<button class="btn green" onclick={elevate}>{m.cl_elevate()}</button>{/if}
     {:else if cleanupState.busy}
       <button class="btn danger" onclick={cancel}>{m.common_cancel()}</button>
-    {:else if confirming}
-      <button class="btn outline" onclick={() => (confirming = false)}>{m.common_cancel()}</button>
-      <button class="btn green" onclick={() => go('run')}>{m.cl_confirm_yes()}</button>
     {:else}
       <button class="btn outline" disabled={!catalog} onclick={() => go('analyze')}
         >{m.cl_analyze()}</button
@@ -893,6 +918,11 @@
   .auto { display: flex; align-items: center; gap: 12px; border-top: 1px solid var(--border); margin-top: 6px; padding: 10px 18px 4px; font-size: 13px; color: var(--text-secondary); }
   .auto-text { flex: 1; display: flex; flex-direction: column; gap: 2px; }
   .auto-name { font-weight: 600; color: var(--head); font-size: 14px; }
+  .confirm-lead { font-size: 14px; color: var(--text); margin: 0 0 8px; line-height: 1.5; }
+  .confirm-size { font-size: 14px; font-weight: 600; color: var(--head); margin: 0 0 10px; }
+  .confirm-list { margin: 0; padding: 0; list-style: none; max-height: 40vh; overflow: auto; border-top: 1px solid var(--border); }
+  .confirm-list li { display: flex; justify-content: space-between; gap: 16px; padding: 5px 0; font-size: 13px; color: var(--text); border-bottom: 1px solid var(--border); }
+  .confirm-list .muted { color: var(--text-secondary); white-space: nowrap; }
   .cols { display: flex; gap: 16px; align-items: flex-start; }
   .card { border: 1px solid var(--border); border-radius: 8px; background: var(--card-bg); padding: 14px 18px; }
   .tree { flex: 1; min-width: 0; padding: 8px 0; }
