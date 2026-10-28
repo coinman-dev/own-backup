@@ -35,6 +35,9 @@ pub enum Request {
         users: Vec<String>,
         #[serde(default)]
         options: Options,
+        /// Files of the analysis' list the window unticked: they stay.
+        #[serde(default)]
+        exclude: Vec<String>,
     },
     /// A page of the files the last analysis found for one item.
     Files {
@@ -100,6 +103,10 @@ fn key(ids: &[String]) -> Vec<String> {
 pub struct CatalogReply {
     pub groups: Vec<catalog::GroupDto>,
     pub users: Vec<UserDto>,
+    /// The window may add folders to the junk search.
+    pub admin: bool,
+    /// The junk masks and age offered.
+    pub junk: own_backup_cleanup::junk::JunkOptions,
 }
 
 #[derive(Debug, Serialize)]
@@ -153,6 +160,14 @@ pub enum Refusal {
     Unknown(String),
     /// `files` with no analysis of that item by this window's user.
     NotAnalyzed,
+    /// A cleanup of an item cleaned only from its list
+    /// ([`catalog::Item::reviewed`]) with no analysis to hold it to.
+    ReviewFirst,
+    /// A junk mask refused by [`own_backup_cleanup::junk::check_mask`].
+    BadMask(String),
+    /// Folders added to the junk search by someone who is not an
+    /// administrator.
+    FoldersAdminOnly,
 }
 
 impl Cleaner {
@@ -171,6 +186,8 @@ impl Cleaner {
                     name: u.name,
                 })
                 .collect(),
+            admin: asker.admin,
+            junk: Default::default(),
         }
     }
 
@@ -270,6 +287,7 @@ impl Cleaner {
     /// runtime). `progress` hears of each item. An analysis is kept; a
     /// cleanup of exactly what was analysed, for the same asker, removes only
     /// the files it listed.
+    #[allow(clippy::too_many_arguments)]
     pub fn go(
         &self,
         asker: &Asker,
@@ -277,8 +295,10 @@ impl Cleaner {
         people: &[User],
         mode: Mode,
         options: Options,
+        exclude: &[String],
         mut progress: impl FnMut(Progress),
     ) -> Result<Report, Refusal> {
+        check_junk(asker, &options)?;
         let flag = {
             let mut slot = self.running.lock().unwrap();
             if slot.is_some() {
@@ -305,7 +325,15 @@ impl Cleaner {
         };
         let report = match mode {
             Mode::Analyze => {
-                let mut report = engine::run(items, &roots, people, mode, options, &flag, progress);
+                let mut report = engine::run(
+                    items,
+                    &roots,
+                    people,
+                    mode,
+                    options.clone(),
+                    &flag,
+                    progress,
+                );
                 *self.last.lock().unwrap() = Some(Analysis {
                     asker: asker.sid.clone(),
                     options,
@@ -321,8 +349,20 @@ impl Cleaner {
                 report
             }
             Mode::Remove => {
-                let held = self.analysed_files(asker, &ids, &sids, options);
-                tracing::info!(held_to_analysis = held.is_some(), "cleanup run");
+                let mut held = self.analysed_files(asker, &ids, &sids, &options);
+                tracing::info!(
+                    held_to_analysis = held.is_some(),
+                    unticked = exclude.len(),
+                    "cleanup run"
+                );
+                if held.is_none() && items.iter().any(|i| i.reviewed()) {
+                    return Err(Refusal::ReviewFirst);
+                }
+                if let Some(only) = held.as_mut() {
+                    for path in exclude {
+                        only.remove(&PathBuf::from(path));
+                    }
+                }
                 let report = match &held {
                     Some(only) => {
                         engine::run_only(items, &roots, people, options, &flag, progress, only)
@@ -345,7 +385,7 @@ impl Cleaner {
         asker: &Asker,
         ids: &[String],
         sids: &[String],
-        options: Options,
+        options: &Options,
     ) -> Option<HashSet<PathBuf>> {
         let last = self.last.lock().unwrap();
         let a = last.as_ref()?;
@@ -360,7 +400,7 @@ impl Cleaner {
         if !same_asker
             || !wanted.iter().all(|id| a.items.contains(id))
             || a.users != key(sids)
-            || a.options != options
+            || a.options != *options
         {
             return None;
         }
@@ -373,6 +413,26 @@ impl Cleaner {
                 .collect(),
         )
     }
+}
+
+/// The junk search's masks and folders, checked: masks that mean junk only,
+/// folders added by an administrator and named in full.
+fn check_junk(asker: &Asker, options: &Options) -> Result<(), Refusal> {
+    let junk = &options.junk;
+    if let Some(bad) = junk
+        .masks
+        .iter()
+        .find(|m| own_backup_cleanup::junk::check_mask(m).is_err())
+    {
+        return Err(Refusal::BadMask(bad.clone()));
+    }
+    if !junk.folders.is_empty() && !asker.admin {
+        return Err(Refusal::FoldersAdminOnly);
+    }
+    if let Some(odd) = junk.folders.iter().find(|f| !f.is_absolute()) {
+        return Err(Refusal::Unknown(odd.display().to_string()));
+    }
+    Ok(())
 }
 
 /// Frees the slot however the run ends.
@@ -505,23 +565,24 @@ mod tests {
         let items = ["recycle_bin".to_string(), "TEMP_USER".to_string()];
         let users = ["s-1-5-21-1-1001".to_string()];
         let held = c
-            .analysed_files(&me(), &items, &users, Options::default())
+            .analysed_files(&me(), &items, &users, &Options::default())
             .unwrap();
         assert_eq!(held.len(), 4);
         let only_bin = c
-            .analysed_files(&me(), &items[..1], &users, Options::default())
+            .analysed_files(&me(), &items[..1], &users, &Options::default())
             .unwrap();
         assert_eq!(only_bin.len(), 1, "only the ticked item's files");
         assert!(c
-            .analysed_files(&me(), &["shader_cache".into()], &users, Options::default())
+            .analysed_files(&me(), &["shader_cache".into()], &users, &Options::default())
             .is_none());
         assert!(c
             .analysed_files(
                 &me(),
                 &items,
                 &users,
-                Options {
-                    history_keep_days: 7
+                &Options {
+                    history_keep_days: 7,
+                    ..Default::default()
                 }
             )
             .is_none());
@@ -530,7 +591,7 @@ mod tests {
                 &me(),
                 &items,
                 &["S-1-5-21-1-1002".into()],
-                Options::default()
+                &Options::default()
             )
             .is_none());
         let other = Asker {
@@ -538,7 +599,7 @@ mod tests {
             admin: false,
         };
         assert!(c
-            .analysed_files(&other, &items, &users, Options::default())
+            .analysed_files(&other, &items, &users, &Options::default())
             .is_none());
     }
 
@@ -629,5 +690,52 @@ mod tests {
         );
         assert_eq!(summary.items[0].ru, "Корзина");
         assert_eq!(summary.items[0].en, "Recycle Bin");
+    }
+
+    /// The junk search takes masks that mean junk only, and other folders
+    /// from an administrator's window only.
+    #[test]
+    fn junk_masks_and_folders_are_checked() {
+        use own_backup_cleanup::junk::JunkOptions;
+        let with = |junk: JunkOptions| Options {
+            junk,
+            ..Default::default()
+        };
+        let admin = Asker {
+            sid: Some("S-1-5-21-1-1001".into()),
+            admin: true,
+        };
+        assert!(check_junk(&me(), &Options::default()).is_ok());
+        assert!(matches!(
+            check_junk(
+                &me(),
+                &with(JunkOptions {
+                    masks: vec!["*.tmp".into(), "*.*".into()],
+                    ..Default::default()
+                })
+            ),
+            Err(Refusal::BadMask(m)) if m == "*.*"
+        ));
+        let folders = with(JunkOptions {
+            folders: vec![PathBuf::from(if cfg!(windows) {
+                r"D:\Downloads"
+            } else {
+                "/d"
+            })],
+            ..Default::default()
+        });
+        assert!(matches!(
+            check_junk(&me(), &folders),
+            Err(Refusal::FoldersAdminOnly)
+        ));
+        assert!(check_junk(&admin, &folders).is_ok());
+        let relative = with(JunkOptions {
+            folders: vec![PathBuf::from("Downloads")],
+            ..Default::default()
+        });
+        assert!(matches!(
+            check_junk(&admin, &relative),
+            Err(Refusal::Unknown(_))
+        ));
     }
 }

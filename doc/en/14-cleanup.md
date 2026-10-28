@@ -14,7 +14,7 @@ and the users' are within its reach. There is no such section on Linux yet.
    bar at the bottom how much the ticked ones free. Nothing is removed. The
    **Files** button of an item opens the list of what will be removed: path,
    size, date, search, largest first or by path; for Windows traces, the
-   registry entries too. The cleanup removes exactly
+   registry entries too. Untick a file you need and it stays. The cleanup removes exactly
    that list for the ticked items: files that turned up after the analysis
    stay. The ticks may change after the analysis; changing the users or the
    days of history kept clears it — press **Analyse** again. For **Browser
@@ -57,6 +57,30 @@ The chosen items and users are remembered.
 | npm, pip, Yarn and NuGet caches (off by default) | `npm-cache\_cacache`, `pip\cache`, `Yarn\Cache`, `NuGet\v3-cache` | — |
 | Programs' logs | the log folders of qBittorrent, Zed, DaVinci Resolve, OBS Studio, npm | logs younger than a week; DaVinci Resolve's projects and project library; a program that is open |
 | NVIDIA driver installers (off by default) | `C:\NVIDIA\DisplayDriver`, `ProgramData\NVIDIA Corporation\Downloader\*` | younger than a day; the installed driver |
+
+### Files by masks
+
+The **Files by masks** item (off by default) looks for abandoned files by
+name masks — like Ace Utilities' junk cleaning, but more carefully:
+
+- **Where.** In the ticked users' profiles; a window run as an
+  administrator may add other folders and drives ("Where else to search").
+- **Never entered:** `Windows`, `Program Files`, `ProgramData`, `AppData`
+  (programs' junk is the other items' business), `.git`, `node_modules`,
+  cloud folders (OneDrive, Dropbox, Google Drive, Yandex Disk — a removal
+  there would remove the file in the cloud too), links and junctions. This
+  program's files (`.own-backup-*`) and backup images (`.obk`, `.vhdx`,
+  `.qcow2`) are never touched, whatever the masks.
+- **Masks.** By default `*.tmp *.temp ~$* Thumbs.db *.dmp *.gid *._mp *.$$$`;
+  they can be changed in the item's description. A mask too broad is
+  refused: a file name only, with at least two letters besides `*`, `?` and
+  the dot — `*.*` or `*.d*` (which would catch `.docx` too) will not do.
+- **Age.** Files older than a day, a week (the default), a month or three
+  months go.
+- **Only after a look.** The item is cleaned only once its **Files** list
+  was opened after the analysis; the service does not remove it without
+  an analysis. Each file of the list has a tick — untick it and the file
+  stays. Folders are not removed.
 
 ## What is guaranteed
 

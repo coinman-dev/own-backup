@@ -44,6 +44,7 @@ mod win {
             Some("trim") if args.len() == 3 => trim(Path::new(&args[1]), args[2].parse().unwrap()),
             Some("selftest") if args.len() == 2 => selftest(Path::new(&args[1])),
             Some("regtest") if args.len() == 2 => regtest(Path::new(&args[1])),
+            Some("junktest") if args.len() == 2 => junktest(Path::new(&args[1])),
             _ => {
                 eprintln!(
                     "cleanup_probe analyze | selftest <empty folder> | regtest <empty folder>"
@@ -100,6 +101,7 @@ mod win {
             Mode::Analyze,
             own_backup_cleanup::Options {
                 history_keep_days: 7,
+                ..Default::default()
             },
             &AtomicBool::new(false),
             |_, _| {},
@@ -129,6 +131,11 @@ mod win {
                 println!("{:<16} left, open: {}", "", i.running.join(", "));
             }
             // Where an item's files are, by folder (the browsers' profiles).
+            if i.id == "junk" {
+                for f in report.listing.get(&i.id).into_iter().flatten().take(60) {
+                    println!("{:<16}   {:>9} {}", "", f.size, f.path.display());
+                }
+            }
             if i.id.starts_with("browser") {
                 let mut dirs = std::collections::BTreeMap::<String, (u64, u64)>::new();
                 for f in report.listing.get(&i.id).into_iter().flatten() {
@@ -407,6 +414,125 @@ mod win {
             close(key);
             Some(out)
         }
+    }
+
+    /// Junk by masks on NTFS: an old `.tmp` and an Office owner file go
+    /// (the latter only when not unticked), a junction is not followed,
+    /// AppData and this program's own files stay.
+    fn junktest(dir: &Path) {
+        let mut failures = 0;
+        let mut check = |ok: bool, what: &str| {
+            println!("{} {what}", if ok { "PASS" } else { "FAIL" });
+            if !ok {
+                failures += 1;
+            }
+        };
+        assert!(
+            !dir.exists() || std::fs::read_dir(dir).unwrap().next().is_none(),
+            "the folder must be empty"
+        );
+        let profile = dir.join("Users").join("tester");
+        let docs = profile.join("Documents");
+        let outside = dir.join("Elsewhere");
+        let files = [
+            docs.join("a.tmp"),
+            docs.join("~$Отчёт.docx"),
+            docs.join("Отчёт.docx"),
+            docs.join(".own-backup-new-0123.tmp"),
+            profile.join(r"AppData\Local\Temp\c.tmp"),
+            outside.join("b.tmp"),
+        ];
+        for f in &files {
+            write(f, 100);
+            age_days(f, 10);
+        }
+        let junction = docs.join("link");
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&outside)
+            .status()
+            .unwrap();
+        check(status.success(), "junction made");
+
+        let roots = Roots {
+            windows: dir.join("Windows"),
+            program_data: dir.join("ProgramData"),
+            volumes: vec![],
+            running: Default::default(),
+            hives: own_backup_cleanup::registry::open_user,
+        };
+        let user = User {
+            sid: "S-1-5-21-0-0-0-1001".into(),
+            name: "tester".into(),
+            profile: profile.clone(),
+        };
+        let item = catalog::item("junk").unwrap();
+        let seen = engine::run(
+            &[item],
+            &roots,
+            std::slice::from_ref(&user),
+            Mode::Analyze,
+            Default::default(),
+            &AtomicBool::new(false),
+            |_, _| {},
+        );
+        for f in seen.listing.values().flatten() {
+            println!("  listed: {}", f.path.display());
+        }
+        check(seen.total.files == 2, "analysis: a.tmp and ~$Отчёт.docx");
+        // The window unticked the owner file.
+        let only: std::collections::HashSet<_> = seen
+            .listing
+            .values()
+            .flatten()
+            .map(|f| f.path.clone())
+            .filter(|p| !p.ends_with("~$Отчёт.docx"))
+            .collect();
+        let done = engine::run_only(
+            &[item],
+            &roots,
+            &[user],
+            Default::default(),
+            &AtomicBool::new(false),
+            |_, _| {},
+            &only,
+        );
+        check(done.total.files == 1, "removed: a.tmp only");
+        check(!files[0].exists(), "a.tmp is gone");
+        check(files[1].exists(), "the unticked owner file stays");
+        check(files[2].exists(), "the document stays");
+        check(files[3].exists(), "this program's own file stays");
+        check(files[4].exists(), "AppData is not entered");
+        check(files[5].exists(), "the junction is not followed");
+        check(
+            std::fs::symlink_metadata(&junction).is_ok(),
+            "the junction itself stays",
+        );
+        let _ = std::fs::remove_dir(&junction);
+        let _ = std::fs::remove_dir_all(dir);
+        println!(
+            "{}",
+            if failures == 0 {
+                "ALL PASS"
+            } else {
+                "FAILURES"
+            }
+        );
+        std::process::exit(if failures == 0 { 0 } else { 1 });
+    }
+
+    /// A file written and created `days` ago.
+    fn age_days(p: &Path, days: u64) {
+        use std::os::windows::fs::{FileTimesExt, OpenOptionsExt};
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86_400);
+        let f = std::fs::OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .open(p)
+            .unwrap();
+        f.set_times(std::fs::FileTimes::new().set_modified(old).set_created(old))
+            .unwrap();
     }
 
     fn regtest(dir: &Path) {

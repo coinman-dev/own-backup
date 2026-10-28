@@ -32,6 +32,14 @@
   Yarn and NuGet; the logs of qBittorrent, Zed, DaVinci Resolve, OBS Studio;
   NVIDIA driver installers. The programs' settings and data are not touched;
   a program that is open is left.
+- **Cleanup: files by masks** (off by default) — as in Ace Utilities, but
+  carefully: only in the users' profiles and in folders an administrator
+  added; Windows, Program Files, ProgramData, AppData, `.git`,
+  `node_modules`, cloud folders and the program's own files are never
+  touched; masks too broad (`*.*`) are refused; files older than a week
+  (the age is chosen). Removed only after the **Files** list was looked
+  through, where any file can be unticked — which works for the other
+  items too.
 - **Cleanup: Windows traces** (off by default): recent documents (shortcuts
   and the registry's lists, the Open and Save As dialogs' too), jump lists
   (the folders pinned to Quick access stay), the Run box's, Explorer's

@@ -91,8 +91,9 @@ export const api = {
   cleanupCatalog: () => invoke<CleanupCatalog>('cleanup', { op: { op: 'catalog' } }),
   cleanupAnalyze: (items: string[], users: string[], options: CleanupOptions) =>
     invoke<CleanupReport>('cleanup', { op: { op: 'analyze', items, users, options } }),
-  cleanupRun: (items: string[], users: string[], options: CleanupOptions) =>
-    invoke<CleanupReport>('cleanup', { op: { op: 'run', items, users, options } }),
+  /** `exclude`: files of the analysis' list the window unticked — they stay. */
+  cleanupRun: (items: string[], users: string[], options: CleanupOptions, exclude: string[] = []) =>
+    invoke<CleanupReport>('cleanup', { op: { op: 'run', items, users, options, exclude } }),
   cleanupCancel: () => invoke<unknown>('cleanup', { op: { op: 'cancel' } }),
   cleanupFiles: (item: string, offset: number, limit: number, sort: 'size' | 'path', filter: string) =>
     invoke<CleanupFilesPage>('cleanup', { op: { op: 'files', item, offset, limit, sort, filter } }),

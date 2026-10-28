@@ -30,6 +30,9 @@ pub enum Base {
     Profile,
     /// The root of the drive Windows is on (`C:\`).
     SystemDrive,
+    /// Files matching the junk masks below the users' profiles and the folders
+    /// added ([`crate::junk`]); the target's own path and masks are unused.
+    Junk,
 }
 
 impl Base {
@@ -37,7 +40,11 @@ impl Base {
     pub fn per_user(self) -> bool {
         matches!(
             self,
-            Base::LocalAppData | Base::RoamingAppData | Base::RecycleBin | Base::Profile
+            Base::LocalAppData
+                | Base::RoamingAppData
+                | Base::RecycleBin
+                | Base::Profile
+                | Base::Junk
         )
     }
 }
@@ -174,11 +181,17 @@ impl Item {
     pub fn per_user(&self) -> bool {
         !self.keys.is_empty() || self.targets.iter().any(|t| t.base.per_user())
     }
+
+    /// Cleaned only as an analysis listed it and the window showed it: the
+    /// junk masks find files no folder of ours vouches for.
+    pub fn reviewed(&self) -> bool {
+        self.targets.iter().any(|t| t.base == Base::Junk)
+    }
 }
 
 /// Groups, in the order the window shows them.
 pub const GROUPS: &[&str] = &[
-    "temp", "reports", "caches", "browsers", "programs", "traces",
+    "temp", "reports", "caches", "browsers", "programs", "traces", "junk",
 ];
 
 // Programs whose lists and caches the "programs" items clean.
@@ -690,6 +703,14 @@ static ITEMS: &[Item] = &[
         ],
         keys: &[],
     },
+    // --- junk by masks -----------------------------------------------------
+    Item {
+        id: "junk",
+        group: "junk",
+        default_on: false,
+        targets: &[tree(Base::Junk, "", 0)],
+        keys: &[],
+    },
 ];
 
 // --- browsers ---------------------------------------------------------------
@@ -1005,6 +1026,7 @@ pub fn label_both(id: &str) -> Localized {
         "dev_caches" => tr_both!("cleanup.dev_caches"),
         "app_logs" => tr_both!("cleanup.app_logs"),
         "driver_installers" => tr_both!("cleanup.driver_installers"),
+        "junk" => tr_both!("cleanup.junk"),
         _ => Localized::plain(id),
     }
 }
@@ -1038,6 +1060,7 @@ pub fn about(id: &str) -> String {
         "dev_caches" => tr!("cleanup.dev_caches_about"),
         "app_logs" => tr!("cleanup.app_logs_about"),
         "driver_installers" => tr!("cleanup.driver_installers_about"),
+        "junk" => tr!("cleanup.junk_about"),
         _ => return String::new(),
     }
     .into_owned()
@@ -1052,6 +1075,7 @@ pub fn group_label(id: &str) -> String {
         "browsers" => tr!("cleanup.group_browsers"),
         "traces" => tr!("cleanup.group_traces"),
         "programs" => tr!("cleanup.group_programs"),
+        "junk" => tr!("cleanup.group_junk"),
         _ => return id.to_string(),
     }
     .into_owned()
@@ -1072,6 +1096,8 @@ pub struct ItemDto {
     pub about: String,
     pub default_on: bool,
     pub per_user: bool,
+    /// Cleaned only after its list was looked through ([`Item::reviewed`]).
+    pub review: bool,
 }
 
 pub fn groups() -> Vec<GroupDto> {
@@ -1089,6 +1115,7 @@ pub fn groups() -> Vec<GroupDto> {
                     about: about(i.id),
                     default_on: i.default_on,
                     per_user: i.per_user(),
+                    review: i.reviewed(),
                 })
                 .collect(),
         })

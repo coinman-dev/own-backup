@@ -443,6 +443,7 @@ fn history_keeps_its_last_days_when_asked() {
     let history = crate::catalog::item("browser_history").unwrap();
     let keep = Options {
         history_keep_days: 7,
+        ..Default::default()
     };
     let go = |mode| {
         run_at_with(
@@ -450,7 +451,7 @@ fn history_keeps_its_last_days_when_asked() {
             &roots(dir.path()),
             &[user(dir.path())],
             mode,
-            keep,
+            keep.clone(),
             &AtomicBool::new(false),
             |_, _| {},
             now,
@@ -989,4 +990,112 @@ fn program_logs_and_caches_go_and_their_data_stays() {
     );
     assert_eq!(again.total.files, 0);
     assert!(support.join("logs/fresh.txt").exists());
+}
+
+// --- junk by masks ------------------------------------------------------------
+
+fn junk_run(
+    dir: &Path,
+    mode: Mode,
+    junk: crate::junk::JunkOptions,
+    later: Duration,
+    only: Option<&HashSet<PathBuf>>,
+) -> Report {
+    run_at_with(
+        &[crate::catalog::item("junk").unwrap()],
+        &roots(dir),
+        &[user(dir)],
+        mode,
+        Options {
+            junk,
+            ..Default::default()
+        },
+        &AtomicBool::new(false),
+        |_, _| {},
+        SystemTime::now() + later,
+        only,
+    )
+}
+
+/// The masks find junk in the profile and in the folders added, but never in
+/// programs' data, version control, cloud folders, nor this program's own
+/// files; documents stay. The cleanup removes what the list kept — a file
+/// unticked in the window stays.
+#[test]
+fn junk_is_found_where_it_may_be_and_removed_as_listed() {
+    let dir = tempfile::tempdir().unwrap();
+    let profile = dir.path().join("Users/u");
+    let docs = profile.join("Documents");
+    write(&docs.join("a.tmp"), 10);
+    write(&docs.join("~$Отчёт.docx"), 20);
+    write(&docs.join("Отчёт.docx"), 500);
+    write(&docs.join("deep/er/Thumbs.db"), 30);
+    write(&docs.join(".own-backup-new-0123.tmp"), 40);
+    write(&docs.join("project/.git/x.tmp"), 1);
+    write(&docs.join("site/node_modules/y.tmp"), 1);
+    write(&profile.join("AppData/Local/Temp/z.tmp"), 1);
+    write(&profile.join("OneDrive - Работа/w.tmp"), 1);
+    let extra = dir.path().join("D");
+    write(&extra.join("old.tmp"), 50);
+    write(&extra.join("Program Files/app/p.tmp"), 1);
+    let junk = crate::junk::JunkOptions {
+        folders: vec![extra.clone()],
+        ..Default::default()
+    };
+
+    let seen = junk_run(dir.path(), Mode::Analyze, junk.clone(), TWO_DAYS * 4, None);
+    let mut listed: Vec<String> = seen.listing["junk"]
+        .iter()
+        .map(|f| f.path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    listed.sort();
+    assert_eq!(
+        listed,
+        vec!["Thumbs.db", "a.tmp", "old.tmp", "~$Отчёт.docx"]
+    );
+    assert_eq!(seen.total.bytes, 110);
+
+    // Nothing is a week old yet.
+    let early = junk_run(
+        dir.path(),
+        Mode::Analyze,
+        junk.clone(),
+        Duration::ZERO,
+        None,
+    );
+    assert_eq!(early.total.files, 0);
+
+    // The window unticked the document's owner file.
+    let only: HashSet<PathBuf> = seen.listing["junk"]
+        .iter()
+        .map(|f| f.path.clone())
+        .filter(|p| !p.ends_with("~$Отчёт.docx"))
+        .collect();
+    let done = junk_run(dir.path(), Mode::Remove, junk, TWO_DAYS * 4, Some(&only));
+    assert_eq!(done.total.files, 3);
+    assert!(!docs.join("a.tmp").exists());
+    assert!(!extra.join("old.tmp").exists());
+    assert!(docs.join("~$Отчёт.docx").exists(), "unticked");
+    assert!(docs.join("Отчёт.docx").exists());
+    assert!(docs.join(".own-backup-new-0123.tmp").exists());
+    assert!(docs.join("project/.git/x.tmp").exists());
+    assert!(docs.join("site/node_modules/y.tmp").exists());
+    assert!(profile.join("AppData/Local/Temp/z.tmp").exists());
+    assert!(profile.join("OneDrive - Работа/w.tmp").exists());
+    assert!(extra.join("Program Files/app/p.tmp").exists());
+    assert!(docs.join("deep/er").is_dir(), "folders are never removed");
+}
+
+/// A mask too broad is not used even if the request carries it.
+#[test]
+fn junk_ignores_masks_too_broad() {
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir.path().join("Users/u/Documents/Отчёт.docx"), 5);
+    let junk = crate::junk::JunkOptions {
+        masks: vec!["*.*".into(), "*".into(), "*.d*".into()],
+        ..Default::default()
+    };
+    let seen = junk_run(dir.path(), Mode::Remove, junk, TWO_DAYS * 4, None);
+    assert_eq!(seen.total.files, 0);
+    assert!(dir.path().join("Users/u/Documents/Отчёт.docx").exists());
 }

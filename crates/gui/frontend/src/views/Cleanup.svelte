@@ -9,9 +9,12 @@
   import { formatBytes } from '../lib/format';
   import { m } from '../lib/paraglide/messages';
   import CleanupFilesModal from '../components/CleanupFilesModal.svelte';
+  import { pickPath } from '../lib/pickPath.svelte';
   import type {
     CleanupCatalog,
     CleanupItem,
+    CleanupJunk,
+    CleanupOptions,
     CleanupProgress,
     CleanupReport,
     CleanupTally,
@@ -22,6 +25,9 @@
   const HISTORY_KEY = 'ob.cleanup.historyDays';
   /** «Хранить историю»: 0 removes it all; a week unless chosen otherwise. */
   const KEEP_CHOICES = [0, 1, 7, 30] as const;
+  const JUNK_KEY = 'ob.cleanup.junk';
+  /** Junk by masks: files unchanged for this many days. */
+  const AGE_CHOICES = [1, 7, 30, 90] as const;
 
   let catalog = $state<CleanupCatalog | null>(null);
   let loadError = $state<string | null>(null);
@@ -41,6 +47,17 @@
   /** The ticks changed after an analysis: its numbers and its list no longer
    *  say what the cleanup would remove. */
   let stale = $state(false);
+  /** The junk search's masks, age and folders; the service's defaults until
+   *  changed. */
+  let junk = $state<CleanupJunk | null>(null);
+  let masksText = $state('');
+  let maskError = $state<string | null>(null);
+  /** Per item: the files of the analysis' list unticked in its window, with
+   *  their sizes — they stay. */
+  let excluded = $state<Record<string, Map<string, number>>>({});
+  /** Items whose list was opened since the analysis: an item cleaned only
+   *  from its list (junk by masks) waits for that. */
+  let reviewed = $state<Set<string>>(new Set());
   let keepDays = $state(
     ((): number => {
       const v = Number(localStorage.getItem(HISTORY_KEY));
@@ -62,6 +79,103 @@
     keepDays = days;
     localStorage.setItem(HISTORY_KEY, String(days));
     changed();
+  }
+
+  /** A mask that means junk: a file name with two letters besides * ? and
+   *  the dot (the service refuses others the same way). */
+  function maskOk(mask: string): boolean {
+    const t = mask.trim();
+    if (!t || /[\\/:]/.test(t)) return false;
+    return [...t].filter((c) => !'*?.'.includes(c)).length >= 2;
+  }
+
+  function rememberedJunk(): CleanupJunk | null {
+    try {
+      const v = JSON.parse(localStorage.getItem(JUNK_KEY) ?? 'null');
+      if (!v || !Array.isArray(v.masks) || typeof v.age_days !== 'number' || !Array.isArray(v.folders)) return null;
+      const masks = v.masks.filter((x: unknown) => typeof x === 'string' && maskOk(x));
+      if (masks.length === 0) return null;
+      const age = (AGE_CHOICES as readonly number[]).includes(v.age_days) ? v.age_days : 7;
+      return { masks, age_days: age, folders: v.folders.filter((x: unknown) => typeof x === 'string') };
+    } catch {
+      return null;
+    }
+  }
+
+  function saveJunk(next: CleanupJunk) {
+    if (JSON.stringify(next) === JSON.stringify(junk)) return;
+    junk = next;
+    localStorage.setItem(JUNK_KEY, JSON.stringify(next));
+    changed();
+  }
+
+  function setMasks() {
+    if (!junk) return;
+    const list = masksText.split(/[\s,;]+/).filter(Boolean);
+    const bad = list.find((x) => !maskOk(x));
+    if (bad) {
+      maskError = m.cl_junk_bad_mask({ mask: bad });
+      return;
+    }
+    if (list.length === 0) {
+      maskError = m.cl_junk_no_masks();
+      return;
+    }
+    maskError = null;
+    saveJunk({ ...junk, masks: list });
+  }
+
+  function defaultMasks() {
+    masksText = (catalog?.junk?.masks ?? []).join(' ');
+    setMasks();
+  }
+
+  function ageLabel(days: number): string {
+    return days === 1
+      ? m.cl_age_day()
+      : days === 7
+        ? m.cl_age_week()
+        : days === 30
+          ? m.cl_age_month()
+          : m.cl_age_quarter();
+  }
+
+  async function addFolder() {
+    if (!junk) return;
+    const dir = await pickPath({ directory: true, title: m.cl_junk_pick() });
+    if (dir && !junk.folders.includes(dir)) saveJunk({ ...junk, folders: [...junk.folders, dir] });
+  }
+
+  function removeFolder(folder: string) {
+    if (junk) saveJunk({ ...junk, folders: junk.folders.filter((f) => f !== folder) });
+  }
+
+  function options(): CleanupOptions {
+    return { history_keep_days: keepDays, junk: junk ?? undefined };
+  }
+
+  function toggleExcluded(item: string, path: string, size: number) {
+    const next = new Map(excluded[item] ?? []);
+    if (next.has(path)) next.delete(path);
+    else next.set(path, size);
+    excluded = { ...excluded, [item]: next };
+    confirming = false;
+  }
+
+  function excludedBytes(item: string): number {
+    return [...(excluded[item]?.values() ?? [])].reduce((s, b) => s + b, 0);
+  }
+
+  function openList(id: string, label: string) {
+    viewing = { id, label };
+    reviewed = new Set([...reviewed, id]);
+  }
+
+  /** Ticked items cleaned only from a list nobody has opened yet. */
+  function unreviewed(): CleanupItem[] {
+    return (catalog?.groups ?? [])
+      .flatMap((g) => g.items)
+      .filter((i) => i.review && items.has(i.id) && (shown !== 'analyze' || !reviewed.has(i.id)));
   }
 
   function remembered(key: string): string[] | null {
@@ -92,6 +206,10 @@
         const me = allowed.filter((u) => u.me).map((u) => u.sid);
         users = new Set(keptUsers?.length ? keptUsers : me.length ? me : allowed.map((u) => u.sid));
         focused = all[0]?.id ?? null;
+        const offered = c.junk ?? { masks: ['*.tmp'], age_days: 7, folders: [] };
+        const kept = rememberedJunk() ?? offered;
+        junk = { ...kept, folders: c.admin ? kept.folders : [] };
+        masksText = junk.masks.join(' ');
       })
       .catch((e) => (loadError = String(e)));
     const un = listen<CleanupProgress>('cleanup-progress', (e) => {
@@ -151,6 +269,8 @@
       shown = 'none';
       stale = true;
     }
+    excluded = {};
+    reviewed = new Set();
   }
 
   /** The ticked items, in the catalogue's order. */
@@ -168,6 +288,12 @@
   async function go(mode: 'analyze' | 'run') {
     const list = mode === 'analyze' ? every() : chosen();
     if (list.length === 0) return;
+    if (mode === 'run' && unreviewed().length > 0) return;
+    const exclude = mode === 'run' ? list.flatMap((id) => [...(excluded[id]?.keys() ?? [])]) : [];
+    if (mode === 'analyze') {
+      excluded = {};
+      reviewed = new Set();
+    }
     confirming = false;
     error = null;
     report = null;
@@ -178,8 +304,8 @@
     try {
       const r =
         mode === 'analyze'
-          ? await api.cleanupAnalyze(list, [...users], { history_keep_days: keepDays })
-          : await api.cleanupRun(list, [...users], { history_keep_days: keepDays });
+          ? await api.cleanupAnalyze(list, [...users], options())
+          : await api.cleanupRun(list, [...users], options(), exclude);
       report = r;
       tallies = Object.fromEntries(r.items.map((i) => [i.id, i]));
     } catch (e) {
@@ -231,7 +357,10 @@
   }
 
   const total = $derived(
-    chosen().reduce((s, id) => s + (tallies[id]?.bytes ?? 0), 0),
+    chosen().reduce(
+      (s, id) => s + (tallies[id]?.bytes ?? 0) - (shown === 'analyze' ? excludedBytes(id) : 0),
+      0,
+    ),
   );
   const focusedItem = $derived(
     (catalog?.groups ?? []).flatMap((g) => g.items).find((i) => i.id === focused) ?? null,
@@ -242,6 +371,10 @@
     if (busy === 'run') return `${m.cl_hint_cleaning()} ${formatBytes(total)}`;
     if (confirming) return m.cl_confirm();
     if (chosen().length === 0) return m.cl_hint_nothing();
+    const waiting = unreviewed();
+    if (waiting.length > 0 && shown !== 'run') {
+      return m.cl_review_first({ names: waiting.map((i) => i.label).join(', ') });
+    }
     if (report && shown === 'run') {
       const size = formatBytes(report.total.bytes);
       if (report.cancelled) return m.cl_hint_cancelled({ size });
@@ -313,7 +446,7 @@
                       title={m.cl_files_title()}
                       onclick={(e) => {
                         e.stopPropagation();
-                        viewing = { id: it.id, label: it.label };
+                        openList(it.id, it.label);
                       }}>{m.cl_files_button()}</button
                     >
                   {/if}
@@ -342,6 +475,46 @@
                     {#each KEEP_CHOICES as d (d)}<option value={d}>{keepLabel(d)}</option>{/each}
                   </select>
                 </label>
+              {/if}
+              {#if focusedItem.review && junk}
+                <label class="keep">
+                  <span>{m.cl_junk_masks()}</span>
+                  <input class="form-input" bind:value={masksText} disabled={!!busy} onchange={setMasks} />
+                </label>
+                {#if maskError}<p class="about bad">{maskError}</p>{/if}
+                <button class="linkish" disabled={!!busy} onclick={defaultMasks}>{m.cl_junk_defaults()}</button>
+                <label class="keep">
+                  <span>{m.cl_junk_age()}</span>
+                  <select
+                    class="form-input"
+                    value={junk.age_days}
+                    disabled={!!busy}
+                    onchange={(e) =>
+                      junk && saveJunk({ ...junk, age_days: Number((e.currentTarget as HTMLSelectElement).value) })}
+                  >
+                    {#each AGE_CHOICES as d (d)}<option value={d}>{ageLabel(d)}</option>{/each}
+                  </select>
+                </label>
+                <div class="keep">
+                  <span>{m.cl_junk_folders()}</span>
+                  {#if catalog.admin}
+                    {#each junk.folders as f (f)}
+                      <div class="folder">
+                        <span class="folder-path" title={f}><bdi>{f}</bdi></span>
+                        <button
+                          class="x"
+                          disabled={!!busy}
+                          title={m.cl_junk_remove_folder()}
+                          aria-label={m.cl_junk_remove_folder()}
+                          onclick={() => removeFolder(f)}>×</button
+                        >
+                      </div>
+                    {/each}
+                    <button class="files-btn add" disabled={!!busy} onclick={addFolder}>{m.cl_junk_add_folder()}</button>
+                  {:else}
+                    <p class="about muted">{m.cl_junk_folders_admin()}</p>
+                  {/if}
+                </div>
               {/if}
             {:else}
               <p class="about muted">{m.cl_pick_item()}</p>
@@ -372,7 +545,14 @@
   </div>
 
   {#if viewing}
-    <CleanupFilesModal item={viewing.id} label={viewing.label} onClose={() => (viewing = null)} />
+    {@const id = viewing.id}
+    <CleanupFilesModal
+      item={id}
+      label={viewing.label}
+      excluded={excluded[id] ?? new Map()}
+      onToggle={(path, size) => toggleExcluded(id, path, size)}
+      onClose={() => (viewing = null)}
+    />
   {/if}
 
   <div class="footer">
@@ -386,7 +566,10 @@
       <button class="btn outline" disabled={!catalog} onclick={() => go('analyze')}
         >{m.cl_analyze()}</button
       >
-      <button class="btn green" disabled={!catalog || chosen().length === 0} onclick={() => (confirming = true)}
+      <button
+        class="btn green"
+        disabled={!catalog || chosen().length === 0 || unreviewed().length > 0}
+        onclick={() => (confirming = true)}
         >{m.cl_clean()}</button
       >
     {/if}
@@ -418,6 +601,14 @@
   .about-name { font-size: 14px; font-weight: 600; color: var(--head); margin-bottom: 6px; }
   .about { font-size: 13px; line-height: 1.5; color: var(--text); margin: 0 0 6px; }
   .keep { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; font-size: 13px; color: var(--text); }
+  .about.bad { color: var(--error-text); }
+  .linkish { align-self: flex-start; background: none; border: none; padding: 0; margin-top: 4px; font-size: 12.5px; color: var(--accent-text); cursor: pointer; font-family: var(--font); }
+  .linkish:disabled { opacity: .45; cursor: default; }
+  .folder { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); }
+  .folder-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+  .x { background: none; border: none; font-size: 16px; line-height: 1; color: var(--text-muted); cursor: pointer; padding: 0 4px; }
+  .x:hover:not(:disabled) { color: var(--error-text); }
+  .files-btn.add { align-self: flex-start; }
   .user { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text); padding: 4px 0; cursor: pointer; }
   .user input { width: auto; margin: 0; }
   .user.off { cursor: default; }

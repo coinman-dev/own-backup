@@ -188,6 +188,18 @@
     "ru": "Распакованный установщик драйвера (C:\\NVIDIA\\DisplayDriver) и скачанные пакеты драйверов (ProgramData\\NVIDIA Corporation\\Downloader) старше суток. Установленный драйвер не затрагивается; для переустановки той же версии её придётся скачать снова.",
     "en": "The unpacked driver installer (C:\\NVIDIA\\DisplayDriver) and the downloaded driver packages (ProgramData\\NVIDIA Corporation\\Downloader) older than a day. The installed driver is not touched; to reinstall the same version you will have to download it again."
   },
+  "cleanup.group_junk": {
+    "ru": "Мусор по маскам",
+    "en": "Junk by masks"
+  },
+  "cleanup.junk": {
+    "ru": "Файлы по маскам",
+    "en": "Files by masks"
+  },
+  "cleanup.junk_about": {
+    "ru": "Временные и брошенные файлы по маскам имён (*.tmp, ~$*, Thumbs.db…) в профилях отмеченных пользователей и в добавленных папках. Не заходит в Windows, Program Files, ProgramData, AppData, .git, node_modules и облачные папки; файлы этой программы и образы копий не трогает. Удаляются только файлы старше выбранного срока и только после того, как вы просмотрели список, — снимите галочку с файла, который нужен.",
+    "en": "Temporary and abandoned files by name masks (*.tmp, ~$*, Thumbs.db…) in the ticked users' profiles and in the folders added. It does not enter Windows, Program Files, ProgramData, AppData, .git, node_modules or cloud folders; this program's files and backup images are never touched. Only files older than the chosen age go, and only after you have looked through the list — untick a file you need."
+  },
   "cleanup.group_traces": {
     "ru": "Следы Windows",
     "en": "Windows traces"

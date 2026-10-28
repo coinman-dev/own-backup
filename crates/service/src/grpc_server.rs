@@ -4493,9 +4493,18 @@ impl BackupService for BackupServiceImpl {
             Refusal::NotAnalyzed => {
                 Status::failed_precondition(tr!("grpc_server.cleanup_not_analyzed").into_owned())
             }
+            Refusal::ReviewFirst => {
+                Status::failed_precondition(tr!("grpc_server.cleanup_review_first").into_owned())
+            }
+            Refusal::BadMask(mask) => Status::invalid_argument(
+                tr!("grpc_server.cleanup_bad_mask", mask = mask).into_owned(),
+            ),
+            Refusal::FoldersAdminOnly => Status::permission_denied(
+                tr!("grpc_server.cleanup_folders_admin_only").into_owned(),
+            ),
         };
         let cleaner = self.cleaner.clone();
-        let (mode, items, users, options) = match op {
+        let (mode, items, users, options, exclude) = match op {
             Op::Catalog => return json_reply(&cleaner.catalog(&asker)),
             Op::Cancel => {
                 cleaner.cancel();
@@ -4520,12 +4529,13 @@ impl BackupService for BackupServiceImpl {
                 items,
                 users,
                 options,
-            } => (Mode::Analyze, items, users, options),
+            } => (Mode::Analyze, items, users, options, Vec::new()),
             Op::Run {
                 items,
                 users,
                 options,
-            } => (Mode::Remove, items, users, options),
+                exclude,
+            } => (Mode::Remove, items, users, options, exclude),
         };
         let (chosen, people) = Cleaner::resolve(&asker, &items, &users).map_err(refused)?;
         info!(?mode, items = ?items, users = people.len(), "gRPC: Cleanup");
@@ -4533,7 +4543,7 @@ impl BackupService for BackupServiceImpl {
         let started = chrono::Utc::now();
         let report = tokio::task::spawn_blocking(move || {
             let mut last: Option<std::time::Instant> = None;
-            cleaner.go(&asker, &chosen, &people, mode, options, |p| {
+            cleaner.go(&asker, &chosen, &people, mode, options, &exclude, |p| {
                 if last.is_none_or(|t| t.elapsed().as_millis() >= 200) {
                     last = Some(std::time::Instant::now());
                     emit_engine(&events, "cleanup", &p);

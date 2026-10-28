@@ -1,7 +1,8 @@
 <script lang="ts">
   // The files an analysis found for one cleanup item — what «Очистка» will
   // remove (the service holds the cleanup to this list). A page at a time:
-  // a recycle bin holds hundreds of thousands.
+  // a recycle bin holds hundreds of thousands. A file unticked here stays:
+  // the cleanup is sent the list of unticked files.
   import { onMount } from 'svelte';
   import Modal from './Modal.svelte';
   import { api } from '../lib/api';
@@ -12,10 +13,14 @@
   interface Props {
     item: string;
     label: string;
+    /** This item's unticked files and their sizes. */
+    excluded: Map<string, number>;
+    onToggle: (path: string, size: number) => void;
     onClose: () => void;
   }
 
-  let { item, label, onClose }: Props = $props();
+  let { item, label, excluded, onToggle, onClose }: Props = $props();
+  const excludedBytes = $derived([...excluded.values()].reduce((s, b) => s + b, 0));
 
   const PAGE = 500;
   let sort = $state<'size' | 'path'>('size');
@@ -78,6 +83,9 @@
   {#if page}
     <div class="summary">
       {m.clf_summary({ count: page.total, size: formatBytes(page.bytes) })}
+      {#if excluded.size > 0}
+        <span class="kept-note">{m.clf_kept({ count: excluded.size, size: formatBytes(excludedBytes) })}</span>
+      {/if}
       {#if page.truncated}<span class="warn">{m.clf_truncated()}</span>{/if}
     </div>
   {/if}
@@ -88,11 +96,17 @@
 
   <div class="list">
     {#each rows as f (f.path)}
-      <div class="row" title={f.path}>
+      <label class="row" class:kept={excluded.has(f.path)} title={f.path}>
+        <input
+          type="checkbox"
+          checked={!excluded.has(f.path)}
+          onchange={() => onToggle(f.path, f.size)}
+          aria-label={m.clf_tick()}
+        />
         <span class="path"><bdi>{f.path}</bdi></span>
         <span class="size">{formatBytes(f.size)}</span>
         <span class="date">{f.modified ? formatDate(f.modified) : ''}</span>
-      </div>
+      </label>
     {:else}
       {#if !loading && page}<div class="empty">{m.clf_empty()}</div>{/if}
     {/each}
@@ -117,8 +131,11 @@
   .warn { color: var(--warning-text, var(--text-secondary)); margin-left: 8px; }
   .err { font-size: 13px; color: var(--error-text); margin-bottom: 8px; }
   .list { max-height: 50vh; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
-  .row { display: flex; gap: 12px; padding: 5px 10px; font-size: 12.5px; border-bottom: 1px solid var(--border); }
+  .row { display: flex; align-items: center; gap: 12px; padding: 5px 10px; cursor: pointer; font-size: 12.5px; border-bottom: 1px solid var(--border); }
   .row:last-child { border-bottom: none; }
+  .row input { width: auto; margin: 0; flex: 0 0 auto; }
+  .row.kept .path, .row.kept .size { color: var(--text-muted); text-decoration: line-through; }
+  .kept-note { margin-left: 8px; }
   .path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; color: var(--text); }
   .size { width: 90px; text-align: right; white-space: nowrap; color: var(--text); }
   .date { width: 170px; text-align: right; white-space: nowrap; color: var(--text-muted); }

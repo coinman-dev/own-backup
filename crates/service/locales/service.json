@@ -240,6 +240,18 @@
     "ru": "Список файлов есть только после анализа — нажмите «Анализ».",
     "en": "The list of files exists only after an analysis — press “Analyse”."
   },
+  "grpc_server.cleanup_review_first": {
+    "ru": "Файлы по маскам удаляются только по просмотренному списку — нажмите «Анализ» и откройте «Файлы».",
+    "en": "Files by masks are removed only from a list you have looked through — press “Analyse” and open “Files”."
+  },
+  "grpc_server.cleanup_bad_mask": {
+    "ru": "Маска «%{mask}» не подходит: нужно имя файла без папок и хотя бы две буквы кроме * ? и точки (например, *.tmp).",
+    "en": "The mask \"%{mask}\" will not do: it needs a file name without folders and at least two letters besides * ? and the dot (*.tmp, say)."
+  },
+  "grpc_server.cleanup_folders_admin_only": {
+    "ru": "Искать мусор в других папках может только окно, запущенное от имени администратора.",
+    "en": "Only a window run as an administrator may search for junk in other folders."
+  },
   "grpc_server.cleanup_unknown": {
     "ru": "Нет такого пункта очистки или пользователя: %{what}.",
     "en": "No such cleanup item or user: %{what}."

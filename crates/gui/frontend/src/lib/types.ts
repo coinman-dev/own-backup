@@ -1356,6 +1356,8 @@ export interface CleanupItem {
   default_on: boolean;
   /** Cleaned in each chosen user's folders. */
   per_user: boolean;
+  /** Cleaned only after its list of files was looked through (junk by masks). */
+  review?: boolean;
 }
 
 export interface CleanupGroup {
@@ -1376,6 +1378,19 @@ export interface CleanupUser {
 export interface CleanupCatalog {
   groups: CleanupGroup[];
   users: CleanupUser[];
+  /** The window may add folders to the junk search (administrator). */
+  admin?: boolean;
+  /** The junk masks and age offered. */
+  junk?: CleanupJunk;
+}
+
+/** What the junk search looks for and where. */
+export interface CleanupJunk {
+  masks: string[];
+  /** Only files unchanged for this many days. */
+  age_days: number;
+  /** Folders searched besides the users' profiles (administrator only). */
+  folders: string[];
 }
 
 export interface CleanupTally {
@@ -1416,4 +1431,5 @@ export interface CleanupFilesPage {
 export interface CleanupOptions {
   /** Keep this many last days of browser history (0: remove it all). */
   history_keep_days: number;
+  junk?: CleanupJunk;
 }

@@ -36,11 +36,13 @@ pub enum Mode {
 }
 
 /// What a run is asked besides the items.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(default)]
 pub struct Options {
     /// Keep this many last days of browser history (0: remove it all).
     pub history_keep_days: u32,
+    /// What the junk item looks for and where ([`crate::junk`]).
+    pub junk: crate::junk::JunkOptions,
 }
 
 /// What one item came to.
@@ -179,6 +181,7 @@ pub fn folders(target: &Target, roots: &Roots, users: &[User]) -> Vec<PathBuf> {
         Base::ProgramData => below(&roots.program_data, target.path),
         Base::LocalAppData => per_user("Local"),
         Base::RoamingAppData => per_user("Roaming"),
+        Base::Junk => users.iter().map(|u| u.profile.clone()).collect(),
         Base::SystemDrive => below(
             roots.windows.parent().unwrap_or(&roots.windows),
             target.path,
@@ -314,6 +317,20 @@ pub(crate) fn run_at_with(
             if open(target.programs) {
                 continue;
             }
+            if target.base == Base::Junk {
+                crate::junk::walk(
+                    &crate::junk::places(users, &options.junk),
+                    &options.junk,
+                    mode,
+                    now,
+                    cancel,
+                    only,
+                    &mut tally,
+                    (mode == Mode::Analyze).then_some(&mut found),
+                    &mut |t| progress(item.id, t),
+                );
+                continue;
+            }
             for folder in folders(target, roots, users) {
                 let mut walk = Walk {
                     target,
@@ -325,7 +342,7 @@ pub(crate) fn run_at_with(
                     progress: &mut |t| progress(item.id, t),
                     only,
                     found: (mode == Mode::Analyze).then_some(&mut found),
-                    options,
+                    options: &options,
                 };
                 walk.root(&folder);
             }
@@ -381,7 +398,7 @@ struct Walk<'a> {
     only: Option<&'a HashSet<PathBuf>>,
     /// Analysis: where the files found go.
     found: Option<&'a mut Vec<Found>>,
-    options: Options,
+    options: &'a Options,
 }
 
 impl Walk<'_> {
@@ -661,7 +678,7 @@ fn expand(hive: &dyn Hive, path: &str) -> Vec<String> {
 }
 
 /// A link, a junction, or (Windows) any other reparse point.
-fn is_link(meta: &Metadata) -> bool {
+pub(crate) fn is_link(meta: &Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
@@ -674,7 +691,7 @@ fn is_link(meta: &Metadata) -> bool {
     }
 }
 
-fn remove_file(path: &Path, meta: &Metadata) -> std::io::Result<()> {
+pub(crate) fn remove_file(path: &Path, meta: &Metadata) -> std::io::Result<()> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if meta.permissions().readonly() => {
