@@ -27,6 +27,7 @@ pub mod history;
 pub mod junk;
 pub mod registry;
 pub mod users;
+pub mod volume_cache;
 
 pub use catalog::{catalog, Base, Item, Target};
 pub use engine::{run, run_only, Found, Listing, Mode, Options, Report, Roots, Tally};

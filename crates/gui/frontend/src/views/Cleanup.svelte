@@ -210,8 +210,9 @@
 
   function toggleGroup(groupItems: CleanupItem[]) {
     const next = new Set(items);
-    const all = groupItems.every((i) => next.has(i.id));
-    for (const i of groupItems) {
+    const mine = groupItems.filter(allowed);
+    const all = mine.every((i) => next.has(i.id));
+    for (const i of mine) {
       if (all) next.delete(i.id);
       else next.add(i.id);
     }
@@ -250,9 +251,18 @@
     reviewed = new Set();
   }
 
+  /** Whether this window may clean the item (Windows' own components need
+   *  an administrator's). */
+  function allowed(i: CleanupItem): boolean {
+    return !i.admin_only || !!catalog?.admin;
+  }
+
   /** The ticked items, in the catalogue's order. */
   function chosen(): string[] {
-    return (catalog?.groups ?? []).flatMap((g) => g.items).filter((i) => items.has(i.id)).map((i) => i.id);
+    return (catalog?.groups ?? [])
+      .flatMap((g) => g.items)
+      .filter((i) => items.has(i.id) && allowed(i))
+      .map((i) => i.id);
   }
 
   /** Every item of the catalogue, in its order. */
@@ -386,7 +396,7 @@
               <label class="row head">
                 <input
                   type="checkbox"
-                  checked={g.items.every((i) => items.has(i.id))}
+                  checked={g.items.filter(allowed).length > 0 && g.items.filter(allowed).every((i) => items.has(i.id))}
                   disabled={!!busy}
                   onchange={() => toggleGroup(g.items)}
                 />
@@ -404,8 +414,8 @@
                 >
                   <input
                     type="checkbox"
-                    checked={items.has(it.id)}
-                    disabled={!!busy}
+                    checked={items.has(it.id) && allowed(it)}
+                    disabled={!!busy || !allowed(it)}
                     onchange={() => toggleItem(it.id)}
                     onclick={(e) => e.stopPropagation()}
                     aria-label={it.label}
@@ -440,6 +450,7 @@
               <div class="about-name">{focusedItem.label}</div>
               <p class="about">{focusedItem.about}</p>
               {#if focusedItem.per_user}<p class="about muted">{m.cl_per_user()}</p>{/if}
+              {#if !allowed(focusedItem)}<p class="about muted">{m.cl_item_admin_only()}</p>{/if}
               {#if focusedItem.id === 'browser_history'}
                 <label class="keep">
                   <span>{m.cl_keep_history()}</span>

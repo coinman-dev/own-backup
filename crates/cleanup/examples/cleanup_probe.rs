@@ -45,6 +45,7 @@ mod win {
             Some("selftest") if args.len() == 2 => selftest(Path::new(&args[1])),
             Some("regtest") if args.len() == 2 => regtest(Path::new(&args[1])),
             Some("junktest") if args.len() == 2 => junktest(Path::new(&args[1])),
+            Some("volcache") => volcache(&args[1..]),
             _ => {
                 eprintln!(
                     "cleanup_probe analyze | selftest <empty folder> | regtest <empty folder>"
@@ -533,6 +534,41 @@ mod win {
             .unwrap();
         f.set_times(std::fs::FileTimes::new().set_modified(old).set_created(old))
             .unwrap();
+    }
+
+    /// Measure Windows' own cleanup handlers on C:\ — nothing is removed.
+    fn volcache(names: &[String]) {
+        let all = [
+            "Update Cleanup",
+            "Previous Installations",
+            "Delivery Optimization Files",
+            "Temporary Setup Files",
+            "Windows Upgrade Log Files",
+            "Windows Reset Log Files",
+            "Upgrade Discarded Files",
+            "Device Driver Packages",
+            "Windows ESD installation files",
+            "Windows Defender",
+        ];
+        let picked: Vec<String> = if names.is_empty() {
+            all.iter().map(|s| s.to_string()).collect()
+        } else {
+            names.to_vec()
+        };
+        for name in picked {
+            let t = std::time::Instant::now();
+            let r = own_backup_cleanup::volume_cache::run(
+                &name,
+                r"C:\",
+                false,
+                &AtomicBool::new(false),
+            );
+            println!(
+                "{name:<32} {:>8.1} s  {:?}",
+                t.elapsed().as_secs_f64(),
+                r.map(|o| mib(o.bytes))
+            );
+        }
     }
 
     fn regtest(dir: &Path) {

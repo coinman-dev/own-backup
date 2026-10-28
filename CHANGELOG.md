@@ -35,6 +35,11 @@
 - **Cleanup: Windows Update cache** — downloaded update files
   (`SoftwareDistribution\Download`) older than a day; the update history
   stays.
+- **Cleanup: Windows components by Windows' own means** — through Disk
+  Cleanup's handlers: update cleanup (WinSxS), the previous Windows
+  installation (Windows.old), Delivery Optimization files, setup temporary
+  files and logs, Defender's files, old driver packages, ESD installation
+  files. Removed from an administrator's window only.
 - **Cleanup: files by masks** (off by default) — a list of masks as in Ace
   Utilities (temporary files and junk on; backups, logs, `*.chk` off), own
   masks, but carefully: only in the users' profiles and in folders an administrator

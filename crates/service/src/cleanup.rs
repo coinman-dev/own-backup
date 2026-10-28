@@ -170,6 +170,9 @@ pub enum Refusal {
     /// Folders added to the junk search by someone who is not an
     /// administrator.
     FoldersAdminOnly,
+    /// Windows' own components ([`catalog::Item::admin_only`]) cleaned by
+    /// someone who is not an administrator: the item's name.
+    AdminOnly(String),
 }
 
 impl Cleaner {
@@ -358,6 +361,9 @@ impl Cleaner {
                     unticked = exclude.len(),
                     "cleanup run"
                 );
+                if let Some(item) = items.iter().find(|i| i.admin_only() && !asker.admin) {
+                    return Err(Refusal::AdminOnly(catalog::label(item.id)));
+                }
                 if held.is_none() && items.iter().any(|i| i.reviewed()) {
                     return Err(Refusal::ReviewFirst);
                 }

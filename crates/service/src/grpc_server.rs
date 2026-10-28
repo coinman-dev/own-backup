@@ -4502,6 +4502,9 @@ impl BackupService for BackupServiceImpl {
             Refusal::FoldersAdminOnly => Status::permission_denied(
                 tr!("grpc_server.cleanup_folders_admin_only").into_owned(),
             ),
+            Refusal::AdminOnly(item) => Status::permission_denied(
+                tr!("grpc_server.cleanup_admin_only", item = item).into_owned(),
+            ),
         };
         let cleaner = self.cleaner.clone();
         let (mode, items, users, options, exclude) = match op {

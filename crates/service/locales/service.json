@@ -248,6 +248,10 @@
     "ru": "Маска «%{mask}» не подходит: нужно только имя файла, и она не должна захватывать обычные файлы — документы, фото, программы (как *.*, *.d* или K*).",
     "en": "The mask \"%{mask}\" will not do: a file name only, and one that does not take ordinary files — documents, photos, programs (as *.*, *.d* or K* would)."
   },
+  "grpc_server.cleanup_admin_only": {
+    "ru": "«%{item}» удаляется только из окна, запущенного от имени администратора.",
+    "en": "\"%{item}\" is removed only from a window run as an administrator."
+  },
   "grpc_server.cleanup_folders_admin_only": {
     "ru": "Искать мусор в других папках может только окно, запущенное от имени администратора.",
     "en": "Only a window run as an administrator may search for junk in other folders."

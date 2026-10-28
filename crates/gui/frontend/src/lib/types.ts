@@ -1358,6 +1358,8 @@ export interface CleanupItem {
   per_user: boolean;
   /** Cleaned only after its list of files was looked through (junk by masks). */
   review?: boolean;
+  /** Windows' own components: removed from an administrator's window only. */
+  admin_only?: boolean;
 }
 
 export interface CleanupGroup {

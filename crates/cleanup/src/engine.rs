@@ -182,6 +182,7 @@ pub fn folders(target: &Target, roots: &Roots, users: &[User]) -> Vec<PathBuf> {
         Base::LocalAppData => per_user("Local"),
         Base::RoamingAppData => per_user("Roaming"),
         Base::Junk => users.iter().map(|u| u.profile.clone()).collect(),
+        Base::VolumeCache => Vec::new(),
         Base::SystemDrive => below(
             roots.windows.parent().unwrap_or(&roots.windows),
             target.path,
@@ -315,6 +316,29 @@ pub(crate) fn run_at_with(
         let keys: Vec<&RegTarget> = item.keys.iter().filter(|k| !open(k.programs)).collect();
         for target in item.targets {
             if open(target.programs) {
+                continue;
+            }
+            if target.base == Base::VolumeCache {
+                let root = roots.windows.ancestors().last().unwrap_or(&roots.windows);
+                match crate::volume_cache::run(
+                    target.path,
+                    &root.to_string_lossy(),
+                    mode == Mode::Remove,
+                    cancel,
+                ) {
+                    Ok(done) => tally.bytes += done.bytes,
+                    // Not on this Windows, or not on this system at all.
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::Unsupported
+                        ) => {}
+                    Err(e) => {
+                        tracing::info!(handler = target.path, error = %e, "cleanup: Windows handler failed");
+                        tally.left_files += 1;
+                    }
+                }
+                progress(item.id, &tally);
                 continue;
             }
             if target.base == Base::Junk {

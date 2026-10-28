@@ -33,6 +33,9 @@ pub enum Base {
     /// Files matching the junk masks below the users' profiles and the folders
     /// added ([`crate::junk`]); the target's own path and masks are unused.
     Junk,
+    /// One of Windows' own cleanup handlers, named by the target's path
+    /// ([`crate::volume_cache`]), on the system volume.
+    VolumeCache,
 }
 
 impl Base {
@@ -159,6 +162,20 @@ const fn files(
     }
 }
 
+/// Windows' cleanup handler `name` (`VolumeCaches\<name>`).
+const fn handler(name: &'static str) -> Target {
+    Target {
+        base: Base::VolumeCache,
+        path: name,
+        masks: &[],
+        recursive: false,
+        min_age_hours: 0,
+        keep: &[],
+        programs: &[],
+        trim: None,
+    }
+}
+
 /// A day: what a running program or installer still uses is younger.
 const DAY: u32 = 24;
 /// A week: logs that may still explain a recent failure are younger.
@@ -180,6 +197,12 @@ impl Item {
     /// Cleaned in each chosen user's folders or registry (as well).
     pub fn per_user(&self) -> bool {
         !self.keys.is_empty() || self.targets.iter().any(|t| t.base.per_user())
+    }
+
+    /// Windows' own components (a previous installation, superseded
+    /// updates): removed from an administrator's window only.
+    pub fn admin_only(&self) -> bool {
+        self.targets.iter().any(|t| t.base == Base::VolumeCache)
     }
 
     /// Cleaned only as an analysis listed it and the window showed it: the
@@ -707,6 +730,60 @@ static ITEMS: &[Item] = &[
     //
     // Only the download folder: beside it, `DataStore` is the update history.
     Item {
+        id: "update_cleanup",
+        group: "windows",
+        default_on: false,
+        targets: &[handler("Update Cleanup")],
+        keys: &[],
+    },
+    Item {
+        id: "previous_windows",
+        group: "windows",
+        default_on: false,
+        targets: &[handler("Previous Installations")],
+        keys: &[],
+    },
+    Item {
+        id: "delivery_optimization",
+        group: "windows",
+        default_on: true,
+        targets: &[handler("Delivery Optimization Files")],
+        keys: &[],
+    },
+    Item {
+        id: "setup_files",
+        group: "windows",
+        default_on: true,
+        targets: &[
+            handler("Temporary Setup Files"),
+            handler("Windows Upgrade Log Files"),
+            handler("Windows Reset Log Files"),
+            handler("Upgrade Discarded Files"),
+        ],
+        keys: &[],
+    },
+    Item {
+        id: "defender_files",
+        group: "windows",
+        default_on: true,
+        targets: &[handler("Windows Defender")],
+        keys: &[],
+    },
+    Item {
+        id: "driver_packages",
+        group: "windows",
+        default_on: false,
+        targets: &[handler("Device Driver Packages")],
+        keys: &[],
+    },
+    Item {
+        id: "windows_esd",
+        group: "windows",
+        default_on: false,
+        targets: &[handler("Windows ESD installation files")],
+        keys: &[],
+    },
+    Item {
         id: "update_cache",
         group: "windows",
         default_on: true,
@@ -1038,6 +1115,13 @@ pub fn label_both(id: &str) -> Localized {
         "driver_installers" => tr_both!("cleanup.driver_installers"),
         "junk" => tr_both!("cleanup.junk"),
         "update_cache" => tr_both!("cleanup.update_cache"),
+        "update_cleanup" => tr_both!("cleanup.update_cleanup"),
+        "previous_windows" => tr_both!("cleanup.previous_windows"),
+        "delivery_optimization" => tr_both!("cleanup.delivery_optimization"),
+        "setup_files" => tr_both!("cleanup.setup_files"),
+        "defender_files" => tr_both!("cleanup.defender_files"),
+        "driver_packages" => tr_both!("cleanup.driver_packages"),
+        "windows_esd" => tr_both!("cleanup.windows_esd"),
         _ => Localized::plain(id),
     }
 }
@@ -1073,6 +1157,13 @@ pub fn about(id: &str) -> String {
         "driver_installers" => tr!("cleanup.driver_installers_about"),
         "junk" => tr!("cleanup.junk_about"),
         "update_cache" => tr!("cleanup.update_cache_about"),
+        "update_cleanup" => tr!("cleanup.update_cleanup_about"),
+        "previous_windows" => tr!("cleanup.previous_windows_about"),
+        "delivery_optimization" => tr!("cleanup.delivery_optimization_about"),
+        "setup_files" => tr!("cleanup.setup_files_about"),
+        "defender_files" => tr!("cleanup.defender_files_about"),
+        "driver_packages" => tr!("cleanup.driver_packages_about"),
+        "windows_esd" => tr!("cleanup.windows_esd_about"),
         _ => return String::new(),
     }
     .into_owned()
@@ -1111,6 +1202,8 @@ pub struct ItemDto {
     pub per_user: bool,
     /// Cleaned only after its list was looked through ([`Item::reviewed`]).
     pub review: bool,
+    /// Removed from an administrator's window only ([`Item::admin_only`]).
+    pub admin_only: bool,
 }
 
 pub fn groups() -> Vec<GroupDto> {
@@ -1129,6 +1222,7 @@ pub fn groups() -> Vec<GroupDto> {
                     default_on: i.default_on,
                     per_user: i.per_user(),
                     review: i.reviewed(),
+                    admin_only: i.admin_only(),
                 })
                 .collect(),
         })
@@ -1219,5 +1313,33 @@ mod tests {
         }
         assert_eq!(program_name("CHROME.EXE"), "Google Chrome");
         assert_eq!(program_name("other.exe"), "other.exe");
+    }
+
+    /// Windows' own components are its handlers' work, in their group, and
+    /// need an administrator's window; nothing else does.
+    #[test]
+    fn only_windows_own_components_need_an_administrator() {
+        let admin: Vec<&str> = catalog()
+            .iter()
+            .filter(|i| i.admin_only())
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(
+            admin,
+            [
+                "update_cleanup",
+                "previous_windows",
+                "delivery_optimization",
+                "setup_files",
+                "defender_files",
+                "driver_packages",
+                "windows_esd"
+            ]
+        );
+        for i in catalog().iter().filter(|i| i.admin_only()) {
+            assert_eq!(i.group, "windows", "{}", i.id);
+            assert!(i.targets.iter().all(|t| t.base == Base::VolumeCache));
+            assert!(!i.reviewed() && !i.per_user());
+        }
     }
 }

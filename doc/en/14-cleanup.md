@@ -59,6 +59,23 @@ The chosen items and users are remembered.
 | Programs' logs | the log folders of qBittorrent, Zed, DaVinci Resolve, OBS Studio, npm | logs younger than a week; DaVinci Resolve's projects and project library; a program that is open |
 | NVIDIA driver installers (off by default) | `C:\NVIDIA\DisplayDriver`, `ProgramData\NVIDIA Corporation\Downloader\*` | younger than a day; the installed driver |
 
+### Windows updates and components
+
+What Windows keeps for itself is removed not file by file but by Windows'
+own handlers — the ones Disk Cleanup (cleanmgr) runs: they measure and
+remove by themselves. These items are removed only from a window run as an
+administrator; their size shows in any window.
+
+| Item | Windows handler | After the cleanup |
+|---|---|---|
+| Windows Update Cleanup (WinSxS) (off by default) | Update Cleanup | replaced updates cannot be uninstalled; measuring and cleaning take up to several minutes |
+| Previous Windows installation (Windows.old) (off by default) | Previous Installations | no going back to the previous Windows version |
+| Delivery Optimization files | Delivery Optimization Files | — |
+| Windows setup temporary files and logs | Temporary Setup Files, Windows Upgrade Log Files, Windows Reset Log Files, Upgrade Discarded Files | — |
+| Microsoft Defender files | Windows Defender | — |
+| Old driver packages (off by default) | Device Driver Packages | no rolling back to the earlier driver |
+| Windows installation files (ESD) (off by default) | Windows ESD installation files | "Reset this PC" only with a cloud download or installation media |
+
 ### Files by masks
 
 The **Files by masks** item (off by default) looks for abandoned files by

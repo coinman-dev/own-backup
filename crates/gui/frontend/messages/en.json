@@ -48,6 +48,7 @@
   "cl_users_hint": "Temporary files, caches, the Recycle Bin and traces are cleaned for the ticked users.",
   "cl_user_me": "you",
   "cl_user_admin_only": "only from an administrator's window",
+  "cl_item_admin_only": "Removed only from a window run as an administrator; its size shows anyway.",
   "cl_not_analyzed": "analysis needed",
   "cl_empty": "empty",
   "cl_files": "Files: {count}",

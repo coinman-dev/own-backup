@@ -250,6 +250,62 @@
     "ru": "Обновления и компоненты Windows",
     "en": "Windows updates and components"
   },
+  "cleanup.update_cleanup": {
+    "ru": "Очистка обновлений Windows (WinSxS)",
+    "en": "Windows Update Cleanup (WinSxS)"
+  },
+  "cleanup.update_cleanup_about": {
+    "ru": "Старые версии компонентов, которые заменили установленные обновления, — штатным средством Windows, как «Очистка диска». После неё эти обновления нельзя будет удалить. Подсчёт и очистка могут занять несколько минут.",
+    "en": "Old versions of components that installed updates replaced — by Windows' own means, as Disk Cleanup does. Afterwards those updates cannot be uninstalled. Measuring and cleaning may take several minutes."
+  },
+  "cleanup.previous_windows": {
+    "ru": "Предыдущая установка Windows (Windows.old)",
+    "en": "Previous Windows installation (Windows.old)"
+  },
+  "cleanup.previous_windows_about": {
+    "ru": "Файлы прежней версии Windows, которые остаются после обновления до новой. После удаления вернуться к прежней версии будет нельзя. Удаляет штатное средство Windows.",
+    "en": "The files of the previous Windows version left after an upgrade to a new one. After the removal you cannot go back to the previous version. Windows' own means removes them."
+  },
+  "cleanup.delivery_optimization": {
+    "ru": "Файлы оптимизации доставки",
+    "en": "Delivery Optimization files"
+  },
+  "cleanup.delivery_optimization_about": {
+    "ru": "Обновления, которые Windows хранит, чтобы раздавать их другим компьютерам. Удаляет штатное средство Windows.",
+    "en": "Updates Windows keeps to share with other computers. Windows' own means removes them."
+  },
+  "cleanup.setup_files": {
+    "ru": "Временные файлы и журналы установки Windows",
+    "en": "Windows setup temporary files and logs"
+  },
+  "cleanup.setup_files_about": {
+    "ru": "Что остаётся после обновления или сброса Windows: временные файлы установки, журналы обновления и сброса, отброшенные при обновлении файлы. Удаляет штатное средство Windows.",
+    "en": "What is left after a Windows upgrade or reset: temporary setup files, upgrade and reset logs, files discarded by an upgrade. Windows' own means removes them."
+  },
+  "cleanup.defender_files": {
+    "ru": "Служебные файлы Microsoft Defender",
+    "en": "Microsoft Defender files"
+  },
+  "cleanup.defender_files_about": {
+    "ru": "Некритичные файлы, которые использует антивирус Microsoft Defender. Удаляет штатное средство Windows.",
+    "en": "Non-critical files Microsoft Defender Antivirus uses. Windows' own means removes them."
+  },
+  "cleanup.driver_packages": {
+    "ru": "Старые пакеты драйверов",
+    "en": "Old driver packages"
+  },
+  "cleanup.driver_packages_about": {
+    "ru": "Прежние версии драйверов, которые заменили новые. После удаления к прежней версии драйвера будет не откатиться. Удаляет штатное средство Windows.",
+    "en": "Earlier versions of drivers that newer ones replaced. After the removal you cannot roll back to the earlier driver. Windows' own means removes them."
+  },
+  "cleanup.windows_esd": {
+    "ru": "Файлы установки Windows (ESD)",
+    "en": "Windows installation files (ESD)"
+  },
+  "cleanup.windows_esd_about": {
+    "ru": "Образ Windows, который нужен, чтобы «Вернуть компьютер в исходное состояние» без интернета. После удаления для сброса понадобится загрузка из облака или установочный носитель.",
+    "en": "The Windows image needed to “Reset this PC” without the internet. After the removal a reset needs a cloud download or installation media."
+  },
   "cleanup.update_cache": {
     "ru": "Кэш обновлений Windows",
     "en": "Windows Update cache"
