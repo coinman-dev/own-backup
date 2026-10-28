@@ -27,6 +27,20 @@ and the users' are within its reach. There is no such section on Linux yet.
 
 The chosen items and users are remembered.
 
+## Automatic cleanup and cleanup before a copy
+
+Below the list is **Automatic cleanup** with a **Set up…** button. The
+service cleans by itself, with no window: on a schedule (daily, weekly on
+chosen days, monthly; a missed cleanup can run after the computer starts)
+and before the copy of jobs whose advanced settings tick **"Clean the disk
+before the copy"**. What is ticked on the page when Save is pressed is
+cleaned, for the ticked users, with the same ages. **Files by masks are
+not part of it** — they go only after their list was looked through. The
+set is saved with the rights of whoever saved it and checked again at each
+run. The result goes into Activity as "Scheduled automatic cleanup" or
+"Cleanup before the copy "…"". If the cleanup before a copy cannot run
+(another one is going on, say), the copy is made anyway.
+
 ## What is removed
 
 | Item | Where | What stays |

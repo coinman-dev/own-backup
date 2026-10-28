@@ -38,6 +38,9 @@ pub struct AppState {
     pub events: broadcast::Sender<proto::Event>,
     /// Passwords for encrypted volumes (in-memory cache + OS-protected store).
     pub passwords: Arc<PasswordStore>,
+    /// The disk cleanup: the window's, the scheduled one, the one before a
+    /// copy — one at a time ([`crate::auto_cleanup`]).
+    pub auto: Arc<crate::auto_cleanup::AutoCleanup>,
     /// Archive-encryption authorizations prepared but not yet confirmed
     /// (plan §7.5). Deliberately in memory only: nothing about a pending one
     /// should survive a service restart, least of all the private key in it.
@@ -65,7 +68,13 @@ impl AppState {
         events: broadcast::Sender<proto::Event>,
         passwords: Arc<PasswordStore>,
     ) -> Arc<Self> {
+        let auto = Arc::new(crate::auto_cleanup::AutoCleanup::new(
+            &config.data_dir,
+            store.clone(),
+            events.clone(),
+        ));
         Arc::new(Self {
+            auto,
             config,
             store,
             queue,

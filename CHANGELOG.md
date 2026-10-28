@@ -35,6 +35,11 @@
 - **Cleanup: Windows Update cache** — downloaded update files
   (`SoftwareDistribution\Download`) older than a day; the update history
   stays.
+- **Automatic cleanup and cleanup before a copy.** The service cleans by
+  itself, with no window: on a schedule (a day, weekdays, a day of the
+  month, a missed one after start-up) and before the copy of jobs that tick
+  "Clean the disk before the copy". The set is what is ticked on the
+  Cleanup page (files by masks excluded); the result goes into Activity.
 - **Cleanup: Windows components by Windows' own means** — through Disk
   Cleanup's handlers: update cleanup (WinSxS), the previous Windows
   installation (Windows.old), Delivery Optimization files, setup temporary

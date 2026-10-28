@@ -159,7 +159,13 @@
           <div class="body">
             <div class="title">
               {r.operation === 'cleanup'
-                ? (r.status === 'cancelled' ? m.act_cleanup_cancelled() : m.act_cleanup_done())
+                ? (r.status === 'cancelled'
+                    ? m.act_cleanup_cancelled()
+                    : r.cleanup?.trigger === 'schedule'
+                      ? m.act_cleanup_scheduled()
+                      : r.cleanup?.trigger === 'before_backup'
+                        ? m.act_cleanup_before({ job: r.job_name })
+                        : m.act_cleanup_done())
                 : r.operation === 'verify'
                 ? (r.status === 'success' ? m.act_verify_done() : r.status === 'cancelled' ? m.act_verify_cancelled() : m.act_verify_failed())
                 : (r.status === 'success' ? m.act_backup_done() : r.skipped ? m.act_backup_skipped() : r.interrupted ? m.act_backup_interrupted() : r.status === 'cancelled' ? m.act_backup_cancelled() : m.act_backup_failed())}

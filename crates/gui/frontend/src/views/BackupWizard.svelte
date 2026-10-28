@@ -2313,6 +2313,16 @@
             {/if}
           </div>
           {/if}
+          {#if isWindows()}
+          <div class="adv-group">
+            <div class="adv-title">{m.wiz_adv_cleanup()}</div>
+            <label class="chk">
+              <input type="checkbox" bind:checked={job.advanced.cleanup_before} />
+              {m.wiz_adv_cleanup_before()}
+            </label>
+            <div class="adv-hint">{m.wiz_adv_cleanup_before_hint()}</div>
+          </div>
+          {/if}
           {#if !cap.after_backup || !cap.low_priority || !cap.speed_limit}
             <div class="note">{m.wiz_adv_unavailable()}</div>
           {/if}

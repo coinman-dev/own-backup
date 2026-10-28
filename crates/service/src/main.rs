@@ -3,6 +3,7 @@
 rust_i18n::i18n!("locales", fallback = "ru");
 
 mod app_state;
+mod auto_cleanup;
 mod cleanup;
 // The decision is plain code tested everywhere; only Windows applies it.
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -791,8 +792,12 @@ pub async fn run_main_loop(
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (events, _bootstrap_rx) = tokio::sync::broadcast::channel::<grpc_server::proto::Event>(256);
 
+    let cleanup_hook = std::sync::Arc::new(std::sync::OnceLock::new());
     let sink: std::sync::Arc<dyn own_backup_core::EventSink> =
-        std::sync::Arc::new(grpc_server::GrpcEventSink { tx: events.clone() });
+        std::sync::Arc::new(grpc_server::GrpcEventSink {
+            tx: events.clone(),
+            auto: cleanup_hook.clone(),
+        });
     // The installed Windows service keeps remembered volume passwords in its
     // SYSTEM-only directory. Validate and pin that directory before SQLite can
     // create the private DB or its WAL/SHM files; complete legacy migration
@@ -1011,6 +1016,13 @@ pub async fn run_main_loop(
         events,
         passwords,
     );
+    // The cleanup before a copy, and the scheduled one (Windows: the cleanup
+    // is Windows' only for now).
+    let _ = cleanup_hook.set(state.auto.clone());
+    #[cfg(windows)]
+    if !own_backup_common::media_mode::is_media_mode() {
+        auto_cleanup::spawn(state.auto.clone(), shutdown.clone());
+    }
 
     // Production transport (no listening TCP port, so no local process can reach
     // the privileged service by opening a socket): Unix Domain Socket on Linux,

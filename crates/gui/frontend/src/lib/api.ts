@@ -45,6 +45,7 @@ import type {
   CleanupCatalog,
   CleanupFilesPage,
   CleanupOptions,
+  CleanupProfile,
   CleanupReport,
   LinuxMediaDownload,
   ServiceStatus,
@@ -95,6 +96,10 @@ export const api = {
   cleanupRun: (items: string[], users: string[], options: CleanupOptions, exclude: string[] = []) =>
     invoke<CleanupReport>('cleanup', { op: { op: 'run', items, users, options, exclude } }),
   cleanupCancel: () => invoke<unknown>('cleanup', { op: { op: 'cancel' } }),
+  /** The automatic cleanup's set, and saving it. */
+  cleanupProfile: () => invoke<CleanupProfile>('cleanup', { op: { op: 'profile' } }),
+  cleanupSaveProfile: (profile: CleanupProfile) =>
+    invoke<CleanupProfile>('cleanup', { op: { op: 'save_profile', profile } }),
   cleanupFiles: (item: string, offset: number, limit: number, sort: 'size' | 'path', filter: string) =>
     invoke<CleanupFilesPage>('cleanup', { op: { op: 'files', item, offset, limit, sort, filter } }),
   buildLinuxMedia: (options: LinuxMediaBuild) =>

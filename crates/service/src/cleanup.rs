@@ -56,6 +56,12 @@ pub enum Request {
         filter: String,
     },
     Cancel,
+    /// The automatic cleanup's set ([`crate::auto_cleanup`]).
+    Profile,
+    /// Save the automatic cleanup's set: the window's ticks and a schedule.
+    SaveProfile {
+        profile: crate::auto_cleanup::Profile,
+    },
 }
 
 fn page() -> usize {
@@ -175,6 +181,8 @@ pub enum Refusal {
     /// Windows' own components ([`catalog::Item::admin_only`]) cleaned by
     /// someone who is not an administrator: the item's name.
     AdminOnly(String),
+    /// An item that is not cleaned on a schedule (junk by masks): its name.
+    NotScheduled(String),
 }
 
 impl Cleaner {
@@ -459,6 +467,7 @@ impl Drop for Free<'_> {
 pub fn activity_record(
     report: &Report,
     started: chrono::DateTime<chrono::Utc>,
+    trigger: &str,
 ) -> own_backup_core::JobRun {
     let finished = chrono::Utc::now();
     own_backup_core::JobRun {
@@ -474,6 +483,7 @@ pub fn activity_record(
         }
         .into(),
         cleanup: Some(own_backup_core::CleanupSummary {
+            trigger: trigger.into(),
             files: report.total.files,
             bytes: report.total.bytes,
             left_files: report.total.left_files,
@@ -686,10 +696,11 @@ mod tests {
             cancelled: false,
             listing: Default::default(),
         };
-        let run = activity_record(&report, chrono::Utc::now());
+        let run = activity_record(&report, chrono::Utc::now(), "schedule");
         assert_eq!(run.operation, "cleanup");
         assert_eq!(run.status, "success");
         let summary = run.cleanup.unwrap();
+        assert_eq!(summary.trigger, "schedule");
         assert_eq!(
             (
                 summary.files,

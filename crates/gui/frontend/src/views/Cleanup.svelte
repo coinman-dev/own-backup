@@ -10,6 +10,7 @@
   import { m } from '../lib/paraglide/messages';
   import CleanupFilesModal from '../components/CleanupFilesModal.svelte';
   import CleanupMasksModal from '../components/CleanupMasksModal.svelte';
+  import CleanupAutoModal from '../components/CleanupAutoModal.svelte';
   import { pickPath } from '../lib/pickPath.svelte';
   import { maskProblem } from '../lib/junkMasks';
   import type {
@@ -17,6 +18,7 @@
     CleanupItem,
     CleanupJunk,
     CleanupOptions,
+    CleanupProfile,
     CleanupProgress,
     CleanupReport,
     CleanupTally,
@@ -57,6 +59,11 @@
   let junk = $state<CleanupJunk | null>(null);
   /** The window of masks is open. */
   let editingMasks = $state(false);
+  /** The automatic cleanup's set, as the service keeps it. */
+  let auto = $state<CleanupProfile | null>(null);
+  let editingAuto = $state(false);
+  let autoSaving = $state(false);
+  let autoError = $state<string | null>(null);
   /** Per item: the files of the analysis' list unticked in its window, with
    *  their sizes — they stay. */
   let excluded = $state<Record<string, Map<string, number>>>({});
@@ -137,6 +144,55 @@
     if (junk) saveJunk({ ...junk, folders: junk.folders.filter((f) => f !== folder) });
   }
 
+  /** The ticked items the automatic cleanup can take, and those it cannot
+   *  (cleaned only after a look at their list). */
+  function autoItems() {
+    const all = (catalog?.groups ?? []).flatMap((g) => g.items).filter((i) => items.has(i.id) && allowed(i));
+    return { take: all.filter((i) => !i.review), left: all.filter((i) => i.review).map((i) => i.label) };
+  }
+
+  async function saveAuto(schedule: CleanupProfile['schedule']) {
+    autoSaving = true;
+    autoError = null;
+    try {
+      auto = await api.cleanupSaveProfile({
+        schedule: { ...(auto?.schedule ?? {}), ...schedule },
+        items: autoItems().take.map((i) => i.id),
+        users: [...users],
+        options: options(),
+      });
+      editingAuto = false;
+    } catch (e) {
+      autoError = String(e);
+    } finally {
+      autoSaving = false;
+    }
+  }
+
+  function weekdayNames(days: string[]): string {
+    const names: Record<string, () => string> = {
+      mon: m.wiz_day_mon, tue: m.wiz_day_tue, wed: m.wiz_day_wed, thu: m.wiz_day_thu,
+      fri: m.wiz_day_fri, sat: m.wiz_day_sat, sun: m.wiz_day_sun,
+    };
+    return ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
+      .filter((d) => days.includes(d))
+      .map((d) => names[d]())
+      .join(', ');
+  }
+
+  function autoText(): string {
+    const p = auto;
+    if (!p || p.schedule.kind === 'none' || p.items.length === 0) return m.cla_summary_off();
+    const at = p.schedule.time;
+    const when =
+      p.schedule.kind === 'daily'
+        ? m.cla_daily({ time: at })
+        : p.schedule.kind === 'weekly'
+          ? m.cla_weekly({ time: at, days: weekdayNames(p.schedule.days) })
+          : m.cla_monthly({ time: at, day: p.schedule.day_of_month });
+    return m.cla_summary({ when, count: p.items.length });
+  }
+
   function options(): CleanupOptions {
     return { history_keep_days: keepDays, junk: junk ?? undefined };
   }
@@ -194,6 +250,10 @@
   }
 
   onMount(() => {
+    api
+      .cleanupProfile()
+      .then((p) => (auto = p))
+      .catch(() => {});
     api
       .cleanupCatalog()
       .then((c) => {
@@ -499,6 +559,15 @@
               {/each}
             </div>
           {/each}
+          <div class="auto">
+            <div class="auto-text">
+              <span class="auto-name">{m.cla_title()}</span>
+              <span>{autoText()}</span>
+            </div>
+            <button class="files-btn" disabled={!!busy} onclick={() => ((autoError = null), (editingAuto = true))}
+              >{m.cla_setup()}</button
+            >
+          </div>
         </div>
 
         <div class="side">
@@ -621,6 +690,25 @@
     {#if error}<div class="banner err">{error}</div>{/if}
   </div>
 
+  {#if editingAuto && catalog}
+    {@const chosenNow = autoItems()}
+    <CleanupAutoModal
+      profile={auto ?? {
+        schedule: { kind: 'none', days: ['mon', 'wed', 'fri'], time: '03:00', day_of_month: 1, run_missed: true, missed_delay_min: 10 },
+        items: [],
+        users: [],
+        options: options(),
+      }}
+      items={chosenNow.take.map((i) => ({ id: i.id, label: i.label }))}
+      users={catalog.users.filter((u) => users.has(u.sid)).map((u) => ({ sid: u.sid, name: u.name }))}
+      left={chosenNow.left}
+      saving={autoSaving}
+      error={autoError}
+      onSave={saveAuto}
+      onClose={() => (editingAuto = false)}
+    />
+  {/if}
+
   {#if editingMasks && junk}
     {@const id = focused ?? 'junk'}
     <CleanupMasksModal
@@ -673,6 +761,9 @@
   .lead { font-size: 13px; color: var(--text-secondary); margin: 0 0 20px; max-width: 900px; line-height: 1.5; }
   .elevate { display: flex; align-items: center; gap: 12px; margin: -8px 0 16px; padding: 8px 14px; font-size: 13px; color: var(--text); background: var(--panel2); border: 1px solid var(--border); border-radius: 8px; max-width: 900px; }
   .elevate span { flex: 1; }
+  .auto { display: flex; align-items: center; gap: 12px; border-top: 1px solid var(--border); margin-top: 6px; padding: 10px 18px 4px; font-size: 13px; color: var(--text-secondary); }
+  .auto-text { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+  .auto-name { font-weight: 600; color: var(--head); font-size: 14px; }
   .cols { display: flex; gap: 16px; align-items: flex-start; }
   .card { border: 1px solid var(--border); border-radius: 8px; background: var(--card-bg); padding: 14px 18px; }
   .tree { flex: 1; min-width: 0; padding: 8px 0; }

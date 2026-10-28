@@ -79,11 +79,11 @@ impl BackupServiceImpl {
         shutdown: crate::shutdown::ShutdownSignal,
     ) -> Self {
         Self {
-            state,
             service_token,
             shutdown,
             linux_browse: Arc::new(crate::linux_browse::Sessions::default()),
-            cleaner: Arc::default(),
+            cleaner: state.auto.cleaner.clone(),
+            state,
         }
     }
 
@@ -620,6 +620,9 @@ fn target_owned_letters(_plan: &own_backup_common::restore_plan::RestorePlan) ->
 /// which is fine — the events are simply dropped until a client connects.
 pub struct GrpcEventSink {
     pub tx: broadcast::Sender<proto::Event>,
+    /// The automatic cleanup, for a job that cleans before its copy. Set
+    /// once the service's state exists (after the worker that holds this).
+    pub auto: Arc<std::sync::OnceLock<Arc<crate::auto_cleanup::AutoCleanup>>>,
 }
 
 impl own_backup_core::EventSink for GrpcEventSink {
@@ -641,6 +644,15 @@ impl own_backup_core::EventSink for GrpcEventSink {
             kind: "finished".into(),
             json: serde_json::to_string(&run).unwrap_or_default(),
         });
+    }
+    fn before_backup(&self, job: &own_backup_core::Job) {
+        let Some(auto) = self.auto.get() else {
+            return;
+        };
+        info!(job = %job.name, "cleaning the disk before the copy");
+        if let Err(e) = auto.run(crate::auto_cleanup::Trigger::BeforeBackup, Some(job)) {
+            tracing::warn!(job = %job.name, ?e, "the cleanup before the copy did not run; the copy goes on");
+        }
     }
 }
 
@@ -4505,10 +4517,22 @@ impl BackupService for BackupServiceImpl {
             Refusal::AdminOnly(item) => Status::permission_denied(
                 tr!("grpc_server.cleanup_admin_only", item = item).into_owned(),
             ),
+            Refusal::NotScheduled(item) => Status::invalid_argument(
+                tr!("grpc_server.cleanup_not_scheduled", item = item).into_owned(),
+            ),
         };
         let cleaner = self.cleaner.clone();
         let (mode, items, users, options, exclude) = match op {
             Op::Catalog => return json_reply(&cleaner.catalog(&asker)),
+            Op::Profile => return json_reply(&self.state.auto.profile()),
+            Op::SaveProfile { profile } => {
+                let auto = self.state.auto.clone();
+                let saved = tokio::task::spawn_blocking(move || auto.save(&asker, profile))
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?
+                    .map_err(refused)?;
+                return json_reply(&saved);
+            }
             Op::Cancel => {
                 cleaner.cancel();
                 return json_reply(&serde_json::json!({}));
@@ -4565,7 +4589,7 @@ impl BackupService for BackupServiceImpl {
             "cleanup finished"
         );
         if mode == Mode::Remove {
-            let mut run = activity_record(&report, started);
+            let mut run = activity_record(&report, started, "");
             if let Err(e) = self.state.store.record_run(run.clone()) {
                 tracing::error!(error = %e, "the cleanup could not be recorded in the activity");
             }

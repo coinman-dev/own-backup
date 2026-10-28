@@ -36,7 +36,7 @@ pub enum Mode {
 }
 
 /// What a run is asked besides the items.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct Options {
     /// Keep this many last days of browser history (0: remove it all).

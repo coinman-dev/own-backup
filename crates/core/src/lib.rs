@@ -458,6 +458,10 @@ pub struct AdvancedConfig {
     pub low_priority: bool,
     /// Cap on how fast the source is read, MB/s. 0 = no cap.
     pub speed_limit_mbps: u32,
+    /// Clean the disk before the copy, by the service's automatic cleanup
+    /// set (the window's «Очистка» → «Автоочистка»): less junk copied.
+    /// Windows only; a cleanup that cannot run leaves the copy to go on.
+    pub cleanup_before: bool,
     // Removed on 2026-09-26, saved and never read: `backup_unallocated`,
     // `password_enabled` (encryption is the OBK format now), `pre_command` /
     // `post_command` (a command a SYSTEM service runs, from a job any
@@ -483,6 +487,7 @@ impl Default for AdvancedConfig {
             after_backup: "none".into(),
             low_priority: false,
             speed_limit_mbps: 0,
+            cleanup_before: false,
         }
     }
 }
@@ -517,6 +522,10 @@ struct KilledRunNote {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(default)]
 pub struct CleanupSummary {
+    /// What started it: "" — a person in the window, "schedule" — the
+    /// automatic cleanup, "before_backup" — a job before its copy (the job's
+    /// name is the run's `job_name`).
+    pub trigger: String,
     /// Files removed and their size.
     pub files: u64,
     pub bytes: u64,
@@ -1757,6 +1766,10 @@ pub trait EventSink: Send + Sync + 'static {
     fn job_progress(&self, progress: JobProgress);
     fn queue_changed(&self, snapshot: QueueSnapshot);
     fn job_finished(&self, run: JobRun);
+    /// Before a copy of a job with `advanced.cleanup_before`, on a blocking
+    /// thread, after the job took its slot: the service cleans the disk.
+    /// Nothing by default.
+    fn before_backup(&self, _job: &Job) {}
 }
 
 /// Supplies passphrases for encrypted source volumes at backup time. The
@@ -2377,6 +2390,14 @@ pub async fn run_queue_worker(
         ));
         let last_success = store.last_success(&job.id);
         store.mark_running(&job);
+        // Clean the disk first when the job asks: less junk in the copy.
+        if job.advanced.cleanup_before && !cancel.load(Ordering::SeqCst) {
+            let (hook, for_job) = (sink.clone(), job.clone());
+            if let Err(e) = tokio::task::spawn_blocking(move || hook.before_backup(&for_job)).await
+            {
+                warn!(error = %e, "the cleanup before the copy failed; the copy goes on");
+            }
+        }
         // The keys of an encrypted job are opened here, once, before anything
         // runs — and if they cannot be opened the run fails saying so, rather
         // than waiting for a password nobody will type at night or writing the

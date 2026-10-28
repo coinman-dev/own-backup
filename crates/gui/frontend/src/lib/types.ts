@@ -501,6 +501,8 @@ export interface AdvancedConfig {
   low_priority: boolean;
   /** Cap on the read speed, MB/s; 0 = none. */
   speed_limit_mbps: number;
+  /** Clean the disk before the copy, by the automatic cleanup set (Windows). */
+  cleanup_before?: boolean;
 }
 
 /** Byte totals per file category — real data from the backup walk. */
@@ -1341,7 +1343,24 @@ export interface Localized {
   en: string;
 }
 
+/** The automatic cleanup: what the service cleans by itself and when. */
+export interface CleanupProfile {
+  schedule: Pick<ScheduleConfig, 'days' | 'time' | 'day_of_month' | 'run_missed' | 'missed_delay_min'> & {
+    kind: 'none' | 'daily' | 'weekly' | 'monthly';
+  } & Partial<ScheduleConfig>;
+  items: string[];
+  users: string[];
+  options: CleanupOptions;
+  /** Kept by the service: who saved it. */
+  owner?: string | null;
+  admin?: boolean;
+  /** When the schedule last ran it. */
+  last_run?: string | null;
+}
+
 export interface CleanupSummary {
+  /** "" — from the window; "schedule"; "before_backup" (the job is the run's job_name). */
+  trigger?: string;
   files: number;
   bytes: number;
   left_files: number;

@@ -252,6 +252,10 @@
     "ru": "«%{item}» удаляет только администратор компьютера.",
     "en": "\"%{item}\" is removed only by a computer's administrator."
   },
+  "grpc_server.cleanup_not_scheduled": {
+    "ru": "«%{item}» не чистится автоматически: эти файлы удаляются только после просмотра списка.",
+    "en": "\"%{item}\" is not cleaned automatically: those files go only after their list was looked through."
+  },
   "grpc_server.cleanup_folders_admin_only": {
     "ru": "Искать мусор в других папках может только администратор компьютера.",
     "en": "Only a computer's administrator may search for junk in other folders."
