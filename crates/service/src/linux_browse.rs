@@ -1,6 +1,6 @@
 //! Opened Linux partitions, for the Total Commander plugin
-//! (`crates/tc-plugin`): the files of an ext4 partition — inside LVM and LUKS
-//! when it is — read in place, without mounting it and without taking its
+//! (`crates/tc-plugin`): the files of an ext4 or btrfs partition — inside LVM
+//! and LUKS when it is — read in place, without mounting it and without taking its
 //! disk from Windows (`own_backup_backup::linux_browse`).
 //!
 //! An opened partition is a session. `ext4-view` keeps its filesystem behind
@@ -168,8 +168,7 @@ impl Sessions {
         std::thread::Builder::new()
             .name("linux-browse".into())
             .spawn(move || {
-                let opened =
-                    linux_browse::open(vol, passphrase.as_ref().map(|p| p.as_bytes()));
+                let opened = linux_browse::open(vol, passphrase.as_ref().map(|p| p.as_bytes()));
                 drop(passphrase);
                 let mut part = match opened {
                     Ok(p) => {
@@ -197,8 +196,9 @@ impl Sessions {
                             len,
                             reply,
                         } => {
-                            let _ = reply
-                                .send(fs_of(&mut part, root).and_then(|f| f.read(&path, offset, len)));
+                            let _ = reply.send(
+                                fs_of(&mut part, root).and_then(|f| f.read(&path, offset, len)),
+                            );
                         }
                     }
                 }
@@ -296,10 +296,7 @@ impl Sessions {
     }
 }
 
-fn fs_of(
-    part: &mut linux_browse::Partition,
-    root: usize,
-) -> Result<&mut linux_browse::Fs, String> {
+fn fs_of(part: &mut linux_browse::Partition, root: usize) -> Result<&mut linux_browse::Fs, String> {
     part.roots
         .get_mut(root)
         .ok_or_else(|| "no such filesystem in the partition".to_string())
@@ -333,7 +330,10 @@ mod tests {
         std::fs::create_dir_all(src.join("home/user")).unwrap();
         std::fs::write(src.join("home/user/note.txt"), "hello").unwrap();
         let img = dir.path().join("fs.img");
-        std::fs::File::create(&img).unwrap().set_len(8 << 20).unwrap();
+        std::fs::File::create(&img)
+            .unwrap()
+            .set_len(8 << 20)
+            .unwrap();
         let ok = std::process::Command::new("mke2fs")
             .args(["-q", "-F", "-t", "ext4", "-d"])
             .arg(&src)
@@ -359,7 +359,10 @@ mod tests {
         assert_eq!(roots.len(), 1);
         let user = s.list(session, 0, "\\home\\user").unwrap();
         assert_eq!(user[0].name, "note.txt");
-        assert_eq!(s.stat(session, 0, "\\home\\user\\note.txt").unwrap().size, 5);
+        assert_eq!(
+            s.stat(session, 0, "\\home\\user\\note.txt").unwrap().size,
+            5
+        );
         let r = ReadRequest {
             session,
             root: 0,
@@ -369,7 +372,10 @@ mod tests {
         };
         assert_eq!(s.read(&r).unwrap(), b"ello");
         assert!(s.list(session, 3, "\\").is_err(), "no such filesystem");
-        assert!(s.list(session + 1, 0, "\\").unwrap_err().contains("no such session"));
+        assert!(s
+            .list(session + 1, 0, "\\")
+            .unwrap_err()
+            .contains("no such session"));
         s.close(session);
         assert_eq!(s.read(&r).unwrap_err(), SESSION_GONE);
     }
@@ -382,8 +388,9 @@ mod tests {
         let s = Sessions::default();
         let mut ids = Vec::new();
         for _ in 0..MAX_SESSIONS + 2 {
-            if let Opened::Open { session, .. } =
-                s.open_volume(Box::new(Mem(img.clone())), None, "test").unwrap()
+            if let Opened::Open { session, .. } = s
+                .open_volume(Box::new(Mem(img.clone())), None, "test")
+                .unwrap()
             {
                 ids.push(session);
             }
@@ -395,9 +402,11 @@ mod tests {
 
     #[test]
     fn requests_are_read_as_the_plugin_writes_them() {
-        let r: Request = serde_json::from_str(r#"{"op":"open","source":"x#3","passphrase":"pw"}"#)
-            .unwrap();
-        assert!(matches!(r, Request::Open { ref source, passphrase: Some(ref p) } if source == "x#3" && p.as_str() == "pw"));
+        let r: Request =
+            serde_json::from_str(r#"{"op":"open","source":"x#3","passphrase":"pw"}"#).unwrap();
+        assert!(
+            matches!(r, Request::Open { ref source, passphrase: Some(ref p) } if source == "x#3" && p.as_str() == "pw")
+        );
         let r: Request =
             serde_json::from_str(r#"{"op":"list","session":5,"root":0,"path":"\\a"}"#).unwrap();
         assert!(matches!(r, Request::List { session: 5, root: 0, ref path } if path == "\\a"));

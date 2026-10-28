@@ -141,12 +141,19 @@ mod real {
         std::os::unix::fs::symlink("/nowhere", src.join("home/broken")).unwrap();
         std::fs::create_dir(src.join("etc")).unwrap();
         std::fs::write(src.join("etc/hostname"), "own-backup\n").unwrap();
+        std::os::unix::fs::symlink("/etc/hostname", src.join("etc/abs")).unwrap();
+        let sparse = std::fs::File::create(src.join("home/user/sparse.bin")).unwrap();
+        sparse.set_len(2 * MIB as u64).unwrap();
+        use std::os::unix::fs::FileExt;
+        sparse.write_at(b"end", 2 * MIB as u64 - 3).unwrap();
     }
 
-    /// What every test reads back from the sample tree, whatever it is in.
-    pub(super) fn check_sample(fs: &mut Fs) {
-        let names = |p: &str| -> Vec<String> {
-            fs.list(&names::path_from_display(p))
+    /// What every test reads back from the sample tree, whatever it is in;
+    /// `pre` is the folder holding it (`\@` on btrfs, nothing elsewhere).
+    pub(super) fn check_sample(fs: &mut Fs, pre: &str) {
+        let at = |s: &str| names::path_from_display(&format!("{pre}{s}"));
+        let mut names = |s: &str| -> Vec<String> {
+            fs.list(&at(s))
                 .unwrap()
                 .into_iter()
                 .map(|e| e.name)
@@ -163,7 +170,7 @@ mod real {
         assert!(home.contains(&"link.bin".to_string()), "{home:?}");
         assert!(!home.contains(&"broken".to_string()), "{home:?}");
 
-        let user = fs.list(&names::path_from_display("\\home\\user")).unwrap();
+        let user = fs.list(&at("\\home\\user")).unwrap();
         assert!(user[0].dir, "directories first: {user:?}");
         let colon = user
             .iter()
@@ -174,18 +181,17 @@ mod real {
             .iter()
             .find(|e| e.name.ends_with(".txt") && e.name.starts_with('\u{F7D0}'));
         let koi = koi.expect("the KOI8 name").name.clone();
-        let p = format!("\\home\\user\\{koi}");
         assert_eq!(
-            fs.read(&names::path_from_display(&p), 0, 100).unwrap(),
+            fs.read(&at(&format!("\\home\\user\\{koi}")), 0, 100).unwrap(),
             b"koi8"
         );
 
-        let report = names::path_from_display("\\home\\user\\Документы\\отчёт.txt");
+        let report = at("\\home\\user\\Документы\\отчёт.txt");
         assert_eq!(fs.read(&report, 0, 100).unwrap(), "привет\n".as_bytes());
         assert_eq!(fs.stat(&report).unwrap().size, "привет\n".len() as u64);
 
         // A big file in pieces, out of order, past its end.
-        let big = names::path_from_display("\\home\\userlink\\big.bin");
+        let big = at("\\home\\userlink\\big.bin");
         let want: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
         assert_eq!(
             fs.read(&big, 100_000, 50_000).unwrap(),
@@ -194,14 +200,21 @@ mod real {
         assert_eq!(fs.read(&big, 0, 10).unwrap(), &want[..10]);
         assert_eq!(fs.read(&big, 299_990, 100).unwrap(), &want[299_990..]);
         assert!(fs.read(&big, 400_000, 100).unwrap().is_empty());
-        let linked = names::path_from_display("\\home\\link.bin");
-        assert_eq!(fs.read(&linked, 0, 300_000).unwrap(), want);
+        assert_eq!(fs.read(&at("\\home\\link.bin"), 0, 300_000).unwrap(), want);
 
-        assert!(fs.list(&names::path_from_display("\\nothing")).is_err());
-        assert!(
-            fs.read(&names::path_from_display("\\home"), 0, 1).is_err(),
-            "a directory"
+        // A link to an absolute path is read from the root the tree is in.
+        assert_eq!(
+            fs.read(&at("\\etc\\abs"), 0, 100).unwrap(),
+            b"own-backup\n"
         );
+        // A file with a hole reads zeros in it.
+        let sparse = at("\\home\\user\\sparse.bin");
+        assert_eq!(fs.stat(&sparse).unwrap().size, 2 * MIB as u64);
+        assert!(fs.read(&sparse, MIB as u64, 4096).unwrap().iter().all(|&b| b == 0));
+        assert_eq!(fs.read(&sparse, 2 * MIB as u64 - 3, 10).unwrap(), b"end");
+
+        assert!(fs.list(&at("\\nothing")).is_err());
+        assert!(fs.read(&at("\\home"), 0, 1).is_err(), "a directory");
     }
 
     #[test]
@@ -216,7 +229,7 @@ mod real {
         assert_eq!(info[0].name, "", "the partition itself");
         assert_eq!(info[0].label, "obk-test");
         let fs = p.roots[0].fs.as_mut().unwrap();
-        check_sample(fs);
+        check_sample(fs, "");
     }
 
     /// The PV of the fixtures: extent 4 MiB, the first extent at 1 MiB. The
@@ -268,21 +281,69 @@ mod real {
             info[1].error.as_deref().unwrap_or("").contains("raid1"),
             "{info:?}"
         );
-        check_sample(p.roots[0].fs.as_mut().unwrap());
+        check_sample(p.roots[0].fs.as_mut().unwrap(), "");
     }
 
-    /// The whole of an encrypted Ubuntu: LUKS2 as cryptsetup writes it
-    /// (root-free, on a file), LVM inside, ext4 inside that. The data area is
-    /// encrypted with the key cryptsetup made. Needs `cryptsetup`:
-    /// `cargo test -p own-backup-backup linux_browse -- --ignored`.
+    /// btrfs as Ubuntu lays it out — the system in the subvolume `@`, homes in
+    /// `@home` — made by mkfs.btrfs from a folder, compressed with
+    /// `compress` (`no`, `zlib`, `lzo`, `zstd`), or `None` without it.
+    pub(super) fn btrfs_image(compress: &str) -> Option<Vec<u8>> {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(src.join("@")).unwrap();
+        std::fs::create_dir_all(src.join("@home/user")).unwrap();
+        sample_tree(&src.join("@"));
+        std::fs::write(src.join("@home/user/note.txt"), "home subvolume\n").unwrap();
+        let img = dir.path().join("fs.img");
+        std::fs::File::create(&img)
+            .unwrap()
+            .set_len(512 * MIB as u64)
+            .unwrap();
+        let ok = Command::new("mkfs.btrfs")
+            .args(["-q", "-f", "-L", "obk-btrfs", "--rootdir"])
+            .arg(&src)
+            .args(["--subvol", "rw:@", "--subvol", "rw:@home", "--compress", compress, "--shrink"])
+            .arg(&img)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            eprintln!("no mkfs.btrfs that can do this here; skipped");
+            return None;
+        }
+        Some(std::fs::read(&img).unwrap())
+    }
+
+    pub(super) fn check_btrfs(p: &mut Partition) {
+        let info = p.info();
+        assert_eq!(info.len(), 1, "one filesystem: {info:?}");
+        assert_eq!(info[0].label, "obk-btrfs");
+        let fs = p.roots[0].fs.as_mut().unwrap();
+        let top: Vec<String> = fs.list(b"/").unwrap().into_iter().map(|e| e.name).collect();
+        assert!(top.contains(&"@".to_string()) && top.contains(&"@home".to_string()), "{top:?}");
+        check_sample(fs, "\\@");
+        let note = names::path_from_display("\\@home\\user\\note.txt");
+        assert_eq!(fs.read(&note, 0, 100).unwrap(), b"home subvolume\n");
+    }
+
+    /// Every compression btrfs has, inline and regular extents, holes,
+    /// links across the tree, the subvolumes entered like folders.
     #[test]
-    #[ignore]
-    fn an_encrypted_ubuntu_partition_opens_with_its_passphrase() {
+    fn btrfs_shows_ubuntus_subvolumes_and_reads_every_compression() {
+        for compress in ["no", "zlib", "lzo", "zstd"] {
+            let Some(img) = btrfs_image(compress) else {
+                return;
+            };
+            let mut p = open(Box::new(MemVolume(img)), None)
+                .unwrap_or_else(|e| panic!("{compress}: {e}"));
+            check_btrfs(&mut p);
+        }
+    }
+
+    /// `plain` inside a LUKS2 container as cryptsetup makes it (root-free, on
+    /// a file), its data encrypted with the key cryptsetup chose.
+    pub(super) fn luks_wrap(plain: &[u8], pw: &str) -> Vec<u8> {
         use std::io::{Seek, SeekFrom, Write};
-        let Some(img) = ext4_image(16 * MIB, sample_tree) else {
-            return;
-        };
-        let mut plain = pv_image(&img);
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("luks.img");
         let data_offset = 16 * MIB;
@@ -290,7 +351,6 @@ mod real {
             .unwrap()
             .set_len((data_offset + plain.len()) as u64)
             .unwrap();
-        let pw = "correct horse battery";
         let mut child = Command::new("cryptsetup")
             .args([
                 "luksFormat",
@@ -310,23 +370,51 @@ mod real {
             .stdin(std::process::Stdio::piped())
             .spawn()
             .expect("cryptsetup");
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(pw.as_bytes())
-            .unwrap();
+        child.stdin.take().unwrap().write_all(pw.as_bytes()).unwrap();
         assert!(child.wait().unwrap().success(), "luksFormat");
-
         let disk = std::fs::read(&file).unwrap();
-        let params = crate::luks::open_luks(&mut MemVolume(disk.clone()), pw.as_bytes()).unwrap();
+        let params = crate::luks::open_luks(&mut MemVolume(disk), pw.as_bytes()).unwrap();
         assert_eq!(params.data_offset, data_offset as u64);
-        params.encrypt(0, &mut plain).unwrap();
+        let mut data = plain.to_vec();
+        params.encrypt(0, &mut data).unwrap();
         let mut f = std::fs::OpenOptions::new().write(true).open(&file).unwrap();
         f.seek(SeekFrom::Start(data_offset as u64)).unwrap();
-        f.write_all(&plain).unwrap();
+        f.write_all(&data).unwrap();
         drop(f);
-        let disk = std::fs::read(&file).unwrap();
+        std::fs::read(&file).unwrap()
+    }
+
+    /// btrfs straight inside LUKS, no LVM: what the user's Ubuntu turned out
+    /// to be. Needs `cryptsetup`: `--ignored`.
+    #[test]
+    #[ignore]
+    fn btrfs_inside_luks_opens_with_its_passphrase() {
+        let Some(img) = btrfs_image("zstd") else {
+            return;
+        };
+        let pw = "correct horse battery";
+        let disk = luks_wrap(&img, pw);
+        assert_eq!(
+            open(Box::new(MemVolume(disk.clone())), None).err(),
+            Some(OpenError::NeedsPassword)
+        );
+        let mut p = open(Box::new(MemVolume(disk)), Some(pw.as_bytes())).unwrap();
+        assert!(p.encrypted);
+        check_btrfs(&mut p);
+    }
+
+    /// The whole of an encrypted Ubuntu: LUKS2 as cryptsetup writes it
+    /// (root-free, on a file), LVM inside, ext4 inside that. The data area is
+    /// encrypted with the key cryptsetup made. Needs `cryptsetup`:
+    /// `cargo test -p own-backup-backup linux_browse -- --ignored`.
+    #[test]
+    #[ignore]
+    fn an_encrypted_ubuntu_partition_opens_with_its_passphrase() {
+        let Some(img) = ext4_image(16 * MIB, sample_tree) else {
+            return;
+        };
+        let pw = "correct horse battery";
+        let disk = luks_wrap(&pv_image(&img), pw);
 
         assert_eq!(
             open(Box::new(MemVolume(disk.clone())), None).err(),
@@ -339,6 +427,6 @@ mod real {
         let mut p = open(Box::new(MemVolume(disk)), Some(pw.as_bytes())).unwrap();
         assert!(p.encrypted);
         assert_eq!(p.roots[0].name, "vg0-root");
-        check_sample(p.roots[0].fs.as_mut().unwrap());
+        check_sample(p.roots[0].fs.as_mut().unwrap(), "");
     }
 }

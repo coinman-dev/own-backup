@@ -1,7 +1,8 @@
 //! `OwnBackup.wfx64` — a Total Commander file system plugin: the files of
-//! Linux partitions on this computer, read-only.
+//! Linux partitions on this computer (ext2/3/4 and btrfs, inside LVM and
+//! LUKS too), read-only.
 //!
-//! Windows cannot read ext4, LVM or LUKS, and WSL can read them only by taking
+//! Windows cannot read ext4, btrfs, LVM or LUKS, and WSL can read them only by taking
 //! the whole disk away from Windows. The service reads them in place instead
 //! (`own_backup_backup::linux_browse`, behind `LinuxBrowse` in the service);
 //! this plugin shows what it reads as ordinary Total Commander panels in the

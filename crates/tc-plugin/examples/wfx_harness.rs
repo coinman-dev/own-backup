@@ -285,6 +285,60 @@ mod win {
             "a Cyrillic file copied out",
             &mut fails,
         );
+
+        // btrfs straight inside LUKS, Ubuntu's subvolumes as folders.
+        if let Some(b) = top.iter().find(|(n, _, _)| n.contains("luks-btrfs")) {
+            *PASSWORDS.lock().unwrap() = vec![pw.clone()];
+            let root = format!("\\{}", b.0);
+            let top = plugin.list(&root);
+            println!("{root}: {top:?}");
+            check(
+                top.iter().any(|(n, d, _)| n == "@" && *d)
+                    && top.iter().any(|(n, d, _)| n == "@home" && *d),
+                "btrfs: the subvolumes @ and @home as folders",
+                &mut fails,
+            );
+            let user = format!("{root}\\@\\home\\user");
+            let files = plugin.list(&user);
+            check(
+                files
+                    .iter()
+                    .any(|(n, _, s)| n == "big.bin" && *s == 5 * 1024 * 1024 + 123),
+                "btrfs: big.bin in @",
+                &mut fails,
+            );
+            let local = format!("{out_dir}\\btrfs-big.bin");
+            let _ = std::fs::remove_file(&local);
+            let code = unsafe {
+                (plugin.get)(
+                    wide(&format!("{user}\\big.bin")).as_ptr(),
+                    wide(&local).as_ptr(),
+                    0,
+                    std::ptr::null(),
+                )
+            };
+            check(
+                code == 0 && std::fs::read(&local).unwrap_or_default() == want,
+                "btrfs: zstd-compressed big.bin copied out byte for byte",
+                &mut fails,
+            );
+            let note = format!("{out_dir}\\note.txt");
+            let code = unsafe {
+                (plugin.get)(
+                    wide(&format!("{root}\\@home\\user\\note.txt")).as_ptr(),
+                    wide(&note).as_ptr(),
+                    1,
+                    std::ptr::null(),
+                )
+            };
+            check(
+                code == 0 && std::fs::read(&note).unwrap_or_default() == b"home subvolume\n",
+                "btrfs: a file of @home",
+                &mut fails,
+            );
+        } else {
+            check(false, "the btrfs image is offered", &mut fails);
+        }
         println!("=== {fails} failed");
         std::process::exit(if fails == 0 { 0 } else { 1 });
     }

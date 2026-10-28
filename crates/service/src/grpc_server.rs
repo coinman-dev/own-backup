@@ -4516,6 +4516,7 @@ fn linux_source_name(s: &own_backup_backup::linux_browse::Source) -> String {
     let what = match s.content {
         Content::Luks => "LUKS",
         Content::Lvm => "LVM",
+        Content::Btrfs => "btrfs",
         _ => "ext",
     };
     let mut name = tr!(

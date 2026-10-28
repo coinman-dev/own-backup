@@ -13,11 +13,14 @@
 //!   an encrypted Ubuntu: `vgubuntu-root` and `vgubuntu-swap_1` inside LUKS;
 //! * an ext2/3/4 filesystem, read by `ext4-view`, which also replays the
 //!   journal in memory: a system that went down without unmounting shows what
-//!   it had written, and nothing is ever written back.
+//!   it had written, and nothing is ever written back;
+//! * or btrfs ([`btrfs`]), its subvolumes as folders — what an Ubuntu
+//!   installed on btrfs inside LUKS turned out to be (27.10).
 //!
 //! What a person sees of it is the Total Commander plugin (`crates/tc-plugin`),
 //! which asks the service for it ([`Partition`] lives in a session there).
 
+mod btrfs;
 pub mod names;
 
 use std::cell::RefCell;
@@ -189,6 +192,7 @@ pub fn open(
                             Box::new(LvView::new(base.clone(), lv.segments, lv.size));
                         match head(&mut *view).map(|h| identify(&h)) {
                             Ok(Content::Ext) => load_ext(view),
+                            Ok(Content::Btrfs) => load_btrfs(view),
                             // Swap is not a place to look for files.
                             Ok(Content::Swap) => continue,
                             Ok(other) => Err(not_ext(other)),
@@ -208,6 +212,11 @@ pub fn open(
             name: String::new(),
             size,
             fs: load_ext(Box::new(SharedView(base))),
+        }],
+        Content::Btrfs => vec![Root {
+            name: String::new(),
+            size,
+            fs: load_btrfs(Box::new(SharedView(base))),
         }],
         other => {
             let head = head(&mut **base.borrow_mut()).unwrap_or_default();
@@ -229,11 +238,10 @@ fn not_ext(c: Content) -> String {
         Content::Swap => tr!("linux_browse.swap"),
         Content::Luks => tr!("linux_browse.luks_in_luks"),
         Content::Lvm => tr!("linux_browse.lvm_in_lvm"),
-        Content::Btrfs => tr!("linux_browse.unsupported", what = "btrfs"),
         Content::Xfs => tr!("linux_browse.unsupported", what = "XFS"),
         Content::Zfs => tr!("linux_browse.unsupported", what = "ZFS"),
         Content::Empty => tr!("linux_browse.empty"),
-        Content::Ext | Content::Other => tr!("linux_browse.unknown"),
+        Content::Ext | Content::Btrfs | Content::Other => tr!("linux_browse.unknown"),
     }
     .into_owned()
 }
@@ -264,8 +272,14 @@ fn read_layout(vol: &mut dyn RawVolume) -> std::result::Result<lvm_pv::VolumeLay
 
 fn load_ext(vol: Box<dyn RawVolume>) -> std::result::Result<Fs, String> {
     Ext4::load(Box::new(Reader(vol)))
-        .map(|ext| Fs { ext, open: None })
+        .map(|ext| Fs::Ext(Box::new(ExtFs { ext, open: None })))
         .map_err(|e| format!("the ext filesystem cannot be read: {e}"))
+}
+
+fn load_btrfs(vol: Box<dyn RawVolume>) -> std::result::Result<Fs, String> {
+    btrfs::Btrfs::load(vol)
+        .map(Fs::Btrfs)
+        .map_err(|e| format!("the btrfs filesystem cannot be read: {e}"))
 }
 
 // --- the partitions of this machine ---------------------------------------------
@@ -332,7 +346,10 @@ pub fn find_sources(disks: &[own_backup_common::disk::DiskInfo]) -> Vec<Source> 
                 .and_then(|mut v| head(&mut *v))
                 .map(|h| identify(&h))
                 .unwrap_or(Content::Other);
-            if !matches!(content, Content::Ext | Content::Lvm | Content::Luks) {
+            if !matches!(
+                content,
+                Content::Ext | Content::Btrfs | Content::Lvm | Content::Luks
+            ) {
                 continue;
             }
             let label = if !part.volume_label.is_empty() {
@@ -365,7 +382,10 @@ pub fn image_source(path: &str) -> Option<Source> {
         .and_then(|mut v| head(&mut *v))
         .map(|h| identify(&h))
         .ok()?;
-    if !matches!(content, Content::Ext | Content::Lvm | Content::Luks) {
+    if !matches!(
+        content,
+        Content::Ext | Content::Btrfs | Content::Lvm | Content::Luks
+    ) {
         return None;
     }
     Some(Source {
@@ -469,8 +489,55 @@ pub struct Entry {
     pub nanos: u32,
 }
 
+/// A readable filesystem: ext2/3/4 or btrfs.
+pub enum Fs {
+    // Boxed: an open ext4 file is the bulk of it.
+    Ext(Box<ExtFs>),
+    Btrfs(btrfs::Btrfs),
+}
+
+impl Fs {
+    pub fn label(&self) -> String {
+        match self {
+            Fs::Ext(f) => f.label(),
+            Fs::Btrfs(f) => f.label(),
+        }
+    }
+
+    /// The entries of the directory at `path` (absolute Linux path bytes),
+    /// symbolic links shown as what they point to; links to nowhere and
+    /// special files (devices, sockets, pipes) left out.
+    pub fn list(&mut self, path: &[u8]) -> std::result::Result<Vec<Entry>, String> {
+        match self {
+            Fs::Ext(f) => f.list(path),
+            Fs::Btrfs(f) => f.list(path),
+        }
+    }
+
+    /// The entry at `path`, links followed.
+    pub fn stat(&mut self, path: &[u8]) -> std::result::Result<Entry, String> {
+        match self {
+            Fs::Ext(f) => f.stat(path),
+            Fs::Btrfs(f) => f.stat(path),
+        }
+    }
+
+    /// Up to `len` bytes of the file at `path` from `offset`; fewer at its end.
+    pub fn read(
+        &mut self,
+        path: &[u8],
+        offset: u64,
+        len: usize,
+    ) -> std::result::Result<Vec<u8>, String> {
+        match self {
+            Fs::Ext(f) => f.read(path, offset, len),
+            Fs::Btrfs(f) => f.read(path, offset, len),
+        }
+    }
+}
+
 /// A readable ext filesystem.
-pub struct Fs {
+pub struct ExtFs {
     ext: Ext4,
     /// The file last read, kept open: a copy reads one file in many pieces.
     open: Option<(Vec<u8>, ext4_view::File)>,
@@ -480,7 +547,7 @@ fn ext_error(e: ext4_view::Ext4Error) -> String {
     e.to_string()
 }
 
-impl Fs {
+impl ExtFs {
     pub fn label(&self) -> String {
         self.ext.label().to_str().unwrap_or_default().to_string()
     }

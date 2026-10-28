@@ -63,8 +63,8 @@ Details, writing to a USB stick and working from the medium are in
 ## Linux partitions in Total Commander (Windows)
 
 A Total Commander plugin shows the files of this computer's Linux partitions:
-ext2/3/4, also inside LVM and encrypted LUKS (the way Ubuntu installs with disk
-encryption). The partition is read in place and **read-only**: nothing is
+ext2/3/4 and btrfs, also inside LVM and encrypted LUKS (the way Ubuntu installs
+with disk encryption). The partition is read in place and **read-only**: nothing is
 mounted or taken offline, and the other partitions of the same disk (a Windows
 data drive, say) keep working. The Own Backup service does the reading, so it
 must be installed and running.
@@ -84,7 +84,9 @@ must be installed and running.
 **Use it:** open **Network Neighborhood** (`\\\`) → **Own Backup Linux**. It
 lists partitions such as "Disk 3 · partition 3 · 128 GB · LUKS". For an
 encrypted one Total Commander asks for its encryption passphrase; with LVM
-inside, its volumes appear (`vgubuntu-root`), swap is not shown. Files are
+inside, its volumes appear (`vgubuntu-root`), swap is not shown. btrfs
+subvolumes are ordinary folders: on Ubuntu the system is in `@`, the home
+folders in `@home`; compressed files (zstd, zlib, LZO) read as they are. Files are
 copied (F5), viewed (F3) and opened (Enter) as usual; nothing on the partition
 can be changed, deleted or moved.
 
@@ -93,7 +95,9 @@ can be changed, deleted or moved.
   copied under those names.
 - Symbolic links are shown as what they point to; special files (devices,
   sockets) are not shown.
-- If Linux was not shut down cleanly, the filesystem journal is taken into
-  account while reading (in memory; nothing is written to the disk).
+- If Linux was not shut down cleanly, ext4 is read with its journal applied
+  (in memory; nothing is written to the disk); btrfs shows its last committed
+  state, without the last few seconds before the crash.
+- btrfs spanning several disks or in RAID is not read.
 - The passphrase is kept in Total Commander's memory until it closes: after
   half an hour idle the partition is reopened without asking again.

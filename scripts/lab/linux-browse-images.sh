@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # Test images for the Total Commander plugin (crates/tc-plugin) and the
-# service's LinuxBrowse: an encrypted Ubuntu-like partition made by the real
-# tools — LUKS2 (argon2id) holding an LVM volume group `vgobk` with `root`
-# (ext4) and `swap_1` — and a plain ext4 partition. Run as root (loop
-# devices, device-mapper):
+# service's LinuxBrowse, made by the real tools: an encrypted Ubuntu-like
+# partition — LUKS2 (argon2id) holding an LVM volume group `vgobk` with `root`
+# (ext4) and `swap_1`; btrfs straight inside LUKS2 with Ubuntu's subvolumes
+# `@` and `@home`, zstd-compressed; and a plain ext4 partition. Run as root
+# (loop devices, device-mapper):
 #
 #   sudo scripts/lab/linux-browse-images.sh DIR [PASSPHRASE]
 #
 # Then offer them to a development build of the service and drive the
 # plugin with crates/tc-plugin/examples/wfx_harness.rs:
 #
-#   OBK_LINUX_BROWSE_IMAGES="DIR/luks-lvm.img;DIR/plain.img" \
+#   OBK_LINUX_BROWSE_IMAGES="DIR/luks-lvm.img;DIR/luks-btrfs.img;DIR/plain.img" \
 #       target/debug/own-backup-service --foreground
 #
 # /home/user/big.bin holds i % 251 for 5 MiB + 123 bytes, which the harness
@@ -44,7 +45,7 @@ fill() { # the files every image holds
     printf 'own-backup\n' >"$root/etc/hostname"
 }
 
-rm -f luks-lvm.img plain.img
+rm -f luks-lvm.img luks-btrfs.img plain.img
 truncate -s 160M luks-lvm.img
 loop=$(losetup -f --show luks-lvm.img)
 printf '%s' "$pw" | cryptsetup luksFormat -q --type luks2 --pbkdf argon2id --key-file - "$loop"
@@ -65,10 +66,28 @@ cleanup
 loop="" mapped=""
 trap - EXIT
 
+# btrfs in LUKS, the files put in by mkfs.btrfs itself.
+src=$(mktemp -d)
+mkdir -p "$src/@" "$src/@home/user"
+fill "$src/@"
+printf 'home subvolume\n' >"$src/@home/user/note.txt"
+truncate -s 160M luks-btrfs.img
+loop=$(losetup -f --show luks-btrfs.img)
+trap cleanup EXIT
+printf '%s' "$pw" | cryptsetup luksFormat -q --type luks2 --pbkdf argon2id --key-file - "$loop"
+printf '%s' "$pw" | cryptsetup open --key-file - "$loop" obk-browse-test
+mapped=1
+mkfs.btrfs -q -f -L obk-btrfs --rootdir "$src" --subvol rw:@ --subvol rw:@home \
+    --compress zstd /dev/mapper/obk-browse-test
+cleanup
+loop="" mapped=""
+trap - EXIT
+rm -rf "$src"
+
 src=$(mktemp -d)
 fill "$src"
 truncate -s 32M plain.img
 mkfs.ext4 -q -L obk-plain -d "$src" plain.img
 rm -rf "$src" mnt
-chmod 0644 luks-lvm.img plain.img
-echo "made $dir/luks-lvm.img (passphrase: $pw) and $dir/plain.img"
+chmod 0644 luks-lvm.img luks-btrfs.img plain.img
+echo "made $dir/luks-lvm.img, $dir/luks-btrfs.img (passphrase: $pw) and $dir/plain.img"
