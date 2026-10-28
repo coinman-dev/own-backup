@@ -20,6 +20,10 @@ be encrypted with a password. From a backup you can restore a partition, a disk
 or individual files — and, from the boot medium, the disk Windows itself boots
 from.
 
+<p align="center">
+  <img src="doc/images/en/backup-dashboard.png" alt="Own Backup: the Backup page with jobs, the last backup of each and its versions">
+</p>
+
 > **0.1.8-beta is a prerelease; the Linux version is new since 0.1.6-beta.**
 > Check an important backup by restoring it to a spare disk or a virtual
 > machine before you rely on it — on Linux especially.
@@ -57,26 +61,37 @@ The interface is in English and Russian, with light, dark and system themes.
 
 - Full, incremental and differential backups of volumes and whole disks; a job
   can keep a sliding window of increments, the oldest folded into the base.
-- Only used clusters are read (NTFS, ReFS, FAT32, exFAT), from a VSS snapshot
-  when the system is running.
+- Only used clusters are read (NTFS, ReFS, FAT32, exFAT, ext2/3/4, XFS,
+  btrfs). A running system is copied from a VSS snapshot on Windows and from an
+  LVM or device-mapper snapshot on Linux.
+- Windows and Linux: a backup made on one opens, validates and restores on the
+  other.
 - Three formats: **VHDX** (Windows mounts it by itself), **qcow2** (zstd
   compression) and **OBK** (zstd and AES-256-GCM, opened with a password or a
   recovery key).
 - Exclusions that really exclude: matched files are not read and their entries
   are removed from the filesystem inside the image, not left as empty ghosts.
 - BitLocker volumes, locked ones included, are copied decrypted — with the
-  password or the 48-digit recovery key.
+  password or the 48-digit recovery key; LUKS volumes with their passphrase.
 - Per-block xxHash64 checksums and verification after a backup or on demand.
 - Restore of a partition or a whole bootable disk, UEFI boot entries included,
   with a guard against overwriting the disk the system runs from.
-- A boot medium built from the computer's own Windows recovery environment,
-  with the same interface on it.
+- Two boot media with the same interface on them: one built from the
+  computer's own Windows recovery environment, and a Linux one (Debian 13
+  live, UEFI with Secure Boot or BIOS) — built by the Linux window, or
+  downloaded ready by the Windows one and checked against the release's
+  checksums.
 - A backup mounted as a disk through Windows' own iSCSI initiator: no
   third-party driver is installed.
+- **Linux partitions in Total Commander** (Windows): a plugin shows the files
+  of this computer's ext2/3/4 and btrfs partitions, also inside LVM and LUKS,
+  read-only and in place — the other partitions of that disk stay in use.
 - Schedules and events (logon, startup, a destination disk plugged in),
-  retries, wake from sleep, an optional shutdown afterwards.
-- A window, a command line and a service: the service runs as LocalSystem and
-  answers over a named pipe with restricted access.
+  retries, wake from sleep, an optional shutdown afterwards. An action whose
+  disks or folder are busy waits in a queue instead of being refused.
+- A window, a command line and a service: on Windows the service runs as
+  LocalSystem and answers over a named pipe with restricted access; on Linux
+  it is a systemd unit behind a Unix socket open to the `own-backup` group.
 
 ## Current boundaries
 
@@ -124,7 +139,7 @@ own-backup-cli.exe verify D:\Backups\disk.vhdx
 own-backup-service.exe /status
 ```
 
-`own-backup-install.exe /S` installs silently; `/D=<folder>`, as the last
+`own-backup-install_<version>.exe /S` installs silently; `/D=<folder>`, as the last
 argument, chooses the folder of a first installation.
 
 ## Building
