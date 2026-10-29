@@ -79,7 +79,7 @@ build)
     # Отладочная сборка без отладочной информации: в госте 16 ГиБ корня.
     g "rm -rf $SRC/crates $SRC/vendor; mkdir -p $SRC && tar -xzf ~/src.tar.gz -C $SRC &&
        . ~/.cargo/env && cd $SRC/crates/gui/frontend &&
-       npm ci --no-audit --no-fund >/tmp/npm-ci.log 2>&1 && npm run build >/tmp/npm-build.log 2>&1 &&
+       $SRC/scripts/npm-ci.sh --no-audit --no-fund >/tmp/npm-ci.log 2>&1 && npm run build >/tmp/npm-build.log 2>&1 &&
        cd $SRC && CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 cargo build --locked \
          -p own-backup-service -p own-backup-cli -p own-backup-gui >/tmp/cargo-build.log 2>&1;
        rc=\$?; tail -5 /tmp/cargo-build.log; exit \$rc"

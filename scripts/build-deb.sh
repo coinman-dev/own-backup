@@ -70,7 +70,7 @@ if [[ "$skip_build" -eq 0 ]]; then
     # The window's pages are compiled into own-backup-gui, so they come first.
     (
         cd crates/gui/frontend
-        [[ -d node_modules ]] || npm ci
+        [[ -d node_modules ]] || "$root/scripts/npm-ci.sh"
         npm run build
     )
     cargo build --locked --release -p own-backup-gui -p own-backup-service -p own-backup-cli \
