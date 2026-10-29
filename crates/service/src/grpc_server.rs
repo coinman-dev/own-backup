@@ -2405,7 +2405,7 @@ impl BackupService for BackupServiceImpl {
         }
         #[cfg(target_os = "linux")]
         {
-            use own_backup_backup::engine_linux::mount_image_with_options;
+            use own_backup_backup::engine_linux::mount_image_with_keys;
             use own_backup_common::engine_dto::MountResultDto;
 
             #[derive(serde::Deserialize)]
@@ -2416,6 +2416,8 @@ impl BackupService for BackupServiceImpl {
                 /// this machine's own devices (`restore_linux::mount_identity_gate`).
                 #[serde(default)]
                 identity_choice: Option<own_backup_common::engine_dto::IdentityChoice>,
+                #[serde(flatten)]
+                secret: ManualSecret,
             }
             let p: In = serde_json::from_str(&req.into_inner().json)
                 .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
@@ -2423,20 +2425,34 @@ impl BackupService for BackupServiceImpl {
             let path = std::path::PathBuf::from(&p.image_path);
             let rw = p.read_write.unwrap_or(false);
             let image_path = p.image_path.clone();
+            let keys = manual_keys_off_thread(path.clone(), p.secret).await?;
             let probed = path.clone();
-            let clashes =
-                tokio::task::spawn_blocking(move || restore_linux::image_clashes(&probed))
-                    .await
-                    .map_err(|e| Status::internal(format!("identity check panicked: {e}")))?
-                    .map_err(|e| Status::internal(e.to_string()))?;
+            let probe_keys = keys.clone();
+            let clashes = tokio::task::spawn_blocking(move || {
+                restore_linux::image_clashes(&probed, probe_keys.as_ref())
+            })
+            .await
+            .map_err(|e| Status::internal(format!("identity check panicked: {e}")))?
+            .map_err(|e| Status::internal(e.to_string()))?;
             let kept = restore_linux::mount_identity_gate(clashes, p.identity_choice)?;
-            // XFS refuses a second filesystem of one UUID unless told.
-            let extra = own_backup_backup::identity_check_linux::mount_options_for(&kept);
-            let mount_point =
-                tokio::task::spawn_blocking(move || mount_image_with_options(&path, rw, &extra))
-                    .await
-                    .map_err(|e| Status::internal(format!("mount task panicked: {e}")))?
-                    .map_err(|e| Status::internal(e.to_string()))?;
+            // As on Windows: the slot is held for the attach only, so the
+            // chain does not change under it (audit AUD-02).
+            let slot = self
+                .reserve_on(
+                    &tr!("grpc_server.busy_mount"),
+                    &p.image_path,
+                    [own_backup_core::busy::image_chain_resource(
+                        std::path::Path::new(&p.image_path),
+                    )],
+                )
+                .await?;
+            let mount_point = tokio::task::spawn_blocking(move || {
+                let _slot = slot;
+                mount_image_with_keys(&path, rw, keys.as_ref(), &kept)
+            })
+            .await
+            .map_err(|e| Status::internal(format!("mount task panicked: {e}")))?
+            .map_err(|e| Status::internal(e.to_string()))?;
 
             {
                 let mut mounts = self.state.active_mounts.lock().unwrap();

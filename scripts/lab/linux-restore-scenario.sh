@@ -11,8 +11,8 @@
 # (`cargo build -p own-backup-client --example linux_restore_rpc`,
 # target/debug/examples/linux_restore_rpc), CLI the package's
 # /usr/bin/own-backup-cli or a build. STAGE is any of
-#   verify guard clash disk plan volume mount fs stack change mbr
-# (default: all but mbr; mbr belongs to a `linux-vm.py up --bios` run). `fs`
+#   verify guard clash disk plan volume mount fs stack change mbr diskmount
+# (default: all but mbr and diskmount; mbr belongs to a `linux-vm.py up --bios` run). `fs`
 # lays its own partitions out on the target (format and grow ext4/XFS/btrfs);
 # `stack` changes identities inside LUKS, LVM and md on the target; `change`
 # restores the source again with its identities changed and its
@@ -113,6 +113,7 @@ cleanup() {
     local m
     for m in "${MOUNTS[@]}"; do mountpoint -q "$m" && umount "$m"; done
     [[ -n ${STACK_LOOP:-} ]] && stack_down
+    [[ -n ${DM_LOOP:-} ]] && dm_down
 }
 trap cleanup EXIT
 
@@ -1007,9 +1008,120 @@ stage_mbr() {
     check mbr-fsck "$(verdict $?)" "e2fsck clean; host: linux-restore-boot.py boot data-1.qcow2 --bios"
 }
 
+# ---------------------------------------------------------------------------
+# diskmount: a whole-disk copy mounts each partition it holds in a folder of
+# its own — vfat, ext4, btrfs with subvolumes (as Ubuntu lays a system out)
+# and XFS — beside the very disk it copies, so the duplicates are asked
+# about first and the XFS gets `nouuid`. The person, not only root, reads
+# their files there; nothing is writable; unmounting leaves no device or
+# folder. A volume copy still mounts at the point itself.
+# ---------------------------------------------------------------------------
+DM_LOOP=
+dm_down() {
+    [[ -n $DM_LOOP ]] && losetup -d "$DM_LOOP" 2>/dev/null
+    DM_LOOP=
+}
+stage_diskmount() {
+    local need=()
+    command -v mkfs.btrfs >/dev/null || need+=(btrfs-progs)
+    command -v mkfs.xfs >/dev/null || need+=(xfsprogs)
+    command -v mkfs.vfat >/dev/null || need+=(dosfstools)
+    command -v sgdisk >/dev/null || need+=(gdisk)
+    if [[ ${#need[@]} -gt 0 ]]; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y "${need[@]}" >"$EV/dm-apt.out" 2>&1 \
+            || { check diskmount SKIP "${need[*]} not installable"; return; }
+    fi
+    local img=$COPIES/dm.raw copy=$COPIES/dm-disk.qcow2 vol=$COPIES/dm-vol.qcow2
+    local src=$WORK/dm-src sums=$WORK/dm-sums person
+    person=$(getent passwd 1000 | cut -d: -f1)
+    rm -f "$img" "$copy" "$vol"
+    truncate -s 1600M "$img"
+    DM_LOOP=$(losetup -fP --show "$img")
+    sgdisk -o -n1:0:+128M -t1:ef00 -n2:0:+300M -n3:0:+600M -n4:0:+400M \
+        "$DM_LOOP" >"$EV/dm-sgdisk.out" 2>&1
+    reread "$DM_LOOP"
+    local l1 l2 l3 l4 rc
+    l1=$(part "$DM_LOOP" 1) && l2=$(part "$DM_LOOP" 2) && l3=$(part "$DM_LOOP" 3) && l4=$(part "$DM_LOOP" 4)
+    { mkfs.vfat -F 32 -n DMESP "$l1" && mkfs.ext4 -q -F -L dmboot "$l2" \
+        && mkfs.btrfs -q -f -L dmroot "$l3" && mkfs.xfs -q -f -L dmxfs "$l4"; } >"$EV/dm-mkfs.out" 2>&1
+    check dm-mkfs "$(verdict $?)" "vfat, ext4, btrfs, XFS on $DM_LOOP"
+    mkdir -p "$src"
+    : >"$sums"
+    local i dir
+    for i in 1 2 3 4; do
+        mount "$(part "$DM_LOOP" $i)" "$src" || continue
+        dir=$src
+        if [[ $i -eq 3 ]]; then
+            btrfs subvolume create "$src/@" >/dev/null && btrfs subvolume create "$src/@home" >/dev/null
+            dir=$src/@home
+        fi
+        head -c 3M /dev/urandom >"$dir/data-$i.bin"
+        if [[ $i -eq 2 && -n $person ]]; then
+            head -c 64K /dev/urandom >"$dir/private.bin"
+            chown 1000:1000 "$dir/private.bin" && chmod 0600 "$dir/private.bin"
+        fi
+        (cd "$src" && find . -type f -name '*.bin' -exec sha256sum {} + | sed "s|  \./|  p$i/|") >>"$sums"
+        umount "$src"
+    done
+    run dm-copy "$CLI" backup-disk --device "$DM_LOOP" -o "$copy" --format qcow2
+    check dm-copy "$(verdict $?)" "whole-disk copy of the four partitions"
+
+    run dm-ask "$RPC" mount "$copy"
+    [[ $? -eq 3 ]] && grep -q '"kind": "xfs"' "$EV/dm-ask.out"
+    check dm-ask "$(verdict $?)" "MountImage asks about the disk's own UUIDs (XFS among them)"
+    grep -q 'смонтируйте, оставив повторы\|mount it keeping the duplicates' "$EV/dm-ask.out"
+    check dm-ask-text "$(verdict $?)" "the question is a mount's, not a restore's"
+    run dm-keep "$RPC" mount "$copy" --keep
+    rc=$?
+    check dm-keep "$(verdict $rc)" "MountImage with keep"
+    [[ $rc -eq 0 ]] || return
+    local at
+    at=$(field dm-keep "['mount_point']")
+    ls -la "$at" >"$EV/dm-ls.out" 2>&1
+    [[ $(find "$at" -mindepth 1 -maxdepth 1 -type d -name 'p[1-4]-*' | wc -l) -eq 4 ]]
+    check dm-parts "$(verdict $?)" "four partition folders in $at: $(ls "$at" | tr '\n' ' ')"
+    local ok=0 sum file
+    while read -r sum file; do
+        i=${file%%/*}
+        i=${i#p}
+        local base
+        base=$(echo "$at"/p"$i"-*)
+        local rel=${file#*/}
+        echo "$sum  $base/$rel" | sha256sum -c --quiet >>"$EV/dm-sums.out" 2>&1 || ok=1
+    done <"$sums"
+    check dm-data "$(verdict $ok)" "every file reads back identical (btrfs subvolumes as folders)"
+    grep " $at/p4-[^ ]* xfs .*nouuid" /proc/mounts >"$EV/dm-nouuid.out"
+    check dm-nouuid "$(verdict $?)" "the duplicate XFS is mounted with nouuid"
+    if [[ -n $person ]]; then
+        sudo -u "$person" cat "$at"/p2-*/private.bin >/dev/null 2>"$EV/dm-person.out"
+        check dm-person "$(verdict $?)" "$person reads their own file in the copy"
+        ! sudo -u nobody cat "$at"/p2-*/private.bin >/dev/null 2>&1
+        check dm-others "$(verdict $?)" "another user cannot: the file's own permissions hold"
+    fi
+    ! touch "$at"/p2-*/new.bin 2>/dev/null
+    check dm-ro "$(verdict $?)" "the copy is read-only"
+    run dm-un "$RPC" unmount "$copy"
+    check dm-un "$(verdict $?)" "unmounted"
+    [[ ! -e $at ]] && ! grep -q " $at" /proc/mounts && ! compgen -G '/sys/block/nbd*/pid' >/dev/null
+    check dm-gone "$(verdict $?)" "no folder, mount or NBD device left"
+
+    run dm-vcopy "$CLI" backup "$l2" -o "$vol" --format qcow2
+    check dm-vcopy "$(verdict $?)" "volume copy of the ext4"
+    run dm-vkeep "$RPC" mount "$vol" --keep
+    rc=$?
+    if [[ $rc -eq 0 ]]; then
+        at=$(field dm-vkeep "['mount_point']")
+        [[ -f $at/data-2.bin ]]
+        rc=$?
+        run dm-vun "$RPC" unmount "$vol"
+    fi
+    check dm-volume "$(verdict $rc)" "a volume copy mounts at the point itself"
+    dm_down
+}
+
 for s in "${STAGES[@]}"; do
     case $s in
-        verify | guard | clash | disk | plan | volume | mount | fs | stack | change | mbr) "stage_$s" ;;
+        verify | guard | clash | disk | plan | volume | mount | fs | stack | change | mbr | diskmount) "stage_$s" ;;
         *) echo "unknown stage $s" >&2; FAILS=$((FAILS + 1)) ;;
     esac
 done

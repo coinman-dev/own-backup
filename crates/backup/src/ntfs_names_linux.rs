@@ -59,7 +59,7 @@ use crate::image_fold::{change_through_scratch, ScratchWindow, SharedScratch};
 use crate::sidecar::BlockChecksum;
 
 /// Where the volumes are mounted while their names are deleted. Not under
-/// `/run/own-backup/mounts`: nothing here is the user's to browse.
+/// `engine_linux::MOUNT_BASE`: nothing here is the user's to browse.
 pub(crate) const MOUNT_BASE: &str = "/run/own-backup/ntfs-names";
 
 /// How long ntfs-3g may take to mount, and to write everything back and exit

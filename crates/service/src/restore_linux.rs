@@ -101,7 +101,18 @@ pub(super) fn mount_identity_gate(
             "the mounted copy shares filesystem labels with this machine: /dev/disk/by-label may name either"
         );
     }
-    identity_gate(others, choice)
+    // The restore's question names choices a mount does not have.
+    let list = identity_check_linux::describe(&others);
+    identity_gate(others, choice).map_err(|s| {
+        if s.code() != tonic::Code::FailedPrecondition {
+            return s;
+        }
+        Status::with_details(
+            tonic::Code::FailedPrecondition,
+            tr!("restore_linux.mount_identity_choice", clashes = list).into_owned(),
+            s.details().to_vec().into(),
+        )
+    })
 }
 
 /// A mounted copy is read, not changed: `Change` is a restore's choice.
@@ -223,8 +234,11 @@ fn volume_clashes_against(
 
 /// What mounting `image` here would duplicate: everything it carries
 /// against every device of the machine.
-pub(super) fn image_clashes(image: &Path) -> own_backup_common::Result<Vec<IdentityClashDto>> {
-    volume_clashes_against(image, None, &[], false)
+pub(super) fn image_clashes(
+    image: &Path,
+    keys: Option<&ArchiveKeys>,
+) -> own_backup_common::Result<Vec<IdentityClashDto>> {
+    volume_clashes_against(image, keys, &[], false)
 }
 
 /// The volume restore's reply: the shared summary, the duplicates left as

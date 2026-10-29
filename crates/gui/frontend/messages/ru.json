@@ -1034,6 +1034,8 @@
   "tools_rw_mode": "Разрешить запись",
   "tools_see_explorer": "см. проводник",
   "tools_mounted_msg": "Подключено ({mode}): {where}. Открыть можно в проводнике.",
+  "tools_mounted_msg_linux": "Подключено ({mode}) в папку {where}. У копии целого диска каждый раздел — в своей подпапке (p1-vfat, p3-btrfs…).",
+  "tools_open_folder": "Открыть папку",
   "tools_unmounted_msg": "Образ отключён.",
   "tools_mount_keep_duplicates": "Смонтировать, оставив повторы",
   "tools_blocks": [

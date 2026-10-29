@@ -53,13 +53,15 @@ if [ "$1" = "purge" ]; then
         # A marker in /run/own-backup/frozen is the only record of a file
         # system a killed engine left frozen or read-only; keep it for
         # `own-backup-cli cleanup-snapshots` (or a reboot). An image still
-        # mounted under /run/own-backup/mounts is not descended into.
+        # mounted under /run/own-backup-mounts is left as it is.
         rmdir /run/own-backup/frozen 2>/dev/null || true
         if [ -d /run/own-backup/frozen ]; then
             echo "own-backup: /run/own-backup/frozen is not empty (a file system may still be frozen); kept" >&2
         else
             rm -rf --one-file-system /run/own-backup
         fi
+        # Empty mount points only: a copy still mounted keeps its folder.
+        find /run/own-backup-mounts -depth -type d -empty -delete 2>/dev/null || true
     fi
     # The group own-backup stays: its GID may still own files, and a
     # reinstall would otherwise need every member added again. Remove it

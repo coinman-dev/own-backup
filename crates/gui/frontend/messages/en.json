@@ -1008,6 +1008,8 @@
   "tools_rw_mode": "Allow writing",
   "tools_see_explorer": "see File Explorer",
   "tools_mounted_msg": "Mounted ({mode}): {where}. You can open it in File Explorer.",
+  "tools_mounted_msg_linux": "Mounted ({mode}) on the folder {where}. A whole-disk copy has each partition in a subfolder of its own (p1-vfat, p3-btrfs…).",
+  "tools_open_folder": "Open folder",
   "tools_unmounted_msg": "Image unmounted.",
   "tools_mount_keep_duplicates": "Mount, keeping the duplicates",
   "tools_blocks": [

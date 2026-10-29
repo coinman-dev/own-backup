@@ -26,9 +26,7 @@ use own_backup_snapshot::Snapshot;
 use crate::checksum::compute_block_checksum;
 use crate::engine_platform_linux::LinuxPlatform;
 use crate::linux_device::LinuxRawDevice;
-use crate::sidecar::{
-    read_embedded_sidecar, read_embedded_sidecar_header, read_sidecar, sidecar_path_for,
-};
+use crate::sidecar::{read_embedded_sidecar, read_sidecar, sidecar_path_for};
 
 pub use crate::engine_core::disk_image::{DiskBackupRequest, DiskPartitionBackup};
 pub use crate::engine_core::disk_target::DiskBackupSummary;
@@ -182,10 +180,6 @@ enum LinuxImageReader {
 }
 
 impl LinuxImageReader {
-    fn open(path: &Path, container: &str) -> Result<Self> {
-        Self::open_with(path, container, None)
-    }
-
     /// `key` is the chain key of an encrypted image — without it an `.obk` is
     /// refused by name rather than half-read.
     fn open_with(
@@ -599,7 +593,9 @@ pub fn ensure_nbd_loaded() -> Result<()> {
 }
 
 struct ActiveMount {
-    nbd: crate::nbd_linux::NbdAttachment,
+    /// Each mounted volume's device and folder: the point itself for a
+    /// volume copy, one folder below it per partition of a whole-disk copy.
+    parts: Vec<(crate::nbd_linux::NbdAttachment, PathBuf)>,
     mount_dir: PathBuf,
     /// Every file the mount reads: the image and the parents behind it.
     reads: Vec<PathBuf>,
@@ -675,19 +671,27 @@ fn active_mounts() -> &'static std::sync::Mutex<std::collections::HashMap<PathBu
     ACTIVE_MOUNTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-/// Mount a backup image (qcow2 incl. chains, or VHDX) and return
-/// the mount point. Requires root (mount(2) + /dev/nbdX). The volume inside
-/// is found via the sidecar's `volume_data_offset` — no partition probing.
+/// Mount a backup image (qcow2 incl. chains, VHDX, or an `.obk` opened with
+/// `keys`) and return the mount point. Requires root (mount(2) + /dev/nbdX).
+///
+/// A volume copy mounts at the point itself, its volume found by the
+/// sidecar's `volume_data_offset`. A whole-disk copy mounts each partition it
+/// holds in a folder of its own below the point (`p3-btrfs`), as the disk
+/// manifest places them — partition probing never decides what is mounted.
+/// Every volume is its own NBD device, served from a window of the image, so
+/// no loop device appears that the udev hold does not cover.
+///
+/// `clashes` are the duplicates the person chose to keep: an XFS among them
+/// mounts with `nouuid`.
 pub fn mount_image(image_path: &Path, read_write: bool) -> Result<String> {
-    mount_image_with_options(image_path, read_write, "")
+    mount_image_with_keys(image_path, read_write, None, &[])
 }
 
-/// [`mount_image`] with extra mount options (`nouuid` for an XFS copy beside
-/// the original, from `identity_check_linux::mount_options_for`).
-pub fn mount_image_with_options(
+pub fn mount_image_with_keys(
     image_path: &Path,
     read_write: bool,
-    extra: &str,
+    keys: Option<&crate::seal::context::ArchiveKeys>,
+    clashes: &[own_backup_common::engine_dto::IdentityClashDto],
 ) -> Result<String> {
     {
         let mounts = active_mounts().lock().unwrap();
@@ -696,25 +700,14 @@ pub fn mount_image_with_options(
         }
     }
 
-    let ext = image_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or_default()
-        .to_lowercase();
-    let (info, _manifest) = match read_embedded_sidecar_header(image_path, &ext) {
-        Ok(h) => h,
-        Err(_) => {
-            let sidecar_path = sidecar_path_for(image_path);
-            crate::sidecar::read_sidecar_header(&sidecar_path)?
-        }
-    };
-    let reader = LinuxImageReader::open(image_path, &info.container)?;
-
-    let nbd = crate::nbd_linux::NbdAttachment::attach(Box::new(reader))?;
+    let (sidecar, chain_key) = read_sidecar_for(image_path, keys)?;
+    let open =
+        || LinuxImageReader::open_with(image_path, &sidecar.info.container, chain_key.as_ref());
+    let image_size = open()?.virtual_size();
 
     // SAFETY: geteuid is always safe.
     let base = if unsafe { libc::geteuid() } == 0 {
-        PathBuf::from("/run/own-backup/mounts")
+        PathBuf::from(MOUNT_BASE)
     } else {
         std::env::temp_dir().join("own-backup-mounts")
     };
@@ -723,38 +716,94 @@ pub fn mount_image_with_options(
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "image".into());
     let mount_dir = base.join(stem);
-    std::fs::create_dir_all(&mount_dir)?;
+    browsable_dir(&base)?;
+    browsable_dir(&mount_dir)?;
 
-    // `-o loop,offset=…` puts a loop device over the NBD disk at the volume
-    // start, so the filesystem mounts regardless of nbd partition support.
-    let mode_str = if read_write { "rw" } else { "ro" };
-    let out = std::process::Command::new("mount")
-        .arg("-o")
-        .arg(format!(
-            "{},loop,offset={}{}{}",
-            mode_str,
-            info.volume_data_offset,
-            if extra.is_empty() { "" } else { "," },
-            extra
-        ))
-        .arg(&nbd.device)
-        .arg(&mount_dir)
-        .output()
-        .map_err(|e| OwnBackupError::Device(format!("failed to run mount: {e}")))?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        let _ = nbd.detach();
+    let options = |part: Option<u32>| {
+        let mine: Vec<_> = clashes
+            .iter()
+            .filter(|c| c.part_index == part)
+            .cloned()
+            .collect();
+        crate::identity_check_linux::mount_options_for(&mine)
+    };
+
+    let mut parts = Vec::new();
+    let mounted = match sidecar.disk_manifest.as_ref() {
+        None => {
+            let start = sidecar.info.volume_data_offset;
+            let len = image_size
+                .saturating_sub(start)
+                .min(sidecar.manifest.source_disk.size_bytes.max(1));
+            mount_window(open()?, start, len, &mount_dir, read_write, &options(None))
+                .map(|nbd| parts.push((nbd, mount_dir.clone())))
+        }
+        Some(dm) => {
+            let sector = u64::from(dm.layout.sector_size.max(512));
+            let mut failed = Vec::new();
+            for img in &dm.images {
+                let Some(p) = dm
+                    .layout
+                    .partitions
+                    .iter()
+                    .find(|p| p.index == img.part_index)
+                else {
+                    continue;
+                };
+                let fs: String = img
+                    .filesystem
+                    .to_lowercase()
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                    .collect();
+                let fs = if fs.is_empty() { "data".to_string() } else { fs };
+                // A container copied as ciphertext needs its own password,
+                // which this mount does not ask for.
+                if img.encryption.as_ref().is_some_and(|e| {
+                    e.capture_mode == own_backup_common::image::VolumeCaptureMode::SectorBySector
+                }) {
+                    failed.push(format!("{}: encrypted container", p.index));
+                    continue;
+                }
+                let dir = mount_dir.join(format!("p{}-{fs}", p.index));
+                if let Err(e) = browsable_dir(&dir) {
+                    failed.push(format!("{}: {e}", p.index));
+                    continue;
+                }
+                let start = p.first_lba * sector;
+                let len = (p.last_lba + 1 - p.first_lba) * sector;
+                match open().and_then(|r| {
+                    mount_window(r, start, len, &dir, read_write, &options(Some(p.index)))
+                }) {
+                    Ok(nbd) => parts.push((nbd, dir)),
+                    Err(e) => {
+                        warn!(image = %image_path.display(), part = p.index, error = %e, "partition of the copy not mounted");
+                        let _ = std::fs::remove_dir(&dir);
+                        failed.push(format!("{}: {e}", p.index));
+                    }
+                }
+            }
+            if parts.is_empty() {
+                Err(OwnBackupError::Device(format!(
+                    "no partition of the copy could be mounted ({})",
+                    failed.join("; ")
+                )))
+            } else {
+                Ok(())
+            }
+        }
+    };
+    if let Err(e) = mounted {
         let _ = std::fs::remove_dir(&mount_dir);
-        return Err(OwnBackupError::Device(format!(
-            "mount failed (root required; NTFS needs the ntfs3 driver or ntfs-3g): {err}"
-        )));
+        return Err(e);
     }
 
-    info!(image = %image_path.display(), dir = %mount_dir.display(), "backup mounted ({})", mode_str);
+    let mode_str = if read_write { "rw" } else { "ro" };
+    info!(image = %image_path.display(), dir = %mount_dir.display(), volumes = parts.len(), "backup mounted ({})", mode_str);
     active_mounts().lock().unwrap().insert(
         image_path.to_path_buf(),
         ActiveMount {
-            nbd,
+            parts,
             mount_dir: mount_dir.clone(),
             reads: chain_files(image_path),
         },
@@ -762,31 +811,152 @@ pub fn mount_image_with_options(
     Ok(mount_dir.display().to_string())
 }
 
-/// Unmount a previously mounted image and release its NBD device.
+/// Where the service mounts copies. Not in `/run/own-backup`, which is the
+/// service's own (0750): the person who mounted a copy browses it, and its
+/// files are then guarded by their own permissions, as on any mounted disk.
+pub const MOUNT_BASE: &str = "/run/own-backup-mounts";
+
+/// A folder anyone may pass through and list (the service's umask is 0027).
+fn browsable_dir(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
+/// `len` bytes of the image from `start`: one volume, as its own device.
+struct ImageWindow {
+    image: LinuxImageReader,
+    start: u64,
+    len: u64,
+}
+
+impl crate::block_source::BlockSource for ImageWindow {
+    fn size(&self) -> u64 {
+        self.len
+    }
+
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        if offset.saturating_add(buf.len() as u64) > self.len {
+            return Err(OwnBackupError::Device(format!(
+                "read past the volume: {offset}+{} of {}",
+                buf.len(),
+                self.len
+            )));
+        }
+        self.image.read_at(self.start + offset, buf)
+    }
+}
+
+impl crate::identity_clash::Probe for ImageWindow {
+    fn size(&self) -> u64 {
+        self.len
+    }
+
+    fn read(&mut self, offset: u64, len: usize) -> Option<Vec<u8>> {
+        let mut buf = vec![0u8; len];
+        crate::block_source::BlockSource::read_at(self, offset, &mut buf).ok()?;
+        Some(buf)
+    }
+}
+
+/// Serve a window of the image as an NBD device and mount it on `dir`.
+///
+/// The device is read-only, so whatever a filesystem would write on mount
+/// must be skipped: ext's journal replay (`noload`) and btrfs's log tree
+/// (`rescue=nologreplay`) — a copy taken from a frozen volume has neither,
+/// one taken under a snapshot may. A LUKS or BitLocker container is refused
+/// by name: the kernel would only say it knows no such filesystem.
+fn mount_window(
+    image: LinuxImageReader,
+    start: u64,
+    len: u64,
+    dir: &Path,
+    read_write: bool,
+    extra: &str,
+) -> Result<crate::nbd_linux::NbdAttachment> {
+    use crate::identity_clash::{identities_of, IdentityKind};
+    let mut window = ImageWindow { image, start, len };
+    let kinds: Vec<IdentityKind> = identities_of(&mut window)
+        .into_iter()
+        .map(|i| i.kind)
+        .collect();
+    if kinds.contains(&IdentityKind::Luks) {
+        return Err(OwnBackupError::Device("encrypted container".into()));
+    }
+    let mut opts = vec![if read_write { "rw" } else { "ro" }];
+    if !read_write {
+        if kinds.contains(&IdentityKind::Ext) {
+            opts.push("noload");
+        }
+        if kinds.contains(&IdentityKind::Btrfs) {
+            opts.push("rescue=nologreplay");
+        }
+    }
+    if !extra.is_empty() {
+        opts.push(extra);
+    }
+
+    let nbd = crate::nbd_linux::NbdAttachment::attach(Box::new(window))?;
+    let out = std::process::Command::new("mount")
+        .arg("-o")
+        .arg(opts.join(","))
+        .arg(&nbd.device)
+        .arg(dir)
+        .output()
+        .map_err(|e| OwnBackupError::Device(format!("failed to run mount: {e}")));
+    let out = match out {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = nbd.detach();
+            return Err(e);
+        }
+    };
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let _ = nbd.detach();
+        return Err(OwnBackupError::Device(format!("mount failed: {err}")));
+    }
+    Ok(nbd)
+}
+
 pub fn unmount_image(image_path: &Path) -> Result<()> {
     let entry = active_mounts().lock().unwrap().remove(image_path);
-    let Some(entry) = entry else {
+    let Some(mut entry) = entry else {
         return Err(OwnBackupError::Config(format!(
             "{} is not mounted by this service",
             image_path.display()
         )));
     };
 
-    let out = std::process::Command::new("umount")
-        .arg(&entry.mount_dir)
-        .output()
-        .map_err(|e| OwnBackupError::Device(format!("failed to run umount: {e}")))?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        // Put the entry back so a later retry can still find it.
-        active_mounts()
-            .lock()
-            .unwrap()
-            .insert(image_path.to_path_buf(), entry);
-        return Err(OwnBackupError::Device(format!("umount failed: {err}")));
+    // Last mounted, first released; what does not let go stays recorded, so
+    // a later retry can still find it.
+    while let Some((nbd, dir)) = entry.parts.pop() {
+        let out = std::process::Command::new("umount")
+            .arg(&dir)
+            .output()
+            .map_err(|e| OwnBackupError::Device(format!("failed to run umount: {e}")));
+        let failed = match out {
+            Ok(o) if o.status.success() => None,
+            Ok(o) => Some(format!(
+                "umount failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            )),
+            Err(e) => Some(e.to_string()),
+        };
+        if let Some(err) = failed {
+            entry.parts.push((nbd, dir));
+            active_mounts()
+                .lock()
+                .unwrap()
+                .insert(image_path.to_path_buf(), entry);
+            return Err(OwnBackupError::Device(err));
+        }
+        nbd.detach()?;
+        if dir != entry.mount_dir {
+            let _ = std::fs::remove_dir(&dir);
+        }
     }
-
-    entry.nbd.detach()?;
     let _ = std::fs::remove_dir(&entry.mount_dir);
     info!(image = %image_path.display(), "backup unmounted");
     Ok(())
@@ -1870,7 +2040,7 @@ mod tests {
     /// The bytes of `image` at `offset`, read through its chain.
     fn image_at(image: &Path, offset: u64, len: usize) -> Vec<u8> {
         let sidecar = read_embedded_sidecar(image, "qcow2").unwrap();
-        let mut r = LinuxImageReader::open(image, &sidecar.info.container).unwrap();
+        let mut r = LinuxImageReader::open_with(image, &sidecar.info.container, None).unwrap();
         let mut out = vec![0u8; len];
         r.read_at(offset, &mut out).unwrap();
         out
