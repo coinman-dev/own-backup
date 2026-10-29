@@ -606,6 +606,34 @@ pub fn find_release_iso_of_upstream(
     find_release_iso(releases, &version).map(|r| (version, r))
 }
 
+/// The ready medium of the newest release that has one, whatever version is
+/// installed here (owner, 29.10): a test build's own revision is never
+/// released, and a newer medium reads what an older program wrote. Drafts
+/// are skipped; the newest is the latest `published_at`, not GitHub's order.
+/// The version is the release tag's in Debian's spelling (`v0.1.8-beta` →
+/// `0.1.8~beta`), with the medium's revision when it has one, as
+/// [`find_release_iso_of_upstream`] picks it.
+pub fn find_latest_release_iso(releases: &serde_json::Value) -> Option<(String, ReleaseIso)> {
+    let mut published: Vec<&serde_json::Value> = releases
+        .as_array()?
+        .iter()
+        .filter(|r| r.get("draft").and_then(|d| d.as_bool()) != Some(true))
+        .collect();
+    let date = |r: &serde_json::Value| {
+        r.get("published_at")
+            .and_then(|d| d.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    // Stable: releases published at the same moment keep GitHub's order.
+    published.sort_by_key(|r| std::cmp::Reverse(date(r)));
+    published.into_iter().find_map(|r| {
+        let tag = r.get("tag_name")?.as_str()?;
+        let upstream = deb_upstream(tag.strip_prefix('v').unwrap_or(tag));
+        find_release_iso_of_upstream(&serde_json::Value::Array(vec![r.clone()]), &upstream)
+    })
+}
+
 /// Revisions compared by their leading number: `10` after `9`.
 fn revision_key(rev: &str) -> (u64, String) {
     let digits: String = rev.chars().take_while(|c| c.is_ascii_digit()).collect();
@@ -626,6 +654,43 @@ pub fn sha256_listed(sums: &str, name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The newest published release with a medium wins, whatever is
+    /// installed: drafts and releases without one are passed over, and the
+    /// date decides, not the order of GitHub's answer.
+    #[test]
+    fn the_latest_release_with_a_medium_is_found() {
+        let asset = |name: &str| {
+            serde_json::json!({
+                "name": name,
+                "size": 7,
+                "browser_download_url": format!("https://github.com/x/releases/download/t/{name}"),
+            })
+        };
+        let releases = serde_json::json!([
+            { "tag_name": "v0.1.9-beta", "draft": true, "published_at": null,
+              "assets": [asset("OwnBackup-Linux-0.1.9.beta_amd64.iso")] },
+            { "tag_name": "v0.1.6-beta", "draft": false, "published_at": "2026-10-10T10:00:00Z",
+              "assets": [asset("OwnBackup-Linux-0.1.6.beta-1_amd64.iso"), asset("SHA256SUMS")] },
+            { "tag_name": "v0.1.8-beta", "draft": false, "published_at": "2026-10-28T10:00:00Z",
+              "assets": [asset("OwnBackup-Linux-0.1.8.beta_amd64.iso"), asset("SHA256SUMS")] },
+            { "tag_name": "v0.1.8-hotfix", "draft": false, "published_at": "2026-10-29T10:00:00Z",
+              "assets": [asset("OwnBackup-Setup.exe")] },
+        ]);
+        let (version, r) = find_latest_release_iso(&releases).unwrap();
+        assert_eq!(version, "0.1.8~beta");
+        assert_eq!(r.tag, "v0.1.8-beta");
+        assert_eq!(r.name, "OwnBackup-Linux-0.1.8.beta_amd64.iso");
+        assert_eq!(r.sums_urls.len(), 1);
+
+        // Only an older release with a revised medium: that one, revision and all.
+        let older = serde_json::json!([releases[1].clone()]);
+        let (version, r) = find_latest_release_iso(&older).unwrap();
+        assert_eq!(version, "0.1.6~beta-1");
+        assert_eq!(r.name, "OwnBackup-Linux-0.1.6.beta-1_amd64.iso");
+
+        assert!(find_latest_release_iso(&serde_json::json!([releases[3].clone()])).is_none());
+    }
 
     #[test]
     fn windows_takes_the_highest_revision_of_its_version_in_the_newest_release() {
