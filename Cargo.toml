@@ -31,7 +31,7 @@ gtk3-macros = { path = "vendor/gtk3-macros" }
 binrw = { path = "vendor/binrw" }
 
 [workspace.package]
-version = "0.1.8-beta"
+version = "0.1.9-beta"
 edition = "2021"
 # Source-available, free for noncommercial use (PolyForm Noncommercial 1.0.0);
 # commercial use requires a separate license — see LICENSE / COMMERCIAL-LICENSE.md.

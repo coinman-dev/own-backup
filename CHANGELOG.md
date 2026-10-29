@@ -2,7 +2,7 @@
 
 # Changelog
 
-## Unreleased
+## 0.1.9-beta — 2026-10-29
 
 ### Added
 
@@ -50,11 +50,15 @@
   month, a missed one after start-up) and before the copy of jobs that tick
   "Clean the disk before the copy". The set is what is ticked on the
   Cleanup page (files by masks excluded); the result goes into Activity.
+- **Cleanup profiles.** What is ticked on the Cleanup page can be saved
+  under a name, opened again and deleted; a job's Cleanup tab chooses the
+  profile to clean the disk by before its copy.
 - **Cleanup: Windows components by Windows' own means** — through Disk
   Cleanup's handlers: update cleanup (WinSxS), the previous Windows
   installation (Windows.old), Delivery Optimization files, setup temporary
   files and logs, Defender's files, old driver packages, ESD installation
-  files. Removed from an administrator's window only.
+  files. Only a computer's administrator removes them (the window need not
+  be run "as administrator" — the service does the work).
 - **Cleanup: files by masks** (off by default) — a list of masks as in Ace
   Utilities (temporary files and junk on; backups, logs, `*.chk` off), own
   masks, but carefully: only in the users' profiles and in folders an administrator
@@ -72,8 +76,18 @@
   the service for itself alone and only for the cleanup; the **Files** list
   shows what each registry entry holds.
 
+### Fixed
+
+- **Linux: mounting a whole-disk copy.** The service mounted a whole-disk
+  copy as one volume and got an ntfs-3g error; each partition is mounted on
+  its own now, the folder is visible to the user (`/run/own-backup-mounts`)
+  and the window shows it with an "Open folder" button.
+
 ### Changed
 
+- **The ready-made boot medium from GitHub** comes from the latest release
+  that has one, not only from the installed version's release.
+- **"Add backup"** is a green button, like "Back up now".
 - **The chain number in backup file names.** A new full starts the next
   number and its versions carry it: `Disk_C_Win11_disk4_3-full_….obk`,
   `Disk_C_Win11_disk4_3-inc_….obk`, so it is plain which full an increment
