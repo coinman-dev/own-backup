@@ -1,0 +1,40 @@
+[package]
+name = "own-backup-cleanup"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+
+# Disk cleanup (the window's «Очистка»): what can be removed, how much it
+# takes, and removing it — in the service, for the system and for each chosen
+# user. Windows first (PLAN §6б); on Linux the catalogue is empty.
+[dependencies]
+own-backup-common = { workspace = true }
+rust-i18n = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+# history.rs: keeping a browser's last days of history, edited on a copy.
+rusqlite = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Registry",
+    # Which browsers are open (users::running_programs): their folders are left.
+    "Win32_System_Diagnostics_ToolHelp",
+    # volume_cache.rs: Windows' own cleanup handlers (Disk Cleanup's), through COM.
+    "Win32_System_Com",
+    "Win32_UI_LegacyWindowsEnvironmentFeatures",
+    "implement",
+] }
+# The `implement` macro names it at the crate root.
+windows-core = "0.58"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# users.rs: a user's own rights for the thread that cleans their folders.
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

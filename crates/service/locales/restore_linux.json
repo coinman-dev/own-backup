@@ -4,6 +4,10 @@
     "ru": "Копия содержит идентификаторы, которые уже есть на этой машине: %{clashes}. Выберите явно: оставить повторы как есть, сменить их у восстановленной копии (по желанию — с правкой её fstab, crypttab и загрузчика) или восстановить на другую машину.",
     "en": "The copy carries identities this machine already has: %{clashes}. Choose explicitly: keep the duplicates as they are, change them on the restored copy (optionally fixing its fstab, crypttab and boot loader too), or restore on another machine."
   },
+  "restore_linux.mount_identity_choice": {
+    "ru": "Копия содержит идентификаторы, которые уже есть на этой машине: %{clashes}. Так бывает с копией дисков этой же машины. Подключить её только для чтения это не мешает — смонтируйте, оставив повторы. Пока копия подключена, поиск разделов по UUID или метке может найти её вместо оригинала.",
+    "en": "The copy carries identities this machine already has: %{clashes}. That is what a copy of this machine's own disks does. It does not stop a read-only mount — mount it keeping the duplicates. While it is mounted, a search for a partition by UUID or label may find the copy instead of the original."
+  },
   "restore_linux.mount_cannot_change": {
     "ru": "Подключённую копию нельзя переименовать: смена идентификаторов делается только при восстановлении. Смонтируйте, оставив повторы как есть.",
     "en": "A mounted copy cannot be re-identified: identities are changed only by a restore. Mount it keeping the duplicates as they are."

@@ -270,6 +270,8 @@ export interface PlatformInfo {
   ui_log_dir: string | null;
   /** The service's log folder where it is fixed (Linux); null on Windows. */
   service_log_dir: string | null;
+  /** The section to open at start (a window started again as an administrator). */
+  start_view?: string | null;
 }
 
 /** What the service's backup engine and scheduler carry out
@@ -347,6 +349,7 @@ export type ViewName =
   | 'boot'
   | 'tools'
   | 'activity'
+  | 'cleanup'
   | 'settings'
   | 'about';
 
@@ -498,6 +501,10 @@ export interface AdvancedConfig {
   low_priority: boolean;
   /** Cap on the read speed, MB/s; 0 = none. */
   speed_limit_mbps: number;
+  /** Clean the disk before the copy… */
+  cleanup_before?: boolean;
+  /** …by this cleanup profile (its id); empty: the automatic cleanup's set. */
+  cleanup_profile?: string;
 }
 
 /** Byte totals per file category — real data from the backup walk. */
@@ -519,6 +526,8 @@ export interface VerificationConfig {
 export interface JobRun {
   operation?: string;
   verification?: JobVerifySummary | null;
+  /** What a disk cleanup removed (`operation: 'cleanup'`). */
+  cleanup?: CleanupSummary | null;
   id: string;
   job_id: string;
   job_name: string;
@@ -1326,4 +1335,149 @@ export interface HiddenVolume {
   size_bytes: number;
   filesystem: string;
   label: string;
+}
+
+// --- «Очистка» (service/src/cleanup.rs) -----------------------------------
+
+/** A text kept in both languages (history read by a window of either). */
+export interface Localized {
+  ru: string;
+  en: string;
+}
+
+/** The automatic cleanup: what the service cleans by itself and when. */
+export interface CleanupProfile {
+  schedule: Pick<ScheduleConfig, 'days' | 'time' | 'day_of_month' | 'run_missed' | 'missed_delay_min'> & {
+    kind: 'none' | 'daily' | 'weekly' | 'monthly';
+  } & Partial<ScheduleConfig>;
+  items: string[];
+  users: string[];
+  options: CleanupOptions;
+  /** Kept by the service: who saved it. */
+  owner?: string | null;
+  admin?: boolean;
+  /** When the schedule last ran it. */
+  last_run?: string | null;
+}
+
+/** A cleanup set saved under a name («Сохранить профиль как…»): a job's
+ *  cleanup before the copy cleans by one. */
+export interface CleanupNamedProfile {
+  /** Given by the service. */
+  id?: string;
+  name: string;
+  items: string[];
+  users: string[];
+  options: CleanupOptions;
+  owner?: string | null;
+  admin?: boolean;
+}
+
+export interface CleanupSummary {
+  /** "" — from the window; "schedule"; "before_backup" (the job is the run's job_name). */
+  trigger?: string;
+  files: number;
+  bytes: number;
+  left_files: number;
+  left_bytes: number;
+  /** Registry entries removed. */
+  entries?: number;
+  items: Localized[];
+}
+
+export interface CleanupItem {
+  id: string;
+  label: string;
+  about: string;
+  default_on: boolean;
+  /** Cleaned in each chosen user's folders. */
+  per_user: boolean;
+  /** Cleaned only after its list of files was looked through (junk by masks). */
+  review?: boolean;
+  /** Windows' own components: removed from an administrator's window only. */
+  admin_only?: boolean;
+}
+
+export interface CleanupGroup {
+  id: string;
+  label: string;
+  items: CleanupItem[];
+}
+
+export interface CleanupUser {
+  sid: string;
+  name: string;
+  /** The person at the window. */
+  me: boolean;
+  /** Whether this window may clean the user's folders (administrator: anyone). */
+  allowed: boolean;
+}
+
+export interface CleanupCatalog {
+  groups: CleanupGroup[];
+  users: CleanupUser[];
+  /** The window may add folders to the junk search (administrator). */
+  admin?: boolean;
+  /** The junk masks and age offered. */
+  junk?: CleanupJunk;
+  /** Every junk mask offered, with its kind and what it finds. */
+  masks?: CleanupMask[];
+}
+
+export interface CleanupMask {
+  mask: string;
+  kind: 'temp' | 'junk' | 'build' | 'backup' | 'log' | 'recovered';
+  kind_label: string;
+  about: string;
+  default_on: boolean;
+}
+
+/** What the junk search looks for and where. */
+export interface CleanupJunk {
+  masks: string[];
+  /** Only files unchanged for this many days. */
+  age_days: number;
+  /** Folders searched besides the users' profiles (administrator only). */
+  folders: string[];
+}
+
+export interface CleanupTally {
+  files: number;
+  bytes: number;
+  left_files: number;
+  left_bytes: number;
+  /** History entries removed (or to be) from a database cut to its last days. */
+  records?: number;
+  /** Registry entries removed (or to be): the Run box's list, recent documents. */
+  entries?: number;
+}
+
+export interface CleanupReport {
+  /** `running`: programs that were open, whose folders were left. */
+  items: ({ id: string; running?: string[] } & CleanupTally)[];
+  total: CleanupTally;
+  cancelled: boolean;
+}
+
+/** `cleanup-progress`: one item's tally so far. */
+export interface CleanupProgress extends CleanupTally {
+  mode: 'analyze' | 'run';
+  item: string;
+}
+
+/** A page of the files an analysis found for one item. */
+export interface CleanupFilesPage {
+  /** Files matching the filter, and their size. */
+  total: number;
+  bytes: number;
+  /** The analysis found more than it lists. */
+  truncated: boolean;
+  files: { path: string; size: number; modified: string | null }[];
+}
+
+/** What a cleanup is asked besides the items. */
+export interface CleanupOptions {
+  /** Keep this many last days of browser history (0: remove it all). */
+  history_keep_days: number;
+  junk?: CleanupJunk;
 }

@@ -1,13 +1,13 @@
-//! The ready Linux boot medium from GitHub instead of a build. The release
-//! of the installed package (`OwnBackup-Linux-<version>_amd64.iso`, see
-//! `media_linux::release_asset_name`) is looked up and downloaded here, in
-//! the person's own process, straight into their folder: no root, no
-//! password, nothing for the service to do. `curl` (a dependency of the
+//! The ready Linux boot medium from GitHub instead of a build. The newest
+//! release that has one (`OwnBackup-Linux-<version>_amd64.iso`, see
+//! `media_linux::find_latest_release_iso`) — whatever version is installed:
+//! a test build's revision is never released — is looked up and downloaded
+//! here, in the person's own process, straight into their folder: no root,
+//! no password, nothing for the service to do. `curl` (a dependency of the
 //! package) does the HTTPS, with the system's certificates.
 //!
-//! Windows, which cannot build that medium, downloads it the same way: the
-//! medium of this program's version (the package revision is unknown here,
-//! so the highest one the release has), with Windows' own `curl.exe`.
+//! Windows, which cannot build that medium, downloads it the same way, with
+//! Windows' own `curl.exe`.
 //!
 //! The file is written under a hidden temporary name beside the result,
 //! checked against the size GitHub lists and the release's SHA256SUMS, and
@@ -20,7 +20,8 @@ use serde::Serialize;
 /// What the window offers before downloading.
 #[derive(Debug, Clone, Serialize)]
 pub struct LinuxMediaReleaseDto {
-    /// The installed package's version, which the medium carries.
+    /// The version the medium carries (the release's, not necessarily the
+    /// installed one).
     pub version: String,
     pub tag: String,
     pub size: u64,
@@ -44,8 +45,8 @@ pub struct LinuxMediaDownloadProgress {
     pub total: u64,
 }
 
-/// The release that has the installed version's medium; `None` when no
-/// release has it (or the repository cannot be seen).
+/// The newest release that has a medium; `None` when none has (or the
+/// repository cannot be seen).
 #[tauri::command]
 pub async fn linux_media_release() -> Result<Option<LinuxMediaReleaseDto>, String> {
     #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -241,17 +242,8 @@ mod imp {
         String::from_utf8(out.stdout).map_err(|_| Fetch::Failed(bad_answer()))
     }
 
-    /// The installed version and the release with its medium.
-    /// On Windows the version is this program's, in Debian's spelling
-    /// (`0.1.6-beta` → `0.1.6~beta`), and the revision comes from the release.
+    /// The newest release with a medium, and the version it carries.
     pub fn find() -> Result<Option<(String, ReleaseIso)>, String> {
-        #[cfg(target_os = "linux")]
-        let version = {
-            use own_backup_backup::media_linux_build::{installed, PACKAGE};
-            installed(Path::new("/"), PACKAGE)
-                .map_err(|_| tr!("linux_media_dl.not_installed").into_owned())?
-                .version
-        };
         let text = match fetch_text(&github_releases_url(), "application/vnd.github+json") {
             Ok(t) => t,
             // A private repository answers 404 too: nothing to download.
@@ -259,15 +251,7 @@ mod imp {
             Err(Fetch::Failed(m)) => return Err(m),
         };
         let releases: serde_json::Value = serde_json::from_str(&text).map_err(|_| bad_answer())?;
-        #[cfg(target_os = "linux")]
-        let found = own_backup_backup::media_linux::find_release_iso(&releases, &version)
-            .map(|r| (version, r));
-        #[cfg(target_os = "windows")]
-        let found = own_backup_backup::media_linux::find_release_iso_of_upstream(
-            &releases,
-            &own_backup_backup::media_linux::deb_upstream(env!("CARGO_PKG_VERSION")),
-        );
-        Ok(found)
+        Ok(own_backup_backup::media_linux::find_latest_release_iso(&releases))
     }
 
     /// Removes the temporary file unless it was given its name.

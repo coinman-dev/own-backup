@@ -22,7 +22,7 @@
 
 ### Установка
 
-1. Запустите `own-backup-install_0.1.8-beta.exe` и подтвердите запрос администратора.
+1. Запустите `own-backup-install_0.1.9-beta.exe` и подтвердите запрос администратора.
 2. Выберите язык мастера (русский или английский) и пройдите его.
 
 Установщик кладёт программу в `C:\Program Files\OwnBackup` для всех
@@ -38,8 +38,8 @@
 ### Тихая установка
 
 ```
-own-backup-install_0.1.8-beta.exe /S
-own-backup-install_0.1.8-beta.exe /S /D=D:\Programs\OwnBackup
+own-backup-install_0.1.9-beta.exe /S
+own-backup-install_0.1.9-beta.exe /S /D=D:\Programs\OwnBackup
 ```
 
 `/S` ставит без вопросов. `/D=<папка>`, обязательно последним аргументом,
@@ -66,7 +66,7 @@ own-backup-install_0.1.8-beta.exe /S /D=D:\Programs\OwnBackup
 ### Установка
 
 ```bash
-sudo apt install ./own-backup_0.1.8.beta_amd64.deb
+sudo apt install ./own-backup_0.1.9.beta_amd64.deb
 ```
 
 Пакет кладёт окно и командную строку в `/usr/bin`, службу — в

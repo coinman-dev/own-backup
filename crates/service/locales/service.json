@@ -224,6 +224,62 @@
     "ru": "читать разделы Linux напрямую может только root",
     "en": "only root may read Linux partitions directly"
   },
+  "grpc_server.cleanup_windows_only": {
+    "ru": "Очистки диска здесь нет: она есть в Windows и Linux, но не на загрузочном носителе.",
+    "en": "There is no disk cleanup here: it is on Windows and Linux, not on the boot medium."
+  },
+  "grpc_server.cleanup_busy": {
+    "ru": "Анализ или очистка уже идёт — дождитесь конца или отмените.",
+    "en": "An analysis or a cleanup is already running — wait for it to end or cancel it."
+  },
+  "grpc_server.cleanup_not_allowed": {
+    "ru": "Чистить папки пользователя «%{user}» может только администратор компьютера.",
+    "en": "Only a computer's administrator may clean the folders of the user \"%{user}\"."
+  },
+  "grpc_server.cleanup_not_analyzed": {
+    "ru": "Список файлов есть только после анализа — нажмите «Анализ».",
+    "en": "The list of files exists only after an analysis — press “Analyse”."
+  },
+  "grpc_server.cleanup_review_first": {
+    "ru": "Файлы по маскам удаляются только по просмотренному списку — нажмите «Анализ» и откройте «Файлы».",
+    "en": "Files by masks are removed only from a list you have looked through — press “Analyse” and open “Files”."
+  },
+  "grpc_server.cleanup_bad_mask": {
+    "ru": "Маска «%{mask}» не подходит: нужно только имя файла, и она не должна захватывать обычные файлы — документы, фото, программы (как *.*, *.d* или K*).",
+    "en": "The mask \"%{mask}\" will not do: a file name only, and one that does not take ordinary files — documents, photos, programs (as *.*, *.d* or K* would)."
+  },
+  "grpc_server.cleanup_admin_only": {
+    "ru": "«%{item}» удаляет только администратор компьютера.",
+    "en": "\"%{item}\" is removed only by a computer's administrator."
+  },
+  "grpc_server.cleanup_not_scheduled": {
+    "ru": "«%{item}» не чистится автоматически: эти файлы удаляются только после просмотра списка.",
+    "en": "\"%{item}\" is not cleaned automatically: those files go only after their list was looked through."
+  },
+  "grpc_server.cleanup_bad_name": {
+    "ru": "Назовите профиль: от 1 до 80 знаков.",
+    "en": "Name the profile: 1 to 80 characters."
+  },
+  "grpc_server.cleanup_not_yours": {
+    "ru": "Профиль «%{name}» сохранил другой пользователь — изменить или удалить его может он или администратор компьютера. Сохраните свой под другим названием.",
+    "en": "The profile \"%{name}\" was saved by another user — only they or a computer's administrator may change or delete it. Save yours under another name."
+  },
+  "grpc_server.cleanup_profile_in_use": {
+    "ru": "По этому профилю чистят диск задания: %{jobs}. Сначала выберите им другой профиль.",
+    "en": "Jobs clean the disk by this profile: %{jobs}. Choose another profile for them first."
+  },
+  "grpc_server.cleanup_no_profile": {
+    "ru": "Профиля очистки, выбранного в задании, больше нет.",
+    "en": "The cleanup profile the job chose is no longer there."
+  },
+  "grpc_server.cleanup_folders_admin_only": {
+    "ru": "Искать мусор в других папках может только администратор компьютера.",
+    "en": "Only a computer's administrator may search for junk in other folders."
+  },
+  "grpc_server.cleanup_unknown": {
+    "ru": "Нет такого пункта очистки или пользователя: %{what}.",
+    "en": "No such cleanup item or user: %{what}."
+  },
   "grpc_server.linux_browse_disk": {
     "ru": "Диск %{number}",
     "en": "Disk %{number}"

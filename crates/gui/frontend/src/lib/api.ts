@@ -42,6 +42,12 @@ import type {
   LinuxMediaReport,
   LinuxMediaStatus,
   LinuxMediaRelease,
+  CleanupCatalog,
+  CleanupFilesPage,
+  CleanupOptions,
+  CleanupProfile,
+  CleanupNamedProfile,
+  CleanupReport,
   LinuxMediaDownload,
   ServiceStatus,
   MountBackendStatus,
@@ -82,6 +88,25 @@ export const api = {
     invoke<MediaStickReport>('write_media_stick', { options }),
   // Linux: the medium built by the service from the installed package.
   linuxMediaStatus: () => invoke<LinuxMediaStatus>('linux_media_status'),
+  /** «Очистка» (Windows): the catalogue, an analysis, the cleanup, its cancel.
+   *  Progress comes on `cleanup-progress`. */
+  cleanupCatalog: () => invoke<CleanupCatalog>('cleanup', { op: { op: 'catalog' } }),
+  cleanupAnalyze: (items: string[], users: string[], options: CleanupOptions) =>
+    invoke<CleanupReport>('cleanup', { op: { op: 'analyze', items, users, options } }),
+  /** `exclude`: files of the analysis' list the window unticked — they stay. */
+  cleanupRun: (items: string[], users: string[], options: CleanupOptions, exclude: string[] = []) =>
+    invoke<CleanupReport>('cleanup', { op: { op: 'run', items, users, options, exclude } }),
+  cleanupCancel: () => invoke<unknown>('cleanup', { op: { op: 'cancel' } }),
+  /** The automatic cleanup's set, and saving it. */
+  cleanupProfile: () => invoke<CleanupProfile>('cleanup', { op: { op: 'profile' } }),
+  cleanupSaveProfile: (profile: CleanupProfile) =>
+    invoke<CleanupProfile>('cleanup', { op: { op: 'save_profile', profile } }),
+  cleanupProfiles: () => invoke<CleanupNamedProfile[]>('cleanup', { op: { op: 'profiles' } }),
+  cleanupSaveNamed: (profile: CleanupNamedProfile) =>
+    invoke<CleanupNamedProfile>('cleanup', { op: { op: 'save_named', profile } }),
+  cleanupDeleteNamed: (id: string) => invoke<object>('cleanup', { op: { op: 'delete_named', id } }),
+  cleanupFiles: (item: string, offset: number, limit: number, sort: 'size' | 'path', filter: string) =>
+    invoke<CleanupFilesPage>('cleanup', { op: { op: 'files', item, offset, limit, sort, filter } }),
   buildLinuxMedia: (options: LinuxMediaBuild) =>
     invoke<LinuxMediaReport>('build_linux_media', { options }),
   // Linux: the ready medium of the installed version from GitHub, downloaded
@@ -280,6 +305,9 @@ export const api = {
   serviceHealth: () => invoke<ServiceHealth>('service_health'),
   /** Which system the window runs on, its service channel and log folders. */
   platformInfo: () => invoke<PlatformInfo>('platform_info'),
+  /** Start the window again as an administrator (UAC), opening at `view`;
+   *  `false` when the person said no. */
+  relaunchElevated: (view: string) => invoke<boolean>('relaunch_elevated', { view }),
   /** Active keyboard layout; null where it cannot be told (non-Windows). */
   keyboardLayout: () => invoke<KeyboardLayout | null>('keyboard_layout'),
   /** Layout and Caps Lock for a password field, taskbar or not. */

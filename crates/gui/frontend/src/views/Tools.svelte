@@ -77,6 +77,8 @@
   // Functions, not strings: a banner outlives the render it was made in and
   // must follow a change of language. An error the service sent stays as it is.
   let mountMsg: (() => string) | null = $state(null);
+  /** Linux: the folder the copy was mounted on, for «Открыть папку». */
+  let mountFolder: string | null = $state(null);
   let mountErr: string | null = $state(null);
   /** The service asked about identities the copy shares with this machine's
    *  own devices (Linux): what it said, and the secret to retry with. */
@@ -195,12 +197,23 @@
   async function mountWith(secret?: ArchiveSecret, identityChoice?: 'keep') {
     mountBusy = true;
     mountMsg = null;
+    mountFolder = null;
     mountErr = null;
     mountClash = null;
     isRefreshingDisks = true;
     try {
-      await api.mountBackup(toolsState.mountPath, toolsState.rwMode, secret, identityChoice);
+      const point = await api.mountBackup(toolsState.mountPath, toolsState.rwMode, secret, identityChoice);
       await Promise.all([loadData(), refreshVolumes()]);
+      if (!isWindows()) {
+        const rw = toolsState.rwMode;
+        mountFolder = point;
+        mountMsg = () =>
+          m.tools_mounted_msg_linux({
+            mode: rw ? m.tools_mode_rw() : m.tools_mode_ro(),
+            where: point,
+          });
+        return;
+      }
       // The disk may need a moment for Windows to assign a letter; poll briefly.
       let letters = mountedLettersFor(toolsState.mountPath);
       for (let i = 0; i < 10 && letters.every(l => l.startsWith(m.tools_disk())); i++) {
@@ -244,6 +257,7 @@
     isRefreshingDisks = true;
     try {
       await api.unmountBackup(toolsState.mountPath);
+      mountFolder = null;
       mountMsg = m.tools_unmounted_msg;
       await Promise.all([loadData(), refreshVolumes()]);
     } catch (e) {
@@ -341,7 +355,15 @@
         </button>
       </div>
     </div>
-    {#if mountMsg}<div class="banner ok">{mountMsg()}</div>{/if}
+    {#if mountMsg}
+      <div class="banner ok">
+        {mountMsg()}
+        {#if mountFolder}
+          <div><button class="btn" onclick={() => mountFolder && api.openFolder(mountFolder).catch((e) => (mountErr = String(e)))}
+            >{m.tools_open_folder()}</button></div>
+        {/if}
+      </div>
+    {/if}
     {#if mountErr}<div class="banner err">{mountErr}</div>{/if}
     {#if mountClash}
       <div class="banner err">

@@ -14,6 +14,7 @@ members = [
     "crates/gui",
     "crates/shell",
     "crates/tc-plugin",
+    "crates/cleanup",
 ]
 resolver = "2"
 exclude = ["vendor/glib", "vendor/glib-macros", "vendor/gtk3-macros"]
@@ -30,7 +31,7 @@ gtk3-macros = { path = "vendor/gtk3-macros" }
 binrw = { path = "vendor/binrw" }
 
 [workspace.package]
-version = "0.1.8-beta"
+version = "0.1.9-beta"
 edition = "2021"
 # Source-available, free for noncommercial use (PolyForm Noncommercial 1.0.0);
 # commercial use requires a separate license — see LICENSE / COMMERCIAL-LICENSE.md.
@@ -115,6 +116,7 @@ own-backup-metadata = { path = "crates/metadata" }
 own-backup-scheduler = { path = "crates/scheduler" }
 own-backup-core = { path = "crates/core" }
 own-backup-client = { path = "crates/client" }
+own-backup-cleanup = { path = "crates/cleanup" }
 
 # Argon2id is deliberately expensive, and an unoptimised build makes it
 # absurdly so: the production profile (256 MiB, 3 passes) takes ~10 s per

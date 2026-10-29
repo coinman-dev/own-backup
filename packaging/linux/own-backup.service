@@ -5,7 +5,7 @@
 # mount namespace — PrivateTmp, PrivateDevices, ProtectSystem, ProtectHome,
 # ProtectKernelTunables/Modules/Logs, ProtectControlGroups, ReadOnlyPaths,
 # InaccessiblePaths, TemporaryFileSystem, PrivateMounts. Inside such a
-# namespace an image the engine mounts (/run/own-backup/mounts) is invisible to
+# namespace an image the engine mounts (/run/own-backup-mounts) is invisible to
 # the user, and the read-only remount of a busy ESP around its copy would
 # change only the service's private view while the real one stays writable.
 # Destinations are arbitrary paths (/home, /media, NFS/SMB), and the engine
@@ -33,7 +33,8 @@ TimeoutStopSec=330
 # are not killed under it while it cleans up; whatever is left is killed after.
 KillMode=mixed
 # /var/lib/own-backup (jobs, history, settings, keys), /var/log/own-backup,
-# /run/own-backup (socket, token, freeze markers, mount points).
+# /run/own-backup (socket, token, freeze markers); mounted copies are in
+# /run/own-backup-mounts, which the engine makes itself (0755).
 StateDirectory=own-backup
 StateDirectoryMode=0750
 LogsDirectory=own-backup

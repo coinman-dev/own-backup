@@ -24,6 +24,7 @@ own-backup-restore = { workspace = true }
 own-backup-metadata = { workspace = true }
 own-backup-scheduler = { workspace = true }
 own-backup-core = { workspace = true }
+own-backup-cleanup = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }

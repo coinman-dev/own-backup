@@ -15,11 +15,16 @@ the disk can be restored in one go and boot again.
 
 | Kind | What it holds | File name part |
 |---|---|---|
-| **Full** | every used block | `_full_` |
-| **Incremental** | blocks changed since the previous version (full or incremental) | `_inc_` |
-| **Differential** | blocks changed since the last full version | `_diff_` |
+| **Full** | every used block | `_1-full_` |
+| **Incremental** | blocks changed since the previous version (full or incremental) | `_1-inc_` |
+| **Differential** | blocks changed since the last full version | `_1-diff_` |
 
-A full version and the incremental versions after it form a **chain**. To
+A full version and the incremental versions after it form a **chain**. The
+number before the kind is the chain's: each new full starts the next number,
+and its versions carry the same one, so `2-inc` belongs to `2-full`. Sorted by
+name, a folder lists every chain together — its full, then its versions by
+time. Backups made before 0.1.8-beta have no number (`_full_`, `_inc_`), and
+the versions added to such a chain stay without one. To
 restore an incremental version the program reads the whole chain under it, so
 a chain is only as good as its oldest file. The job's **retention** settings
 decide how long chains grow and which versions are removed:

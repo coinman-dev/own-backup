@@ -3,6 +3,8 @@
 rust_i18n::i18n!("locales", fallback = "ru");
 
 mod app_state;
+mod auto_cleanup;
+mod cleanup;
 // The decision is plain code tested everywhere; only Windows applies it.
 #[cfg_attr(not(windows), allow(dead_code))]
 mod data_dir_acl;
@@ -790,8 +792,12 @@ pub async fn run_main_loop(
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (events, _bootstrap_rx) = tokio::sync::broadcast::channel::<grpc_server::proto::Event>(256);
 
+    let cleanup_hook = std::sync::Arc::new(std::sync::OnceLock::new());
     let sink: std::sync::Arc<dyn own_backup_core::EventSink> =
-        std::sync::Arc::new(grpc_server::GrpcEventSink { tx: events.clone() });
+        std::sync::Arc::new(grpc_server::GrpcEventSink {
+            tx: events.clone(),
+            auto: cleanup_hook.clone(),
+        });
     // The installed Windows service keeps remembered volume passwords in its
     // SYSTEM-only directory. Validate and pin that directory before SQLite can
     // create the private DB or its WAL/SHM files; complete legacy migration
@@ -1010,6 +1016,13 @@ pub async fn run_main_loop(
         events,
         passwords,
     );
+    // The cleanup before a copy, and the scheduled one (Windows: the cleanup
+    // is Windows' only for now).
+    let _ = cleanup_hook.set(state.auto.clone());
+    #[cfg(any(windows, target_os = "linux"))]
+    if !own_backup_common::media_mode::is_media_mode() {
+        auto_cleanup::spawn(state.auto.clone(), shutdown.clone());
+    }
 
     // Production transport (no listening TCP port, so no local process can reach
     // the privileged service by opening a socket): Unix Domain Socket on Linux,
@@ -1463,6 +1476,12 @@ pub(crate) struct PipeCaller {
     pub sid: String,
     /// SYSTEM, or a token elevated as an administrator.
     pub elevated: bool,
+    /// A member of the Administrators group, elevated or not (UAC's limited
+    /// token of an administrator). The disk cleanup goes by this: the
+    /// service does that work itself, as it will on a schedule with no
+    /// window at all (owner, 2026-10-28); everything else still asks for
+    /// `elevated`.
+    pub administrator: bool,
 }
 
 #[cfg(windows)]
@@ -1521,7 +1540,8 @@ fn client_in_active_console(
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::Security::{
-        EqualSid, GetTokenInformation, TokenElevation, TokenUser, TOKEN_ELEVATION, TOKEN_QUERY,
+        EqualSid, GetTokenInformation, TokenElevation, TokenElevationType,
+        TokenElevationTypeLimited, TokenUser, TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE, TOKEN_QUERY,
         TOKEN_USER,
     };
     use windows::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeClientSessionId};
@@ -1595,7 +1615,26 @@ fn client_in_active_console(
         }
         .is_ok()
             && elevation.TokenIsElevated != 0);
-    let caller = PipeCaller { sid, elevated };
+    // An administrator whose window runs unelevated holds UAC's limited
+    // token; a standard user's is the default kind.
+    let mut kind = TOKEN_ELEVATION_TYPE::default();
+    let administrator = elevated
+        || (unsafe {
+            GetTokenInformation(
+                client_token.0,
+                TokenElevationType,
+                Some(std::ptr::addr_of_mut!(kind).cast()),
+                std::mem::size_of::<TOKEN_ELEVATION_TYPE>() as u32,
+                &mut len,
+            )
+        }
+        .is_ok()
+            && kind == TokenElevationTypeLimited);
+    let caller = PipeCaller {
+        sid,
+        elevated,
+        administrator,
+    };
     let mut console_token = HANDLE::default();
     if unsafe { WTSQueryUserToken(active, &mut console_token) }.is_err() {
         // A stripped WinPE may have no WTS token; its single temporary console

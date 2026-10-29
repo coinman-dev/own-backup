@@ -12,6 +12,7 @@
   import Boot from './views/Boot.svelte';
   import Tools from './views/Tools.svelte';
   import Activity from './views/Activity.svelte';
+  import Cleanup from './views/Cleanup.svelte';
   import Settings from './views/Settings.svelte';
   import About from './views/About.svelte';
   import type { ViewName } from './lib/types';
@@ -37,6 +38,14 @@
   function handleNavigate(view: ViewName) {
     currentView = view;
   }
+
+  // Started again as an administrator from a section: open it again.
+  api
+    .platformInfo()
+    .then((p) => {
+      if (p.start_view === 'cleanup') currentView = 'cleanup';
+    })
+    .catch(() => {});
 
   // A section asked for from inside another one (a job's «Подключить как диск»).
   $effect(() => {
@@ -165,6 +174,8 @@
         <Tools />
       {:else if currentView === 'activity'}
         <Activity />
+      {:else if currentView === 'cleanup'}
+        <Cleanup />
       {:else if currentView === 'settings'}
         <Settings />
       {:else if currentView === 'about'}

@@ -54,7 +54,7 @@ function ExpectedHash([int]$Seed) {
 }
 function Arm([string]$Phase) {
     $path = "C:\Lab\h02-consolidation-$Phase.arm.json"
-    $base = Get-ChildItem -LiteralPath $script:folder -Filter '*_full_*.qcow2' -File | Select-Object -First 1
+    $base = Get-ChildItem -LiteralPath $script:folder -Filter '*full_*.qcow2' -File | Select-Object -First 1
     if (-not $base) { throw 'base absent before arming' }
     [IO.File]::WriteAllText($path + '.tmp', (@{ job_id = $script:jobId; folder = $script:folder; base_bytes = $base.Length } | ConvertTo-Json))
     Move-Item -LiteralPath ($path + '.tmp') -Destination $path -Force
@@ -137,7 +137,7 @@ try {
     $images = @(Get-ChildItem -LiteralPath $script:folder -Filter '*.qcow2' -File)
     if ($images.Count -ne 2) { throw 'graceful consolidation did not leave two points' }
     foreach ($image in $images) {
-        CheckPoint $image.FullName $(if ($image.Name -match '_full_') { $expected1 } else { $expected2 })
+        CheckPoint $image.FullName $(if ($image.Name -match '[_-]full_') { $expected1 } else { $expected2 })
     }
     Say "H02-CONSOL-CONTROL-PASS action=$action points=2 folded=1 marker_absent=True"
     if ($action -eq 'stop') {
@@ -157,7 +157,7 @@ try {
         $images = @(Get-ChildItem -LiteralPath $script:folder -Filter '*.qcow2' -File)
         if ($images.Count -ne 3) { throw 'recovered chain does not contain three expected points' }
         foreach ($image in $images) {
-            CheckPoint $image.FullName $(if ($image.Name -match '_full_') { $expected2 } else { $expected3 })
+            CheckPoint $image.FullName $(if ($image.Name -match '[_-]full_') { $expected2 } else { $expected3 })
         }
         Say 'H02-CONSOL-RECOVERY-PASS points=3 marker_absent=True policy_consolidation=False'
     }

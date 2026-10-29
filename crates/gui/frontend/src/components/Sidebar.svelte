@@ -2,6 +2,7 @@
   import type { ViewName, KeyboardLayout } from '../lib/types';
   import { api } from '../lib/api';
   import { media } from '../lib/mediaStore.svelte';
+  import { isWindows } from '../lib/platformStore.svelte';
   import { appVersion, ensureAppVersion } from '../lib/appVersion.svelte';
   import { effectiveTheme, setTheme } from '../lib/themeStore.svelte';
   import { m } from '../lib/paraglide/messages';
@@ -55,6 +56,9 @@
     /** A function, so the menu follows a change of language. */
     label: () => string;
     icon: string;
+    /** Not on the boot medium: «Очистка» — there is nothing of the
+     *  person's to clean there. */
+    installedOnly?: boolean;
   }
 
   // Icons from the design (Own Backup.dc.html), its <rect>/<circle> spelled
@@ -97,6 +101,13 @@
       icon: circle(12, 12, 8.5) + 'M12 7.5V12l3 2',
     },
     {
+      id: 'cleanup',
+      label: m.nav_cleanup,
+      // Метла: черенок и веник.
+      icon: 'M20 4l-7.5 7.5M10 10l4 4-3.5 6.5H5.5L4 19v-4.5z M7.5 20.5l2.5-4.5',
+      installedOnly: true,
+    },
+    {
       id: 'settings',
       label: m.nav_settings,
       icon:
@@ -124,7 +135,7 @@
   </div>
 
   <ul class="nav-list">
-    {#each navItems as item}
+    {#each navItems.filter((i) => !i.installedOnly || !media.active) as item}
       <li>
         <button
           class="nav-item"

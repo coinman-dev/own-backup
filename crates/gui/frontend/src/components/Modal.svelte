@@ -18,6 +18,8 @@
     danger?: boolean;
     /** A window that holds a table rather than a sentence. */
     wide?: boolean;
+    /** A long list of wide rows (paths): a broad rectangle, not a square. */
+    xwide?: boolean;
     children: Snippet;
   }
 
@@ -34,6 +36,7 @@
     cancelLabel,
     danger = false,
     wide = false,
+    xwide = false,
     children,
   }: Props = $props();
 
@@ -64,7 +67,7 @@
     onclick={handleBackdropClick}
     onkeydown={handleKeydown}
   >
-    <div class="modal-card" class:wide>
+    <div class="modal-card" class:wide class:xwide>
       <div class="modal-header">
         <h2 class="modal-title">{title}</h2>
         <button class="modal-close" onclick={onClose} aria-label={m.common_close()}>
@@ -125,6 +128,10 @@
 
   .modal-card.wide {
     max-width: 760px;
+  }
+
+  .modal-card.xwide {
+    max-width: 1180px;
   }
 
   .modal-header {

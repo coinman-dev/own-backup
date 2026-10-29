@@ -980,6 +980,17 @@ pub async fn linux_media_status(
     state.link.client().await?.linux_media_status().await
 }
 
+/// «Очистка»: the catalogue, an analysis, the cleanup and its cancel, passed
+/// to the service as they are (`op` and its fields). Progress comes back on
+/// the `cleanup-progress` window event.
+#[tauri::command]
+pub async fn cleanup(
+    state: State<'_, GuiState>,
+    op: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    state.link.client().await?.cleanup(&op).await
+}
+
 /// Linux: build the boot medium from the installed package into the person's
 /// folder (and onto a stick). Minutes of work in the service; progress comes
 /// back on the `media-progress` window event.

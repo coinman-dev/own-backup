@@ -398,10 +398,12 @@
     {#if addError}
       <div class="add-error">{m.bs_add_error({ error: addError })}</div>
     {/if}
-    <button class="add-btn" onclick={addJob}>
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-      {m.bs_add()}
-    </button>
+    <div class="add-bar">
+      <button class="add-btn" onclick={addJob}>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+        {m.bs_add()}
+      </button>
+    </div>
   </div>
 
   <!-- right: wizard (inline) or dashboard -->
@@ -620,11 +622,12 @@
     line-height: 1.35;
   }
 
-  /* As tall as the action bar beside it (--footer-height): one line across. */
-  .add-btn { display: flex; align-items: center; gap: 10px; flex-shrink: 0; height: var(--footer-height); padding: 0 18px; background: none; border: none; border-top: 1px solid var(--border); cursor: pointer; font-size: 14px; font-weight: 600; color: var(--accent-text); font-family: var(--font); }
-  .add-btn:hover { background: var(--panel2); }
+  /* As tall as the action bar beside it (--footer-height): one line across.
+     The button is green, as «Создать копию» in that bar (owner, 2026-10-28). */
+  .add-bar { display: flex; align-items: center; flex-shrink: 0; min-height: var(--footer-height); padding: 12px 16px; border-top: 1px solid var(--border); }
+  .add-btn { flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 10px 24px; line-height: 20px; border: 1px solid transparent; border-radius: 6px; background: var(--green); color: #fff; cursor: pointer; font-size: 14px; font-weight: 600; font-family: var(--font); transition: background-color .15s ease; }
+  .add-btn:hover { background: var(--green-hover); }
   .dash-col { flex: 1; min-width: 0; overflow: auto; }
   .empty-dash { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; color: var(--text-muted); font-size: 15px; }
-  .add-btn.big { height: auto; border: 1px solid var(--primary); border-radius: 6px; color: var(--accent-text); padding: 10px 24px; }
-  .add-btn.big:hover { background: var(--accent-soft); }
+  .add-btn.big { flex: none; }
 </style>

@@ -43,6 +43,8 @@ pub struct BackupServiceImpl {
     service_token: String,
     /// Linux partitions opened for the Total Commander plugin.
     linux_browse: Arc<crate::linux_browse::Sessions>,
+    /// The window's «Очистка»: one analysis or cleanup at a time.
+    cleaner: Arc<crate::cleanup::Cleaner>,
 }
 
 /// Tells the window an operation no longer waits its turn — once, whether
@@ -77,10 +79,11 @@ impl BackupServiceImpl {
         shutdown: crate::shutdown::ShutdownSignal,
     ) -> Self {
         Self {
-            state,
             service_token,
             shutdown,
             linux_browse: Arc::new(crate::linux_browse::Sessions::default()),
+            cleaner: state.auto.cleaner.clone(),
+            state,
         }
     }
 
@@ -617,6 +620,9 @@ fn target_owned_letters(_plan: &own_backup_common::restore_plan::RestorePlan) ->
 /// which is fine — the events are simply dropped until a client connects.
 pub struct GrpcEventSink {
     pub tx: broadcast::Sender<proto::Event>,
+    /// The automatic cleanup, for a job that cleans before its copy. Set
+    /// once the service's state exists (after the worker that holds this).
+    pub auto: Arc<std::sync::OnceLock<Arc<crate::auto_cleanup::AutoCleanup>>>,
 }
 
 impl own_backup_core::EventSink for GrpcEventSink {
@@ -638,6 +644,15 @@ impl own_backup_core::EventSink for GrpcEventSink {
             kind: "finished".into(),
             json: serde_json::to_string(&run).unwrap_or_default(),
         });
+    }
+    fn before_backup(&self, job: &own_backup_core::Job) {
+        let Some(auto) = self.auto.get() else {
+            return;
+        };
+        info!(job = %job.name, "cleaning the disk before the copy");
+        if let Err(e) = auto.run(crate::auto_cleanup::Trigger::BeforeBackup, Some(job)) {
+            tracing::warn!(job = %job.name, ?e, "the cleanup before the copy did not run; the copy goes on");
+        }
     }
 }
 
@@ -2390,7 +2405,7 @@ impl BackupService for BackupServiceImpl {
         }
         #[cfg(target_os = "linux")]
         {
-            use own_backup_backup::engine_linux::mount_image_with_options;
+            use own_backup_backup::engine_linux::mount_image_with_keys;
             use own_backup_common::engine_dto::MountResultDto;
 
             #[derive(serde::Deserialize)]
@@ -2401,6 +2416,8 @@ impl BackupService for BackupServiceImpl {
                 /// this machine's own devices (`restore_linux::mount_identity_gate`).
                 #[serde(default)]
                 identity_choice: Option<own_backup_common::engine_dto::IdentityChoice>,
+                #[serde(flatten)]
+                secret: ManualSecret,
             }
             let p: In = serde_json::from_str(&req.into_inner().json)
                 .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
@@ -2408,20 +2425,34 @@ impl BackupService for BackupServiceImpl {
             let path = std::path::PathBuf::from(&p.image_path);
             let rw = p.read_write.unwrap_or(false);
             let image_path = p.image_path.clone();
+            let keys = manual_keys_off_thread(path.clone(), p.secret).await?;
             let probed = path.clone();
-            let clashes =
-                tokio::task::spawn_blocking(move || restore_linux::image_clashes(&probed))
-                    .await
-                    .map_err(|e| Status::internal(format!("identity check panicked: {e}")))?
-                    .map_err(|e| Status::internal(e.to_string()))?;
+            let probe_keys = keys.clone();
+            let clashes = tokio::task::spawn_blocking(move || {
+                restore_linux::image_clashes(&probed, probe_keys.as_ref())
+            })
+            .await
+            .map_err(|e| Status::internal(format!("identity check panicked: {e}")))?
+            .map_err(|e| Status::internal(e.to_string()))?;
             let kept = restore_linux::mount_identity_gate(clashes, p.identity_choice)?;
-            // XFS refuses a second filesystem of one UUID unless told.
-            let extra = own_backup_backup::identity_check_linux::mount_options_for(&kept);
-            let mount_point =
-                tokio::task::spawn_blocking(move || mount_image_with_options(&path, rw, &extra))
-                    .await
-                    .map_err(|e| Status::internal(format!("mount task panicked: {e}")))?
-                    .map_err(|e| Status::internal(e.to_string()))?;
+            // As on Windows: the slot is held for the attach only, so the
+            // chain does not change under it (audit AUD-02).
+            let slot = self
+                .reserve_on(
+                    &tr!("grpc_server.busy_mount"),
+                    &p.image_path,
+                    [own_backup_core::busy::image_chain_resource(
+                        std::path::Path::new(&p.image_path),
+                    )],
+                )
+                .await?;
+            let mount_point = tokio::task::spawn_blocking(move || {
+                let _slot = slot;
+                mount_image_with_keys(&path, rw, keys.as_ref(), &kept)
+            })
+            .await
+            .map_err(|e| Status::internal(format!("mount task panicked: {e}")))?
+            .map_err(|e| Status::internal(e.to_string()))?;
 
             {
                 let mut mounts = self.state.active_mounts.lock().unwrap();
@@ -4463,6 +4494,192 @@ impl BackupService for BackupServiceImpl {
             .map_err(|e| Status::internal(e.to_string()))?
             .map_err(Status::failed_precondition)?;
         Ok(Response::new(BytesReply { data }))
+    }
+
+    async fn cleanup(&self, req: Request<JsonRequest>) -> Result<Response<JsonReply>, Status> {
+        use crate::cleanup::{activity_record, Cleaner, Refusal, Request as Op};
+        use own_backup_cleanup::Mode;
+        check_auth(&req, &self.service_token)?;
+        // Windows and Linux; not on the boot medium, which has nothing of
+        // its own to clean.
+        if !(cfg!(windows) || cfg!(target_os = "linux"))
+            || own_backup_common::media_mode::is_media_mode()
+        {
+            return Err(Status::unimplemented(
+                tr!("grpc_server.cleanup_windows_only").into_owned(),
+            ));
+        }
+        let asker = cleanup_asker(&req);
+        let op: Op = serde_json::from_str(&req.into_inner().json)
+            .map_err(|e| Status::invalid_argument(format!("cleanup: {e}")))?;
+        let refused = |r: Refusal| match r {
+            Refusal::Busy => {
+                Status::failed_precondition(tr!("grpc_server.cleanup_busy").into_owned())
+            }
+            Refusal::NotAllowed(user) => Status::permission_denied(
+                tr!("grpc_server.cleanup_not_allowed", user = user).into_owned(),
+            ),
+            Refusal::Unknown(what) => Status::invalid_argument(
+                tr!("grpc_server.cleanup_unknown", what = what).into_owned(),
+            ),
+            Refusal::NotAnalyzed => {
+                Status::failed_precondition(tr!("grpc_server.cleanup_not_analyzed").into_owned())
+            }
+            Refusal::ReviewFirst => {
+                Status::failed_precondition(tr!("grpc_server.cleanup_review_first").into_owned())
+            }
+            Refusal::BadMask(mask) => Status::invalid_argument(
+                tr!("grpc_server.cleanup_bad_mask", mask = mask).into_owned(),
+            ),
+            Refusal::FoldersAdminOnly => Status::permission_denied(
+                tr!("grpc_server.cleanup_folders_admin_only").into_owned(),
+            ),
+            Refusal::AdminOnly(item) => Status::permission_denied(
+                tr!("grpc_server.cleanup_admin_only", item = item).into_owned(),
+            ),
+            Refusal::NotScheduled(item) => Status::invalid_argument(
+                tr!("grpc_server.cleanup_not_scheduled", item = item).into_owned(),
+            ),
+            Refusal::BadName => {
+                Status::invalid_argument(tr!("grpc_server.cleanup_bad_name").into_owned())
+            }
+            Refusal::NotYours(name) => Status::permission_denied(
+                tr!("grpc_server.cleanup_not_yours", name = name).into_owned(),
+            ),
+            Refusal::ProfileInUse(jobs) => Status::failed_precondition(
+                tr!("grpc_server.cleanup_profile_in_use", jobs = jobs).into_owned(),
+            ),
+            Refusal::NoProfile => {
+                Status::not_found(tr!("grpc_server.cleanup_no_profile").into_owned())
+            }
+        };
+        let cleaner = self.cleaner.clone();
+        let (mode, items, users, options, exclude) = match op {
+            Op::Catalog => return json_reply(&cleaner.catalog(&asker)),
+            Op::Profile => return json_reply(&self.state.auto.profile()),
+            Op::SaveProfile { profile } => {
+                let auto = self.state.auto.clone();
+                let saved = tokio::task::spawn_blocking(move || auto.save(&asker, profile))
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?
+                    .map_err(refused)?;
+                return json_reply(&saved);
+            }
+            Op::Profiles => return json_reply(&self.state.auto.profiles()),
+            Op::SaveNamed { profile } => {
+                let auto = self.state.auto.clone();
+                let saved = tokio::task::spawn_blocking(move || auto.save_named(&asker, profile))
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?
+                    .map_err(refused)?;
+                return json_reply(&saved);
+            }
+            Op::DeleteNamed { id } => {
+                let auto = self.state.auto.clone();
+                tokio::task::spawn_blocking(move || auto.delete_named(&asker, &id))
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?
+                    .map_err(refused)?;
+                return json_reply(&serde_json::json!({}));
+            }
+            Op::Cancel => {
+                cleaner.cancel();
+                return json_reply(&serde_json::json!({}));
+            }
+            Op::Files {
+                item,
+                offset,
+                limit,
+                sort,
+                filter,
+            } => {
+                let page = tokio::task::spawn_blocking(move || {
+                    cleaner.files(&asker, &item, offset, limit, &sort, &filter)
+                })
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?
+                .map_err(refused)?;
+                return json_reply(&page);
+            }
+            Op::Analyze {
+                items,
+                users,
+                options,
+            } => (Mode::Analyze, items, users, options, Vec::new()),
+            Op::Run {
+                items,
+                users,
+                options,
+                exclude,
+            } => (Mode::Remove, items, users, options, exclude),
+        };
+        let (chosen, people) = Cleaner::resolve(&asker, &items, &users).map_err(refused)?;
+        info!(?mode, items = ?items, users = people.len(), "gRPC: Cleanup");
+        let events = self.state.events.clone();
+        let started = chrono::Utc::now();
+        let report = tokio::task::spawn_blocking(move || {
+            let mut last: Option<std::time::Instant> = None;
+            cleaner.go(&asker, &chosen, &people, mode, options, &exclude, |p| {
+                if last.is_none_or(|t| t.elapsed().as_millis() >= 200) {
+                    last = Some(std::time::Instant::now());
+                    emit_engine(&events, "cleanup", &p);
+                }
+            })
+        })
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map_err(refused)?;
+        info!(
+            ?mode,
+            files = report.total.files,
+            bytes = report.total.bytes,
+            left = report.total.left_files,
+            cancelled = report.cancelled,
+            "cleanup finished"
+        );
+        if mode == Mode::Remove {
+            let mut run = activity_record(&report, started, "");
+            if let Err(e) = self.state.store.record_run(run.clone()) {
+                tracing::error!(error = %e, "the cleanup could not be recorded in the activity");
+            }
+            run.in_language(own_backup_common::lang::code());
+            let _ = self.state.events.send(Event {
+                kind: "finished".into(),
+                json: serde_json::to_string(&run).unwrap_or_default(),
+            });
+        }
+        json_reply(&report)
+    }
+}
+
+/// Who asks for a cleanup: their SID and whether they may clean other users'
+/// folders (an administrator's window). Development over TCP has no caller;
+/// a debug build lets it clean anyone's, a release build nobody's.
+fn cleanup_asker<T>(req: &Request<T>) -> crate::cleanup::Asker {
+    #[cfg(windows)]
+    if let Some(c) = req.extensions().get::<crate::PipeCaller>() {
+        return crate::cleanup::Asker {
+            sid: Some(c.sid.clone()),
+            admin: c.administrator,
+        };
+    }
+    // Linux: the window's uid over the socket; an administrator is root or
+    // a member of sudo, wheel or admin (`users::is_admin`).
+    #[cfg(unix)]
+    if let Some(c) = req
+        .extensions()
+        .get::<tonic::transport::server::UdsConnectInfo>()
+        .and_then(|info| info.peer_cred)
+    {
+        return crate::cleanup::Asker {
+            sid: Some(c.uid().to_string()),
+            admin: own_backup_cleanup::users::is_admin(c.uid()),
+        };
+    }
+    let _ = req;
+    crate::cleanup::Asker {
+        sid: None,
+        admin: cfg!(debug_assertions),
     }
 }
 

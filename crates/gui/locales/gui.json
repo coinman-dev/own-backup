@@ -92,10 +92,6 @@
     "ru": "Готовый носитель Linux скачивается только в Linux.",
     "en": "The ready Linux medium is downloaded on Linux only."
   },
-  "linux_media_dl.not_installed": {
-    "ru": "Программа установлена не из пакета own-backup — неизвестно, какой готовый ISO ей подходит. Соберите носитель на этом компьютере.",
-    "en": "The program was not installed from the own-backup package, so it is not known which ready ISO matches it. Build the medium on this computer."
-  },
   "linux_media_dl.no_curl": {
     "ru": "Для загрузки нужна программа curl: sudo apt install curl",
     "en": "Downloading needs curl: sudo apt install curl"
@@ -121,8 +117,8 @@
     "en": "GitHub's answer could not be read. Try again later or build the medium on this computer."
   },
   "linux_media_dl.none": {
-    "ru": "Для установленной версии готового ISO на GitHub нет. Соберите носитель на этом компьютере.",
-    "en": "There is no ready ISO for the installed version on GitHub. Build the medium on this computer."
+    "ru": "Готового ISO в релизах на GitHub пока нет. Соберите носитель на этом компьютере.",
+    "en": "There is no ready ISO in the releases on GitHub yet. Build the medium on this computer."
   },
   "linux_media_dl.no_folder": {
     "ru": "Папка «%{path}» не найдена.",
