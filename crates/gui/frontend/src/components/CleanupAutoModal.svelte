@@ -6,6 +6,7 @@
   import { untrack } from 'svelte';
   import Modal from './Modal.svelte';
   import { m } from '../lib/paraglide/messages';
+  import { isWindows } from '../lib/platformStore.svelte';
   import type { CleanupProfile } from '../lib/types';
 
   interface Props {
@@ -96,7 +97,7 @@
     <p class="what muted">{m.cla_users({ names: users.map((u) => u.name).join(', ') || '—' })}</p>
   {/if}
   {#if left.length > 0}<p class="what muted">{m.cla_left({ names: left.join(', ') })}</p>{/if}
-  <p class="note">{m.cla_note()}</p>
+  <p class="note">{isWindows() ? m.cla_note() : m.cla_note_linux()}</p>
   {#if profile.last_run && profile.schedule.kind !== 'none'}
     <p class="note">{m.cla_last({ when: new Date(profile.last_run).toLocaleString() })}</p>
   {/if}

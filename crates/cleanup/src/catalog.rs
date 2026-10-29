@@ -1205,6 +1205,7 @@ pub fn about(id: &str) -> String {
         "dev_caches" => tr!("cleanup.dev_caches_about"),
         "app_logs" => tr!("cleanup.app_logs_about"),
         "driver_installers" => tr!("cleanup.driver_installers_about"),
+        "junk" if cfg!(target_os = "linux") => tr!("cleanup.junk_about_linux"),
         "junk" => tr!("cleanup.junk_about"),
         "update_cache" => tr!("cleanup.update_cache_about"),
         "apt_cache" => tr!("cleanup.apt_cache_about"),
@@ -1241,6 +1242,10 @@ pub fn group_label(id: &str) -> String {
         "reports" => tr!("cleanup.group_reports"),
         "caches" => tr!("cleanup.group_caches"),
         "browsers" => tr!("cleanup.group_browsers"),
+        // On Linux the group holds only the desktop's recent files.
+        "traces" if cfg!(target_os = "linux") => {
+            tr!("cleanup.group_traces_linux")
+        }
         "traces" => tr!("cleanup.group_traces"),
         "programs" => tr!("cleanup.group_programs"),
         "junk" => tr!("cleanup.group_junk"),

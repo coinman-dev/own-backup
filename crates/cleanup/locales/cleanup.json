@@ -200,6 +200,10 @@
     "ru": "Временные и брошенные файлы по маскам имён (*.tmp, ~$*, Thumbs.db…) в профилях отмеченных пользователей и в добавленных папках. Не заходит в Windows, Program Files, ProgramData, AppData, скрытые папки (.cargo, .npm, .config, .git…), node_modules и облачные папки; файлы этой программы и образы копий не трогает. Удаляются только файлы старше выбранного срока и только после того, как вы просмотрели список, — снимите галочку с файла, который нужен.",
     "en": "Temporary and abandoned files by name masks (*.tmp, ~$*, Thumbs.db…) in the ticked users' profiles and in the folders added. It does not enter Windows, Program Files, ProgramData, AppData, hidden folders (.cargo, .npm, .config, .git…), node_modules or cloud folders; this program's files and backup images are never touched. Only files older than the chosen age go, and only after you have looked through the list — untick a file you need."
   },
+  "cleanup.junk_about_linux": {
+    "ru": "Временные и брошенные файлы по маскам имён (*.tmp, ~$*, Thumbs.db…) в профилях отмеченных пользователей и в добавленных папках. Не заходит в скрытые папки (.cargo, .npm, .config, .git…), node_modules и облачные папки; файлы этой программы и образы копий не трогает. Удаляются только файлы старше выбранного срока и только после того, как вы просмотрели список, — снимите галочку с файла, который нужен.",
+    "en": "Temporary and abandoned files by name masks (*.tmp, ~$*, Thumbs.db…) in the ticked users' profiles and in the folders added. It does not enter hidden folders (.cargo, .npm, .config, .git…), node_modules or cloud folders; this program's files and backup images are never touched. Only files older than the chosen age go, and only after you have looked through the list — untick a file you need."
+  },
   "cleanup.mask_temp": { "ru": "Временные", "en": "Temporary" },
   "cleanup.mask_temp_about": {
     "ru": "Временный файл, который программа не убрала за собой.",
@@ -437,6 +441,10 @@
   "cleanup.group_traces": {
     "ru": "Следы Windows",
     "en": "Windows traces"
+  },
+  "cleanup.group_traces_linux": {
+    "ru": "Следы работы",
+    "en": "Usage traces"
   },
   "cleanup.recent_docs": {
     "ru": "Недавние документы",

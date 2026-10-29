@@ -87,6 +87,7 @@
   "cla_users": "Users: {names}",
   "cla_left": "Not included (removed only after looking through the list): {names}",
   "cla_note": "Each automatic cleanup's result goes into Activity. The set is saved by whoever presses Save, with their rights: Windows components and other users' folders — a computer's administrator only.",
+  "cla_note_linux": "Each automatic cleanup's result goes into Activity. The set is saved by whoever presses Save, with their rights: system items and other users' folders — an administrator only (root or a member of the sudo group).",
   "cla_last": "Last run on the schedule: {when}",
   "cla_save": "Save",
   "act_cleanup_scheduled": "Scheduled automatic cleanup",
