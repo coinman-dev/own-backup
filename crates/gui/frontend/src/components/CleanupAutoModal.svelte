@@ -79,7 +79,7 @@
     <div class="row">
       {#if schedule.kind === 'monthly'}
         <label>{m.wiz_sched_day_of_month()}
-          <select class="form-input" bind:value={schedule.day_of_month}>
+          <select class="form-select" bind:value={schedule.day_of_month}>
             {#each Array.from({ length: 28 }, (_, i) => i + 1) as d (d)}<option value={d}>{d}</option>{/each}
           </select>
         </label>
@@ -117,7 +117,8 @@
   .day.on { background: var(--primary); color: #fff; }
   .row { display: flex; gap: 16px; margin-top: 10px; align-items: center; }
   .row label { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text); }
-  .row .form-input { width: auto; }
+  .row .form-input,
+  .row .form-select { width: auto; }
   .what { font-size: 13px; color: var(--text); margin: 0 0 6px; line-height: 1.5; }
   .muted { color: var(--text-secondary); }
   .warn { font-size: 13px; color: var(--warning-text, var(--text)); margin: 0; }

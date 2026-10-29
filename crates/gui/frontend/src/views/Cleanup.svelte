@@ -557,7 +557,7 @@
       <label class="profile-pick">
         <span>{m.cl_profile()}</span>
         <select
-          class="form-input"
+          class="form-select"
           value={matchedProfile}
           disabled={!catalog || !!cleanupState.busy || profiles.length === 0}
           title={profiles.length === 0 ? m.clp_row_none() : ''}
@@ -692,7 +692,7 @@
                 <label class="keep">
                   <span>{m.cl_keep_history()}</span>
                   <select
-                    class="form-input"
+                    class="form-select"
                     value={keepDays}
                     disabled={!!cleanupState.busy}
                     onchange={(e) => setKeep(Number((e.currentTarget as HTMLSelectElement).value))}
@@ -739,7 +739,7 @@
                 <label class="keep">
                   <span>{m.cl_junk_age()}</span>
                   <select
-                    class="form-input"
+                    class="form-select"
                     value={junk.age_days}
                     disabled={!!cleanupState.busy}
                     onchange={(e) =>
@@ -909,7 +909,7 @@
   .title-row h1 { margin: 0 8px 0 0; }
   .title-row .grow { flex: 1; }
   .profile-pick { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text); }
-  .profile-pick .form-input { width: auto; min-width: 200px; max-width: 320px; }
+  .profile-pick .form-select { width: auto; min-width: 200px; max-width: 320px; }
   .title-row .btn { padding: 7px 18px; }
   h1 { font-size: 24px; font-weight: 300; color: var(--head); margin-bottom: 8px; }
   .lead { font-size: 13px; color: var(--text-secondary); margin: 0 0 20px; max-width: 900px; line-height: 1.5; }
