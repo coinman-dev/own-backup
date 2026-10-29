@@ -1,6 +1,7 @@
 //! Linux system work done by the system's own commands (PLAN §6б, stage 8):
 //! the journal (`journalctl --vacuum-size`), old snap revisions (`snap
-//! remove --revision`) and unneeded packages (`apt-get autoremove --purge`).
+//! remove --revision`), unused Flatpak runtimes (`flatpak uninstall
+//! --unused`) and unneeded packages (`apt-get autoremove --purge`).
 //! Removing their files by hand would leave the tools' own records wrong.
 //!
 //! Commands run with `LC_ALL=C`: what is read back is the C locale's text,
@@ -25,6 +26,7 @@ pub fn run(name: &str, remove: bool, cancel: &AtomicBool) -> std::io::Result<Out
         match name {
             "journal" => linux::journal(remove),
             "snap_revisions" => linux::snap_revisions(remove),
+            "flatpak_unused" => linux::flatpak_unused(remove),
             "apt_autoremove" => linux::apt_autoremove(remove),
             _ => Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
         }
@@ -46,6 +48,23 @@ pub fn disabled_snaps(listing: &str) -> Vec<(String, String)> {
             // Name Version Rev Tracking Publisher Notes
             (f.len() >= 6 && f[5..].iter().any(|n| n.split(',').any(|n| n == "disabled")))
                 .then(|| (f[0].to_string(), f[2].to_string()))
+        })
+        .collect()
+}
+
+/// The refs `flatpak uninstall --unused` lists before it asks: (id, branch).
+/// A row is `" 1.\t[flags]\tID\tBRANCH\tOP"` (Flatpak 1.16).
+pub fn unused_flatpaks(listing: &str) -> Vec<(String, String)> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split('\t').map(str::trim).collect();
+            let numbered = f.first().is_some_and(|n| {
+                n.strip_suffix('.')
+                    .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+            });
+            (numbered && f.len() >= 5 && f[f.len() - 1] == "r")
+                .then(|| (f[f.len() - 3].to_string(), f[f.len() - 2].to_string()))
         })
         .collect()
 }
@@ -82,7 +101,7 @@ mod linux {
     use std::path::Path;
     use std::process::Command;
 
-    use super::{autoremoved, disabled_snaps, size_of, Outcome, JOURNAL_KEEP};
+    use super::{autoremoved, disabled_snaps, size_of, unused_flatpaks, Outcome, JOURNAL_KEEP};
 
     fn command(program: &str) -> Command {
         let mut c = Command::new(program);
@@ -145,6 +164,99 @@ mod linux {
         Ok(Outcome { bytes })
     }
 
+    const FLATPAK: &str = "/var/lib/flatpak";
+
+    /// Every file below `dir` by inode, links not followed.
+    fn inodes(dir: &Path, into: &mut std::collections::HashMap<(u64, u64), u64>) {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(meta) = std::fs::symlink_metadata(dir) else {
+            return;
+        };
+        if meta.is_dir() {
+            for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                inodes(&e.path(), into);
+            }
+        } else if meta.is_file() {
+            into.insert((meta.dev(), meta.ino()), meta.len());
+        }
+    }
+
+    /// The deployed refs: `<kind>/<id>/<arch>/<branch>`.
+    fn deployed() -> Vec<(String, std::path::PathBuf)> {
+        let mut found = Vec::new();
+        let list = |p: &Path| -> Vec<std::path::PathBuf> {
+            std::fs::read_dir(p)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir() && !p.is_symlink())
+                .collect()
+        };
+        for kind in ["app", "runtime"] {
+            for id in list(&Path::new(FLATPAK).join(kind)) {
+                for arch in list(&id) {
+                    for branch in list(&arch) {
+                        let name = |p: &Path| {
+                            p.file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .into_owned()
+                        };
+                        found.push((format!("{kind}/{}/{}", name(&id), name(&branch)), branch));
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// No dry run: asked without a terminal and answered "n", flatpak lists
+    /// what it would remove. Its files are hard links into the shared repo,
+    /// so what goes is the files no remaining app or runtime also has.
+    pub(super) fn flatpak_unused(remove: bool) -> io::Result<Outcome> {
+        use std::io::Write;
+        use std::process::Stdio;
+        let mut asked = command("flatpak")
+            .args(["uninstall", "--unused"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        if let Some(mut stdin) = asked.stdin.take() {
+            let _ = stdin.write_all(b"n\n");
+        }
+        let listing = asked.wait_with_output()?;
+        let unused: Vec<String> = unused_flatpaks(&String::from_utf8_lossy(&listing.stdout))
+            .into_iter()
+            .map(|(id, branch)| format!("runtime/{id}/{branch}"))
+            .collect();
+        if unused.is_empty() {
+            return Ok(Outcome::default());
+        }
+        let (mut going, mut staying) = Default::default();
+        for (name, dir) in deployed() {
+            inodes(
+                &dir,
+                if unused.contains(&name) {
+                    &mut going
+                } else {
+                    &mut staying
+                },
+            );
+        }
+        let going: std::collections::HashMap<(u64, u64), u64> = going;
+        let bytes = going
+            .iter()
+            .filter(|(ino, _)| !staying.contains_key(*ino))
+            .map(|(_, len)| len)
+            .sum();
+        if remove {
+            output(command("flatpak").args(["uninstall", "--unused", "-y", "--noninteractive"]))?;
+        }
+        Ok(Outcome { bytes })
+    }
+
     /// Installed size of `package`, from dpkg (KiB).
     fn installed_size(package: &str) -> u64 {
         output(command("dpkg-query").args(["-W", "-f=${Installed-Size}", package]))
@@ -186,6 +298,33 @@ mod tests {
                 ("firefox".to_string(), "4033".to_string())
             ]
         );
+    }
+
+    /// Flatpak 1.16.6's listing on the Linux stand (Ubuntu 26.04).
+    #[test]
+    fn unused_flatpak_runtimes_are_read() {
+        let listing = "\n\n 1.\t   \torg.freedesktop.Platform.GL.default\t24.08\tr\n \
+                       2.\t   \torg.freedesktop.Platform.GL.default\t24.08extra\tr\n \
+                       3.\t   \torg.freedesktop.Platform.Locale\t24.08\tr\n\n\
+                       Proceed with these changes to the system installation? [Y/n]: n\n";
+        assert_eq!(
+            unused_flatpaks(listing),
+            vec![
+                (
+                    "org.freedesktop.Platform.GL.default".to_string(),
+                    "24.08".to_string()
+                ),
+                (
+                    "org.freedesktop.Platform.GL.default".to_string(),
+                    "24.08extra".to_string()
+                ),
+                (
+                    "org.freedesktop.Platform.Locale".to_string(),
+                    "24.08".to_string()
+                ),
+            ]
+        );
+        assert!(unused_flatpaks("Nothing unused to uninstall\n").is_empty());
     }
 
     #[test]

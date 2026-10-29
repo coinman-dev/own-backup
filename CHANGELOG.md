@@ -37,9 +37,11 @@
   stays.
 - **Disk cleanup on Linux.** The Cleanup section and the automatic cleanup
   on Linux too: the apt cache, old logs, the systemd journal (to 200 MB),
-  crash reports, old snap revisions, `apt autoremove` (off); the trash,
-  thumbnails, shaders, browsers (snap and flatpak Firefox too), developer
-  caches, editors' junk. A user's folders are cleaned with that user's own
+  crash reports, old snap revisions, unused Flatpak runtimes, `apt
+  autoremove` (off); the trash, thumbnails, shaders, browsers (snap and
+  flatpak Firefox too), programs' caches (VS Code, Discord, Slack,
+  Obsidian, Signal, TradingView, Termius, Steam), the Telegram cache (off),
+  developer caches, editors' junk (Zed's npm cache too). A user's folders are cleaned with that user's own
   rights; the system's part by an administrator only (root, the sudo
   group). The mask search no longer enters hidden folders (`.cargo`,
   `.npm`…) — on Windows either; the `*.err` mask is off by default.

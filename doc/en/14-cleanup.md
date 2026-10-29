@@ -136,13 +136,16 @@ On Linux the service runs as root, and the items are Linux's own:
 | Crash reports (administrator) | `/var/crash`, `/var/lib/systemd/coredump` | — |
 | Old snap revisions (administrator) | `snap remove --revision` of the disabled ones | current revisions |
 | snapd cache (administrator) | `/var/lib/snapd/cache` | the snaps themselves |
+| Unused Flatpak runtimes (administrator) | `flatpak uninstall --unused` in the system installation | programs and the runtimes they need, pinned runtimes |
 | Unneeded packages (administrator, off) | `apt-get autoremove --purge` (old kernels too) | — |
 | apt package lists (administrator, off) | `/var/lib/apt/lists` | `lock`, `partial` |
 | Trash | `~/.local/share/Trash` | — |
 | Thumbnail, shader, font caches | `~/.cache/thumbnails`, `mesa_shader_cache`, `nvidia/GLCache`, `fontconfig` | — |
 | Browsers | Chrome, Chromium, Edge, Vivaldi, Brave, Yandex, Opera (`~/.config`, `~/.cache`), Firefox and Thunderbird, snap and flatpak too | as on Windows: passwords, bookmarks, autofill — never |
 | npm, pip, Go, Cargo, Yarn, Playwright, Gradle caches (off) | `~/.npm/_cacache`, `~/.cache/pip`, `go-build`, `~/.cargo/registry/cache`… | — |
-| Editors' and tools' junk | Cursor's extension archives, Zed's logs and build scratch, JNA, the Gradle daemon, gopls, staticcheck | the AI agents' sessions and memory (`~/.claude`, `~/.codex`, `~/.gemini`, `~/.copilot`, opencode) — never |
+| Editors' and tools' junk | Cursor's extension archives, Zed's logs, build scratch and npm cache, JNA, the Gradle daemon, gopls, staticcheck | the AI agents' sessions and memory (`~/.claude`, `~/.codex`, `~/.gemini`, `~/.copilot`, opencode) — never |
+| Programs' caches | `Cache`, `Code Cache`, `GPUCache` in `~/.config` of VS Code, VSCodium, Discord, Slack, Obsidian, Signal, Element, TradingView, Termius; Steam's browser | the programs' sign-in, settings and data; a program that is open |
+| Telegram Desktop cache (off) | `tdata/user_data*/cache`, `media_cache` — its own build, snap and flatpak | the sign-in and the chats |
 | Recent files (off) | `recently-used.xbel`, `~/.local/share/RecentDocuments` | the files themselves |
 | Files by masks | home folders (plus the masks `*Zone.Identifier`, `.DS_Store`, `*.swp`, `*.orig`, `*.rej`) | hidden folders, other file systems |
 
@@ -154,7 +157,7 @@ On Linux the service runs as root, and the items are Linux's own:
   `wheel`, `admin`.
 - Sockets, pipes and devices are never removed; `/tmp` and `/var/tmp` are
   left to systemd-tmpfiles.
-- Commands' output (`snap`, `apt-get`) is read in the C locale, never a
+- Commands' output (`snap`, `apt-get`, `flatpak`) is read in the C locale, never a
   translation.
 
 ## What is guaranteed

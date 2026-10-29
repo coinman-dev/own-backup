@@ -1239,6 +1239,92 @@ fn linux_items_clean_their_folders_and_leave_sockets_and_live_logs() {
     assert!(root.join("var/log/syslog").exists(), "the live log stays");
 }
 
+/// Programs' caches go — Telegram's media in every account (its own build
+/// and the snap's), an Electron program's Chromium caches, Zed's npm cache —
+/// and their sign-in and settings stay; an open program's cache is left.
+#[cfg(unix)]
+#[test]
+fn linux_program_caches_go_and_the_programs_data_stays() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("Users/u");
+    let tdata = home.join(".local/share/TelegramDesktop/tdata");
+    write(&tdata.join("user_data/cache/0/A"), 10);
+    write(&tdata.join("user_data/media_cache/0/B"), 10);
+    write(&tdata.join("user_data#2/cache/0/C"), 10);
+    write(&tdata.join("key_datas"), 5);
+    write(&tdata.join("D877F783D5D3EF8C/maps"), 5);
+    write(
+        &home.join(
+            "snap/telegram-desktop/6810/.local/share/TelegramDesktop/tdata/user_data/cache/D",
+        ),
+        10,
+    );
+    let tv = home.join(".config/TradingView");
+    write(&tv.join("Cache/Cache_Data/f_000001"), 10);
+    write(&tv.join("Code Cache/js/index"), 10);
+    write(&tv.join("GPUCache/data_0"), 10);
+    write(&tv.join("Cookies"), 5);
+    write(&tv.join("Local Storage/leveldb/000003.log"), 5);
+    let code = home.join(".config/Code");
+    write(&code.join("CachedData/abc/x.code"), 10);
+    write(&code.join("User/settings.json"), 5);
+    let zed = home.join(".local/share/zed");
+    write(&zed.join("node/cache/_cacache/content-v2/sha512/aa/bb"), 10);
+    write(&zed.join("node/node-v24.21.0-linux-x64/bin/node"), 5);
+    write(&zed.join("db/0-stable/db.sqlite"), 5);
+
+    let items: Vec<&Item> = ["telegram_cache", "app_caches_linux", "editor_junk"]
+        .iter()
+        .map(|id| linux_item(id))
+        .collect();
+    let run = |running: &[&str]| {
+        let mut r = roots(dir.path());
+        r.running = running.iter().map(|p| p.to_string()).collect();
+        run_at_with(
+            &items,
+            &r,
+            &[user(dir.path())],
+            Mode::Remove,
+            Options::default(),
+            &AtomicBool::new(false),
+            |_, _| {},
+            SystemTime::now() + TWO_DAYS,
+            None,
+        )
+    };
+    let open = run(&["tradingview", "telegram"]);
+    let by_id = |r: &Report, id: &str| r.items.iter().find(|i| i.id == id).unwrap().clone();
+    assert_eq!(by_id(&open, "telegram_cache").tally.files, 0);
+    assert_eq!(by_id(&open, "telegram_cache").running, ["Telegram"]);
+    assert_eq!(by_id(&open, "app_caches_linux").tally.files, 1, "VS Code's");
+    assert_eq!(by_id(&open, "app_caches_linux").running, ["TradingView"]);
+    assert_eq!(
+        by_id(&open, "editor_junk").tally.files,
+        1,
+        "Zed's npm cache"
+    );
+    assert!(tv.join("Cache/Cache_Data/f_000001").exists());
+
+    let done = run(&[]);
+    assert_eq!(
+        by_id(&done, "telegram_cache").tally.files,
+        4,
+        "both accounts and the snap"
+    );
+    assert_eq!(by_id(&done, "app_caches_linux").tally.files, 3);
+    for stays in [
+        tdata.join("key_datas"),
+        tdata.join("D877F783D5D3EF8C/maps"),
+        tv.join("Cookies"),
+        tv.join("Local Storage/leveldb/000003.log"),
+        code.join("User/settings.json"),
+        zed.join("node/node-v24.21.0-linux-x64/bin/node"),
+        zed.join("db/0-stable/db.sqlite"),
+    ] {
+        assert!(stays.exists(), "{}", stays.display());
+    }
+}
+
 /// As root, a user's folders are cleaned with the user's rights: what the
 /// user could not remove (a root-owned folder in their cache) stays, what
 /// they could goes. Runs only as root (`sudo` the test binary).

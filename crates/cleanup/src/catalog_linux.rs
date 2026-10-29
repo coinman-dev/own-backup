@@ -2,12 +2,12 @@
 //! `wsl-cleanup.sh` as the model).
 //!
 //! The service runs as root. The system's part — the apt cache, rotated logs,
-//! the journal, crash reports, old snap revisions — is root's and cleaned by
-//! root, for an administrator only. A user's part is below their home and
-//! cleaned with that user's own rights (`users::as_user`). `/tmp` and
-//! `/var/tmp` are not here: systemd-tmpfiles cleans them already, and root
-//! removing files in a folder everyone writes to is how cleaners get fooled
-//! into removing what a link points at.
+//! the journal, crash reports, old snap revisions, unused Flatpak runtimes —
+//! is root's and cleaned by root, for an administrator only. A user's part is
+//! below their home and cleaned with that user's own rights
+//! (`users::as_user`). `/tmp` and `/var/tmp` are not here: systemd-tmpfiles
+//! cleans them already, and root removing files in a folder everyone writes
+//! to is how cleaners get fooled into removing what a link points at.
 //!
 //! Never part of anything here, as in the owner's script: the AI agents'
 //! sessions and memory (`~/.claude`, `~/.codex`, `~/.gemini`, `~/.copilot`,
@@ -116,6 +116,13 @@ pub(super) static ITEMS: &[Item] = &[
         keys: &[],
     },
     Item {
+        id: "flatpak_unused",
+        group: "system",
+        default_on: true,
+        targets: &[command("flatpak_unused")],
+        keys: &[],
+    },
+    Item {
         id: "apt_autoremove",
         group: "system",
         default_on: false,
@@ -203,6 +210,8 @@ pub(super) static ITEMS: &[Item] = &[
             home(".cursor-server/data/CachedExtensionVSIXs", 0),
             files(Base::Home, ".local/share/zed/logs", &["*.log.*"], 0),
             home(".local/share/zed/remote_extensions/work", DAY),
+            // The npm cache of Zed's own node.js (language servers' downloads).
+            home(".local/share/zed/node/cache/_cacache", 0),
             home(".cache/JNA/temp", DAY),
             home(".gradle/daemon", WEEK),
             home(".cache/staticcheck", 0),
@@ -238,6 +247,71 @@ pub(super) static ITEMS: &[Item] = &[
         keys: &[],
     },
 ];
+
+// --- programs ----------------------------------------------------------------
+
+/// Telegram Desktop's downloaded media, every account (`user_data`,
+/// `user_data#2`): its own build, the snap's (per revision) and the Flatpak's.
+const TELEGRAM_DATA: &[&str] = &[
+    ".local/share/TelegramDesktop",
+    "snap/telegram-desktop/*/.local/share/TelegramDesktop",
+    ".var/app/org.telegram.desktop/data/TelegramDesktop",
+];
+const TELEGRAM: &[&str] = &["telegram", "telegram-desktop"];
+
+/// Electron programs: their folder in `~/.config` and their processes.
+const ELECTRON: &[(&str, &[&str])] = &[
+    ("Code", &["code"]),
+    ("VSCodium", &["codium"]),
+    ("discord", &["discord"]),
+    ("Slack", &["slack"]),
+    ("obsidian", &["obsidian"]),
+    ("Signal", &["signal-desktop"]),
+    ("Element", &["element-desktop"]),
+    ("TradingView", &["tradingview"]),
+    ("Termius", &["termius-app"]),
+];
+/// Chromium's caches inside an Electron program's folder; its storage,
+/// cookies and settings beside them stay.
+const ELECTRON_CACHES: &[&str] = &[
+    "Cache",
+    "Code Cache",
+    "GPUCache",
+    "DawnGraphiteCache",
+    "DawnWebGPUCache",
+];
+const STEAM: &[&str] = &["steam", "steamwebhelper"];
+
+pub(super) fn program_items() -> Vec<Item> {
+    let mut telegram = Vec::new();
+    for data in TELEGRAM_DATA {
+        for sub in ["cache", "media_cache"] {
+            telegram.push(at(format!("{data}/tdata/user_data*/{sub}"), &[], TELEGRAM));
+        }
+    }
+    let mut caches = Vec::new();
+    for (dir, programs) in ELECTRON {
+        for sub in ELECTRON_CACHES {
+            caches.push(at(format!(".config/{dir}/{sub}"), &[], programs));
+        }
+    }
+    // VS Code's compiled scripts.
+    for (dir, programs) in [("Code", &["code"]), ("VSCodium", &["codium"])] {
+        caches.push(at(format!(".config/{dir}/CachedData"), &[], programs));
+    }
+    caches.push(at(".local/share/Steam/config/htmlcache".into(), &[], STEAM));
+    let item = |id, default_on, targets: Vec<Target>| Item {
+        id,
+        group: "programs",
+        default_on,
+        targets: Box::leak(targets.into_boxed_slice()),
+        keys: &[],
+    };
+    vec![
+        item("app_caches_linux", true, caches),
+        item("telegram_cache", false, telegram),
+    ]
+}
 
 // --- browsers ----------------------------------------------------------------
 

@@ -156,6 +156,10 @@
     "ru": "Кэши, которые программы пересоздают сами: миниатюры XnView MP, кэш Discord, Visual Studio Code и встроенного браузера Steam. Открытая программа не трогается.",
     "en": "Caches the programs rebuild by themselves: XnView MP's thumbnails, the caches of Discord, Visual Studio Code and Steam's built-in browser. A program that is open is left."
   },
+  "cleanup.app_caches_linux_about": {
+    "ru": "Кэши, которые программы пересоздают сами: Visual Studio Code, VSCodium, Discord, Slack, Obsidian, Signal, Element, TradingView, Termius и встроенного браузера Steam. Вход, настройки и данные программ не затрагиваются. Открытая программа не трогается.",
+    "en": "Caches the programs rebuild by themselves: those of Visual Studio Code, VSCodium, Discord, Slack, Obsidian, Signal, Element, TradingView, Termius and Steam's built-in browser. The programs' sign-in, settings and data are not touched. A program that is open is left."
+  },
   "cleanup.telegram_cache": {
     "ru": "Кэш Telegram Desktop",
     "en": "Telegram Desktop cache"
@@ -350,6 +354,14 @@
     "ru": "Отключённые прежние версии snap-пакетов, которые snapd хранит для отката (snap remove --revision). Текущие версии остаются; откатиться на удалённую версию будет нельзя.",
     "en": "The disabled earlier revisions snapd keeps for a rollback (snap remove --revision). Current revisions stay; you cannot roll back to a removed one."
   },
+  "cleanup.flatpak_unused": {
+    "ru": "Неиспользуемые среды flatpak",
+    "en": "Unused Flatpak runtimes"
+  },
+  "cleanup.flatpak_unused_about": {
+    "ru": "Среды выполнения и расширения flatpak, которые не нужны ни одной установленной программе (flatpak uninstall --unused). Остались после удаления или обновления программ. Программы не затрагиваются; закреплённые среды (flatpak pin) остаются.",
+    "en": "Flatpak runtimes and extensions no installed program needs (flatpak uninstall --unused), left behind by removed or updated programs. Programs are not touched; pinned runtimes (flatpak pin) stay."
+  },
   "cleanup.snap_cache": {
     "ru": "Кэш snapd",
     "en": "snapd cache"
@@ -419,8 +431,8 @@
     "en": "Editors' and tools' junk"
   },
   "cleanup.editor_junk_about": {
-    "ru": "Старые архивы расширений Cursor, ротированные журналы и временная сборка расширений Zed, временные файлы JNA, журналы демона Gradle старше недели, кэши gopls и staticcheck. Сессии и память ИИ-агентов (~/.claude, ~/.codex, ~/.gemini, ~/.copilot) не затрагиваются никогда.",
-    "en": "Cursor's old extension archives, Zed's rotated logs and extension build scratch, JNA's temporary files, the Gradle daemon's logs older than a week, gopls' and staticcheck's caches. The AI agents' sessions and memory (~/.claude, ~/.codex, ~/.gemini, ~/.copilot) are never touched."
+    "ru": "Старые архивы расширений Cursor; у Zed — ротированные журналы, временная сборка расширений и кэш npm; временные файлы JNA, журналы демона Gradle старше недели, кэши gopls и staticcheck. Сессии и память ИИ-агентов (~/.claude, ~/.codex, ~/.gemini, ~/.copilot) не затрагиваются никогда.",
+    "en": "Cursor's old extension archives, Zed's rotated logs, extension build scratch and npm cache, JNA's temporary files, the Gradle daemon's logs older than a week, gopls' and staticcheck's caches. The AI agents' sessions and memory (~/.claude, ~/.codex, ~/.gemini, ~/.copilot) are never touched."
   },
   "cleanup.recent_files": {
     "ru": "Недавние файлы",

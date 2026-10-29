@@ -298,6 +298,19 @@ const PROGRAM_NAMES: &[(&str, &str)] = &[
     ("firefox", "Mozilla Firefox"),
     ("firefox-bin", "Mozilla Firefox"),
     ("thunderbird", "Mozilla Thunderbird"),
+    ("telegram", "Telegram"),
+    ("telegram-desktop", "Telegram"),
+    ("code", "Visual Studio Code"),
+    ("codium", "VSCodium"),
+    ("discord", "Discord"),
+    ("slack", "Slack"),
+    ("obsidian", "Obsidian"),
+    ("signal-desktop", "Signal"),
+    ("element-desktop", "Element"),
+    ("tradingview", "TradingView"),
+    ("termius-app", "Termius"),
+    ("steam", "Steam"),
+    ("steamwebhelper", "Steam"),
 ];
 
 static ITEMS: &[Item] = &[
@@ -1082,6 +1095,7 @@ pub fn program_name(exe: &str) -> &str {
 
 static LINUX_CATALOG: std::sync::LazyLock<Vec<Item>> = std::sync::LazyLock::new(|| {
     let mut all = crate::catalog_linux::ITEMS.to_vec();
+    all.extend(crate::catalog_linux::program_items());
     all.extend(crate::catalog_linux::browser_items());
     all
 });
@@ -1143,7 +1157,7 @@ pub fn label_both(id: &str) -> Localized {
         "rdp_history" => tr_both!("cleanup.rdp_history"),
         "office_recent" => tr_both!("cleanup.office_recent"),
         "apps_recent" => tr_both!("cleanup.apps_recent"),
-        "app_caches" => tr_both!("cleanup.app_caches"),
+        "app_caches" | "app_caches_linux" => tr_both!("cleanup.app_caches"),
         "telegram_cache" => tr_both!("cleanup.telegram_cache"),
         "dev_caches" => tr_both!("cleanup.dev_caches"),
         "app_logs" => tr_both!("cleanup.app_logs"),
@@ -1155,6 +1169,7 @@ pub fn label_both(id: &str) -> Localized {
         "journal" => tr_both!("cleanup.journal"),
         "linux_crashes" => tr_both!("cleanup.linux_crashes"),
         "snap_old" => tr_both!("cleanup.snap_old"),
+        "flatpak_unused" => tr_both!("cleanup.flatpak_unused"),
         "snap_cache" => tr_both!("cleanup.snap_cache"),
         "apt_autoremove" => tr_both!("cleanup.apt_autoremove"),
         "apt_lists" => tr_both!("cleanup.apt_lists"),
@@ -1201,6 +1216,7 @@ pub fn about(id: &str) -> String {
         "office_recent" => tr!("cleanup.office_recent_about"),
         "apps_recent" => tr!("cleanup.apps_recent_about"),
         "app_caches" => tr!("cleanup.app_caches_about"),
+        "app_caches_linux" => tr!("cleanup.app_caches_linux_about"),
         "telegram_cache" => tr!("cleanup.telegram_cache_about"),
         "dev_caches" => tr!("cleanup.dev_caches_about"),
         "app_logs" => tr!("cleanup.app_logs_about"),
@@ -1213,6 +1229,7 @@ pub fn about(id: &str) -> String {
         "journal" => tr!("cleanup.journal_about"),
         "linux_crashes" => tr!("cleanup.linux_crashes_about"),
         "snap_old" => tr!("cleanup.snap_old_about"),
+        "flatpak_unused" => tr!("cleanup.flatpak_unused_about"),
         "snap_cache" => tr!("cleanup.snap_cache_about"),
         "apt_autoremove" => tr!("cleanup.apt_autoremove_about"),
         "apt_lists" => tr!("cleanup.apt_lists_about"),

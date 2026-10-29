@@ -134,13 +134,16 @@
 | Отчёты о сбоях (администратор) | `/var/crash`, `/var/lib/systemd/coredump` | — |
 | Старые версии snap (администратор) | `snap remove --revision` отключённых версий | текущие версии |
 | Кэш snapd (администратор) | `/var/lib/snapd/cache` | сами snap-пакеты |
+| Неиспользуемые среды flatpak (администратор) | `flatpak uninstall --unused` в системной установке | программы и нужные им среды, закреплённые среды |
 | Ненужные пакеты (администратор, выкл.) | `apt-get autoremove --purge` (и старые ядра) | — |
 | Списки пакетов apt (администратор, выкл.) | `/var/lib/apt/lists` | `lock`, `partial` |
 | Корзина | `~/.local/share/Trash` | — |
 | Кэш миниатюр, шейдеров, шрифтов | `~/.cache/thumbnails`, `mesa_shader_cache`, `nvidia/GLCache`, `fontconfig` | — |
 | Браузеры | Chrome, Chromium, Edge, Vivaldi, Brave, Яндекс, Opera (`~/.config`, `~/.cache`), Firefox и Thunderbird, в том числе snap и flatpak | как в Windows: пароли, закладки, автозаполнение — никогда |
 | Кэши npm, pip, Go, Cargo, Yarn, Playwright, Gradle (выкл.) | `~/.npm/_cacache`, `~/.cache/pip`, `go-build`, `~/.cargo/registry/cache`… | — |
-| Мусор редакторов и инструментов | архивы расширений Cursor, журналы и временная сборка Zed, JNA, демон Gradle, gopls, staticcheck | сессии и память ИИ-агентов (`~/.claude`, `~/.codex`, `~/.gemini`, `~/.copilot`, opencode) — никогда |
+| Мусор редакторов и инструментов | архивы расширений Cursor, журналы, временная сборка и кэш npm Zed, JNA, демон Gradle, gopls, staticcheck | сессии и память ИИ-агентов (`~/.claude`, `~/.codex`, `~/.gemini`, `~/.copilot`, opencode) — никогда |
+| Кэши программ | `Cache`, `Code Cache`, `GPUCache` в `~/.config` у VS Code, VSCodium, Discord, Slack, Obsidian, Signal, Element, TradingView, Termius; браузер Steam | вход, настройки и данные программ; открытая программа |
+| Кэш Telegram Desktop (выкл.) | `tdata/user_data*/cache`, `media_cache` — своя сборка, snap и flatpak | вход и переписка |
 | Недавние файлы (выкл.) | `recently-used.xbel`, `~/.local/share/RecentDocuments` | сами файлы |
 | Файлы по маскам | домашние папки (плюс маски `*Zone.Identifier`, `.DS_Store`, `*.swp`, `*.orig`, `*.rej`) | скрытые папки, другие файловые системы |
 
@@ -152,7 +155,7 @@
   `sudo`, `wheel`, `admin`.
 - Сокеты, каналы и устройства не удаляются никогда; `/tmp` и `/var/tmp` не
   трогаются — их чистит systemd-tmpfiles.
-- Вывод команд (`snap`, `apt-get`) читается в языке C, а не в языке системы.
+- Вывод команд (`snap`, `apt-get`, `flatpak`) читается в языке C, а не в языке системы.
 
 ## Что гарантировано
 

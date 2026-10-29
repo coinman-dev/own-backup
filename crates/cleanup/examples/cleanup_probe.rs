@@ -20,10 +20,13 @@
 //!       loads it privately, lists and removes the traces; checks that the
 //!       settings stay and that a hive held by someone else is left.
 //!
-//!   cleanup_probe analyze          (Linux)
-//!       Every Linux item for the users of this system — measured, nothing
-//!       removed. As a user: that user only; as root: every user (each with
-//!       their own rights) and the system's part.
+//!   cleanup_probe analyze [<id>...]          (Linux)
+//!       Every Linux item (or those named) for the users of this system —
+//!       measured, nothing removed. As a user: that user only; as root: every
+//!       user (each with their own rights) and the system's part.
+//!
+//!   cleanup_probe clean <id>...              (Linux)
+//!       The items named, removed for real, as `analyze` would list them.
 
 #[cfg(target_os = "linux")]
 fn main() {
@@ -31,10 +34,16 @@ fn main() {
 
     use own_backup_cleanup::{catalog, engine, users, Mode, Roots};
 
-    if std::env::args().nth(1).as_deref() != Some("analyze") {
-        eprintln!("cleanup_probe analyze");
-        std::process::exit(2);
-    }
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mode = match args.first().map(String::as_str) {
+        Some("analyze") => Mode::Analyze,
+        Some("clean") if args.len() > 1 => Mode::Remove,
+        _ => {
+            eprintln!("cleanup_probe analyze [<id>...] | cleanup_probe clean <id>...");
+            std::process::exit(2);
+        }
+    };
+    let named = &args[1..];
     // SAFETY: no arguments.
     let me = unsafe { libc::geteuid() };
     let people: Vec<_> = users::profiles()
@@ -48,12 +57,13 @@ fn main() {
     let items: Vec<_> = catalog::catalog()
         .iter()
         .filter(|i| me == 0 || !i.admin_only())
+        .filter(|i| named.is_empty() || named.iter().any(|n| n == i.id))
         .collect();
     let report = engine::run(
         &items,
         &roots,
         &people,
-        Mode::Analyze,
+        mode,
         own_backup_cleanup::Options {
             history_keep_days: 7,
             ..Default::default()
@@ -83,7 +93,15 @@ fn main() {
                 println!("{:<20} {:>9} {}", "", f.size, f.path.display());
             }
         }
-        if i.id == "browser_cache" || i.id == "editor_junk" || i.id == "dev_caches_linux" {
+        if [
+            "browser_cache",
+            "editor_junk",
+            "dev_caches_linux",
+            "app_caches_linux",
+            "telegram_cache",
+        ]
+        .contains(&i.id.as_str())
+        {
             let mut dirs = std::collections::BTreeMap::<String, (u64, u64)>::new();
             for f in report.listing.get(&i.id).into_iter().flatten() {
                 let mut p = f.path.clone();
