@@ -1322,6 +1322,8 @@
   "pick_no_drives": "No drives found.",
   "pick_empty": "This folder is empty.",
   "pick_new_folder_placeholder": "New folder name",
+  "pick_unmount": "Unmount",
+  "pick_unmount_title": "Unmount the volume so that a copy can be restored onto it",
   "pick_create_folder": "Create folder",
   "pick_select": "Select",
   "akey_title": "Recovery key",

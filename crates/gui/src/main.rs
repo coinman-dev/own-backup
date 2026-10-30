@@ -799,6 +799,9 @@ fn main() {
             commands::files::list_roots,
             commands::files::list_dir,
             commands::files::create_dir,
+            commands::files::medium_mount_volume,
+            commands::files::medium_unmount_volume,
+            commands::files::medium_make_writable,
             commands::files::open_folder,
             commands::files::destination_mount,
             // Единственный свидетель того, что интерфейс жив, — он сам.

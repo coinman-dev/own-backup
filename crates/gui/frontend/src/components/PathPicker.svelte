@@ -78,8 +78,33 @@
   // are in here" — the folder is the answer, not one of them.
   const pickable = (e: DirEntry) => e.is_dir || !req?.directory;
 
+  async function openVolume(name: string) {
+    loading = true;
+    error = null;
+    try {
+      await go(await api.mediumMountVolume(name));
+    } catch (e) {
+      error = String(e);
+      loading = false;
+    }
+  }
+
+  async function unmountVolume(name: string) {
+    error = null;
+    try {
+      await api.mediumUnmountVolume(name);
+      lastPath = '';
+    } catch (e) {
+      error = String(e);
+    }
+    const kept = error;
+    await roots();
+    error = kept;
+  }
+
   function onRow(e: DirEntry) {
-    if (e.is_dir) go(e.path);
+    if (e.volume) openVolume(e.volume);
+    else if (e.is_dir) go(e.path);
     else if (!req?.directory) selectedFile = selectedFile === e.path ? null : e.path;
   }
 
@@ -89,6 +114,7 @@
     creating = true;
     error = null;
     try {
+      await api.mediumMakeWritable(path);
       const made = await api.createDir(joinPath(path, name));
       newFolder = '';
       await go(made);
@@ -99,7 +125,15 @@
     }
   }
 
-  function accept() {
+  async function accept() {
+    if (req?.writable) {
+      try {
+        await api.mediumMakeWritable(path);
+      } catch (e) {
+        error = String(e);
+        return;
+      }
+    }
     finishPick(req?.directory ? path : selectedFile);
   }
 </script>
@@ -135,7 +169,7 @@
         {:else if entries.length === 0}
           <div class="muted">{path === '' ? m.pick_no_drives() : m.pick_empty()}</div>
         {/if}
-        {#each entries as e (e.path)}
+        {#each entries as e (e.volume || e.path)}
           <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
           <div
             class="row"
@@ -160,7 +194,14 @@
             {:else if e.fs}
               <span class="tag muted-tag">{e.fs}</span>
             {/if}
-            {#if !e.is_dir && e.size != null}<span class="sz">{formatBytes(e.size)}</span>{/if}
+            {#if (!e.is_dir || e.volume) && e.size != null}<span class="sz">{formatBytes(e.size)}</span>{/if}
+            {#if e.volume && e.mounted}
+              <button
+                class="nav"
+                title={m.pick_unmount_title()}
+                onclick={(ev) => { ev.stopPropagation(); unmountVolume(e.volume); }}
+              >{m.pick_unmount()}</button>
+            {/if}
           </div>
         {/each}
       </div>

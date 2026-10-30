@@ -9,10 +9,12 @@
 # package's Depends). DRM drivers and Mesa for the screen, fonts with Cyrillic
 # (DejaVu has the monospace the terminal needs), polkit's daemon for the
 # engine (root needs no question, but the engine asks polkit about callers and
-# must reach it).
+# must reach it). wlr-randr sets the screen size in a virtual machine
+# (vm-resolution).
 labwc
 cage
 foot
+wlr-randr
 libgtk-layer-shell0
 fonts-dejavu-core
 libgl1-mesa-dri

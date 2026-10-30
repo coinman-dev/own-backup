@@ -91,6 +91,23 @@ while [ "$i" -lt 30 ]; do
 done
 report "desktop=${desktop:-unknown} shell=$shell"
 
+# The path picker opens NTFS with the kernel's driver (crates/gui medium_volumes).
+ntfs_image=/run/obk-selftest-ntfs.img
+ntfs_dir=/run/obk-selftest-ntfs
+ntfs3=no
+mkdir -p "$ntfs_dir"
+if truncate -s 32M "$ntfs_image" && mkntfs -F -q -Q "$ntfs_image" >/dev/null 2>&1 &&
+    mount -t ntfs3 -o ro,loop "$ntfs_image" "$ntfs_dir" 2>/dev/null; then
+    ntfs3=yes
+    umount "$ntfs_dir"
+fi
+rm -rf "$ntfs_image" "$ntfs_dir"
+report "ntfs3_mount=$ntfs3"
+
+# The stand is a virtual machine, so vm-resolution has set the screen by now.
+screen_sock=$(find /run/user/0 -maxdepth 1 -name 'wayland-*' -type s 2>/dev/null | grep -v lock | head -n1)
+report "vm_screen=$(XDG_RUNTIME_DIR=/run/user/0 WAYLAND_DISPLAY=$(basename "${screen_sock:-none}") wlr-randr 2>/dev/null | awk '/current/ {print $1; exit}')"
+
 if [ "$shell" = running ]; then
     # The strip's window buttons, as it wrote them: the window is listed.
     list=/run/user/0/own-backup-shell.windows

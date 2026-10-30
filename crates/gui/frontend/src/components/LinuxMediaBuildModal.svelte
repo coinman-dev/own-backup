@@ -216,7 +216,7 @@
   }
 
   async function chooseFolder() {
-    const dir = await pickPath({ directory: true, title: m.mb_dest() });
+    const dir = await pickPath({ writable: true, directory: true, title: m.mb_dest() });
     if (dir) outputDir = dir;
   }
 

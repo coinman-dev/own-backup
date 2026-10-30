@@ -775,7 +775,7 @@
 
   async function browseDest() {
     try {
-      const picked = await pickPath({ directory: true, title: m.wiz_dest_pick_title() });
+      const picked = await pickPath({ writable: true, directory: true, title: m.wiz_dest_pick_title() });
       if (typeof picked === 'string') job.dest_folder = picked;
     } catch (e) {
       error = () => String(e);
