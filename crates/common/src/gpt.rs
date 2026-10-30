@@ -184,6 +184,8 @@ pub fn plan_whole_disk_image(layout: &DiskLayout, meta_size: u64) -> WholeDiskIm
 
 /// EFI System Partition GPT *type* GUID.
 pub const GPT_TYPE_EFI_SYSTEM: &str = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B";
+/// The generic "Linux filesystem" GPT *type* GUID; Windows is never on one.
+pub const GPT_TYPE_LINUX_FILESYSTEM: &str = "0FC63DAF-8483-4772-8E79-3D69D8477DE4";
 /// Microsoft Reserved Partition (MSR) GPT *type* GUID — no filesystem; its GPT
 /// entry is recreated on restore but no data is backed up.
 pub const GPT_TYPE_MSR: &str = "E3C9E316-0B5C-4DB8-817D-F92DF00215AE";
