@@ -694,6 +694,10 @@
     "ru": "На разделе EFI несколько загрузчиков (%{candidates}), и определить по UUID, какой из них от восстановленной системы, не удалось — взят EFI\\%{dir}. Если система не загрузится, запустите из UEFI Shell загрузчик из другого каталога.",
     "en": "The EFI partition has several loaders (%{candidates}), and which one belongs to the restored system could not be told by UUID — EFI\\%{dir} was taken. If the system does not boot, start a loader from another folder in the UEFI Shell."
   },
+  "esp_fallback_win.grub_replaced": {
+    "ru": "На %{fallback} лежала копия GRUB, которую Secure Boot не пропускает. На её место поставлен shim из EFI\\%{dir}: система стартует и с Secure Boot, и без него.",
+    "en": "%{fallback} held a copy of GRUB that Secure Boot refuses. It was replaced with the shim from EFI\\%{dir}: the system starts with Secure Boot on and off."
+  },
   "esp_fallback_win.copied": {
     "ru": "Из EFI\\%{dir} скопировано в %{fallback_dir}: %{files}",
     "en": "Copied from EFI\\%{dir} to %{fallback_dir}: %{files}"

@@ -166,7 +166,7 @@ fn ensure_fallback(plan: &RestorePlan, device: &str, esp: PartRef) -> Result<Boo
     )?;
     Ok(BootNote {
         message: outcome.message,
-        follow_ups: if outcome.copied {
+        follow_ups: if outcome.copied && !outcome.replaced {
             vec![tr!("restore_exec.fallback_copied", from = outcome.from).into_owned()]
         } else {
             outcome.follow_ups
@@ -442,7 +442,7 @@ fn finalize_windows(
         &[],
         &format!("{device} #{}", esp.index),
     )?;
-    if fallback.copied {
+    if fallback.copied && !fallback.replaced {
         follow_ups.push(tr!("restore_exec.fallback_copied", from = fallback.from).into_owned());
     }
     drop(esp_mount);
