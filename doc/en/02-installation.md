@@ -23,7 +23,7 @@ Download the files from the
 
 ### Install
 
-1. Run `own-backup-install_0.1.9-beta.exe` and confirm the administrator prompt.
+1. Run `own-backup-install_0.2.0-beta.exe` and confirm the administrator prompt.
 2. Choose the language of the wizard (English or Russian) and follow it.
 
 The installer puts the program into `C:\Program Files\OwnBackup` for all users
@@ -38,8 +38,8 @@ by its schedule.
 ### Silent install
 
 ```
-own-backup-install_0.1.9-beta.exe /S
-own-backup-install_0.1.9-beta.exe /S /D=D:\Programs\OwnBackup
+own-backup-install_0.2.0-beta.exe /S
+own-backup-install_0.2.0-beta.exe /S /D=D:\Programs\OwnBackup
 ```
 
 `/S` installs without questions. `/D=<folder>`, which must be the last
@@ -65,7 +65,7 @@ them. **Backups are never deleted** by uninstalling.
 ### Install
 
 ```bash
-sudo apt install ./own-backup_0.1.9.beta_amd64.deb
+sudo apt install ./own-backup_0.2.0.beta_amd64.deb
 ```
 
 The package installs the window and the command line into `/usr/bin`, the

@@ -1,0 +1,21 @@
+#!/bin/sh
+# labwc's autostart runs this before the strip and the window, so both open on
+# the final screen size. In a virtual machine the display starts small (Hyper-V:
+# 1024x768, with the window's lower half out of reach), and nothing on the medium
+# changes it afterwards. Real hardware keeps what its monitor prefers.
+#
+# A size the display does not take leaves the screen as it was: this must never
+# stand between the user and the window, so it always ends with success.
+set -u
+
+wanted=1440x900
+
+systemd-detect-virt --vm --quiet || exit 0
+command -v wlr-randr >/dev/null 2>&1 || exit 0
+
+for output in $(timeout 5 wlr-randr | awk '/^[^ ]/ {print $1}'); do
+    timeout 5 wlr-randr --output "$output" --mode "$wanted" 2>/dev/null ||
+        timeout 5 wlr-randr --output "$output" --custom-mode "$wanted" ||
+        echo "vm-resolution: $output stays as it was" >&2
+done
+exit 0

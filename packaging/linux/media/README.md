@@ -16,7 +16,9 @@ small desktop on tty1, no login. Plan §6, stage 6, decision 11.
   keyboards (`/dev/input`, never grabbed) through the same keymap with
   libxkbcommon, and a click presses Alt+Shift on a `uinput` keyboard of its
   own (`crates/shell/src/linux/keyboard.rs`); the layout it shows is in
-  `$XDG_RUNTIME_DIR/own-backup-shell.layout` for the self-test.
+  `$XDG_RUNTIME_DIR/own-backup-shell.layout` for the self-test. In a virtual
+  machine `vm-resolution` sets the screen to 1440x900 first; real hardware
+  keeps what its monitor prefers.
 - **Tools just in case:** the window's checkbox (or `media build-linux
   --tools krusader,featherpad`) adds Krusader and FeatherPad — Debian packages
   (`crates/common/src/media_tools.rs`), written by `build-media.sh --packages`

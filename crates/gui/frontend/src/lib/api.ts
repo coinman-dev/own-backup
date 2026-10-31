@@ -74,6 +74,9 @@ export const api = {
   listDir: (path: string, dirsOnly: boolean, filesExt: string[]) =>
     invoke<DirListing>('list_dir', { path, dirsOnly, filesExt }),
   createDir: (path: string) => invoke<string>('create_dir', { path }),
+  mediumMountVolume: (name: string) => invoke<string>('medium_mount_volume', { name }),
+  mediumUnmountVolume: (name: string) => invoke<void>('medium_unmount_volume', { name }),
+  mediumMakeWritable: (path: string) => invoke<void>('medium_make_writable', { path }),
 
   // --- boot medium ---
   findBaseImages: () => invoke<BaseImage[]>('find_base_images'),

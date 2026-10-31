@@ -29,6 +29,13 @@ pub struct DirEntryDto {
     /// label, so a drive is never listed with nothing beside it.
     #[serde(default)]
     pub fs: String,
+    /// Linux medium: the volume to mount before this row can be listed; empty
+    /// everywhere else (`medium_volumes`).
+    #[serde(default)]
+    pub volume: String,
+    /// Linux medium: that volume is mounted now, so it can be released.
+    #[serde(default)]
+    pub mounted: bool,
 }
 
 #[derive(Serialize)]
@@ -62,6 +69,8 @@ pub async fn list_roots() -> Result<Vec<DirEntryDto>, String> {
                         size: None,
                         label,
                         fs,
+                        volume: String::new(),
+                        mounted: false,
                     });
                 }
             }
@@ -69,14 +78,28 @@ pub async fn list_roots() -> Result<Vec<DirEntryDto>, String> {
         }
         #[cfg(not(target_os = "windows"))]
         {
-            Ok(vec![DirEntryDto {
+            let mut out = vec![DirEntryDto {
                 name: "/".into(),
                 path: "/".into(),
                 is_dir: true,
                 size: None,
                 label: String::new(),
                 fs: String::new(),
-            }])
+                volume: String::new(),
+                mounted: false,
+            }];
+            #[cfg(target_os = "linux")]
+            out.extend(super::medium_volumes::list().into_iter().map(|v| DirEntryDto {
+                path: v.mount_point.clone().unwrap_or_default(),
+                mounted: v.mount_point.is_some(),
+                name: v.name.clone(),
+                is_dir: true,
+                size: v.size,
+                label: v.label,
+                fs: v.fs,
+                volume: v.name,
+            }));
+            Ok(out)
         }
     })
     .await
@@ -164,6 +187,8 @@ pub async fn list_dir(
                     size: None,
                     label: String::new(),
                     fs: String::new(),
+                    volume: String::new(),
+                    mounted: false,
                 });
             // Files are listed when one is being picked — and ALSO when a
             // FOLDER is being picked and the caller named the extensions that
@@ -190,6 +215,8 @@ pub async fn list_dir(
                         size: Some(meta.len()),
                         label: String::new(),
                         fs: String::new(),
+                        volume: String::new(),
+                        mounted: false,
                     });
                 }
             }
@@ -218,6 +245,60 @@ pub async fn create_dir(path: String) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
         std::fs::create_dir_all(&path).map_err(|e| format!("{path}: {e}"))?;
         Ok(path)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Linux medium: mount a volume the picker offered, read-only; returns where it
+/// is. See `medium_volumes` for why this waits for the user's click.
+#[tauri::command]
+pub async fn medium_mount_volume(name: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        #[cfg(target_os = "linux")]
+        {
+            super::medium_volumes::mount(&name)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(format!("{name}: not on this system"))
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Linux medium: release a volume the picker mounted.
+#[tauri::command]
+pub async fn medium_unmount_volume(name: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        #[cfg(target_os = "linux")]
+        {
+            super::medium_volumes::unmount(&name)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(format!("{name}: not on this system"))
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Linux medium: `path` is about to be written to, so its volume must be
+/// read-write. Anywhere else there is nothing to do.
+#[tauri::command]
+pub async fn medium_make_writable(path: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        #[cfg(target_os = "linux")]
+        {
+            super::medium_volumes::make_writable(&path)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = path;
+            Ok(())
+        }
     })
     .await
     .map_err(|e| e.to_string())?

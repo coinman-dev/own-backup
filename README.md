@@ -7,7 +7,7 @@
 <h1 align="center">Own Backup</h1>
 <p align="center">Block-level backup of Windows and Linux disks and volumes, with boot media to restore from.</p>
 
-[![Release](https://img.shields.io/badge/release-0.1.9--beta-orange)](https://github.com/coinman-dev/own-backup/releases/tag/v0.1.9-beta)
+[![Release](https://img.shields.io/badge/release-0.2.0--beta-orange)](https://github.com/coinman-dev/own-backup/releases/tag/v0.2.0-beta)
 [![Build](https://github.com/coinman-dev/own-backup/actions/workflows/release.yml/badge.svg)](https://github.com/coinman-dev/own-backup/actions/workflows/release.yml)
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-blue)](#download)
 [![Linux](https://img.shields.io/badge/Linux-Ubuntu%2024.04%2B%20%2F%20Debian%2013%2B-blue)](#download)
@@ -24,7 +24,7 @@ from.
   <img src="doc/images/en/backup-dashboard.png" alt="Own Backup: the Backup page with jobs, the last backup of each and its versions">
 </p>
 
-> **0.1.9-beta is a prerelease; the Linux version is new since 0.1.6-beta.**
+> **0.2.0-beta is a prerelease; the Linux version is new since 0.1.6-beta.**
 > Check an important backup by restoring it to a spare disk or a virtual
 > machine before you rely on it — on Linux especially.
 
@@ -32,9 +32,9 @@ from.
 
 | Edition | Download | Usage |
 |---|---|---|
-| Windows installer | [own-backup-install_0.1.9-beta.exe](https://github.com/coinman-dev/own-backup/releases/download/v0.1.9-beta/own-backup-install_0.1.9-beta.exe) | Installs the program for all users of the computer and starts its backup service. Needs administrator rights. |
-| Linux package | [own-backup_0.1.9.beta_amd64.deb](https://github.com/coinman-dev/own-backup/releases/download/v0.1.9-beta/own-backup_0.1.9.beta_amd64.deb) | `sudo apt install ./own-backup_0.1.9.beta_amd64.deb` installs the program, starts its service and adds you to the `own-backup` group (sign in again to open the window). |
-| Linux boot medium | [OwnBackup-Linux-0.1.9.beta_amd64.iso](https://github.com/coinman-dev/own-backup/releases/download/v0.1.9-beta/OwnBackup-Linux-0.1.9.beta_amd64.iso) | Boots a computer from a CD or a USB stick (UEFI with Secure Boot, or BIOS) to back up or restore its disks, Windows ones included. The window writes it onto a stick. |
+| Windows installer | [own-backup-install_0.2.0-beta.exe](https://github.com/coinman-dev/own-backup/releases/download/v0.2.0-beta/own-backup-install_0.2.0-beta.exe) | Installs the program for all users of the computer and starts its backup service. Needs administrator rights. |
+| Linux package | [own-backup_0.2.0.beta_amd64.deb](https://github.com/coinman-dev/own-backup/releases/download/v0.2.0-beta/own-backup_0.2.0.beta_amd64.deb) | `sudo apt install ./own-backup_0.2.0.beta_amd64.deb` installs the program, starts its service and adds you to the `own-backup` group (sign in again to open the window). |
+| Linux boot medium | [OwnBackup-Linux-0.2.0.beta_amd64.iso](https://github.com/coinman-dev/own-backup/releases/download/v0.2.0-beta/OwnBackup-Linux-0.2.0.beta_amd64.iso) | Boots a computer from a CD or a USB stick (UEFI with Secure Boot, or BIOS) to back up or restore its disks, Windows ones included. The window writes it onto a stick. |
 
 Windows 10/11, x64. The window needs the Microsoft Edge WebView2 Runtime — part
 of Windows 11, and the installer says so if a Windows 10 does not have it.

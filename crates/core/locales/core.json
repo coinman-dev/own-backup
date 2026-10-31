@@ -247,6 +247,10 @@
     "ru": "Идентификаторы исходного диска воспроизведены — записи загрузки и среда восстановления (WinRE) из копии продолжают работать",
     "en": "The source disk's identifiers were reproduced — the boot entries and Windows RE from the backup keep working"
   },
+  "restore_exec.disk_ids_preserved_no_windows": {
+    "ru": "Идентификаторы исходного диска воспроизведены — записи загрузки из копии продолжают работать",
+    "en": "The source disk's identifiers were reproduced — the boot entries from the backup keep working"
+  },
   "restore_exec.partitions_moved": {
     "ru": "Разделы %{parts} начинаются не там, где на исходном диске. Записи загрузки это переживут (они ссылаются на GUID), а среда восстановления WinRE — нет: ReAgent.xml помнит смещение раздела. Если «Особые варианты загрузки» не работают, выполните в восстановленной системе: reagentc /setreimage /path C:\\Recovery\\WindowsRE, затем reagentc /enable.",
     "en": "Partitions %{parts} do not start where they did on the source disk. The boot entries will survive this (they refer to GUIDs), but Windows RE will not: ReAgent.xml remembers the partition's offset. If “Advanced startup” does not work, run this in the restored system: reagentc /setreimage /path C:\\Recovery\\WindowsRE, then reagentc /enable."

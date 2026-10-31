@@ -5,9 +5,14 @@
 // work lives in «Инструменты» — it leaves the request here and the window
 // follows it.
 
-import type { ViewName } from './types';
+import type { Job, ViewName } from './types';
 
-export const nav = $state({ request: null as ViewName | null });
+export const nav = $state({
+  request: null as ViewName | null,
+  /** «Клонировать параметры» asked from outside «Резервное копирование»,
+   *  whose wizard does it. */
+  cloneJob: null as Job | null,
+});
 
 export function goTo(view: ViewName): void {
   nav.request = view;

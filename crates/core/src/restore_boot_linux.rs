@@ -28,6 +28,7 @@ use tracing::{info, warn};
 use own_backup_backup::efivars_linux::{safety_copy_dir, Action, Efivarfs};
 use own_backup_backup::linux_tools::TempMount;
 use own_backup_backup::restore_disk_linux::partition_node;
+use own_backup_common::gpt::{DiskLayout, GPT_TYPE_LINUX_FILESYSTEM};
 use own_backup_common::restore_plan::{PartRef, RestoreOp, RestorePlan};
 use own_backup_common::{tr, OwnBackupError, Result};
 
@@ -48,6 +49,18 @@ pub(super) fn run_boot_op(
     match op {
         RestoreOp::EnsureFallbackBootloader { esp } => ensure_fallback(plan, device, *esp),
         RestoreOp::RestoreBootEntries => restore_boot_entries(plan, sidecar),
+        RestoreOp::FinalizeBoot { windows_part, .. }
+            if is_linux_partition(captured_layout(sidecar), plan, windows_part.index) =>
+        {
+            info!(
+                part = windows_part.index,
+                "the Windows boot step named a Linux partition: nothing to finish"
+            );
+            Ok(BootNote {
+                message: tr!("restore_boot_linux.not_windows").into_owned(),
+                follow_ups: Vec::new(),
+            })
+        }
         RestoreOp::FinalizeBoot {
             windows_part,
             esp,
@@ -153,7 +166,7 @@ fn ensure_fallback(plan: &RestorePlan, device: &str, esp: PartRef) -> Result<Boo
     )?;
     Ok(BootNote {
         message: outcome.message,
-        follow_ups: if outcome.copied {
+        follow_ups: if outcome.copied && !outcome.replaced {
             vec![tr!("restore_exec.fallback_copied", from = outcome.from).into_owned()]
         } else {
             outcome.follow_ups
@@ -294,6 +307,40 @@ fn guids_preserved(
     })
 }
 
+fn captured_layout(sidecar: &own_backup_backup::sidecar::Sidecar) -> Option<&DiskLayout> {
+    sidecar.disk_manifest.as_ref().map(|d| &d.layout)
+}
+
+/// Did target partition `dst` receive a partition the copy's own table calls a
+/// Linux filesystem? The window offers the Windows boot step for the partition
+/// the system ran from, and Linux has one of those as well.
+fn is_linux_partition(layout: Option<&DiskLayout>, plan: &RestorePlan, dst: u32) -> bool {
+    let Some(src) = source_of(plan, dst) else {
+        return false;
+    };
+    layout
+        .and_then(|l| l.partitions.iter().find(|p| p.index == src))
+        .is_some_and(|p| p.type_guid.eq_ignore_ascii_case(GPT_TYPE_LINUX_FILESYSTEM))
+}
+
+/// Is there a Windows in this plan to finish? What is said about WinRE and
+/// `reagentc` is for that case only.
+pub(super) fn plan_restores_windows(
+    plan: &RestorePlan,
+    sidecar: &own_backup_backup::sidecar::Sidecar,
+) -> bool {
+    windows_step_is_real(captured_layout(sidecar), plan)
+}
+
+fn windows_step_is_real(layout: Option<&DiskLayout>, plan: &RestorePlan) -> bool {
+    plan.ops.iter().any(|op| match op {
+        RestoreOp::FinalizeBoot { windows_part, .. } => {
+            !is_linux_partition(layout, plan, windows_part.index)
+        }
+        _ => false,
+    })
+}
+
 fn source_of(plan: &RestorePlan, dst: u32) -> Option<u32> {
     plan.ops.iter().find_map(|op| match op {
         RestoreOp::RestorePartition {
@@ -395,7 +442,7 @@ fn finalize_windows(
         &[],
         &format!("{device} #{}", esp.index),
     )?;
-    if fallback.copied {
+    if fallback.copied && !fallback.replaced {
         follow_ups.push(tr!("restore_exec.fallback_copied", from = fallback.from).into_owned());
     }
     drop(esp_mount);
@@ -471,7 +518,73 @@ fn finalize_windows(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use own_backup_common::gpt::{DiskLayout, GptPartitionEntry};
+    use own_backup_common::gpt::GptPartitionEntry;
+    use own_backup_common::restore_plan::RestoreMode;
+
+    fn plan_finishing(dst: u32, src: u32) -> RestorePlan {
+        let part = PartRef {
+            index: dst,
+            offset: 1 << 20,
+            size: 1 << 20,
+        };
+        RestorePlan::new(
+            1,
+            "/tmp/img.vhdx".into(),
+            vec![
+                RestoreOp::RestorePartition {
+                    src_index: src,
+                    dst: part,
+                    mode: RestoreMode::Sectors,
+                    wipe_free_space: false,
+                    reencrypt: false,
+                },
+                RestoreOp::FinalizeBoot {
+                    windows_part: part,
+                    esp: None,
+                    uefi: true,
+                },
+            ],
+        )
+    }
+
+    fn layout_of(index: u32, type_guid: &str) -> DiskLayout {
+        DiskLayout {
+            disk_guid: String::new(),
+            sector_size: 512,
+            size_bytes: 1 << 30,
+            partitions: vec![GptPartitionEntry {
+                type_guid: type_guid.into(),
+                ..entry(index, "P")
+            }],
+        }
+    }
+
+    /// A Kubuntu restored from the window got the Windows step for its root
+    /// partition, and with it advice about `reagentc` (owner, Hyper-V, 30.10).
+    #[test]
+    fn a_linux_root_is_not_windows_to_finish() {
+        let plan = plan_finishing(3, 5);
+        let linux = layout_of(5, "0fc63daf-8483-4772-8e79-3d69d8477de4");
+        assert!(is_linux_partition(Some(&linux), &plan, 3));
+        assert!(!windows_step_is_real(Some(&linux), &plan));
+    }
+
+    #[test]
+    fn windows_is_still_finished() {
+        let plan = plan_finishing(3, 5);
+        let basic = layout_of(5, "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7");
+        assert!(windows_step_is_real(Some(&basic), &plan));
+        // Nothing says otherwise: the step runs and answers for itself, as before.
+        assert!(windows_step_is_real(None, &plan));
+        let elsewhere = layout_of(9, "0FC63DAF-8483-4772-8E79-3D69D8477DE4");
+        assert!(windows_step_is_real(Some(&elsewhere), &plan));
+    }
+
+    #[test]
+    fn no_step_no_windows() {
+        let plan = RestorePlan::new(1, "/tmp/img.vhdx".into(), Vec::new());
+        assert!(!windows_step_is_real(None, &plan));
+    }
 
     fn entry(index: u32, guid: &str) -> GptPartitionEntry {
         GptPartitionEntry {

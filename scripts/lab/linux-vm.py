@@ -863,6 +863,11 @@ def layout_step(line: str, lines: list, screen: tuple) -> None:
     elif line.startswith('OBK-SELFTEST layout_click_ready'):
         at = next((m.group(1, 2) for ln in lines
                    for m in [re.search(r'layout_at=(\d+),(\d+)', ln)] if m), None)
+        # The medium has changed the size the VGA started with (vm-resolution).
+        size = next((m.group(1, 2) for ln in lines
+                     for m in [re.search(r'vm_screen=(\d+)x(\d+)', ln)] if m), None)
+        if size:
+            screen = (int(size[0]), int(size[1]))
         if at:
             click(int(at[0]), int(at[1]), screen)
             time.sleep(1)

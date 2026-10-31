@@ -69,7 +69,7 @@
   });
 
   async function pickMirrorDir() {
-    const chosen = await pickPath({ directory: true, title: m.set_log_mirror_pick_title() });
+    const chosen = await pickPath({ writable: true, directory: true, title: m.set_log_mirror_pick_title() });
     if (typeof chosen === 'string') logMirrorDir = chosen;
   }
 

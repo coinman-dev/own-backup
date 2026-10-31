@@ -1121,6 +1121,10 @@ export interface DirEntry {
   label: string;
   /** Filesystem of the drive, shown when it has no label. */
   fs: string;
+  /** Linux medium: the volume to mount before this row can be listed. */
+  volume: string;
+  /** Linux medium: that volume is mounted now. */
+  mounted: boolean;
 }
 
 export interface DirListing {

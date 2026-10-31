@@ -1552,8 +1552,16 @@
       const espIdx = srcBackupParts.findIndex(
         (p) => (p.gpt_type_guid || '').toUpperCase() === GPT_TYPES[1].guid,
       );
+      // Linux has a system partition as well, and a Linux disk may carry NTFS
+      // data: neither is a Windows to finish (a Kubuntu got this step, 30.10).
+      const isLinuxPart = (p: (typeof srcBackupParts)[number]) =>
+        (p.gpt_type_guid || '').toUpperCase() === GPT_TYPES[4].guid ||
+        /^(ext[234]|xfs|btrfs|f2fs|swap|crypto_luks|luks)/.test((p.filesystem || '').toLowerCase());
+      const anyLinux = srcBackupParts.some(isLinuxPart);
       const winIdx = srcBackupParts.findIndex(
-        (p) => p.is_system || (p.filesystem || '').toLowerCase() === 'ntfs',
+        (p) =>
+          !isLinuxPart(p) &&
+          (p.is_system || (!anyLinux && (p.filesystem || '').toLowerCase() === 'ntfs')),
       );
       const win = winIdx >= 0 ? refOf(previewIdx[winIdx]) : null;
       const esp = espIdx >= 0 ? refOf(previewIdx[espIdx]) : null;

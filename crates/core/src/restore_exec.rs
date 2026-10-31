@@ -1653,7 +1653,7 @@ fn run_op(
             // nothing is noise.
             Ok(OpNote {
                 message: outcome.message,
-                follow_ups: if outcome.copied {
+                follow_ups: if outcome.copied && !outcome.replaced {
                     vec![tr!("restore_exec.fallback_copied", from = outcome.from).into_owned()]
                 } else {
                     outcome.follow_ups

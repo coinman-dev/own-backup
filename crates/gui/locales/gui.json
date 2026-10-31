@@ -72,6 +72,18 @@
     "ru": "Скрыть значок",
     "en": "Hide the icon"
   },
+  "files.volume_gone": {
+    "ru": "Тома %{name} больше нет",
+    "en": "The volume %{name} is no longer there"
+  },
+  "files.volume_not_mounted": {
+    "ru": "Не удалось подключить том %{name}: %{error}",
+    "en": "The volume %{name} could not be mounted: %{error}"
+  },
+  "files.volume_not_unmounted": {
+    "ru": "Не удалось отключить том %{name}: %{error}",
+    "en": "The volume %{name} could not be unmounted: %{error}"
+  },
   "files.folder_missing": {
     "ru": "Папки нет: %{path}",
     "en": "There is no such folder: %{path}"

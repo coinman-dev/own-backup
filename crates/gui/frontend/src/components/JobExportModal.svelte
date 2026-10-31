@@ -99,7 +99,7 @@
 
   async function browse() {
     try {
-      const picked = await pickPath({ directory: true, title: m.jex_pick_folder(), startPath: folder || undefined });
+      const picked = await pickPath({ writable: true, directory: true, title: m.jex_pick_folder(), startPath: folder || undefined });
       if (picked) folder = picked;
     } catch {
       /* dialog cancelled */

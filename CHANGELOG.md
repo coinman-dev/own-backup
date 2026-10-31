@@ -2,6 +2,47 @@
 
 # Changelog
 
+## 0.2.0-beta — 2026-10-31
+
+### Added
+
+- **Linux boot medium: the computer's partitions in the path picker.** **Drives**
+  lists them with label and size. A partition is mounted when you open it, at
+  `/mnt/<device name>`, read-only and without replaying a journal; it becomes
+  writable only when a destination folder is chosen on it. **Unmount** releases
+  it. Nothing is mounted at boot: a mounted partition cannot be restored onto.
+  LUKS, BitLocker and LVM partitions do not open from this list.
+- **Restore: the list of backups works as in Backup.** The same order button
+  beside **This computer**, and the same menu on the arrow of a row or a right
+  click. A backup added by hand has a shorter menu: checking and mounting (on
+  the **Tools** page), **Open storage** and removing it from the list, which
+  replaces the cross in the row.
+- **Activity keeps what the "Backup created" card says** for every finished
+  backup.
+
+### Fixed
+
+- **A restored Linux starts with Secure Boot on.** The fallback path
+  `\EFI\BOOT\BOOTX64.EFI` of a Kubuntu held a plain copy of GRUB, which Secure
+  Boot refuses, and a new machine has no boot entry for the shim beside it. Such
+  a copy is now replaced with that shim, which starts with Secure Boot on and
+  off and leads to the same GRUB; a failure leaves the GRUB in place. Anything
+  else on that path is left alone.
+- **Restoring a Linux disk from the window no longer ends in an error.** Its
+  system partition was taken for Windows, so the plan got the step that finishes
+  a Windows boot; that step failed and the boot entries were not restored.
+- **No advice about Windows RE and `reagentc` on a Linux backup.**
+
+### Changed
+
+- **The job page.** Upright cards for the source and the destination with new
+  pictures. The disk shows a padlock when the source volume is encrypted, the
+  folder when the backup itself is. The "Backup created" card and the block of
+  file types sit together above the buttons. The cross closes the card of that
+  run for good, and the next backup has its own.
+- **Linux boot medium in a virtual machine:** the screen switches to 1440×900.
+  Real hardware keeps what its monitor prefers.
+
 ## 0.1.9-beta — 2026-10-29
 
 ### Added

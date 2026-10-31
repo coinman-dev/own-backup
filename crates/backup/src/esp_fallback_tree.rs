@@ -27,6 +27,9 @@ pub struct FallbackOutcome {
     pub copied: bool,
     /// Which `EFI\<vendor>` directory it came from, when it was.
     pub from: String,
+    /// The copy took the place of a GRUB already at the path, rather than
+    /// filling an empty one.
+    pub replaced: bool,
 }
 
 /// `rel` (firmware spelling, backslashes) under `root`.
@@ -42,13 +45,15 @@ fn under(root: &Path, rel: &str) -> PathBuf {
 /// what identifies the live bootloader directory among the leftovers of every
 /// system the machine has ever had. `label` names the ESP in the log.
 ///
-/// Never overwrites an existing fallback loader.
+/// Never overwrites an existing fallback loader, with one exception: a plain
+/// copy of GRUB whose own directory has shim beside it ([`vendors_behind`]).
 pub fn ensure_at_root(root: &Path, uuids: &[String], label: &str) -> Result<FallbackOutcome> {
     let efi = root.join("EFI");
     if !efi.is_dir() {
         return Ok(FallbackOutcome {
             copied: false,
             from: String::new(),
+            replaced: false,
             message: tr!("esp_fallback_win.no_efi_dir").into_owned(),
             follow_ups: vec![tr!("esp_fallback_win.no_efi_dir_follow_up").into_owned()],
         });
@@ -58,9 +63,23 @@ pub fn ensure_at_root(root: &Path, uuids: &[String], label: &str) -> Result<Fall
     // First question, before anything else: is there already a loader at the
     // path the firmware tries by itself? A disk that boots anywhere needs
     // nothing from us — and the one way this operation could do harm is by
-    // replacing a working loader with one of our choosing. So it never does.
+    // replacing a working loader with one of our choosing. So it does not,
+    // unless the file there is a plain copy of a GRUB that has its shim beside
+    // it: that one starts only with Secure Boot off (a Kubuntu in a Hyper-V
+    // machine, 30.10), and shim starts both ways and leads to the same GRUB.
     let fallback = efi.join("BOOT").join(FALLBACK_NAME);
-    if fallback.is_file() {
+    let mut vendors = read_vendor_dirs(&efi);
+    let exists = fallback.is_file();
+    let behind = if exists {
+        vendors_behind(root, &fallback, &vendors)
+    } else {
+        Vec::new()
+    };
+    let replacing = !behind.is_empty();
+    if replacing {
+        vendors = behind;
+    }
+    if exists && !replacing {
         let size = std::fs::metadata(&fallback).map(|m| m.len()).unwrap_or(0);
         let known = identify_loader(&fallback);
         info!(
@@ -78,10 +97,10 @@ pub fn ensure_at_root(root: &Path, uuids: &[String], label: &str) -> Result<Fall
             follow_ups: Vec::new(),
             copied: false,
             from: String::new(),
+            replaced: false,
         });
     }
 
-    let vendors = read_vendor_dirs(&efi);
     info!(
         esp = %label,
         root = %root.display(),
@@ -94,6 +113,7 @@ pub fn ensure_at_root(root: &Path, uuids: &[String], label: &str) -> Result<Fall
         return Ok(FallbackOutcome {
             copied: false,
             from: String::new(),
+            replaced: false,
             message: tr!("esp_fallback_win.no_loader").into_owned(),
             follow_ups: vec![tr!(
                 "esp_fallback_win.no_loader_follow_up",
@@ -122,7 +142,10 @@ pub fn ensure_at_root(root: &Path, uuids: &[String], label: &str) -> Result<Fall
         )
     })?;
 
-    let copies = copies_for(&vendors, &choice);
+    let mut copies = copies_for(&vendors, &choice);
+    if replacing {
+        replace_loader(root, &dest_dir, &mut copies, &fallback_path)?;
+    }
     let mut copied = Vec::new();
     for c in &copies {
         let from = under(root, &c.from);
@@ -167,6 +190,21 @@ pub fn ensure_at_root(root: &Path, uuids: &[String], label: &str) -> Result<Fall
             .into_owned(),
         );
     }
+    if replacing {
+        info!(dir = %choice.dir, "shim took the place of a plain copy of GRUB at the fallback path");
+        return Ok(FallbackOutcome {
+            message: tr!(
+                "esp_fallback_win.grub_replaced",
+                fallback = fallback_path.as_str(),
+                dir = choice.dir.as_str()
+            )
+            .into_owned(),
+            follow_ups: Vec::new(),
+            copied: true,
+            from: choice.dir,
+            replaced: true,
+        });
+    }
     Ok(FallbackOutcome {
         message: tr!(
             "esp_fallback_win.copied",
@@ -178,7 +216,69 @@ pub fn ensure_at_root(root: &Path, uuids: &[String], label: &str) -> Result<Fall
         follow_ups,
         copied: true,
         from: choice.dir.clone(),
+        replaced: false,
     })
+}
+
+/// The vendor directories whose `grubx64.efi` is byte for byte the file at the
+/// fallback path and which have `shimx64.efi` too. Empty for anything else: a
+/// shim, Windows' boot manager or a GRUB of unknown origin is left alone.
+fn vendors_behind(root: &Path, fallback: &Path, vendors: &[VendorDir]) -> Vec<VendorDir> {
+    let Ok(current) = std::fs::read(fallback) else {
+        return Vec::new();
+    };
+    let named = |d: &VendorDir, name: &str| {
+        d.files
+            .iter()
+            .find(|f| f.eq_ignore_ascii_case(name))
+            .cloned()
+    };
+    vendors
+        .iter()
+        .filter(|d| !d.path.eq_ignore_ascii_case("BOOT"))
+        .filter(|d| named(d, "shimx64.efi").is_some())
+        .filter(|d| {
+            named(d, "grubx64.efi").is_some_and(|grub| {
+                std::fs::read(under(root, &format!("EFI\\{}\\{grub}", d.path)))
+                    .is_ok_and(|bytes| bytes == current)
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+/// Put everything shim needs in place first and shim itself last, in one
+/// rename, so that a failure at any point leaves the GRUB that was there, in
+/// working order. The loader is taken off `copies`: nothing is left to copy.
+fn replace_loader(
+    root: &Path,
+    dest_dir: &Path,
+    copies: &mut Vec<crate::esp_fallback::Copy>,
+    fallback_path: &str,
+) -> Result<()> {
+    let failed = |e: std::io::Error| {
+        OwnBackupError::Device(
+            tr!(
+                "esp_fallback_win.copy_failed",
+                fallback = fallback_path,
+                error = e
+            )
+            .into_owned(),
+        )
+    };
+    let (loader, companions): (Vec<_>, Vec<_>) = copies
+        .drain(..)
+        .partition(|c| c.to.eq_ignore_ascii_case(FALLBACK_NAME));
+    for c in &companions {
+        std::fs::copy(under(root, &c.from), dest_dir.join(&c.to)).map_err(failed)?;
+    }
+    let Some(loader) = loader.first() else {
+        return Ok(());
+    };
+    let staged = dest_dir.join("BOOTX64.NEW");
+    std::fs::copy(under(root, &loader.from), &staged).map_err(failed)?;
+    std::fs::rename(&staged, dest_dir.join(FALLBACK_NAME)).map_err(failed)?;
+    Ok(())
 }
 
 /// What the loader already at the fallback path appears to be.
@@ -308,6 +408,64 @@ mod tests {
         let out = ensure_at_root(esp.path(), &[UUID.to_string()], "test").unwrap();
         assert!(!out.copied);
         assert_eq!(std::fs::read(boot.join(FALLBACK_NAME)).unwrap(), b"theirs");
+    }
+
+    /// The ESP of a Kubuntu: GRUB at the fallback path, shim only in its own
+    /// directory. The firmware's Secure Boot refuses that GRUB.
+    fn esp_with_grub_at_the_fallback_path() -> (tempfile::TempDir, PathBuf) {
+        let esp = esp_with_two_vendors();
+        let boot = esp.path().join("EFI").join("BOOT");
+        std::fs::create_dir_all(&boot).unwrap();
+        std::fs::write(boot.join(FALLBACK_NAME), b"grub").unwrap();
+        (esp, boot)
+    }
+
+    #[test]
+    fn a_copy_of_grub_gives_way_to_its_shim() {
+        let (esp, boot) = esp_with_grub_at_the_fallback_path();
+        let out = ensure_at_root(esp.path(), &[UUID.to_string()], "test").unwrap();
+        assert!(out.copied && out.replaced);
+        assert_eq!(out.from, "kubuntu");
+        assert_eq!(
+            std::fs::read_to_string(boot.join(FALLBACK_NAME)).unwrap(),
+            "shim of kubuntu"
+        );
+        assert_eq!(std::fs::read(boot.join("grubx64.efi")).unwrap(), b"grub");
+        assert!(boot.join("grub.cfg").is_file());
+        assert!(boot.join("mmx64.efi").is_file());
+        assert!(!boot.join("BOOTX64.NEW").exists());
+    }
+
+    #[test]
+    fn a_second_run_finds_shim_and_leaves_it() {
+        let (esp, boot) = esp_with_grub_at_the_fallback_path();
+        ensure_at_root(esp.path(), &[UUID.to_string()], "test").unwrap();
+        let out = ensure_at_root(esp.path(), &[UUID.to_string()], "test").unwrap();
+        assert!(!out.copied);
+        assert_eq!(
+            std::fs::read_to_string(boot.join(FALLBACK_NAME)).unwrap(),
+            "shim of kubuntu"
+        );
+    }
+
+    #[test]
+    fn a_grub_with_no_shim_beside_it_stays() {
+        let (esp, boot) = esp_with_grub_at_the_fallback_path();
+        for vendor in ["ubuntu", "kubuntu"] {
+            std::fs::remove_file(esp.path().join("EFI").join(vendor).join("shimx64.efi")).unwrap();
+        }
+        let out = ensure_at_root(esp.path(), &[UUID.to_string()], "test").unwrap();
+        assert!(!out.copied);
+        assert_eq!(std::fs::read(boot.join(FALLBACK_NAME)).unwrap(), b"grub");
+    }
+
+    #[test]
+    fn a_failure_leaves_the_grub_that_was_there() {
+        let (esp, boot) = esp_with_grub_at_the_fallback_path();
+        // A directory where a companion goes: its copy fails.
+        std::fs::create_dir(boot.join("mmx64.efi")).unwrap();
+        assert!(ensure_at_root(esp.path(), &[UUID.to_string()], "test").is_err());
+        assert_eq!(std::fs::read(boot.join(FALLBACK_NAME)).unwrap(), b"grub");
     }
 
     #[test]

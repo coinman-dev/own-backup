@@ -4,7 +4,7 @@
 import { m } from './paraglide/messages';
 import { intlLocale } from './i18n.svelte';
 import { formatBytes } from './format';
-import type { JobVersion, JobVersionChain, JobVersions } from './types';
+import type { Job, JobRun, JobVersion, JobVersionChain, JobVersions } from './types';
 
 export function roleLabel(role: string): string {
   return role === 'full'
@@ -62,4 +62,24 @@ export function choiceLabel(c: VersionChoice, withSource: boolean): string {
   const parts = [shortDateTime(c.image.created_at), roleLabel(c.image.role), formatBytes(c.image.size_bytes)];
   if (withSource && c.chain.source) parts.push(c.chain.source);
   return parts.join(' · ');
+}
+
+/** A list of jobs in the chosen order. The history records processed source
+ *  bytes, not the compressed size of files still present after retention; a copy
+ *  added by hand has no history and is measured by what its newest file covers. */
+export function sortJobs(list: Job[], key: 'name' | 'time' | 'size', activity: JobRun[]): Job[] {
+  const out = [...list];
+  if (key === 'time') {
+    out.sort((a, b) => (b.last_run?.finished_at ?? '').localeCompare(a.last_run?.finished_at ?? ''));
+  } else if (key === 'size') {
+    const totals = new Map<string, number>();
+    for (const run of activity) {
+      totals.set(run.job_id, (totals.get(run.job_id) ?? 0) + (run.bytes_copied || 0));
+    }
+    const size = (j: Job) => totals.get(j.id) ?? j.last_run?.source_bytes ?? 0;
+    out.sort((a, b) => size(b) - size(a));
+  } else {
+    out.sort((a, b) => a.name.localeCompare(b.name, intlLocale()));
+  }
+  return out;
 }

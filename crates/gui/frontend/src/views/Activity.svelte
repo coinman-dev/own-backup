@@ -7,6 +7,7 @@
   import { formatBytes, formatDate, formatDuration } from '../lib/format';
   import type { JobRun, RestoreRunState } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
+  import RunSummary from '../components/RunSummary.svelte';
   import { locale } from '../lib/i18n.svelte';
 
   // Restores live in the service's own history, not in the job runs: this
@@ -47,6 +48,10 @@
     ];
     return all.sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
   });
+
+  /** A copy that was made, as opposed to a cleanup, a check or a failure. */
+  const copyMade = (r: JobRun) =>
+    r.status === 'success' && r.operation !== 'cleanup' && r.operation !== 'verify';
 
   /** Seconds between two RFC 3339 stamps, or -1. */
   function secondsBetween(from: string, to: string | null): number {
@@ -180,15 +185,20 @@
             {:else if r.status === 'error' && r.error_kind === 'archive_reauthorize'}
               <div class="note">{m.run_error_reauthorize()}</div>
             {/if}
-            {#if r.excluded_entries_kept}
-              <div class="note">{r.excluded_entries_kept}</div>
+            {#if copyMade(r)}
+              <!-- The card on the job's page, which can be closed for good. -->
+              <div class="summary"><RunSummary run={r} /></div>
+            {:else}
+              {#if r.excluded_entries_kept}
+                <div class="note">{r.excluded_entries_kept}</div>
+              {/if}
+              {#if r.layout_changed}
+                <div class="note">{r.layout_changed}</div>
+              {/if}
+              {#each r.notes ?? [] as note}
+                <div class="note">{note}</div>
+              {/each}
             {/if}
-            {#if r.layout_changed}
-              <div class="note">{r.layout_changed}</div>
-            {/if}
-            {#each r.notes ?? [] as note}
-              <div class="note">{note}</div>
-            {/each}
             {#if r.operation === 'cleanup' && r.cleanup}
               {@const c = r.cleanup}
               <div class="stats">
@@ -265,6 +275,8 @@
   /* A long path still wraps, but a sentence breaks between words: break-all cut
      "does n|ot" in two (2026-10-24). */
   .note { font-size: 13px; color: var(--error-text); margin-top: 5px; overflow-wrap: anywhere; }
+  .summary { font-size: 13px; line-height: 1.5; color: var(--text-secondary); margin-top: 5px; overflow-wrap: anywhere; }
+  .summary :global(b) { color: var(--head); font-weight: 600; }
   .stats { display: flex; gap: 40px; margin-top: 12px; flex-wrap: wrap; }
   .stats > div { display: flex; flex-direction: column; }
   .k { font-size: 12px; color: var(--accent-text); }

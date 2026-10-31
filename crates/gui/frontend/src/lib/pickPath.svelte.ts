@@ -21,6 +21,8 @@ export interface PickRequest {
   extensions?: string[];
   /** Where to start; the last visited directory is used when omitted. */
   startPath?: string;
+  /** The chosen folder will be written to (the Linux medium mounts read-only). */
+  writable?: boolean;
 }
 
 /** State the modal renders from. `open` is false when nothing is being picked. */

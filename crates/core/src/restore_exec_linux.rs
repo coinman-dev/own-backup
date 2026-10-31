@@ -657,10 +657,16 @@ fn run_op(
             );
             *expected = Some(written.expected);
             let mut note = OpNote::default();
+            // WinRE and `reagentc` are said only where there is a Windows.
+            let windows = super::boot_linux::plan_restores_windows(plan, sidecar);
             if identity.disk_guid_preserved {
-                note.message = tr!("restore_exec.disk_ids_preserved").into_owned();
+                note.message = if windows {
+                    tr!("restore_exec.disk_ids_preserved").into_owned()
+                } else {
+                    tr!("restore_exec.disk_ids_preserved_no_windows").into_owned()
+                };
             }
-            if !identity.partitions_moved.is_empty() {
+            if windows && !identity.partitions_moved.is_empty() {
                 note.follow_ups.push(
                     tr!(
                         "restore_exec.partitions_moved",

@@ -56,6 +56,10 @@
     "ru": "Windows на BIOS из Linux пока не подготовить к загрузке: нужна правка BCD. Загрузите восстановленную систему с носителя Windows и выполните bcdboot, или восстановите с загрузочного носителя Own Backup на Windows PE.",
     "en": "A BIOS Windows cannot be made bootable from Linux yet: its BCD needs editing. Start the restored system from Windows media and run bcdboot, or restore from the Own Backup Windows PE boot media."
   },
+  "restore_boot_linux.not_windows": {
+    "ru": "В копии Linux, а не Windows: этот шаг не нужен",
+    "en": "The backup holds Linux, not Windows: this step is not needed"
+  },
   "restore_boot_linux.windows_no_esp": {
     "ru": "Для загрузки Windows через UEFI нужен системный раздел EFI, а в плане его нет.",
     "en": "Starting Windows through UEFI needs an EFI System Partition, and the plan has none."

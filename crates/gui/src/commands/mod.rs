@@ -4,6 +4,8 @@ pub mod engine;
 pub mod files;
 pub mod keyboard;
 pub mod linux_media_download;
+#[cfg(target_os = "linux")]
+pub mod medium_volumes;
 pub mod settings;
 
 /// A failure a screen acts on by its kind rather than its words: `code` is

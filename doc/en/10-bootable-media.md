@@ -57,7 +57,8 @@ A Debian 13 live system with the program on a small desktop (labwc) with its
 own taskbar: a **Start** menu (**Backup**, **Terminal**, the added tools,
 **Restart**, **Shut down**), buttons of the open windows, the keyboard layout
 and a clock. Alt+Shift or a click on the layout indicator (EN/RU) switches the
-layout. It boots with **UEFI —
+layout. In a virtual machine the screen switches to 1440×900 by itself. It
+boots with **UEFI —
 Secure Boot does not need to be turned off** (Debian's signed boot loader) —
 and with legacy **BIOS**. It reads ext4, XFS, btrfs, LVM and LUKS directly, and
 restores Windows backups as well (NTFS, BitLocker, boot configuration).
@@ -110,5 +111,10 @@ session go to the OBK-LOGS partition of the stick, so they survive a restart.
 - The medium does not keep jobs: add the backup with **Restore → Add backup**
   (a file or a folder) and restore it. Encrypted backups ask for their password
   or recovery key.
+- The path picker lists the computer's partitions under **Drives**. A partition
+  is mounted when you open it, at `/mnt/<device name>`, read-only; for writing
+  when a destination folder is chosen on it. The others stay unmounted: a copy
+  cannot be restored onto a mounted partition, press **Unmount** beside it for
+  that. LUKS, BitLocker and LVM partitions do not open from this list.
 - New OBK images can only be opened by a medium of this version or newer:
   rebuild the medium after updating the program.

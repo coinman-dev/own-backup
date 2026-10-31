@@ -86,6 +86,10 @@ judge() {
     expect "$label:window" "$txt" 'kiosk=active window=drawn$' "the kiosk runs and the page drew"
     expect "$label:desktop" "$txt" '^OBK-SELFTEST desktop=labwc shell=running$' \
         "labwc with our strip (not the cage fallback)"
+    expect "$label:ntfs3" "$txt" '^OBK-SELFTEST ntfs3_mount=yes$' \
+        "the kernel's NTFS driver mounts an NTFS volume read-only"
+    expect "$label:vm-screen" "$txt" '^OBK-SELFTEST vm_screen=1440x900$' \
+        "a virtual machine gets 1440x900"
     expect "$label:strip-lists" "$txt" '^OBK-SELFTEST shell_windows=[1-9][0-9]* front=.' \
         "the strip has a button for the window, one of them in front"
     expect "$label:strip-terminal" "$txt" '^OBK-SELFTEST terminal_listed=yes terminal_gone=yes$' \
