@@ -5,6 +5,7 @@
     jobs, jobStatus, lastSuccessfulRun, sourceSummary, runJob, cancelRunning, runClock, etaMs,
   } from '../lib/jobStore.svelte';
   import sourcePic from '../assets/backup-source.png';
+  import sourceLockedPic from '../assets/backup-source-locked.png';
   import destPic from '../assets/backup-dest.png';
   import InfoModal from '../components/InfoModal.svelte';
   import RunSummary from '../components/RunSummary.svelte';
@@ -266,7 +267,7 @@
 <div class="dash">
   <div class="flow">
     <div class="card">
-      <img class="pic" src={sourcePic} alt="" draggable="false" />
+      <img class="pic" src={encryptedSource ? sourceLockedPic : sourcePic} alt="" draggable="false" />
       <div class="card-text">
         <div class="card-title">{job.name}</div>
         <div class="card-sub">{sourceSummary(job)}</div>
@@ -307,7 +308,7 @@
       {/if}
     </div>
 
-    <div class="card dest">
+    <div class="card">
       <img class="pic" src={destPic} alt="" draggable="false" />
       <div class="card-text">
         <div class="card-title">{job.name}</div>
@@ -513,22 +514,14 @@
   .page { height: 100%; display: flex; flex-direction: column; }
   .dash { flex: 1; overflow: auto; width: 100%; padding: 34px 44px 20px; display: flex; flex-direction: column; }
   .bottom { margin-top: auto; flex-shrink: 0; }
-  .flow { display: flex; align-items: stretch; justify-content: center; container-type: inline-size; }
-  /* Wider than tall, the pictures on the outer edges: the source's on the left,
-     the destination's on the right. */
-  .card { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; background: var(--card-bg); display: flex; align-items: center; gap: 18px; }
-  .card.dest { flex-direction: row-reverse; text-align: right; }
-  .card-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
-  /* No room for a picture beside the words in a narrow window: above them. */
-  @container (max-width: 760px) {
-    .card, .card.dest { flex-direction: column; text-align: center; gap: 10px; padding: 14px; }
-    .card-text { flex: none; width: 100%; }
-    .connector { width: 80px; }
-    .dash-line { display: none; }
-  }
+  .flow { display: flex; align-items: stretch; justify-content: center; }
+  /* Taller than wide, the picture above the words; from the top, so the two
+     pictures stay level when one card has more to say. */
+  .card { flex: 1; min-width: 0; max-width: 240px; min-height: 280px; border: 1px solid var(--border); border-radius: 8px; padding: 28px 18px 24px; text-align: center; background: var(--card-bg); display: flex; flex-direction: column; align-items: center; gap: 16px; }
+  .card-text { width: 100%; display: flex; flex-direction: column; gap: 6px; }
   /* The logo's rim (Sidebar.svelte): the same shifted copies of the silhouette. */
   .pic {
-    height: 88px;
+    height: 110px;
     width: auto;
     flex-shrink: 0;
     filter:

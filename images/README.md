@@ -11,4 +11,8 @@
 
 `backup-forder.png` — исходник картинок страницы задания: слева источник, справа
 назначение, тёмный фон со свечением. Вырезанные из него значки с прозрачным фоном —
-`crates/gui/frontend/src/assets/backup-source.png` и `backup-dest.png`.
+`crates/gui/frontend/src/assets/backup-dest.png` (папка).
+
+`disks.png` — исходник диска, прозрачный фон: слева без замка, справа с замком.
+Из него `assets/backup-source.png` и `backup-source-locked.png`; диск с замком
+показывается, когда источник задания зашифрован.
