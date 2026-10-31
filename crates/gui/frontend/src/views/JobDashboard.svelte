@@ -267,7 +267,9 @@
 <div class="dash">
   <div class="flow">
     <div class="card">
-      <img class="pic" src={encryptedSource ? sourceLockedPic : sourcePic} alt="" draggable="false" />
+      <div class="pic-wrap">
+        <img class="pic" src={encryptedSource ? sourceLockedPic : sourcePic} alt="" draggable="false" />
+      </div>
       <div class="card-text">
         <div class="card-title">{job.name}</div>
         <div class="card-sub">{sourceSummary(job)}</div>
@@ -548,7 +550,8 @@
      many lines they are: nothing else may stand between them and the two edges. */
   .card-text { flex: 1; width: 100%; padding: 12px 0; display: flex; flex-direction: column; justify-content: center; gap: 6px; }
   .pic.folder { width: 111px; }
-  .pic-wrap { position: relative; display: flex; flex-shrink: 0; }
+  /* A tenth of the card shows through, on the picture and its padlock as one. */
+  .pic-wrap { position: relative; display: flex; flex-shrink: 0; opacity: 0.9; }
   .pic-lock {
     position: absolute;
     right: -14px;
