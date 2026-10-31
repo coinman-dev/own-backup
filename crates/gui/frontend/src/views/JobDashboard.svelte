@@ -309,7 +309,33 @@
     </div>
 
     <div class="card">
-      <img class="pic folder" src={destPic} alt="" draggable="false" />
+      <!-- The copy itself is encrypted: a padlock on the folder, as the disk has its
+           own for an encrypted source. -->
+      <div class="pic-wrap">
+        <img class="pic folder" src={destPic} alt="" draggable="false" />
+        {#if job.archive_encryption}
+          <svg class="pic-lock" viewBox="0 0 48 58" role="img" aria-label={m.bs_encrypted_title()}>
+            <defs>
+              <linearGradient id="lock-body" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0" stop-color="#f4f7fb" />
+                <stop offset=".55" stop-color="#c3cfdd" />
+                <stop offset="1" stop-color="#8fa2b8" />
+              </linearGradient>
+              <linearGradient id="lock-bow" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0" stop-color="#8fa2b8" />
+                <stop offset=".45" stop-color="#f4f7fb" />
+                <stop offset="1" stop-color="#9fb0c4" />
+              </linearGradient>
+            </defs>
+            <path d="M13 30V15a11 11 0 0 1 22 0v15" fill="none" stroke="#26303d" stroke-width="9" />
+            <path d="M13 30V15a11 11 0 0 1 22 0v15" fill="none" stroke="url(#lock-bow)" stroke-width="6" />
+            <rect x="3" y="25" width="42" height="31" rx="6" fill="url(#lock-body)" stroke="#26303d" stroke-width="2" />
+            <path d="M6 30a3 3 0 0 1 3-3h30a3 3 0 0 1 3 3" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round" />
+            <circle cx="24" cy="38" r="4.6" fill="#1d2530" />
+            <path d="M21.6 40h4.8l1.6 9.5h-8z" fill="#1d2530" />
+          </svg>
+        {/if}
+      </div>
       <div class="card-text">
         <div class="card-title">{job.name}</div>
         <div class="card-sub">{job.dest_folder}</div>
@@ -522,6 +548,19 @@
      many lines they are: nothing else may stand between them and the two edges. */
   .card-text { flex: 1; width: 100%; padding: 12px 0; display: flex; flex-direction: column; justify-content: center; gap: 6px; }
   .pic.folder { width: 111px; }
+  .pic-wrap { position: relative; display: flex; flex-shrink: 0; }
+  .pic-lock {
+    position: absolute;
+    right: -14px;
+    bottom: -6px;
+    width: 52px;
+    height: 63px;
+    filter:
+      drop-shadow(1px 0 0 #ffffff) drop-shadow(-1px 0 0 #ffffff)
+      drop-shadow(0 1px 0 #ffffff) drop-shadow(0 -1px 0 #ffffff)
+      drop-shadow(1px 1px 0 #ffffff) drop-shadow(-1px -1px 0 #ffffff)
+      drop-shadow(1px -1px 0 #ffffff) drop-shadow(-1px 1px 0 #ffffff);
+  }
   /* The logo's rim (Sidebar.svelte): the same shifted copies of the silhouette. */
   .pic {
     /* Drawn 10 % taller than the files are (owner, 31.10): both sizes are named,
