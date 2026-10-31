@@ -309,7 +309,7 @@
     </div>
 
     <div class="card">
-      <img class="pic" src={destPic} alt="" draggable="false" />
+      <img class="pic folder" src={destPic} alt="" draggable="false" />
       <div class="card-text">
         <div class="card-title">{job.name}</div>
         <div class="card-sub">{job.dest_folder}</div>
@@ -517,12 +517,17 @@
   .flow { display: flex; align-items: stretch; justify-content: center; }
   /* Taller than wide, the picture above the words; from the top, so the two
      pictures stay level when one card has more to say. */
-  .card { flex: 1; min-width: 0; max-width: 240px; min-height: 280px; border: 1px solid var(--border); border-radius: 8px; padding: 28px 18px 24px; text-align: center; background: var(--card-bg); display: flex; flex-direction: column; align-items: center; gap: 16px; }
-  .card-text { width: 100%; display: flex; flex-direction: column; gap: 6px; }
+  .card { flex: 1; min-width: 0; max-width: 264px; min-height: 308px; border: 1px solid var(--border); border-radius: 8px; padding: 26px 18px 0; text-align: center; background: var(--card-bg); display: flex; flex-direction: column; align-items: center; }
+  /* The words take the room under the picture and stay in its middle, however
+     many lines they are: nothing else may stand between them and the two edges. */
+  .card-text { flex: 1; width: 100%; padding: 12px 0; display: flex; flex-direction: column; justify-content: center; gap: 6px; }
+  .pic.folder { width: 111px; }
   /* The logo's rim (Sidebar.svelte): the same shifted copies of the silhouette. */
   .pic {
-    height: 110px;
-    width: auto;
+    /* Drawn 10 % taller than the files are (owner, 31.10): both sizes are named,
+       as the width would otherwise follow the height. */
+    height: 161px;
+    width: 147px;
     flex-shrink: 0;
     filter:
       drop-shadow(1px 0 0 #ffffff) drop-shadow(-1px 0 0 #ffffff)
