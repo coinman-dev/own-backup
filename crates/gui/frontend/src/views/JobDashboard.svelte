@@ -417,7 +417,7 @@
         </div>
       {/if}
     {:else if lastRun?.status === 'error'}
-      <!-- When: the stats above now date the last COPY, and without its own
+      <!-- When: the stats below date the last COPY, and without its own
            time this banner read as if that copy had failed. -->
       <div class="banner err">{@render errIcon()}<span>{m.dash_error({ date: formatDate(lastRun.finished_at), error: lastRun.error ?? '' })}</span></div>
       {#if lastRun.error_kind === 'key_protection'}
@@ -426,52 +426,6 @@
         <div class="banner info"><span>{m.run_error_reauthorize()}</span></div>
       {/if}
     {/if}
-
-    <!-- stats row -->
-    <div class="stats">
-      <span>
-        {m.dash_last_backup()}
-        <b>{lastGood
-          ? formatDate(lastGood.finished_at)
-          : lastRun
-            ? m.dash_no_backups_yet()
-            : m.dash_never_run()}</b>
-      </span>
-      <span class="reco">
-        {m.dash_restore_data()}
-        <b>{lastGood ? formatBytes(lastGood.used_blocks > 0 ? lastGood.used_blocks * 1048576 : lastGood.bytes_copied) : '—'}</b>
-        <button class="q" title={m.dash_cats_about()} onclick={() => (stubMsg = m.dash_cats_about_text)}>?</button>
-      </span>
-    </div>
-    {#if catData}
-      <div class="catbar">
-        {#each barData?.filter((c) => c.bytes > 0) ?? [] as c}
-          <div class="catseg" style="width:{c.pct}%; background:{c.color}" title="{c.name()}: {formatBytes(c.bytes)}"></div>
-        {/each}
-      </div>
-      <div class="cats">
-        {#each catData as c}
-          <div class="cat">
-            <span class="dot" style="background:{c.color}"></span>
-            <span class="cat-name">{c.name()}</span>
-            <span class="cat-size">{formatBytes(c.bytes)}</span>
-          </div>
-        {/each}
-        {@render excludedCell()}
-      </div>
-    {:else}
-      <div class="catbar empty-catbar"></div>
-      <!-- The breakdown comes out of the file walk. When that walk did not run,
-           the copy knows why — and saying so beats promising it "next time" to
-           someone whose next copy will not have it either. -->
-      <div class="cats-note">
-        {#if lastGood?.file_scan_skipped}
-          {m.dash_cats_skipped({ reason: lastGood.file_scan_skipped })}
-        {:else}
-          {m.dash_cats_next()}
-        {/if}
-      </div>
-    {/if}
   {/if}
 
   <!-- The run happened but the service could not write it into the history:
@@ -479,6 +433,58 @@
   {#if lastRun?.record_error}<div class="banner err">{@render errIcon()}<span>{lastRun.record_error}</span></div>{/if}
   {#if actionErr}<div class="banner err">{@render errIcon()}<span>{actionErr}</span></div>{/if}
   {#if actionMsg}<div class="banner info"><span>{actionMsg}</span></div>{/if}
+
+  <!-- Last in the scrolling area and pushed to its bottom: it stays on the
+       footer's buttons however much is written above it. -->
+  {#if !running}
+    <div class="files">
+      <!-- stats row -->
+      <div class="stats">
+        <span>
+          {m.dash_last_backup()}
+          <b>{lastGood
+            ? formatDate(lastGood.finished_at)
+            : lastRun
+              ? m.dash_no_backups_yet()
+              : m.dash_never_run()}</b>
+        </span>
+        <span class="reco">
+          {m.dash_restore_data()}
+          <b>{lastGood ? formatBytes(lastGood.used_blocks > 0 ? lastGood.used_blocks * 1048576 : lastGood.bytes_copied) : '—'}</b>
+          <button class="q" title={m.dash_cats_about()} onclick={() => (stubMsg = m.dash_cats_about_text)}>?</button>
+        </span>
+      </div>
+      {#if catData}
+        <div class="catbar">
+          {#each barData?.filter((c) => c.bytes > 0) ?? [] as c}
+            <div class="catseg" style="width:{c.pct}%; background:{c.color}" title="{c.name()}: {formatBytes(c.bytes)}"></div>
+          {/each}
+        </div>
+        <div class="cats">
+          {#each catData as c}
+            <div class="cat">
+              <span class="dot" style="background:{c.color}"></span>
+              <span class="cat-name">{c.name()}</span>
+              <span class="cat-size">{formatBytes(c.bytes)}</span>
+            </div>
+          {/each}
+          {@render excludedCell()}
+        </div>
+      {:else}
+        <div class="catbar empty-catbar"></div>
+        <!-- The breakdown comes out of the file walk. When that walk did not run,
+             the copy knows why — and saying so beats promising it "next time" to
+             someone whose next copy will not have it either. -->
+        <div class="cats-note">
+          {#if lastGood?.file_scan_skipped}
+            {m.dash_cats_skipped({ reason: lastGood.file_scan_skipped })}
+          {:else}
+            {m.dash_cats_next()}
+          {/if}
+        </div>
+      {/if}
+    </div>
+  {/if}
 </div>
 
   <div class="footer">
@@ -504,7 +510,8 @@
 
 <style>
   .page { height: 100%; display: flex; flex-direction: column; }
-  .dash { flex: 1; overflow: auto; width: 100%; padding: 34px 44px; display: flex; flex-direction: column; }
+  .dash { flex: 1; overflow: auto; width: 100%; padding: 34px 44px 20px; display: flex; flex-direction: column; }
+  .files { margin-top: auto; flex-shrink: 0; }
   .flow { display: flex; align-items: stretch; justify-content: center; }
   .card { flex: 1; max-width: 300px; border: 1px solid var(--border); border-radius: 8px; padding: 22px 18px; text-align: center; background: var(--card-bg); display: flex; flex-direction: column; align-items: center; gap: 8px; }
   .card-title { font-size: 20px; font-weight: 600; color: var(--head); }
