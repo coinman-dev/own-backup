@@ -8,3 +8,7 @@
 (`crates/gui/frontend/src/assets/logo.png`, он же в шапке README) и значки
 исполняемого файла, окна и области уведомлений (`crates/gui/icons/`).
 Изображения из этой папки в программу не встраиваются.
+
+`backup-forder.png` — исходник картинок страницы задания: слева источник, справа
+назначение, тёмный фон со свечением. Вырезанные из него значки с прозрачным фоном —
+`crates/gui/frontend/src/assets/backup-source.png` и `backup-dest.png`.

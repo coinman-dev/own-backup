@@ -4,6 +4,8 @@
   import {
     jobs, jobStatus, lastSuccessfulRun, sourceSummary, runJob, cancelRunning, runClock, etaMs,
   } from '../lib/jobStore.svelte';
+  import sourcePic from '../assets/backup-source.png';
+  import destPic from '../assets/backup-dest.png';
   import InfoModal from '../components/InfoModal.svelte';
   import RunSummary from '../components/RunSummary.svelte';
   import type { Job } from '../lib/types';
@@ -264,18 +266,16 @@
 <div class="dash">
   <div class="flow">
     <div class="card">
-      <svg width="110" height="110" viewBox="0 0 24 24" fill="none" stroke="var(--disk-icon)" stroke-width="1.1">
-        <rect x="3" y="5" width="18" height="14" rx="3" />
-        <circle cx="12" cy="12" r="3.5" />
-        <circle cx="12" cy="12" r=".8" fill="var(--disk-icon)" />
-      </svg>
-      <div class="card-title">{job.name}</div>
-      <div class="card-sub">{sourceSummary(job)}</div>
-      {#if encryptedSource}
-        <div class="enc-note" class:warn={!job.archive_encryption}>
-          {job.archive_encryption ? m.dash_src_encrypted_sealed() : m.dash_src_encrypted_plain()}
-        </div>
-      {/if}
+      <img class="pic" src={sourcePic} alt="" draggable="false" />
+      <div class="card-text">
+        <div class="card-title">{job.name}</div>
+        <div class="card-sub">{sourceSummary(job)}</div>
+        {#if encryptedSource}
+          <div class="enc-note" class:warn={!job.archive_encryption}>
+            {job.archive_encryption ? m.dash_src_encrypted_sealed() : m.dash_src_encrypted_plain()}
+          </div>
+        {/if}
+      </div>
     </div>
 
     <div class="connector">
@@ -307,13 +307,12 @@
       {/if}
     </div>
 
-    <div class="card">
-      <svg width="110" height="110" viewBox="0 0 24 24">
-        <path d="M3 7a2 2 0 0 1 2-2h4.2l2 2H19a2 2 0 0 1 2 2v8.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="var(--folder)" />
-        <path d="M3 10h18v7.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="var(--folder2)" />
-      </svg>
-      <div class="card-title">{job.name}</div>
-      <div class="card-sub">{job.dest_folder}</div>
+    <div class="card dest">
+      <img class="pic" src={destPic} alt="" draggable="false" />
+      <div class="card-text">
+        <div class="card-title">{job.name}</div>
+        <div class="card-sub">{job.dest_folder}</div>
+      </div>
     </div>
   </div>
 
@@ -514,11 +513,33 @@
   .page { height: 100%; display: flex; flex-direction: column; }
   .dash { flex: 1; overflow: auto; width: 100%; padding: 34px 44px 20px; display: flex; flex-direction: column; }
   .bottom { margin-top: auto; flex-shrink: 0; }
-  .flow { display: flex; align-items: stretch; justify-content: center; }
-  .card { flex: 1; max-width: 300px; border: 1px solid var(--border); border-radius: 8px; padding: 22px 18px; text-align: center; background: var(--card-bg); display: flex; flex-direction: column; align-items: center; gap: 8px; }
-  .card-title { font-size: 20px; font-weight: 600; color: var(--head); }
+  .flow { display: flex; align-items: stretch; justify-content: center; container-type: inline-size; }
+  /* Wider than tall, the pictures on the outer edges: the source's on the left,
+     the destination's on the right. */
+  .card { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; background: var(--card-bg); display: flex; align-items: center; gap: 18px; }
+  .card.dest { flex-direction: row-reverse; text-align: right; }
+  .card-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+  /* No room for a picture beside the words in a narrow window: above them. */
+  @container (max-width: 760px) {
+    .card, .card.dest { flex-direction: column; text-align: center; gap: 10px; padding: 14px; }
+    .card-text { flex: none; width: 100%; }
+    .connector { width: 80px; }
+    .dash-line { display: none; }
+  }
+  /* The logo's rim (Sidebar.svelte): the same shifted copies of the silhouette. */
+  .pic {
+    height: 88px;
+    width: auto;
+    flex-shrink: 0;
+    filter:
+      drop-shadow(1px 0 0 #ffffff) drop-shadow(-1px 0 0 #ffffff)
+      drop-shadow(0 1px 0 #ffffff) drop-shadow(0 -1px 0 #ffffff)
+      drop-shadow(1px 1px 0 #ffffff) drop-shadow(-1px -1px 0 #ffffff)
+      drop-shadow(1px -1px 0 #ffffff) drop-shadow(-1px 1px 0 #ffffff);
+  }
+  .card-title { font-size: 20px; font-weight: 600; color: var(--head); overflow-wrap: anywhere; }
   .card-sub { font-size: 12px; color: var(--text-muted); word-break: break-all; }
-  .enc-note { margin-top: 6px; font-size: 11.5px; color: var(--text-muted); max-width: 220px; }
+  .enc-note { font-size: 11.5px; color: var(--text-muted); }
   .enc-note.warn { color: var(--warning-text); }
   .connector { width: 130px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; gap: 8px; }
   .dash-line { width: 26px; height: 2px; background: repeating-linear-gradient(90deg, var(--border-strong) 0 4px, transparent 4px 8px); }
