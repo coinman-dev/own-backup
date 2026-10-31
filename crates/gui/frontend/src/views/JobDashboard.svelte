@@ -404,30 +404,6 @@
         </div>
       {/if}
     </div>
-    <!-- Разбивка по типам — сразу, как только сканер её посчитал, а не в конце.
-         Он видит каждый файл с размером ещё ДО копирования, так что ответ на
-         вопрос «что вообще в этой копии» готов через минуту после старта, а
-         не через двадцать. -->
-    {#if catData}
-      <div class="live-cats">
-        <div class="live-cats-head">{m.dash_live_cats_head()}</div>
-        <div class="catbar">
-          {#each barData?.filter((c) => c.bytes > 0) ?? [] as c}
-            <div class="catseg" style="width:{c.pct}%; background:{c.color}" title="{c.name()}: {formatBytes(c.bytes)}"></div>
-          {/each}
-        </div>
-        <div class="cats">
-          {#each catData as c}
-            <div class="cat">
-              <span class="dot" style="background:{c.color}"></span>
-              <span class="cat-name">{c.name()}</span>
-              <span class="cat-size">{formatBytes(c.bytes)}</span>
-            </div>
-          {/each}
-          {@render excludedCell()}
-        </div>
-      </div>
-    {/if}
   {/if}
 
   <!-- Pushed to the bottom of the scrolling area as one group: what the last run
@@ -467,7 +443,32 @@
     {#if actionErr}<div class="banner err">{@render errIcon()}<span>{actionErr}</span></div>{/if}
     {#if actionMsg}<div class="banner info"><span>{actionMsg}</span></div>{/if}
 
-    {#if !running}
+    <!-- Разбивка по типам — сразу, как только сканер её посчитал, а не в конце.
+         Он видит каждый файл с размером ещё ДО копирования, так что ответ на
+         вопрос «что вообще в этой копии» готов через минуту после старта, а
+         не через двадцать. -->
+    {#if running}
+      {#if catData}
+        <div class="live-cats">
+          <div class="live-cats-head">{m.dash_live_cats_head()}</div>
+          <div class="catbar">
+            {#each barData?.filter((c) => c.bytes > 0) ?? [] as c}
+              <div class="catseg" style="width:{c.pct}%; background:{c.color}" title="{c.name()}: {formatBytes(c.bytes)}"></div>
+            {/each}
+          </div>
+          <div class="cats">
+            {#each catData as c}
+              <div class="cat">
+                <span class="dot" style="background:{c.color}"></span>
+                <span class="cat-name">{c.name()}</span>
+                <span class="cat-size">{formatBytes(c.bytes)}</span>
+              </div>
+            {/each}
+            {@render excludedCell()}
+          </div>
+        </div>
+      {/if}
+    {:else}
       <!-- stats row -->
       <div class="stats">
         <span>
