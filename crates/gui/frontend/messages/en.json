@@ -285,7 +285,6 @@
   "dash_cats_about_text": "The breakdown by type is counted from the files that went into the backup (by extension) while the volume is scanned. Excluded files are not counted.",
   "dash_cats_skipped": "The breakdown by type was not counted for this backup: {reason}.",
   "dash_cats_next": "The breakdown by type will appear after the next backup (it is counted while the volume is scanned).",
-  "dash_show_summary": "Show backup details",
   "dash_created": "Backup created — {kind}.",
   "dash_created_vss": "Backup created — {kind}, VSS snapshot.",
   "dash_created_cold": "Backup created — {kind}, cold backup (system offline).",

@@ -20,6 +20,10 @@ device-mapper snapshot, or *not needed (offline)* on the boot medium). A restore
 shows the target disk and **Operations** done of planned, and **Still to do**
 if something is left.
 
+A finished copy also keeps here what the **Backup created** card on the job's
+page says. That card closes with its cross and does not come back; the next
+copy has its own.
+
 The history keeps the last 200 runs. Its notes stay in the language the program
 spoke at the time of the run.
 

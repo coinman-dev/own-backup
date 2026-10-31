@@ -1,12 +1,11 @@
 <script lang="ts">
-  import { media } from '../lib/mediaStore.svelte';
-  import { isWindows } from '../lib/platformStore.svelte';
   import { api } from '../lib/api';
   import { formatBytes, formatDate, formatClock } from '../lib/format';
   import {
     jobs, jobStatus, lastSuccessfulRun, sourceSummary, runJob, cancelRunning, runClock, etaMs,
   } from '../lib/jobStore.svelte';
   import InfoModal from '../components/InfoModal.svelte';
+  import RunSummary from '../components/RunSummary.svelte';
   import type { Job } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
   import { intlLocale } from '../lib/i18n.svelte';
@@ -69,16 +68,6 @@
   /** What the job HAS: the newest copy, its size and what is in it. A failed
    *  attempt after it changes nothing about that (see `lastSuccessfulRun`). */
   const lastGood = $derived(lastSuccessfulRun(job));
-  // The job asks for exclusions and the copy did not apply them. Reporting
-  // "Исключено файлов: 0" for that reads as "the rules matched nothing", which
-  // is the opposite of what happened — the rules were never run.
-  const exclusionsIgnored = $derived(
-    !!lastRun?.file_scan_skipped &&
-      lastRun.excluded_files === 0 &&
-      job.exclusions.enabled &&
-      job.exclusions.patterns.length > 0,
-  );
-
   // "Том 2/3 · C: Windows — " prefix while a multi-volume job runs.
   const volTag = $derived.by(() => {
     const p = progress;
@@ -86,12 +75,6 @@
     const n = (p.volume_index ?? 0) + 1;
     return `${m.dash_vol_tag({ n, count: p.volume_count })}${p.volume ? ` · ${p.volume}` : ''} — `;
   });
-
-  const KIND_LABELS: Record<string, () => string> = {
-    incremental: m.kind_incremental,
-    differential: m.kind_differential,
-  };
-  const kindLabel = (k: string) => (KIND_LABELS[k] ?? m.kind_full)();
 
   const SCHED_LABELS: Record<string, () => string> = {
     daily: m.dash_sched_daily,
@@ -221,26 +204,27 @@
     return out;
   });
 
-  // Collapsible "Копия создана…" summary card; its state is remembered across
-  // sessions (localStorage), per this job so hiding one doesn't hide others.
+  // The "Копия создана…" card closes for good, with nothing to bring it back:
+  // Activity keeps the same words. What is remembered is the RUN that was closed,
+  // so the next copy has its card, and what it may warn about, seen.
   //
   // The key has to FOLLOW the job. Svelte reuses this component when the
   // selected job changes rather than remounting it, so a key computed once at
-  // creation stayed on whichever job happened to be open first — hiding the
-  // card on one job then hid it on every other, which is the exact thing the
+  // creation stayed on whichever job happened to be open first — closing the
+  // card on one job then closed it on every other, which is the exact thing the
   // per-job key exists to prevent (audit AUD-13, reactivity warning).
-  const SUMMARY_KEY = $derived(`hideRunSummary:${job.id}`);
-  let summaryHidden = $state(false);
+  const SUMMARY_KEY = $derived(`closedRunSummary:${job.id}`);
+  let closedRun = $state<string | null>(null);
   // Only READING reacts to the key. Writing happens where the user actually
-  // folds the card: an effect that both read and wrote would fire on the
+  // closes the card: an effect that both read and wrote would fire on the
   // switch to another job and save the previous job's value under the new key.
   $effect(() => {
-    summaryHidden =
-      typeof localStorage !== 'undefined' && localStorage.getItem(SUMMARY_KEY) === '1';
+    closedRun = typeof localStorage !== 'undefined' ? localStorage.getItem(SUMMARY_KEY) : null;
   });
-  function rememberSummaryState(hidden: boolean) {
+  function closeSummary(runId: string) {
+    closedRun = runId;
     if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(SUMMARY_KEY, hidden ? '1' : '0');
+      localStorage.setItem(SUMMARY_KEY, runId);
     }
   }
 
@@ -417,6 +401,32 @@
       </div>
     {/if}
   {:else}
+    {#if lastVerification?.status === 'error'}
+      <div class="banner err">{@render errIcon()}<span>{m.act_verify_failed()} — {formatDate(lastVerification.finished_at)}. {lastVerification.error}</span></div>
+    {/if}
+    {#if lastRun?.status === 'success'}
+      {#if closedRun !== lastRun.id}
+        <div class="banner ok">
+          <span class="bdot">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
+          </span>
+          <span><RunSummary run={lastRun} /></span>
+          <button class="banner-x" title={m.common_close()} aria-label={m.common_close()} onclick={() => closeSummary(lastRun.id)}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
+          </button>
+        </div>
+      {/if}
+    {:else if lastRun?.status === 'error'}
+      <!-- When: the stats above now date the last COPY, and without its own
+           time this banner read as if that copy had failed. -->
+      <div class="banner err">{@render errIcon()}<span>{m.dash_error({ date: formatDate(lastRun.finished_at), error: lastRun.error ?? '' })}</span></div>
+      {#if lastRun.error_kind === 'key_protection'}
+        <div class="banner info"><span>{m.run_error_key_protection()}</span></div>
+      {:else if lastRun.error_kind === 'archive_reauthorize'}
+        <div class="banner info"><span>{m.run_error_reauthorize()}</span></div>
+      {/if}
+    {/if}
+
     <!-- stats row -->
     <div class="stats">
       <span>
@@ -461,76 +471,6 @@
           {m.dash_cats_next()}
         {/if}
       </div>
-    {/if}
-
-    {#if lastVerification?.status === 'error'}
-      <div class="banner err">{@render errIcon()}<span>{m.act_verify_failed()} — {formatDate(lastVerification.finished_at)}. {lastVerification.error}</span></div>
-    {/if}
-    {#if lastRun?.status === 'success'}
-      {#if summaryHidden}
-        <button class="summary-show" onclick={() => { summaryHidden = false; rememberSummaryState(false); }}>
-          <span class="bdot small"></span>{m.dash_show_summary()}
-        </button>
-      {:else}
-        <div class="banner ok">
-          <span class="bdot">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
-          </span>
-          <span>
-            <!-- `vss_used` is "read from a snapshot" on both systems: VSS on
-                 Windows, an LVM or device-mapper snapshot on Linux. -->
-            {lastRun.vss_used
-              ? isWindows()
-                ? m.dash_created_vss({ kind: kindLabel(lastRun.backup_kind) })
-                : m.dash_created_snapshot({ kind: kindLabel(lastRun.backup_kind) })
-              : media.active
-                ? m.dash_created_cold({ kind: kindLabel(lastRun.backup_kind) })
-                : m.dash_created({ kind: kindLabel(lastRun.backup_kind) })}
-            {lastRun.smart_mode ? m.dash_used_only() : m.dash_sector_by_sector()}
-            {#if lastRun.backup_kind === 'incremental' || lastRun.backup_kind === 'differential'}
-              {m.dash_changed_only({ size: formatBytes(lastRun.bytes_copied) })}
-            {/if}
-            {#if lastRun.consolidated_increments > 0}
-              {m.dash_consolidated({ count: lastRun.consolidated_increments })}
-            {/if}
-            {#if lastRun.excluded_files > 0}
-              {m.dash_excluded_files({ count: lastRun.excluded_files, size: formatBytes(lastRun.excluded_bytes) })}
-            {:else if exclusionsIgnored}
-              <br />
-              <b>{m.dash_excl_ignored()}</b>
-              {m.dash_excl_ignored_rest({
-                rules: m.dash_rules_count({ count: job.exclusions.patterns.length }),
-                reason: lastRun.file_scan_skipped ?? '',
-              })}
-            {/if}
-            {#if lastRun.excluded_entries_kept}
-              <br />
-              <b>{m.dash_entries_kept()}</b>
-              {lastRun.excluded_entries_kept}.
-            {/if}
-            {#if lastRun.layout_changed}
-              <br />
-              {lastRun.layout_changed}.
-            {/if}
-            {#each lastRun.notes ?? [] as note}
-              <br />
-              {note}
-            {/each}
-          </span>
-          <button class="banner-x" title={m.common_hide()} aria-label={m.common_hide()} onclick={() => { summaryHidden = true; rememberSummaryState(true); }}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
-          </button>
-        </div>
-      {/if}
-    {:else if lastRun?.status === 'error'}
-      <!-- When: the stats above now date the last COPY, and without its own
-           time this banner read as if that copy had failed. -->
-      <div class="banner err">{@render errIcon()}<span>{m.dash_error({ date: formatDate(lastRun.finished_at), error: lastRun.error ?? '' })}</span></div>
-      {#if lastRun.error_kind === 'key_protection'}
-        <div class="banner info"><span>{m.run_error_key_protection()}</span></div>
-      {:else if lastRun.error_kind === 'archive_reauthorize'}
-        <div class="banner info"><span>{m.run_error_reauthorize()}</span></div>
-      {/if}
     {/if}
   {/if}
 
@@ -624,12 +564,9 @@
   .banner.err { background: var(--error-soft); border: 1px solid var(--error-line); color: var(--error-text); }
   .banner.info { background: var(--info-soft); border: 1px solid var(--info-line); color: var(--info-text); }
   .bdot { width: 20px; height: 20px; border-radius: 50%; background: var(--success); flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
-  .bdot.small { width: 8px; height: 8px; }
   .bicon { flex-shrink: 0; }
   .banner .banner-x { margin-left: auto; flex-shrink: 0; width: 22px; height: 22px; border: none; background: none; color: var(--text-muted); cursor: pointer; border-radius: 4px; display: flex; align-items: center; justify-content: center; }
   .banner .banner-x:hover { background: var(--track); color: var(--head); }
-  .summary-show { margin-top: 22px; display: flex; align-items: center; gap: 8px; padding: 8px 14px; background: none; border: 1px dashed var(--border-strong); border-radius: 8px; color: var(--text-secondary); font-size: 13px; font-family: var(--font); cursor: pointer; align-self: flex-start; }
-  .summary-show:hover { color: var(--head); border-color: var(--text-muted); }
   /* .footer is global (styles/global.css) — full-width bar, same on every page. */
   .hint { flex: 1; font-size: 13px; color: var(--text-secondary); }
   .btn { border-radius: 6px; padding: 10px 24px; font-size: 14px; font-weight: 600; font-family: var(--font); cursor: pointer; border: 1px solid transparent; transition: background-color .15s ease; }
