@@ -7,7 +7,7 @@
 <h1 align="center">Own Backup</h1>
 <p align="center">Резервное копирование дисков и томов Windows и Linux блок за блоком — и загрузочные носители, с которых их можно вернуть.</p>
 
-[![Релиз](https://img.shields.io/badge/release-0.1.9--beta-orange)](https://github.com/coinman-dev/own-backup/releases/tag/v0.1.9-beta)
+[![Релиз](https://img.shields.io/badge/release-0.2.0--beta-orange)](https://github.com/coinman-dev/own-backup/releases/tag/v0.2.0-beta)
 [![Сборка](https://github.com/coinman-dev/own-backup/actions/workflows/release.yml/badge.svg)](https://github.com/coinman-dev/own-backup/actions/workflows/release.yml)
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-blue)](#скачать)
 [![Linux](https://img.shields.io/badge/Linux-Ubuntu%2024.04%2B%20%2F%20Debian%2013%2B-blue)](#скачать)
@@ -24,7 +24,7 @@ Windows.
   <img src="doc/images/ru/backup-dashboard.png" alt="Own Backup: страница «Резервное копирование» — задания, последняя копия каждого и её версии">
 </p>
 
-> **0.1.9-beta — предварительный релиз; версия для Linux появилась в
+> **0.2.0-beta — предварительный релиз; версия для Linux появилась в
 > 0.1.6-beta.** Важную копию проверьте восстановлением на запасной диск или в
 > виртуальную машину, прежде чем на неё полагаться, — в Linux особенно.
 
@@ -32,9 +32,9 @@ Windows.
 
 | Вариант | Скачать | Как использовать |
 |---|---|---|
-| Установщик для Windows | [own-backup-install_0.1.9-beta.exe](https://github.com/coinman-dev/own-backup/releases/download/v0.1.9-beta/own-backup-install_0.1.9-beta.exe) | Ставит программу для всех пользователей компьютера и запускает её службу. Нужны права администратора. |
-| Пакет для Linux | [own-backup_0.1.9.beta_amd64.deb](https://github.com/coinman-dev/own-backup/releases/download/v0.1.9-beta/own-backup_0.1.9.beta_amd64.deb) | `sudo apt install ./own-backup_0.1.9.beta_amd64.deb` ставит программу, запускает её службу и добавляет вас в группу `own-backup` (войдите в систему заново, чтобы открыть окно). |
-| Загрузочный носитель Linux | [OwnBackup-Linux-0.1.9.beta_amd64.iso](https://github.com/coinman-dev/own-backup/releases/download/v0.1.9-beta/OwnBackup-Linux-0.1.9.beta_amd64.iso) | Загружает компьютер с диска или флешки (UEFI с Secure Boot или BIOS), чтобы сделать копию его дисков или восстановить их, в том числе диски Windows. Окно записывает его на флешку. |
+| Установщик для Windows | [own-backup-install_0.2.0-beta.exe](https://github.com/coinman-dev/own-backup/releases/download/v0.2.0-beta/own-backup-install_0.2.0-beta.exe) | Ставит программу для всех пользователей компьютера и запускает её службу. Нужны права администратора. |
+| Пакет для Linux | [own-backup_0.2.0.beta_amd64.deb](https://github.com/coinman-dev/own-backup/releases/download/v0.2.0-beta/own-backup_0.2.0.beta_amd64.deb) | `sudo apt install ./own-backup_0.2.0.beta_amd64.deb` ставит программу, запускает её службу и добавляет вас в группу `own-backup` (войдите в систему заново, чтобы открыть окно). |
+| Загрузочный носитель Linux | [OwnBackup-Linux-0.2.0.beta_amd64.iso](https://github.com/coinman-dev/own-backup/releases/download/v0.2.0-beta/OwnBackup-Linux-0.2.0.beta_amd64.iso) | Загружает компьютер с диска или флешки (UEFI с Secure Boot или BIOS), чтобы сделать копию его дисков или восстановить их, в том числе диски Windows. Окно записывает его на флешку. |
 
 Windows 10/11, x64. Окну программы нужен Microsoft Edge WebView2 Runtime — в
 Windows 11 он есть, а если его нет в Windows 10, установщик об этом скажет.
