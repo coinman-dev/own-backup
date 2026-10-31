@@ -13,7 +13,11 @@ with the number of versions. To restore a backup that is not in the list (made
 on another computer, copied from elsewhere), click **Add backup** and choose a
 **File** (a single image) or a **Folder with backups** (every backup in it).
 With **Add the backup file(s) to the Backups list** it stays in the list after a
-restart. A backup added this way can be removed from the list later; its files
+restart. The icon beside **This computer** changes the order of the list. The
+arrow in a row or a right click opens the same menu as in **Backup**; a backup
+added by hand has a shorter one: checking and mounting (on the **Tools** page),
+**Open storage** and removing it from the list. A backup added this way can be
+removed from the list later; its files
 are not deleted.
 
 ## What to restore

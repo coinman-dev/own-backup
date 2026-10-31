@@ -1,8 +1,13 @@
 <script lang="ts">
   import { pickPath } from '../lib/pickPath.svelte';
-  import { jobs, jobStatus } from '../lib/jobStore.svelte';
+  import { jobs } from '../lib/jobStore.svelte';
   import { api } from '../lib/api';
+  import { goTo, nav } from '../lib/navStore.svelte';
+  import { sortJobs } from '../lib/jobVersions';
   import RestoreDashboard from './RestoreDashboard.svelte';
+  import JobMenu, { type AddedCopy } from '../components/JobMenu.svelte';
+  import JobRow from '../components/JobRow.svelte';
+  import JobSortMenu, { type JobSortKey } from '../components/JobSortMenu.svelte';
   import type { Job, ImageInfo, LockedImage } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
 
@@ -290,12 +295,27 @@
     }
   }
 
-  function statusColor(s: string): string {
-    return s === 'running' ? 'var(--primary)'
-      : s === 'queued' ? 'var(--info)'
-      : s === 'success' ? 'var(--success)'
-      : s === 'error' ? 'var(--error)'
-      : 'var(--text-muted)';
+  const SORT_KEY = 'ob.restore.sortKey';
+  let sortKey = $state<JobSortKey>((localStorage.getItem(SORT_KEY) as JobSortKey) ?? 'name');
+  $effect(() => {
+    localStorage.setItem(SORT_KEY, sortKey);
+  });
+  /** Jobs and copies added by hand are one list, in one order. */
+  const rows = $derived(sortJobs([...jobs.list, ...imported.map((it) => it.job)], sortKey, jobs.activity));
+  const importedOf = (job: Job) => imported.find((it) => it.job.id === job.id);
+
+  let jobMenu = $state<JobMenu | null>(null);
+  let menuJobId = $state<string | null>(null);
+
+  /** What the menu may do with a copy added by hand. */
+  function addedCopy(job: Job): AddedCopy | null {
+    const it = importedOf(job);
+    if (!it) return null;
+    return { folder: folderOf(it.paths[0]), newest: it.paths[0], forget: () => void forget(it.id) };
+  }
+  function cloneElsewhere(job: Job) {
+    nav.cloneJob = job;
+    goTo('backup');
   }
 </script>
 
@@ -307,53 +327,29 @@
     <div class="this-pc">
       <svg width="11" height="11" viewBox="0 0 24 24" fill="var(--text-muted)"><path d="M6 9l6 6 6-6z"/></svg>
       {m.rl_this_pc()}
+      <JobSortMenu bind:value={sortKey} />
     </div>
     <div class="jobs-list">
       {#if jobs.list.length === 0 && imported.length === 0}
         <div class="empty-list">{m.rl_empty()}<br/>{m.rl_empty_hint()}</div>
       {/if}
-      {#each jobs.list as job (job.id)}
-        <button class="job-item" class:sel={selectedId === job.id} onclick={() => (selectedId = job.id)}>
-          <div class="job-icon">
-            <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--disk-icon)" stroke-width="1.6"><rect x="3" y="5" width="18" height="14" rx="3"/><circle cx="12" cy="12" r="3.5"/></svg>
-            <span class="status-dot" style="background:{statusColor(jobStatus(job))}"></span>
-          </div>
-          <div class="job-meta">
-            <!-- The same padlock as in «Резервное копирование»: here it matters
-                 more, since this is the screen that will ask for the password. -->
-            <div class="job-name">
-              {job.name}{#if job.archive_encryption}<span
-                  class="enc-badge"
-                  title={m.rl_encrypted_job_title()}
-                  aria-label={m.rl_encrypted()}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2.2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></span
-                >{/if}
-            </div>
-            <div class="job-path">{job.dest_folder}</div>
-          </div>
-        </button>
-      {/each}
-      {#each imported as it (it.id)}
-        <!-- Added by hand, so it can be taken away by hand: the × removes it
-             from the list and from what is remembered for next launch. -->
-        <div class="job-item added" class:sel={selectedId === it.id}>
-          <button class="job-pick" onclick={() => (selectedId = it.id)}>
-            <div class="job-icon">
-              <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="var(--disk-icon)" stroke-width="1.6"><rect x="3" y="5" width="18" height="14" rx="3"/><circle cx="12" cy="12" r="3.5"/></svg>
-              <span class="status-dot" style="background:var(--success)"></span>
-            </div>
-            <div class="job-meta">
-              <div class="job-name">
-                {it.job.name}{#if it.sealed}<span
-                    class="enc-badge"
-                    title={m.rl_encrypted_copy_title()}
-                    aria-label={m.rl_encrypted()}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2.2" stroke-linecap="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></span
-                  >{/if}
-              </div>
-              <div class="job-path" title={it.job.dest_folder}>{it.chainJobId ? `${m.rl_copies_count({ count: it.paths.length })} · ${it.job.dest_folder}` : m.rl_backup_file()}</div>
-            </div>
-          </button>
-          <button class="job-forget" title={m.rl_forget_title()} onclick={() => forget(it.id)}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
-        </div>
+      {#each rows as job (job.id)}
+        {@const it = importedOf(job)}
+        <JobRow
+          {job}
+          selected={selectedId === job.id}
+          menuOpen={menuJobId === job.id}
+          path={it
+            ? it.chainJobId
+              ? `${m.rl_copies_count({ count: it.paths.length })} · ${job.dest_folder}`
+              : m.rl_backup_file()
+            : job.dest_folder}
+          encryptedTitle={it
+            ? it.sealed ? m.rl_encrypted_copy_title() : undefined
+            : job.archive_encryption ? m.rl_encrypted_job_title() : undefined}
+          onselect={() => (selectedId = job.id)}
+          onmenu={(e, anchor) => jobMenu?.open(job, e, anchor)}
+        />
       {/each}
     </div>
     {#if addError}<div class="add-err">{addError()}</div>{/if}
@@ -416,26 +412,18 @@
     </div>
   </div>
 {/if}
+
+<JobMenu bind:this={jobMenu} bind:openJobId={menuJobId} onClone={cloneElsewhere} imported={addedCopy} />
 </div>
 
 <style>
   .restore-root { display: flex; flex-direction: column; height: 100%; }
   .layout { display: flex; flex: 1; min-height: 0; }
   .jobs-col { width: 240px; flex-shrink: 0; background: var(--column-bg); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
-  .col-title { font-size: 24px; font-weight: 300; color: var(--head); padding: 22px 8px 12px 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .col-title { font-size: 22px; font-weight: 300; color: var(--head); padding: 22px 8px 12px 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .this-pc { display: flex; align-items: center; gap: 8px; padding: 6px 18px 6px 12px; font-size: 13px; font-weight: 600; color: var(--text-secondary); }
   .jobs-list { flex: 1; overflow: auto; padding: 8px 8px; }
   .empty-list { text-align: center; color: var(--text-muted); font-size: 13px; padding: 30px 10px; line-height: 1.6; }
-  .job-item { width: 100%; display: flex; align-items: center; gap: 10px; padding: 10px 8px; border: 1px solid transparent; border-radius: 8px; background: none; cursor: pointer; margin-bottom: 4px; text-align: left; font-family: var(--font); }
-  .job-item:hover { background: var(--panel2); }
-  .job-item.sel { background: var(--accent-soft); border-color: var(--primary); }
-  .job-icon { position: relative; flex-shrink: 0; }
-  .status-dot { position: absolute; right: -2px; bottom: 0; width: 11px; height: 11px; border-radius: 50%; border: 2px solid var(--column-bg); }
-  .job-meta { flex: 1; min-width: 0; }
-  .job-name { font-size: 14px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .enc-badge { margin-left: 6px; font-size: 11px; }
-  .enc-badge svg { vertical-align: -1px; }
-  .job-path { font-size: 12px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* As tall as the action bar beside it (--footer-height): one line across.
      The button is green, as «Создать копию» (owner, 2026-10-28). */
   .add-bar { display: flex; align-items: center; flex-shrink: 0; min-height: var(--footer-height); padding: 12px 16px; border-top: 1px solid var(--border); }
@@ -443,10 +431,6 @@
   .add-btn:hover { background: var(--green-hover); }
   .remember { display: flex; align-items: flex-start; gap: 9px; margin: 4px 0 16px; font-size: 13px; color: var(--text); cursor: pointer; line-height: 1.45; }
   .remember input { width: auto; margin-top: 2px; flex: 0 0 auto; }
-  .job-item.added { display: flex; align-items: center; padding: 0; }
-  .job-pick { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 10px 8px; background: none; border: none; cursor: pointer; text-align: left; font-family: var(--font); }
-  .job-forget { flex: 0 0 auto; width: 26px; height: 26px; margin-right: 6px; border: none; background: none; border-radius: 4px; color: var(--text-muted); font-size: 17px; line-height: 1; cursor: pointer; font-family: var(--font); display: flex; align-items: center; justify-content: center; }
-  .job-forget:hover { background: var(--error-soft); color: var(--error-text); }
   .remember em { display: block; font-style: normal; font-size: 12px; color: var(--text-muted); margin-top: 3px; }
   .add-err { margin: 0 8px 8px; padding: 8px 12px; font-size: 12px; color: var(--error-text); background: var(--error-soft); border: 1px solid var(--error-line); border-radius: 8px; }
   .dash-col { flex: 1; min-width: 0; overflow: auto; }
