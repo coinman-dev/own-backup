@@ -10,7 +10,7 @@
 //! The icon is shown exactly while the service is RUNNING and taken away when
 //! it is not, so its presence is the answer to «is my backup service up» and
 //! never a decoration. The service is asked through the SCM every few seconds;
-//! any user may ask that.
+//! any user may ask that. While a job is running the icon moves (`busy_icon`).
 //!
 //! Whether the icon is wanted is one person's choice about their own desktop,
 //! so it is kept in their registry hive and not in `config.toml`, which is the
@@ -18,14 +18,18 @@
 //! choice and is rewritten at every start of the window, which also keeps it
 //! pointing at the exe that is actually in use.
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use windows::core::{w, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, BOOL, ERROR_ALREADY_EXISTS, FALSE, HWND, LPARAM, LRESULT, POINT,
     TRUE, WPARAM,
+};
+use windows::Win32::Graphics::Gdi::{
+    CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    DIB_RGB_COLORS,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Registry::{
@@ -45,15 +49,16 @@ use windows::Win32::UI::Shell::{
     NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    DispatchMessageW, EnumWindows, FindWindowW, GetCursorPos, GetMessageW, GetSystemMetrics,
-    GetWindow, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowThreadProcessId, IsIconic,
-    IsWindowVisible, LoadIconW, LoadImageW, PostMessageW, PostQuitMessage, RegisterClassW,
-    RegisterWindowMessageW, SetForegroundWindow, SetMenuDefaultItem, SetTimer, ShowWindow,
-    TrackPopupMenuEx, TranslateMessage, GWL_EXSTYLE, GW_OWNER, HICON, IDI_APPLICATION, IMAGE_ICON,
-    LR_DEFAULTCOLOR, MF_SEPARATOR, MF_STRING, MSG, SM_CXSMICON, SM_CYSMICON, SW_RESTORE,
-    TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_DESTROY,
-    WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_OVERLAPPED,
+    AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
+    DestroyWindow, DispatchMessageW, EnumWindows, FindWindowW, GetCursorPos, GetMessageW,
+    GetSystemMetrics, GetWindow, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowThreadProcessId,
+    IsIconic, IsWindowVisible, KillTimer, LoadIconW, LoadImageW, PostMessageW, PostQuitMessage,
+    RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetMenuDefaultItem, SetTimer,
+    ShowWindow, TrackPopupMenuEx, TranslateMessage, GWL_EXSTYLE, GW_OWNER, HICON, ICONINFO,
+    IDI_APPLICATION, IMAGE_ICON, LR_DEFAULTCOLOR, MF_SEPARATOR, MF_STRING, MSG, SM_CXSMICON,
+    SM_CYSMICON, SW_RESTORE, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE,
+    WM_APP, WM_CLOSE, WM_DESTROY, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
+    WS_EX_TOOLWINDOW, WS_OVERLAPPED,
 };
 
 use own_backup_common::config::AppConfig;
@@ -68,6 +73,10 @@ const POLL_TIMER: usize = 1;
 /// How often the service is asked. Slow enough to cost nothing, fast enough
 /// that the icon follows a restart of the service while someone is looking.
 const POLL_MS: u32 = 5000;
+/// The flag from `busy_icon::watch_jobs` is read this often; reading costs nothing.
+const BUSY_TIMER: usize = 2;
+const BUSY_MS: u32 = 1000;
+const FRAME_TIMER: usize = 3;
 const CMD_OPEN: usize = 1;
 const CMD_HIDE: usize = 2;
 /// The id tauri-build gives the exe's icon (`IDI_APPLICATION`).
@@ -85,6 +94,13 @@ static SHOWN: AtomicBool = AtomicBool::new(false);
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 /// The loaded icon, kept for the life of the process.
 static ICON: AtomicIsize = AtomicIsize::new(0);
+/// A job is running, says the service (`busy_icon::watch_jobs`).
+static BUSY: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+/// The frames as icons, made the first time a job runs and kept from then on.
+static FRAMES: OnceLock<Vec<isize>> = OnceLock::new();
+static NEXT_FRAME: AtomicUsize = AtomicUsize::new(0);
+/// The frame timer is on.
+static MOVING: AtomicBool = AtomicBool::new(false);
 /// The tooltip as last given to the shell, to rewrite it only when the
 /// language changed under us.
 static TIP: Mutex<String> = Mutex::new(String::new());
@@ -268,7 +284,9 @@ fn message_loop() -> windows::core::Result<()> {
     // SAFETY: a live window of this thread.
     unsafe {
         SetTimer(window, POLL_TIMER, POLL_MS, None);
+        SetTimer(window, BUSY_TIMER, BUSY_MS, None);
     }
+    let _ = BUSY.set(crate::busy_icon::watch_jobs());
 
     let mut msg = MSG::default();
     // -1 is an error and is not false: `> 0`, or a broken queue spins forever.
@@ -291,6 +309,14 @@ unsafe extern "system" fn window_proc(
     match message {
         WM_TIMER if wparam.0 == POLL_TIMER => {
             follow_service(window);
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == BUSY_TIMER => {
+            follow_jobs(window);
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == FRAME_TIMER => {
+            next_frame(window);
             LRESULT(0)
         }
         TRAY_MESSAGE => {
@@ -335,6 +361,112 @@ fn follow_service(window: HWND) {
         tracing::info!("tray: the service is not running, icon hidden");
     } else if running {
         refresh_tip(window);
+    }
+}
+
+/// Start or stop the movement. Back to the program's own icon when a job ends.
+fn follow_jobs(window: HWND) {
+    let busy = BUSY.get().is_some_and(|flag| flag.load(Ordering::Relaxed));
+    let wanted = busy && SHOWN.load(Ordering::Relaxed);
+    if wanted == MOVING.load(Ordering::Relaxed) {
+        return;
+    }
+    MOVING.store(wanted, Ordering::Relaxed);
+    // SAFETY: timers of a live window of this thread.
+    unsafe {
+        if wanted {
+            SetTimer(window, FRAME_TIMER, crate::busy_icon::FRAME_MS, None);
+        } else {
+            let _ = KillTimer(window, FRAME_TIMER);
+        }
+    }
+    if !wanted {
+        set_icon(window, icon());
+    }
+}
+
+fn next_frame(window: HWND) {
+    let frames = FRAMES.get_or_init(make_frames);
+    if frames.is_empty() {
+        return;
+    }
+    let index = NEXT_FRAME.fetch_add(1, Ordering::Relaxed) % frames.len();
+    set_icon(window, HICON(frames[index] as *mut core::ffi::c_void));
+}
+
+fn set_icon(window: HWND, icon: HICON) {
+    let mut data = icon_data(window);
+    data.uFlags = NIF_ICON;
+    data.hIcon = icon;
+    // SAFETY: as in `add_icon`. An icon that is gone answers false, and is added
+    // back by `follow_service`.
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
+    }
+}
+
+/// Every frame as an icon of the size this screen's notification area wants.
+fn make_frames() -> Vec<isize> {
+    let Some(frames) = crate::busy_icon::Frames::load() else {
+        tracing::warn!("tray: the frames did not load, the icon stands still");
+        return Vec::new();
+    };
+    // SAFETY: a plain query.
+    let side = unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16) as u32;
+    (0..frames.count)
+        .filter_map(|index| icon_from_rgba(&frames.scaled(index, side), side))
+        .map(|icon| icon.0 as isize)
+        .collect()
+}
+
+/// An icon from RGBA pixels. The alpha is in the colour bitmap, so the mask only
+/// has to exist. The bitmaps are copied into the icon and deleted here.
+fn icon_from_rgba(rgba: &[u8], side: u32) -> Option<HICON> {
+    let header = BITMAPINFOHEADER {
+        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+        biWidth: side as i32,
+        // Negative: the first row is the top one.
+        biHeight: -(side as i32),
+        biPlanes: 1,
+        biBitCount: 32,
+        biCompression: BI_RGB.0,
+        ..Default::default()
+    };
+    let info = BITMAPINFO {
+        bmiHeader: header,
+        ..Default::default()
+    };
+    let mut bits = std::ptr::null_mut();
+    // SAFETY: `info` describes the bitmap asked for; `bits` then points at
+    // side * side * 4 bytes owned by it, which are written once, in bounds, before
+    // the bitmap is deleted. Both bitmaps are deleted on every path.
+    unsafe {
+        let color = CreateDIBSection(None, &info, DIB_RGB_COLORS, &mut bits, None, 0).ok()?;
+        let pixels = std::slice::from_raw_parts_mut(bits as *mut u8, rgba.len());
+        for (to, from) in pixels
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(rgba.as_chunks::<4>().0)
+        {
+            // BGRA, with the colour multiplied by alpha, as a 32-bit icon holds it.
+            let alpha = from[3] as u32;
+            to[0] = (from[2] as u32 * alpha / 255) as u8;
+            to[1] = (from[1] as u32 * alpha / 255) as u8;
+            to[2] = (from[0] as u32 * alpha / 255) as u8;
+            to[3] = from[3];
+        }
+        let mask = CreateBitmap(side as i32, side as i32, 1, 1, None);
+        let made = CreateIconIndirect(&ICONINFO {
+            fIcon: TRUE,
+            xHotspot: 0,
+            yHotspot: 0,
+            hbmMask: mask,
+            hbmColor: color,
+        });
+        let _ = DeleteObject(mask);
+        let _ = DeleteObject(color);
+        made.ok()
     }
 }
 

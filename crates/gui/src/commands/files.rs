@@ -89,16 +89,20 @@ pub async fn list_roots() -> Result<Vec<DirEntryDto>, String> {
                 mounted: false,
             }];
             #[cfg(target_os = "linux")]
-            out.extend(super::medium_volumes::list().into_iter().map(|v| DirEntryDto {
-                path: v.mount_point.clone().unwrap_or_default(),
-                mounted: v.mount_point.is_some(),
-                name: v.name.clone(),
-                is_dir: true,
-                size: v.size,
-                label: v.label,
-                fs: v.fs,
-                volume: v.name,
-            }));
+            out.extend(
+                super::medium_volumes::list()
+                    .into_iter()
+                    .map(|v| DirEntryDto {
+                        path: v.mount_point.clone().unwrap_or_default(),
+                        mounted: v.mount_point.is_some(),
+                        name: v.name.clone(),
+                        is_dir: true,
+                        size: v.size,
+                        label: v.label,
+                        fs: v.fs,
+                        volume: v.name,
+                    }),
+            );
             Ok(out)
         }
     })

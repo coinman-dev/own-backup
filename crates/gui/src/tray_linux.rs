@@ -10,7 +10,9 @@
 //!
 //! The icon is shown exactly while the service is running: its presence is
 //! the answer to «is my backup service up». A person in the `own-backup`
-//! group is answered by the service's socket; anyone else by systemd.
+//! group is answered by the service's socket; anyone else by systemd. While a
+//! job is running the icon moves (`busy_icon`), more slowly than on Windows:
+//! every new picture is a file for the desktop to read.
 //!
 //! Started at every login by the package's `/etc/xdg/autostart` entry. The
 //! settings switch is one person's choice, so it is kept the way the
@@ -21,7 +23,8 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
@@ -35,6 +38,11 @@ use own_backup_common::config::AppConfig;
 const AUTOSTART_FILE: &str = "own-backup-tray.desktop";
 /// How often the service is asked.
 const POLL: Duration = Duration::from_secs(5);
+/// Every other frame of the strip, at this pace: the same turn as on Windows.
+const FRAME_EVERY: Duration = Duration::from_millis(300);
+const FRAME_STEP: usize = 2;
+/// The side of the picture given to the desktop, which scales it itself.
+const ICON_SIDE: u32 = 32;
 /// After a click started the window, how long another click starts nothing:
 /// the window takes a moment before it holds its name and answers.
 const START_GRACE: Duration = Duration::from_secs(5);
@@ -202,6 +210,12 @@ struct Tray {
     hide: MenuItem,
     icon: Option<Icon>,
     shown: Option<TrayIcon>,
+    /// A job is running, says the service (`busy_icon::watch_jobs`).
+    busy: Arc<AtomicBool>,
+    /// The frames as icons; empty if they did not load.
+    frames: Vec<Icon>,
+    next_frame: usize,
+    moving: bool,
     /// The language the menu was last written in.
     language: &'static str,
     /// One line in the log for an icon that would not be made, not one per tick.
@@ -233,10 +247,19 @@ impl Tray {
             hide,
             icon: load_icon(),
             shown: None,
+            busy: crate::busy_icon::watch_jobs(),
+            frames: load_frames(),
+            next_frame: 0,
+            moving: false,
             language: own_backup_common::lang::code(),
             build_failed: false,
         }));
         tray.borrow_mut().follow_service();
+        let moving = tray.clone();
+        glib::timeout_add_local(FRAME_EVERY, move || {
+            moving.borrow_mut().follow_jobs();
+            glib::ControlFlow::Continue
+        });
         glib::timeout_add_local(POLL, move || {
             tray.borrow_mut().follow_service();
             glib::ControlFlow::Continue
@@ -272,6 +295,22 @@ impl Tray {
             tracing::info!("tray: the service is not running, icon hidden");
         }
         self.follow_language();
+    }
+
+    /// The next frame while a job runs; the program's own icon when it ends.
+    fn follow_jobs(&mut self) {
+        let busy = self.busy.load(Ordering::Relaxed) && !self.frames.is_empty();
+        let Some(shown) = &self.shown else {
+            return;
+        };
+        if busy {
+            let icon = self.frames[self.next_frame % self.frames.len()].clone();
+            self.next_frame = (self.next_frame + 1) % self.frames.len();
+            self.moving = true;
+            let _ = shown.set_icon(Some(icon));
+        } else if std::mem::take(&mut self.moving) {
+            let _ = shown.set_icon(self.icon.clone());
+        }
     }
 
     /// The menu follows a change of language made in the window.
@@ -315,6 +354,20 @@ fn load_icon() -> Option<Icon> {
         tracing::warn!("tray: the program's icon did not load, using the theme's");
     }
     decoded
+}
+
+/// Every `FRAME_STEP`th frame as an icon.
+fn load_frames() -> Vec<Icon> {
+    let Some(frames) = crate::busy_icon::Frames::load() else {
+        tracing::warn!("tray: the frames did not load, the icon stands still");
+        return Vec::new();
+    };
+    (0..frames.count)
+        .step_by(FRAME_STEP)
+        .filter_map(|index| {
+            Icon::from_rgba(frames.scaled(index, ICON_SIDE), ICON_SIDE, ICON_SIDE).ok()
+        })
+        .collect()
 }
 
 /// Is the service up? Its socket answers a member of the access group; the
