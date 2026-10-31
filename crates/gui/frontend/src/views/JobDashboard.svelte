@@ -400,44 +400,46 @@
         </div>
       </div>
     {/if}
-  {:else}
-    {#if lastVerification?.status === 'error'}
-      <div class="banner err">{@render errIcon()}<span>{m.act_verify_failed()} — {formatDate(lastVerification.finished_at)}. {lastVerification.error}</span></div>
-    {/if}
-    {#if lastRun?.status === 'success'}
-      {#if closedRun !== lastRun.id}
-        <div class="banner ok">
-          <span class="bdot">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
-          </span>
-          <span><RunSummary run={lastRun} /></span>
-          <button class="banner-x" title={m.common_close()} aria-label={m.common_close()} onclick={() => closeSummary(lastRun.id)}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
-          </button>
-        </div>
-      {/if}
-    {:else if lastRun?.status === 'error'}
-      <!-- When: the stats below date the last COPY, and without its own
-           time this banner read as if that copy had failed. -->
-      <div class="banner err">{@render errIcon()}<span>{m.dash_error({ date: formatDate(lastRun.finished_at), error: lastRun.error ?? '' })}</span></div>
-      {#if lastRun.error_kind === 'key_protection'}
-        <div class="banner info"><span>{m.run_error_key_protection()}</span></div>
-      {:else if lastRun.error_kind === 'archive_reauthorize'}
-        <div class="banner info"><span>{m.run_error_reauthorize()}</span></div>
-      {/if}
-    {/if}
   {/if}
 
-  <!-- The run happened but the service could not write it into the history:
-       until a later write succeeds it lives only in the service's memory. -->
-  {#if lastRun?.record_error}<div class="banner err">{@render errIcon()}<span>{lastRun.record_error}</span></div>{/if}
-  {#if actionErr}<div class="banner err">{@render errIcon()}<span>{actionErr}</span></div>{/if}
-  {#if actionMsg}<div class="banner info"><span>{actionMsg}</span></div>{/if}
+  <!-- Pushed to the bottom of the scrolling area as one group: what the last run
+       has to say sits right on the files, and both on the footer's buttons. -->
+  <div class="bottom">
+    {#if !running}
+      {#if lastVerification?.status === 'error'}
+        <div class="banner err">{@render errIcon()}<span>{m.act_verify_failed()} — {formatDate(lastVerification.finished_at)}. {lastVerification.error}</span></div>
+      {/if}
+      {#if lastRun?.status === 'success'}
+        {#if closedRun !== lastRun.id}
+          <div class="banner ok">
+            <span class="bdot">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
+            </span>
+            <span><RunSummary run={lastRun} /></span>
+            <button class="banner-x" title={m.common_close()} aria-label={m.common_close()} onclick={() => closeSummary(lastRun.id)}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
+            </button>
+          </div>
+        {/if}
+      {:else if lastRun?.status === 'error'}
+        <!-- When: the stats below date the last COPY, and without its own
+             time this banner read as if that copy had failed. -->
+        <div class="banner err">{@render errIcon()}<span>{m.dash_error({ date: formatDate(lastRun.finished_at), error: lastRun.error ?? '' })}</span></div>
+        {#if lastRun.error_kind === 'key_protection'}
+          <div class="banner info"><span>{m.run_error_key_protection()}</span></div>
+        {:else if lastRun.error_kind === 'archive_reauthorize'}
+          <div class="banner info"><span>{m.run_error_reauthorize()}</span></div>
+        {/if}
+      {/if}
+    {/if}
 
-  <!-- Last in the scrolling area and pushed to its bottom: it stays on the
-       footer's buttons however much is written above it. -->
-  {#if !running}
-    <div class="files">
+    <!-- The run happened but the service could not write it into the history:
+         until a later write succeeds it lives only in the service's memory. -->
+    {#if lastRun?.record_error}<div class="banner err">{@render errIcon()}<span>{lastRun.record_error}</span></div>{/if}
+    {#if actionErr}<div class="banner err">{@render errIcon()}<span>{actionErr}</span></div>{/if}
+    {#if actionMsg}<div class="banner info"><span>{actionMsg}</span></div>{/if}
+
+    {#if !running}
       <!-- stats row -->
       <div class="stats">
         <span>
@@ -483,8 +485,8 @@
           {/if}
         </div>
       {/if}
-    </div>
-  {/if}
+    {/if}
+  </div>
 </div>
 
   <div class="footer">
@@ -511,7 +513,7 @@
 <style>
   .page { height: 100%; display: flex; flex-direction: column; }
   .dash { flex: 1; overflow: auto; width: 100%; padding: 34px 44px 20px; display: flex; flex-direction: column; }
-  .files { margin-top: auto; flex-shrink: 0; }
+  .bottom { margin-top: auto; flex-shrink: 0; }
   .flow { display: flex; align-items: stretch; justify-content: center; }
   .card { flex: 1; max-width: 300px; border: 1px solid var(--border); border-radius: 8px; padding: 22px 18px; text-align: center; background: var(--card-bg); display: flex; flex-direction: column; align-items: center; gap: 8px; }
   .card-title { font-size: 20px; font-weight: 600; color: var(--head); }
@@ -543,7 +545,7 @@
   .progress-meta .times { white-space: nowrap; flex-shrink: 0; }
   .stall-note { margin-top: 8px; padding: 6px 10px; border-radius: 6px; font-size: 12px;
     background: var(--warning-soft); border: 1px solid var(--warning-line); color: var(--warning-text); }
-  .stats { display: flex; justify-content: space-between; font-size: 13px; color: var(--text-secondary); margin-top: 34px; }
+  .stats { display: flex; justify-content: space-between; font-size: 13px; color: var(--text-secondary); margin-top: 20px; }
   .stats b { color: var(--head); font-weight: 600; }
   .reco { display: flex; align-items: center; gap: 6px; }
   .q { width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--border-strong); background: none; color: var(--text-muted); font-size: 10px; cursor: pointer; padding: 0; }
