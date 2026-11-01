@@ -1,5 +1,7 @@
 //! The moving logo that says «a job is running»: in the notification area, and on
-//! the window's taskbar button on Windows.
+//! the window's taskbar button on Windows. Also the message from the system when a
+//! job starts: the service has no desktop to show one on, so the icon's process,
+//! which belongs to the person who is logged in, shows it.
 //!
 //! The frames are one strip, `icons/busy-frames.png`, made from
 //! `images/own_backup_512_fit.webp` (see images/README.md). Whether a job runs is the
@@ -7,7 +9,7 @@
 //! neither the tray's message loop nor the window waits for an answer.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use own_backup_common::config::AppConfig;
@@ -99,12 +101,34 @@ fn shrink(rgba: &[u8], from: u32, to: u32) -> Vec<u8> {
     out
 }
 
-/// Starts asking the service; the flag says whether a job is running. An answer
-/// that does not come reads as «no»: an icon standing still is the honest default,
-/// and only a person the service lets in can be told otherwise anyway.
-pub fn watch_jobs() -> Arc<AtomicBool> {
-    let busy = Arc::new(AtomicBool::new(false));
-    let flag = busy.clone();
+/// What the service last said about its jobs.
+#[derive(Default)]
+pub struct JobWatch {
+    busy: AtomicBool,
+    started: Mutex<Option<String>>,
+}
+
+impl JobWatch {
+    /// A job is running.
+    pub fn busy(&self) -> bool {
+        self.busy.load(Ordering::Relaxed)
+    }
+
+    /// The message about a job that has started, once.
+    pub fn take_started(&self) -> Option<String> {
+        self.started
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    }
+}
+
+/// Starts asking the service. An answer that does not come reads as «no job»: an
+/// icon standing still is the honest default, and only a person the service lets
+/// in can be told otherwise anyway.
+pub fn watch_jobs() -> Arc<JobWatch> {
+    let watch = Arc::new(JobWatch::default());
+    let shared = watch.clone();
     let spawned = std::thread::Builder::new()
         .name("busy-icon".into())
         .spawn(move || {
@@ -121,8 +145,20 @@ pub fn watch_jobs() -> Arc<AtomicBool> {
             let config = AppConfig::load_or_default();
             let link = ServiceLink::new(&config.grpc_address, config.token_path());
             runtime.block_on(async {
+                let mut seen = None;
                 loop {
-                    flag.store(job_running(&link).await, Ordering::Relaxed);
+                    let answer = current_job(&link).await;
+                    shared
+                        .busy
+                        .store(matches!(answer, Some(Some(_))), Ordering::Relaxed);
+                    if let Some(id) = answer.and_then(|now| newly_started(&mut seen, now)) {
+                        let name = job_name(&link, &id).await;
+                        *shared
+                            .started
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                            Some(started_message(name.as_deref()));
+                    }
                     tokio::time::sleep(ASK_EVERY).await;
                 }
             });
@@ -130,21 +166,40 @@ pub fn watch_jobs() -> Arc<AtomicBool> {
     if let Err(error) = spawned {
         tracing::warn!(%error, "busy icon: no thread, the icon stands still");
     }
-    busy
+    watch
 }
 
-/// Asked without starting the service, which `client()` would try to do: this is
-/// a decoration, not a reason to touch it.
-async fn job_running(link: &ServiceLink) -> bool {
-    let Some(mut client) = link.connected().await else {
-        return false;
-    };
+/// The job the service is running; `None` if it did not answer. Asked without
+/// starting the service, which `client()` would try to do: this is a decoration,
+/// not a reason to touch it.
+async fn current_job(link: &ServiceLink) -> Option<Option<String>> {
+    let mut client = link.connected().await?;
     match client.get_queue().await {
-        Ok(queue) => queue.current.is_some(),
+        Ok(queue) => Some(queue.current),
         Err(_) => {
             link.invalidate().await;
-            false
+            None
         }
+    }
+}
+
+/// The job to tell about, given the service's answer. The first answer only sets
+/// the starting point: a job already running when the icon appeared did not start
+/// now. A silence of the service does not come here, so it does not repeat a message.
+fn newly_started(seen: &mut Option<Option<String>>, now: Option<String>) -> Option<String> {
+    let before = seen.replace(now.clone())?;
+    now.filter(|id| before.as_ref() != Some(id))
+}
+
+async fn job_name(link: &ServiceLink, id: &str) -> Option<String> {
+    let job = link.connected().await?.get_job(id).await.ok()??;
+    Some(job.name).filter(|name| !name.is_empty())
+}
+
+fn started_message(name: Option<&str>) -> String {
+    match name {
+        Some(name) => own_backup_common::tr!("tray.job_started", name = name).into_owned(),
+        None => own_backup_common::tr!("tray.job_started_unnamed").into_owned(),
     }
 }
 
@@ -158,13 +213,13 @@ pub fn animate_window(window: tauri::WebviewWindow, idle: Option<tauri::image::I
     let Some(frames) = Frames::load() else {
         return;
     };
-    let busy = watch_jobs();
+    let jobs = watch_jobs();
     let spawned = std::thread::Builder::new()
         .name("busy-window-icon".into())
         .spawn(move || {
             let (mut index, mut moving) = (0, false);
             loop {
-                if busy.load(Ordering::Relaxed) {
+                if jobs.busy() {
                     let image =
                         tauri::image::Image::new(frames.frame(index), frames.side, frames.side);
                     if window.set_icon(image).is_err() {
@@ -191,6 +246,49 @@ pub fn animate_window(window: tauri::WebviewWindow, idle: Option<tauri::image::I
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn job(id: &str) -> Option<String> {
+        Some(id.to_string())
+    }
+
+    #[test]
+    fn a_job_is_told_about_once_when_it_starts() {
+        let mut seen = None;
+        assert_eq!(newly_started(&mut seen, None), None);
+        assert_eq!(newly_started(&mut seen, job("a")), job("a"));
+        assert_eq!(newly_started(&mut seen, job("a")), None);
+        assert_eq!(newly_started(&mut seen, None), None);
+        assert_eq!(newly_started(&mut seen, job("a")), job("a"));
+    }
+
+    #[test]
+    fn the_next_job_of_the_queue_is_told_about_too() {
+        let mut seen = None;
+        assert_eq!(newly_started(&mut seen, job("a")), None);
+        assert_eq!(newly_started(&mut seen, job("b")), job("b"));
+    }
+
+    #[test]
+    fn a_job_already_running_when_the_icon_appeared_is_not_news() {
+        let mut seen = None;
+        assert_eq!(newly_started(&mut seen, job("a")), None);
+        assert_eq!(newly_started(&mut seen, job("a")), None);
+    }
+
+    #[test]
+    fn the_message_is_taken_once() {
+        let watch = JobWatch::default();
+        assert_eq!(watch.take_started(), None);
+        *watch.started.lock().unwrap() = Some("x".into());
+        assert_eq!(watch.take_started().as_deref(), Some("x"));
+        assert_eq!(watch.take_started(), None);
+    }
+
+    #[test]
+    fn the_message_names_the_job() {
+        assert!(started_message(Some("Disk_C")).contains("Disk_C"));
+        assert!(!started_message(None).contains("%{"));
+    }
 
     #[test]
     fn the_built_in_strip_is_whole() {

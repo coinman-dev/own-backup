@@ -65,6 +65,9 @@ Whether the tray icon is shown. The icon appears when you sign in and while the
 service runs; its tooltip says *Own Backup — the service is running*. Clicking
 it opens the window; its menu has **Open Own Backup** and **Hide the icon**. While
 a job is running the icon moves; on Windows so does the window's taskbar icon.
+When a job starts, the system shows the message *Backup started* with the job's
+name. This icon shows those messages: while it is hidden there are none, and the
+backup runs all the same.
 
 ## Help
 

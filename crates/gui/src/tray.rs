@@ -10,7 +10,8 @@
 //! The icon is shown exactly while the service is RUNNING and taken away when
 //! it is not, so its presence is the answer to «is my backup service up» and
 //! never a decoration. The service is asked through the SCM every few seconds;
-//! any user may ask that. While a job is running the icon moves (`busy_icon`).
+//! any user may ask that. While a job is running the icon moves (`busy_icon`),
+//! and when one starts the system shows a message from this icon.
 //!
 //! Whether the icon is wanted is one person's choice about their own desktop,
 //! so it is kept in their registry hive and not in `config.toml`, which is the
@@ -45,8 +46,8 @@ use windows::Win32::System::Threading::{
     PROCESS_QUERY_LIMITED_INFORMATION, SYNCHRONIZATION_SYNCHRONIZE,
 };
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
-    NOTIFYICONDATAW,
+    Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_NOSOUND, NIIF_USER, NIM_ADD,
+    NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
@@ -61,6 +62,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOOLWINDOW, WS_OVERLAPPED,
 };
 
+use crate::busy_icon::JobWatch;
 use own_backup_common::config::AppConfig;
 
 /// Class of the hidden window. Also how the window finds a running icon to
@@ -73,7 +75,7 @@ const POLL_TIMER: usize = 1;
 /// How often the service is asked. Slow enough to cost nothing, fast enough
 /// that the icon follows a restart of the service while someone is looking.
 const POLL_MS: u32 = 5000;
-/// The flag from `busy_icon::watch_jobs` is read this often; reading costs nothing.
+/// What `busy_icon::watch_jobs` found is read this often; reading costs nothing.
 const BUSY_TIMER: usize = 2;
 const BUSY_MS: u32 = 1000;
 const FRAME_TIMER: usize = 3;
@@ -94,8 +96,8 @@ static SHOWN: AtomicBool = AtomicBool::new(false);
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 /// The loaded icon, kept for the life of the process.
 static ICON: AtomicIsize = AtomicIsize::new(0);
-/// A job is running, says the service (`busy_icon::watch_jobs`).
-static BUSY: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+/// What the service says about its jobs.
+static JOBS: OnceLock<Arc<JobWatch>> = OnceLock::new();
 /// The frames as icons, made the first time a job runs and kept from then on.
 static FRAMES: OnceLock<Vec<isize>> = OnceLock::new();
 static NEXT_FRAME: AtomicUsize = AtomicUsize::new(0);
@@ -242,10 +244,10 @@ fn init_log() {
         .try_init();
 }
 
-fn message_loop() -> windows::core::Result<()> {
+fn create_window() -> windows::core::Result<HWND> {
     // SAFETY: plain window-class registration and creation; every pointer is a
     // constant or outlives the call.
-    let window = unsafe {
+    unsafe {
         let instance = GetModuleHandleW(None)?;
         let class = WNDCLASSW {
             lpfnWndProc: Some(window_proc),
@@ -272,8 +274,12 @@ fn message_loop() -> windows::core::Result<()> {
             None,
             instance,
             None,
-        )?
-    };
+        )
+    }
+}
+
+fn message_loop() -> windows::core::Result<()> {
+    let window = create_window()?;
     // SAFETY: a constant string.
     TASKBAR_CREATED.store(
         unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
@@ -286,7 +292,7 @@ fn message_loop() -> windows::core::Result<()> {
         SetTimer(window, POLL_TIMER, POLL_MS, None);
         SetTimer(window, BUSY_TIMER, BUSY_MS, None);
     }
-    let _ = BUSY.set(crate::busy_icon::watch_jobs());
+    let _ = JOBS.set(crate::busy_icon::watch_jobs());
 
     let mut msg = MSG::default();
     // -1 is an error and is not false: `> 0`, or a broken queue spins forever.
@@ -364,10 +370,21 @@ fn follow_service(window: HWND) {
     }
 }
 
-/// Start or stop the movement. Back to the program's own icon when a job ends.
+/// Tell about a job that started, and start or stop the movement. Back to the
+/// program's own icon when a job ends.
 fn follow_jobs(window: HWND) {
-    let busy = BUSY.get().is_some_and(|flag| flag.load(Ordering::Relaxed));
-    let wanted = busy && SHOWN.load(Ordering::Relaxed);
+    let Some(jobs) = JOBS.get() else {
+        return;
+    };
+    let shown = SHOWN.load(Ordering::Relaxed);
+    if let Some(text) = jobs.take_started() {
+        // The system's message comes from the icon, and there is none to come from
+        // only if the service stopped in the same moment.
+        if shown && !announce(window, &text) {
+            tracing::warn!("tray: the shell did not take the message about a job");
+        }
+    }
+    let wanted = jobs.busy() && shown;
     if wanted == MOVING.load(Ordering::Relaxed) {
         return;
     }
@@ -394,15 +411,26 @@ fn next_frame(window: HWND) {
     set_icon(window, HICON(frames[index] as *mut core::ffi::c_void));
 }
 
-fn set_icon(window: HWND, icon: HICON) {
+/// An icon that is gone answers false, and is added back by `follow_service`.
+fn set_icon(window: HWND, icon: HICON) -> bool {
     let mut data = icon_data(window);
     data.uFlags = NIF_ICON;
     data.hIcon = icon;
-    // SAFETY: as in `add_icon`. An icon that is gone answers false, and is added
-    // back by `follow_service`.
-    unsafe {
-        let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
-    }
+    // SAFETY: as in `add_icon`.
+    unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) }.as_bool()
+}
+
+/// The system's message in the corner of the screen. Silent: a job that starts at
+/// night by its schedule is no reason to make a sound. No title of its own: the
+/// system already heads the message with the program's name.
+fn announce(window: HWND, text: &str) -> bool {
+    let mut data = icon_data(window);
+    data.uFlags = NIF_INFO;
+    data.dwInfoFlags = NIIF_USER | NIIF_NOSOUND;
+    data.hBalloonIcon = icon();
+    put_text(&mut data.szInfo, text);
+    // SAFETY: as in `add_icon`.
+    unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) }.as_bool()
 }
 
 /// Every frame as an icon of the size this screen's notification area wants.
@@ -527,13 +555,12 @@ fn icon_data(window: HWND) -> NOTIFYICONDATAW {
     }
 }
 
-/// Write the tooltip into `data`; the shell takes at most 127 characters.
-fn put_tip(data: &mut NOTIFYICONDATAW, tip: &str) {
-    let text = wide(tip);
-    let room = data.szTip.len() - 1;
-    let length = text.len().saturating_sub(1).min(room);
-    data.szTip[..length].copy_from_slice(&text[..length]);
-    data.szTip[length] = 0;
+/// Write text into one of the structure's fields, as much of it as fits.
+fn put_text(field: &mut [u16], text: &str) {
+    let text = wide(text);
+    let length = text.len().saturating_sub(1).min(field.len() - 1);
+    field[..length].copy_from_slice(&text[..length]);
+    field[length] = 0;
 }
 
 fn add_icon(window: HWND) -> bool {
@@ -542,7 +569,7 @@ fn add_icon(window: HWND) -> bool {
     data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     data.uCallbackMessage = TRAY_MESSAGE;
     data.hIcon = icon();
-    put_tip(&mut data, &tip);
+    put_text(&mut data.szTip, &tip);
     // SAFETY: a fully initialised structure of the size it declares.
     let added = unsafe { Shell_NotifyIconW(NIM_ADD, &data) }.as_bool();
     if added {
@@ -573,7 +600,7 @@ fn refresh_tip(window: HWND) {
     }
     let mut data = icon_data(window);
     data.uFlags = NIF_TIP;
-    put_tip(&mut data, &tip);
+    put_text(&mut data.szTip, &tip);
     // SAFETY: as in `add_icon`.
     if unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) }.as_bool() {
         *last = tip;
@@ -750,4 +777,45 @@ unsafe fn runs_exe(pid: u32, exe_name: &str) -> bool {
     std::path::Path::new(&path)
         .file_name()
         .is_some_and(|name| name.to_string_lossy().to_lowercase() == exe_name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_text_is_cut_to_the_field() {
+        let mut field = [7u16; 4];
+        put_text(&mut field, "abcdef");
+        assert_eq!(field, [97, 98, 99, 0]);
+        put_text(&mut field, "");
+        assert_eq!(field[0], 0);
+    }
+
+    /// Needs a desktop, so it is run by hand on Windows, with `--ignored`: the icon
+    /// turns through its frames and the message stays on screen to be looked at.
+    #[test]
+    #[ignore]
+    fn the_shell_takes_the_icon_its_frames_and_the_message() {
+        let window = create_window().unwrap();
+        assert!(add_icon(window));
+        SHOWN.store(true, Ordering::Relaxed);
+        let frames = make_frames();
+        assert_eq!(frames.len(), 16);
+        assert!(announce(
+            window,
+            &own_backup_common::tr!("tray.job_started", name = "Disk_C_Win11")
+        ));
+        for round in 0..64 {
+            let frame = HICON(frames[round % frames.len()] as *mut core::ffi::c_void);
+            assert!(set_icon(window, frame));
+            std::thread::sleep(Duration::from_millis(crate::busy_icon::FRAME_MS as u64));
+        }
+        assert!(set_icon(window, icon()));
+        remove_icon(window);
+        // SAFETY: the window was made above and nothing uses it after this.
+        unsafe {
+            let _ = DestroyWindow(window);
+        }
+    }
 }
