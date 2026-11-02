@@ -285,7 +285,7 @@ const STEAM: &[&str] = &["steam", "steamwebhelper"];
 pub(super) fn program_items() -> Vec<Item> {
     let mut telegram = Vec::new();
     for data in TELEGRAM_DATA {
-        for sub in ["cache", "media_cache"] {
+        for sub in ["cache", "media_cache", "wvbots"] {
             telegram.push(at(format!("{data}/tdata/user_data*/{sub}"), &[], TELEGRAM));
         }
     }

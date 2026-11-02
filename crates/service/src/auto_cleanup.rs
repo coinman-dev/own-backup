@@ -20,6 +20,7 @@
 #![cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use own_backup_cleanup::{catalog, Mode, Options};
@@ -231,8 +232,14 @@ impl AutoCleanup {
 
     /// Clean by the set, on this thread, and record it in the activity.
     /// `job`: the job whose copy waits for it; it cleans by the profile it
-    /// names, or by the automatic set if it names none.
-    pub fn run(&self, trigger: Trigger, job: Option<&own_backup_core::Job>) -> Result<(), Refusal> {
+    /// names, or by the automatic set if it names none. `stop`: the copy was
+    /// cancelled, and its cleanup stops with it.
+    pub fn run(
+        &self,
+        trigger: Trigger,
+        job: Option<&own_backup_core::Job>,
+        stop: Option<&AtomicBool>,
+    ) -> Result<(), Refusal> {
         let chosen = job.map_or("", |j| j.advanced.cleanup_profile.as_str());
         let p = if chosen.is_empty() {
             let p = self.profile();
@@ -271,26 +278,43 @@ impl AutoCleanup {
         let started = chrono::Utc::now();
         let mut last: Option<std::time::Instant> = None;
         let events = self.events.clone();
-        let report = self.cleaner.go(
-            &asker,
-            &items,
-            &people,
-            Mode::Remove,
-            p.options.clone(),
-            &[],
-            |progress| {
-                if last.is_none_or(|t| t.elapsed().as_millis() >= 200) {
-                    last = Some(std::time::Instant::now());
-                    let _ = events.send(Event {
-                        kind: "cleanup".into(),
-                        json: serde_json::to_string(&progress).unwrap_or_default(),
-                    });
-                }
-            },
-        )?;
+        let done = AtomicBool::new(false);
+        let report = std::thread::scope(|scope| {
+            if let Some(stop) = stop {
+                let (cleaner, done) = (&self.cleaner, &done);
+                scope.spawn(move || {
+                    while !done.load(Ordering::Relaxed) {
+                        if stop.load(Ordering::Relaxed) {
+                            cleaner.cancel();
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                });
+            }
+            let report = self.cleaner.go(
+                &asker,
+                &items,
+                &people,
+                Mode::Remove,
+                p.options.clone(),
+                &[],
+                |progress| {
+                    if last.is_none_or(|t| t.elapsed().as_millis() >= 200) {
+                        last = Some(std::time::Instant::now());
+                        let _ = events.send(Event {
+                            kind: "cleanup".into(),
+                            json: serde_json::to_string(&progress).unwrap_or_default(),
+                        });
+                    }
+                },
+            );
+            done.store(true, Ordering::Relaxed);
+            report
+        })?;
         let mut run = activity_record(&report, started, trigger.code());
+        // The job's name only, for «Активность»: with its id this record would be
+        // taken for a run of the job while its copy is only about to begin.
         if let Some(job) = job {
-            run.job_id = job.id.clone();
             run.job_name = job.name.clone();
         }
         info!(
@@ -337,7 +361,7 @@ impl AutoCleanup {
         if !own_backup_scheduler::is_due(&sched, now, last, p.schedule.run_missed && grace, fresh) {
             return;
         }
-        match self.run(Trigger::Schedule, None) {
+        match self.run(Trigger::Schedule, None, None) {
             Err(Refusal::Busy) => {
                 info!("automatic cleanup: another cleanup is going on; next minute");
                 return;
@@ -503,7 +527,7 @@ mod tests {
 
         // A job whose profile is gone cleans nothing and says so.
         assert!(matches!(
-            a.run(Trigger::BeforeBackup, Some(&job)),
+            a.run(Trigger::BeforeBackup, Some(&job), None),
             Err(Refusal::NoProfile)
         ));
     }
@@ -513,7 +537,7 @@ mod tests {
     fn an_empty_set_cleans_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let a = auto(dir.path());
-        assert!(a.run(Trigger::Schedule, None).is_ok());
+        assert!(a.run(Trigger::Schedule, None, None).is_ok());
         assert!(a.store.activity().is_empty());
     }
 }

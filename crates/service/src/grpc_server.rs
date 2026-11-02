@@ -645,12 +645,16 @@ impl own_backup_core::EventSink for GrpcEventSink {
             json: serde_json::to_string(&run).unwrap_or_default(),
         });
     }
-    fn before_backup(&self, job: &own_backup_core::Job) {
+    fn before_backup(&self, job: &own_backup_core::Job, cancel: &AtomicBool) {
         let Some(auto) = self.auto.get() else {
             return;
         };
         info!(job = %job.name, "cleaning the disk before the copy");
-        if let Err(e) = auto.run(crate::auto_cleanup::Trigger::BeforeBackup, Some(job)) {
+        if let Err(e) = auto.run(
+            crate::auto_cleanup::Trigger::BeforeBackup,
+            Some(job),
+            Some(cancel),
+        ) {
             tracing::warn!(job = %job.name, ?e, "the cleanup before the copy did not run; the copy goes on");
         }
     }
@@ -4527,6 +4531,9 @@ impl BackupService for BackupServiceImpl {
             }
             Refusal::ReviewFirst => {
                 Status::failed_precondition(tr!("grpc_server.cleanup_review_first").into_owned())
+            }
+            Refusal::AnalysisGone => {
+                Status::failed_precondition(tr!("grpc_server.cleanup_analysis_gone").into_owned())
             }
             Refusal::BadMask(mask) => Status::invalid_argument(
                 tr!("grpc_server.cleanup_bad_mask", mask = mask).into_owned(),

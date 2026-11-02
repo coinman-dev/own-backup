@@ -25,7 +25,9 @@ use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 
-use crate::engine::{is_link, matches_mask, remove_file, Found, Mode, Tally, LIST_CAP};
+use crate::engine::{
+    is_link, matches_mask, open_dir, remove_file, Found, Mode, Opened, Tally, LIST_CAP,
+};
 use crate::users::User;
 
 /// What kind of junk a mask finds — how the window groups and explains it.
@@ -354,16 +356,27 @@ fn entered(name: &str) -> bool {
 /// Where the search runs: the users' profiles and the folders added, a
 /// folder inside another one once.
 pub fn places(users: &[User], options: &JunkOptions) -> Vec<PathBuf> {
-    let mut all: Vec<PathBuf> = users
+    let all = users
         .iter()
         .map(|u| u.profile.clone())
         .chain(options.folders.iter().cloned())
         .collect();
-    all.sort();
-    all.dedup();
+    distinct(all, |p| {
+        // Windows' names do not differ by case; `Path` does not know that.
+        if cfg!(windows) {
+            PathBuf::from(p.to_string_lossy().to_lowercase())
+        } else {
+            p.to_path_buf()
+        }
+    })
+}
+
+/// `all` with each folder once and none inside another, as `same` makes them comparable.
+fn distinct(mut all: Vec<PathBuf>, same: impl Fn(&Path) -> PathBuf) -> Vec<PathBuf> {
+    all.sort_by_key(|p| same(p));
     let mut kept: Vec<PathBuf> = Vec::new();
     for p in all {
-        if !kept.iter().any(|k| p.starts_with(k)) {
+        if !kept.iter().any(|k| same(&p).starts_with(same(k))) {
             kept.push(p);
         }
     }
@@ -375,6 +388,7 @@ pub fn places(users: &[User], options: &JunkOptions) -> Vec<PathBuf> {
 pub(crate) fn walk(
     places: &[PathBuf],
     options: &JunkOptions,
+    owner: Option<&User>,
     mode: Mode,
     now: SystemTime,
     cancel: &AtomicBool,
@@ -404,6 +418,8 @@ pub(crate) fn walk(
         progress,
         seen: 0,
         device: None,
+        owner,
+        as_owner: false,
     };
     for place in places {
         match fs::symlink_metadata(place) {
@@ -429,6 +445,10 @@ struct Search<'a> {
     seen: u64,
     /// The file system of the place being searched (Unix).
     device: Option<u64>,
+    /// Whose folder is searched, if it is one person's.
+    owner: Option<&'a User>,
+    /// This thread already acts as that person.
+    as_owner: bool,
 }
 
 fn device_of(meta: &fs::Metadata) -> Option<u64> {
@@ -453,9 +473,22 @@ fn same_device(place: Option<u64>, meta: &fs::Metadata) -> bool {
 
 impl Search<'_> {
     fn dir(&mut self, dir: &Path) {
-        let Ok(entries) = fs::read_dir(dir) else {
-            return;
+        let (entries, rights) = match open_dir(dir, self.owner, self.as_owner) {
+            Opened::Entries(entries, rights) => (entries, rights),
+            Opened::Gone => return,
+            Opened::Closed => {
+                self.tally.left_files += 1;
+                return;
+            }
         };
+        let was_owner = self.as_owner;
+        self.as_owner |= rights.is_some();
+        let _rights = rights;
+        self.entries(entries);
+        self.as_owner = was_owner;
+    }
+
+    fn entries(&mut self, entries: fs::ReadDir) {
         for entry in entries.flatten() {
             if self.cancel.load(Ordering::Relaxed) {
                 return;
@@ -588,6 +621,54 @@ mod tests {
         assert!(!entered(".config"));
         assert!(!entered("site-packages"));
         assert!(entered("Documents"));
+    }
+
+    /// `C:\Users\Имя` and `c:\users\имя\Documents` are one place on Windows.
+    #[test]
+    fn folders_differing_by_case_are_searched_once() {
+        let fold = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
+        let found = distinct(
+            vec![
+                PathBuf::from("/C/Users/U"),
+                PathBuf::from("/c/users/u/Documents"),
+                PathBuf::from("/c/USERS/u"),
+                PathBuf::from("/D/Data"),
+            ],
+            fold,
+        );
+        assert_eq!(found.len(), 2, "{found:?}");
+    }
+
+    /// A folder that cannot be read is counted, not passed over as if it were empty.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_folder_the_search_cannot_read_is_counted_as_left() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: no arguments.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root reads everything
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let closed = dir.path().join("closed");
+        fs::create_dir(&closed).unwrap();
+        fs::write(closed.join("a.tmp"), b"x").unwrap();
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+        let mut tally = Tally::default();
+        walk(
+            &[dir.path().to_path_buf()],
+            &JunkOptions::default(),
+            None,
+            Mode::Analyze,
+            SystemTime::now(),
+            &AtomicBool::new(false),
+            None,
+            &mut tally,
+            None,
+            &mut |_| {},
+        );
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(tally.left_files, 1);
+        assert_eq!(tally.files, 0);
     }
 
     #[test]

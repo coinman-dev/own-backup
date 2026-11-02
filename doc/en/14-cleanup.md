@@ -53,14 +53,14 @@ run. The result goes into Activity as "Scheduled automatic cleanup" or
 | Crash dumps | `Windows\MEMORY.DMP`, `Windows\Minidump`, `Windows\LiveKernelReports`, `AppData\Local\CrashDumps` | — |
 | Windows setup logs | `Windows\Logs\CBS`, `DISM`, `WindowsUpdate`, `waasmedic`, `SIH`, `NetSetup`, `MoSetup`; `Windows\Panther`, `Windows\debug`; `ProgramData\USOShared\Logs` | logs younger than a week |
 | WinINet cache | `AppData\Local\Microsoft\Windows\INetCache` | — |
-| Shader cache | `D3DSCache`, the NVIDIA and AMD caches | — |
+| Shader cache | `D3DSCache`, the NVIDIA, AMD and Intel caches, in `AppData\LocalLow` too | — |
 | Remote Desktop cache | `AppData\Local\Microsoft\Terminal Server Client\Cache` | a Remote Desktop client that is open |
 | Thumbnail cache (off by default) | `AppData\Local\Microsoft\Windows\Explorer` | files Explorer holds |
 | Prefetch (off by default) | `Windows\Prefetch` | — |
 | Previous driver configuration (off by default) | `Windows\LastGood`, `Windows\LastGood.Tmp` | files younger than a week |
 | Windows Update cache | `Windows\SoftwareDistribution\Download` | files younger than a day; the update history `DataStore`; what is not installed yet Windows downloads again |
 | Browser cache | the caches of Chrome, Edge, Vivaldi, Brave, Yandex, Opera, Firefox, Thunderbird in every profile | a browser that is open |
-| Browser history (off by default) | `History` of Chromium browsers — whole, or what is older than the days kept (the database is edited on a copy and checked); `Visited Links`, `Top Sites`, `Shortcuts` | bookmarks, passwords; Firefox history (it shares a database with the bookmarks); a database left with a crash journal |
+| Browser history (off by default) | `History` of Chromium browsers — whole, or what is older than the days kept (the database is edited on a copy and checked); `Visited Links`, `Top Sites`, `Shortcuts`, `Favicons`. When the last days are kept, the search terms, annotations and history clusters of the old visits go with them | bookmarks, passwords; Firefox history (it shares a database with the bookmarks); a database left with a crash journal |
 | Browser cookies (off by default) | `Cookies` of Chromium browsers, `cookies.sqlite` of Firefox and Thunderbird | a browser that is open |
 | Browser sessions — open tabs (off by default) | `Sessions` of Chromium browsers, Firefox `sessionstore` | cookies (a separate item); a browser that is open. Firefox keeps its until-closed cookies in the session — sites that keep you signed in only with those ask you to sign in again |
 | Browser crash reports | `Crashpad\reports` of Chromium browsers; `Crash Reports\pending`, `submitted` and `minidumps` of Firefox and Thunderbird | a browser that is open |
@@ -70,9 +70,10 @@ run. The result goes into Activity as "Scheduled automatic cleanup" or
 | Remote Desktop connections (off by default) | in the registry `Terminal Server Client\Default` (`MRU*`), `Servers`; `Documents\Default.rdp` | saved passwords (Credential Manager), other `.rdp` files |
 | Microsoft Office recent documents (off by default) | in the registry `Office\<version>\<program>\File MRU`, `Place MRU`, `User MRU\<account>` too — `Item N` only; the shortcuts in `AppData\Roaming\Microsoft\Office\Recent` | the places pinned to the lists; an Office program that is open |
 | Programs' recent files (off by default) | in the registry: Paint, WordPad, Windows Media Player, MPC-HC (`Recent File List`, `MediaHistory`, `PlaylistHistory`), 7-Zip (`FolderHistory`, `CopyHistory`, `PanelPath*`, `ArcHistory`, `PathHistory`), WinRAR, Adobe Acrobat Reader, Registry Editor's `LastKey` | the programs' settings (7-Zip's folder shortcuts, MPC-HC's settings); a program that is open |
-| Programs' caches | XnView MP's thumbnails (`Thumb.db`), the caches of Discord, Visual Studio Code, `Steam\htmlcache` | a program that is open |
-| Telegram Desktop cache (off by default) | `tdata\user_data*\cache`, `media_cache` of every account | the sign-in and the chats; Telegram open |
-| npm, pip, Yarn and NuGet caches (off by default) | `npm-cache\_cacache`, `pip\cache`, `Yarn\Cache`, `NuGet\v3-cache` | — |
+| Programs' caches | XnView MP's thumbnails (`Thumb.db`), the caches of Discord, Visual Studio Code, VSCodium, TradingView, Slack, Obsidian, Signal, Element, Termius, `Steam\htmlcache` | the programs' sign-in, settings and data; a program that is open |
+| Telegram Desktop cache (off by default) | `tdata\user_data*\cache`, `media_cache`, `wvbots` of every account | the sign-in and the chats; Telegram open. Mini apps may ask you to sign in again |
+| Developer caches (off by default) | `npm-cache\_cacache`, `pip\cache`, `uv\cache`, `Yarn\Cache`, `NuGet\v3-cache`, `go-build`, `.cargo\registry\cache`, `.gradle\caches` | uv's Python and tools (`Roaming\uv`) |
+| Downloaded program updates (off by default) | `AppData\Local\*-updater` | files younger than a day; a program downloads an update it needs again |
 | Programs' logs | the log folders of qBittorrent, Zed, DaVinci Resolve, OBS Studio, npm | logs younger than a week; DaVinci Resolve's projects and project library; a program that is open |
 | Driver installers (off by default) | `C:\NVIDIA\DisplayDriver`, `C:\AMD`, `ProgramData\NVIDIA Corporation\Downloader\*` | younger than a day; the installed driver |
 
@@ -176,7 +177,10 @@ On Linux the service runs as root, and the items are Linux's own:
 - **Recent files are left.** In the temporary folders only files unchanged for
   more than a day are removed (the later of the write and creation times
   counts), so what a program or a setup uses now stays.
-- **Links and junctions are not followed.** What they point to stays intact;
+- **Unticked files are always respected.** If the analysis has gone out of date, a
+  cleanup with such files is refused and asks for a new analysis.
+- **Links and junctions are not followed.** In the Recycle Bin the link itself goes,
+  or a folder holding one would stay there for good. What they point to stays intact;
   cloud placeholders (OneDrive) are not touched either.
 - **Files in use are skipped** and counted apart.
 - **Other users' folders — an administrator's only.** An ordinary user

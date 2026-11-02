@@ -174,7 +174,7 @@
                 : r.operation === 'verify'
                 ? (r.status === 'success' ? m.act_verify_done() : r.status === 'cancelled' ? m.act_verify_cancelled() : m.act_verify_failed())
                 : (r.status === 'success' ? m.act_backup_done() : r.skipped ? m.act_backup_skipped() : r.interrupted ? m.act_backup_interrupted() : r.status === 'cancelled' ? m.act_backup_cancelled() : m.act_backup_failed())}
-              {#if r.job_name}— {r.job_name}{/if}
+              {#if r.job_name && r.operation !== 'cleanup'}— {r.job_name}{/if}
               <span class="time">{formatDate(r.finished_at || r.started_at)}</span>
             </div>
             {#if (r.status === 'error' || r.interrupted) && r.error}

@@ -240,6 +240,10 @@
     "ru": "Список файлов есть только после анализа — нажмите «Анализ».",
     "en": "The list of files exists only after an analysis — press “Analyse”."
   },
+  "grpc_server.cleanup_analysis_gone": {
+    "ru": "Ничего не удалено: результат анализа устарел, и файлы со снятыми галочками удалились бы вместе с остальными. Нажмите «Анализ» и снимите галочки снова.",
+    "en": "Nothing was removed: the analysis is out of date, and the files you unticked would have gone with the rest. Press “Analyse” and untick them again."
+  },
   "grpc_server.cleanup_review_first": {
     "ru": "Файлы по маскам удаляются только по просмотренному списку — нажмите «Анализ» и откройте «Файлы».",
     "en": "Files by masks are removed only from a list you have looked through — press “Analyse” and open “Files”."

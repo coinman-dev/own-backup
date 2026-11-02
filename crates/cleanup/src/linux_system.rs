@@ -124,19 +124,30 @@ mod linux {
     }
 
     pub(super) fn journal(remove: bool) -> io::Result<Outcome> {
-        let dir = Path::new("/var/log/journal");
-        if !dir.is_dir() {
+        // On disk, or in memory on a system that keeps no journal on disk.
+        let dirs: Vec<&Path> = ["/var/log/journal", "/run/log/journal"]
+            .into_iter()
+            .map(Path::new)
+            .filter(|d| d.is_dir())
+            .collect();
+        if dirs.is_empty() {
             return Err(io::ErrorKind::NotFound.into());
         }
-        let before = size_of(dir);
+        let size = || dirs.iter().map(|d| size_of(d)).sum::<u64>();
+        let before = size();
         if !remove {
             return Ok(Outcome {
                 bytes: before.saturating_sub(JOURNAL_KEEP),
             });
         }
+        // Vacuuming takes archived files only: the one being written goes to the
+        // archive first, or a large journal frees nothing.
+        if let Err(e) = output(command("journalctl").arg("--rotate")) {
+            tracing::info!(error = %e, "cleanup: the journal was not rotated");
+        }
         output(command("journalctl").arg(format!("--vacuum-size={}M", JOURNAL_KEEP >> 20)))?;
         Ok(Outcome {
-            bytes: before.saturating_sub(size_of(dir)),
+            bytes: before.saturating_sub(size()),
         })
     }
 

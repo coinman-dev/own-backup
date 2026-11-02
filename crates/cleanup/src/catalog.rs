@@ -24,6 +24,8 @@ pub enum Base {
     LocalAppData,
     /// A user's roaming application data (`<profile>\AppData\Roaming`).
     RoamingAppData,
+    /// What low-rights programs keep (`<profile>\AppData\LocalLow`).
+    LocalLowAppData,
     /// A user's recycle bin on every volume (`X:\$Recycle.Bin\<SID>`).
     RecycleBin,
     /// A user's profile folder (`C:\Users\<name>`).
@@ -55,6 +57,7 @@ impl Base {
             self,
             Base::LocalAppData
                 | Base::RoamingAppData
+                | Base::LocalLowAppData
                 | Base::RecycleBin
                 | Base::Profile
                 | Base::Junk
@@ -292,6 +295,13 @@ const PROGRAM_NAMES: &[(&str, &str)] = &[
     ("zed.exe", "Zed"),
     ("resolve.exe", "DaVinci Resolve"),
     ("obs64.exe", "OBS Studio"),
+    ("tradingview.exe", "TradingView"),
+    ("slack.exe", "Slack"),
+    ("obsidian.exe", "Obsidian"),
+    ("signal.exe", "Signal"),
+    ("element.exe", "Element"),
+    ("termius.exe", "Termius"),
+    ("vscodium.exe", "VSCodium"),
     // Linux processes.
     ("chrome", "Google Chrome"),
     ("chromium", "Chromium"),
@@ -436,6 +446,10 @@ static ITEMS: &[Item] = &[
             tree(Base::LocalAppData, r"AMD\DxCache", 0),
             tree(Base::LocalAppData, r"AMD\DxcCache", 0),
             tree(Base::LocalAppData, r"AMD\GLCache", 0),
+            // Where newer NVIDIA drivers and Intel's keep them.
+            tree(Base::LocalLowAppData, r"NVIDIA\PerDriverVersion\DXCache", 0),
+            tree(Base::LocalLowAppData, r"NVIDIA\PerDriverVersion\GLCache", 0),
+            tree(Base::LocalLowAppData, r"Intel\ShaderCache", 0),
             tree(Base::ProgramData, r"NVIDIA Corporation\NV_Cache", 0),
         ],
     },
@@ -751,6 +765,15 @@ static ITEMS: &[Item] = &[
                 ),
                 TELEGRAM,
             ),
+            // The mini apps' browser.
+            of_program(
+                tree(
+                    Base::RoamingAppData,
+                    r"Telegram Desktop\tdata\user_data*\wvbots",
+                    0,
+                ),
+                TELEGRAM,
+            ),
         ],
         keys: &[],
     },
@@ -763,7 +786,21 @@ static ITEMS: &[Item] = &[
             tree(Base::LocalAppData, r"pip\cache", 0),
             tree(Base::LocalAppData, r"Yarn\Cache", 0),
             tree(Base::LocalAppData, r"NuGet\v3-cache", 0),
+            tree(Base::RoamingAppData, r"npm-cache\_cacache", 0),
+            // Only uv's cache: its Python and tools are in `Roaming\uv`.
+            tree(Base::LocalAppData, r"uv\cache", 0),
+            tree(Base::LocalAppData, "go-build", 0),
+            tree(Base::Profile, r".cargo\registry\cache", 0),
+            tree(Base::Profile, r".gradle\caches", 0),
         ],
+        keys: &[],
+    },
+    Item {
+        id: "app_updaters",
+        group: "programs",
+        default_on: false,
+        // What Electron programs download to update themselves.
+        targets: &[tree(Base::LocalAppData, "*-updater", DAY)],
         keys: &[],
     },
     Item {
@@ -997,7 +1034,8 @@ static BROWSERS: [Browser; 9] = [
 /// Chromium's history database and its journal: removed, or cut down to
 /// the last days ([`Trim::ChromiumHistory`]) — then both stay as they are
 /// but for the old rows.
-pub(crate) const CHROMIUM_HISTORY_DB: &[&str] = &["History", "History-journal"];
+pub(crate) const CHROMIUM_HISTORY_DB: &[&str] =
+    &["History", "History-journal", "History-wal", "History-shm"];
 /// What is derived from the history (visited links, most visited, the
 /// address bar's suggestions): removed either way, the browser rebuilds it.
 pub(crate) const CHROMIUM_HISTORY: &[&str] = &[
@@ -1008,6 +1046,9 @@ pub(crate) const CHROMIUM_HISTORY: &[&str] = &[
     "Shortcuts-journal",
     "Network Action Predictor",
     "Network Action Predictor-journal",
+    // The icons of sites, by the addresses of the pages visited.
+    "Favicons",
+    "Favicons-journal",
 ];
 pub(crate) const CHROMIUM_COOKIES: &[&str] = &["Cookies", "Cookies-journal"];
 /// Sessions of browsers that kept them in the profile folder itself.
@@ -1065,12 +1106,21 @@ fn browser_items() -> Vec<Item> {
                     "Cache",
                     "Code Cache",
                     "GPUCache",
+                    "DawnGraphiteCache",
+                    "DawnWebGPUCache",
                     r"Service Worker\CacheStorage",
                     r"Service Worker\ScriptCache",
                 ] {
                     cache.push(of(b, local, format!(r"{profile}\{sub}"), &[]));
                 }
-                for sub in ["ShaderCache", "GrShaderCache", "GraphiteDawnCache"] {
+                for sub in [
+                    "ShaderCache",
+                    "GrShaderCache",
+                    "GraphiteDawnCache",
+                    "GPUPersistentCache",
+                    "component_crx_cache",
+                    "extensions_crx_cache",
+                ] {
                     cache.push(of(b, local, format!(r"{user_data}\{sub}"), &[]));
                 }
                 history.push(trimmed(of(b, local, profile.clone(), CHROMIUM_HISTORY_DB)));
@@ -1170,8 +1220,44 @@ pub fn linux_catalog() -> &'static [Item] {
     &LINUX_CATALOG
 }
 
+/// Electron programs on Windows: their folder in roaming data and their processes.
+const ELECTRON: &[(&str, &[&str])] = &[
+    ("TradingView", &["tradingview.exe"]),
+    ("Slack", &["slack.exe"]),
+    ("obsidian", &["obsidian.exe"]),
+    ("Signal", &["signal.exe"]),
+    ("Element", &["element.exe"]),
+    ("Termius", &["termius.exe"]),
+    ("VSCodium", &["vscodium.exe"]),
+];
+/// Chromium's caches inside such a folder; its storage, cookies and settings stay.
+const ELECTRON_CACHES: &[&str] = &[
+    "Cache",
+    "Code Cache",
+    "GPUCache",
+    "DawnGraphiteCache",
+    "DawnWebGPUCache",
+];
+
+fn electron_caches() -> Vec<Target> {
+    ELECTRON
+        .iter()
+        .flat_map(|(dir, programs)| {
+            ELECTRON_CACHES.iter().map(move |sub| {
+                let path = keep_path(format!(r"{dir}\{sub}"));
+                of_program(tree(Base::RoamingAppData, path, 0), programs)
+            })
+        })
+        .collect()
+}
+
 static CATALOG: std::sync::LazyLock<Vec<Item>> = std::sync::LazyLock::new(|| {
     let mut all = ITEMS.to_vec();
+    if let Some(caches) = all.iter_mut().find(|i| i.id == "app_caches") {
+        let mut targets = caches.targets.to_vec();
+        targets.extend(electron_caches());
+        caches.targets = Box::leak(targets.into_boxed_slice());
+    }
     all.extend(browser_items());
     all
 });
@@ -1229,6 +1315,7 @@ pub fn label_both(id: &str) -> Localized {
         "dev_caches" => tr_both!("cleanup.dev_caches"),
         "app_logs" => tr_both!("cleanup.app_logs"),
         "driver_installers" => tr_both!("cleanup.driver_installers"),
+        "app_updaters" => tr_both!("cleanup.app_updaters"),
         "junk" => tr_both!("cleanup.junk"),
         "update_cache" => tr_both!("cleanup.update_cache"),
         "apt_cache" => tr_both!("cleanup.apt_cache"),
@@ -1290,6 +1377,7 @@ pub fn about(id: &str) -> String {
         "dev_caches" => tr!("cleanup.dev_caches_about"),
         "app_logs" => tr!("cleanup.app_logs_about"),
         "driver_installers" => tr!("cleanup.driver_installers_about"),
+        "app_updaters" => tr!("cleanup.app_updaters_about"),
         "junk" if cfg!(target_os = "linux") => tr!("cleanup.junk_about_linux"),
         "junk" => tr!("cleanup.junk_about"),
         "update_cache" => tr!("cleanup.update_cache_about"),

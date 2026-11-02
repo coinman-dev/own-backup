@@ -706,6 +706,11 @@ fn join_texts(first: Option<Localized>, next: Localized) -> Localized {
 }
 
 impl JobRun {
+    /// A copy, not a check of one or a cleanup of the disk.
+    fn is_backup(&self) -> bool {
+        !matches!(self.operation.as_str(), "verify" | "cleanup")
+    }
+
     /// A note for the run's summary, once.
     pub fn add_note(&mut self, note: Localized) {
         if self.texts.notes.contains(&note) || self.notes.iter().any(|n| n == note.current()) {
@@ -1355,7 +1360,7 @@ impl JobStore {
                             }
                         }
                     }
-                } else {
+                } else if run.operation != "cleanup" {
                     job.last_run = Some(run.clone());
                 }
             }
@@ -1479,7 +1484,7 @@ impl JobStore {
             .lock()
             .unwrap()
             .iter()
-            .find(|r| r.job_id == job_id && r.status == "success" && r.operation != "verify")
+            .find(|r| r.job_id == job_id && r.status == "success" && r.is_backup())
             .cloned()
     }
 
@@ -1492,7 +1497,7 @@ impl JobStore {
             .lock()
             .unwrap()
             .iter()
-            .find(|r| r.job_id == job_id && r.operation != "verify" && !r.interrupted && !r.skipped)
+            .find(|r| r.job_id == job_id && r.is_backup() && !r.interrupted && !r.skipped)
             .map(|r| r.started_at.clone())
     }
 }
@@ -1771,9 +1776,9 @@ pub trait EventSink: Send + Sync + 'static {
     fn queue_changed(&self, snapshot: QueueSnapshot);
     fn job_finished(&self, run: JobRun);
     /// Before a copy of a job with `advanced.cleanup_before`, on a blocking
-    /// thread, after the job took its slot: the service cleans the disk.
-    /// Nothing by default.
-    fn before_backup(&self, _job: &Job) {}
+    /// thread, after the job took its slot: the service cleans the disk, until
+    /// `cancel` says the copy is off. Nothing by default.
+    fn before_backup(&self, _job: &Job, _cancel: &AtomicBool) {}
 }
 
 /// Supplies passphrases for encrypted source volumes at backup time. The
@@ -2396,8 +2401,9 @@ pub async fn run_queue_worker(
         store.mark_running(&job);
         // Clean the disk first when the job asks: less junk in the copy.
         if job.advanced.cleanup_before && !cancel.load(Ordering::SeqCst) {
-            let (hook, for_job) = (sink.clone(), job.clone());
-            if let Err(e) = tokio::task::spawn_blocking(move || hook.before_backup(&for_job)).await
+            let (hook, for_job, stop) = (sink.clone(), job.clone(), cancel.clone());
+            if let Err(e) =
+                tokio::task::spawn_blocking(move || hook.before_backup(&for_job, &stop)).await
             {
                 warn!(error = %e, "the cleanup before the copy failed; the copy goes on");
             }
@@ -6003,6 +6009,35 @@ mod tests {
         assert!(!dest_on_source_volume("E:", r"D:\OwnBackup"));
         // Network destination is fine even when backing up any local drive.
         assert!(!dest_on_source_volume("E:", r"\\nas\share\OwnBackup"));
+    }
+
+    /// Records written before a job's cleanup stopped carrying the job's id still
+    /// say nothing about its copies.
+    #[test]
+    fn a_cleanup_is_not_a_run_of_the_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::load(dir.path());
+        let (job, good, _) = job_with_last(dir.path(), "incremental", "incremental", 1, true);
+        store.upsert(job).unwrap();
+        store.record_run(good.clone()).unwrap();
+        store
+            .record_run(JobRun {
+                job_id: "job1".into(),
+                operation: "cleanup".into(),
+                status: "success".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let found = store.last_success("job1").expect("the copy is found");
+        assert_eq!(found.image_path, good.image_path);
+        assert_eq!(
+            store.last_scheduled_start("job1").as_deref(),
+            Some(good.started_at.as_str())
+        );
+        assert_eq!(
+            store.get("job1").unwrap().last_run.unwrap().image_path,
+            good.image_path
+        );
     }
 
     #[test]

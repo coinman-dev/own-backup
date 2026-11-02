@@ -53,14 +53,14 @@
 | Аварийные дампы | `Windows\MEMORY.DMP`, `Windows\Minidump`, `Windows\LiveKernelReports`, `AppData\Local\CrashDumps` | — |
 | Журналы установки Windows | `Windows\Logs\CBS`, `DISM`, `WindowsUpdate`, `waasmedic`, `SIH`, `NetSetup`, `MoSetup`; `Windows\Panther`, `Windows\debug`; `ProgramData\USOShared\Logs` | журналы моложе недели |
 | Кэш WinINet | `AppData\Local\Microsoft\Windows\INetCache` | — |
-| Кэш шейдеров | `D3DSCache`, кэши NVIDIA и AMD | — |
+| Кэш шейдеров | `D3DSCache`, кэши NVIDIA, AMD и Intel, в том числе в `AppData\LocalLow` | — |
 | Кэш удалённого рабочего стола | `AppData\Local\Microsoft\Terminal Server Client\Cache` | открытый клиент удалённого рабочего стола |
 | Кэш миниатюр (по умолчанию выкл.) | `AppData\Local\Microsoft\Windows\Explorer` | файлы, которые держит Проводник |
 | Prefetch (по умолчанию выкл.) | `Windows\Prefetch` | — |
 | Прежняя конфигурация драйверов (по умолчанию выкл.) | `Windows\LastGood`, `Windows\LastGood.Tmp` | файлы моложе недели |
 | Кэш обновлений Windows | `Windows\SoftwareDistribution\Download` | файлы моложе суток; журнал обновлений `DataStore`; неустановленное Windows скачает снова |
 | Кэш браузеров | кэш Chrome, Edge, Vivaldi, Brave, Яндекс, Opera, Firefox, Thunderbird во всех профилях | открытый браузер |
-| История браузеров (по умолчанию выкл.) | `History` браузеров на Chromium — целиком или старше выбранного срока (база правится на копии и проверяется); `Visited Links`, `Top Sites`, `Shortcuts` | закладки, пароли; история Firefox (она в одной базе с закладками); база с журналом аварийной записи |
+| История браузеров (по умолчанию выкл.) | `History` браузеров на Chromium — целиком или старше выбранного срока (база правится на копии и проверяется); `Visited Links`, `Top Sites`, `Shortcuts`, `Favicons`. При частичной очистке вместе со старыми посещениями удаляются их поисковые запросы, заметки и группы истории | закладки, пароли; история Firefox (она в одной базе с закладками); база с журналом аварийной записи |
 | Cookie браузеров (по умолчанию выкл.) | `Cookies` браузеров на Chromium, `cookies.sqlite` Firefox и Thunderbird | открытый браузер |
 | Сессии браузеров — открытые вкладки (по умолчанию выкл.) | `Sessions` браузеров на Chromium, `sessionstore` Firefox | cookie (отдельный пункт); открытый браузер. Firefox хранит в сессии cookie «до закрытия браузера» — на сайтах, где вход держится только на них, придётся войти заново |
 | Отчёты о сбоях браузеров | `Crashpad\reports` браузеров на Chromium; `Crash Reports\pending`, `submitted` и `minidumps` Firefox и Thunderbird | открытый браузер |
@@ -70,9 +70,10 @@
 | Подключения к удалённому рабочему столу (по умолчанию выкл.) | в реестре `Terminal Server Client\Default` (`MRU*`), `Servers`; `Документы\Default.rdp` | сохранённые пароли (диспетчер учётных данных), другие файлы `.rdp` |
 | Недавние документы Microsoft Office (по умолчанию выкл.) | в реестре `Office\<версия>\<программа>\File MRU`, `Place MRU`, в том числе `User MRU\<учётная запись>` — только `Item N`; ярлыки `AppData\Roaming\Microsoft\Office\Recent` | места, закреплённые в списках; открытая программа Office |
 | Недавние файлы программ (по умолчанию выкл.) | в реестре: Paint, WordPad, Проигрыватель Windows Media, MPC-HC (`Recent File List`, `MediaHistory`, `PlaylistHistory`), 7-Zip (`FolderHistory`, `CopyHistory`, `PanelPath*`, `ArcHistory`, `PathHistory`), WinRAR, Adobe Acrobat Reader, `LastKey` редактора реестра | настройки программ (избранные папки 7-Zip, настройки MPC-HC); открытая программа |
-| Кэши программ | миниатюры XnView MP (`Thumb.db`), кэш Discord, Visual Studio Code, `Steam\htmlcache` | открытая программа |
-| Кэш Telegram Desktop (по умолчанию выкл.) | `tdata\user_data*\cache`, `media_cache` всех учётных записей | вход и переписка; открытый Telegram |
-| Кэши npm, pip, Yarn и NuGet (по умолчанию выкл.) | `npm-cache\_cacache`, `pip\cache`, `Yarn\Cache`, `NuGet\v3-cache` | — |
+| Кэши программ | миниатюры XnView MP (`Thumb.db`), кэш Discord, Visual Studio Code, VSCodium, TradingView, Slack, Obsidian, Signal, Element, Termius, `Steam\htmlcache` | вход, настройки и данные программ; открытая программа |
+| Кэш Telegram Desktop (по умолчанию выкл.) | `tdata\user_data*\cache`, `media_cache`, `wvbots` всех учётных записей | вход и переписка; открытый Telegram. В мини-приложения может понадобиться войти заново |
+| Кэши разработчика (по умолчанию выкл.) | `npm-cache\_cacache`, `pip\cache`, `uv\cache`, `Yarn\Cache`, `NuGet\v3-cache`, `go-build`, `.cargo\registry\cache`, `.gradle\caches` | Python и инструменты uv (`Roaming\uv`) |
+| Скачанные обновления программ (по умолчанию выкл.) | `AppData\Local\*-updater` | файлы моложе суток; нужное обновление программа скачает снова |
 | Журналы программ | папки журналов qBittorrent, Zed, DaVinci Resolve, OBS Studio, npm | журналы моложе недели; проекты и база проектов DaVinci Resolve; открытая программа |
 | Установщики драйверов (по умолчанию выкл.) | `C:\NVIDIA\DisplayDriver`, `C:\AMD`, `ProgramData\NVIDIA Corporation\Downloader\*` | моложе суток; установленный драйвер |
 
@@ -175,7 +176,10 @@ DISM не сообщает, сколько освободит очистка х�
   менявшиеся больше суток (берётся более позднее из времени изменения и
   создания), — то, чем сейчас пользуется программа или установщик, остаётся.
 - **Ссылки и точки соединения не проходятся.** То, на что они указывают,
-  остаётся целым; облачные файлы-заглушки (OneDrive) тоже не трогаются.
+  остаётся целым; облачные файлы-заглушки (OneDrive) тоже не трогаются. Из
+  Корзины удаляется сама ссылка, иначе папка со ссылкой осталась бы там навсегда.
+- **Снятые галочки соблюдаются всегда.** Если результат анализа успел устареть,
+  очистка с такими файлами отказывает и просит повторить анализ.
 - **Занятые файлы пропускаются** и считаются отдельно. Папка, которую не удалось
   прочитать, тоже считается отдельно. Папку, открытую только её владельцу, служба
   читает с правами этого пользователя, если он вошёл в систему.

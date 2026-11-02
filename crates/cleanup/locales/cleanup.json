@@ -69,8 +69,8 @@
     "en": "Downloads cached by the Windows network library (INetCache): the old Internet Explorer, help and some programs. Chrome, Edge and Firefox keep their caches elsewhere."
   },
   "cleanup.shader_cache": {
-    "ru": "Кэш шейдеров (DirectX, NVIDIA, AMD)",
-    "en": "Shader cache (DirectX, NVIDIA, AMD)"
+    "ru": "Кэш шейдеров (DirectX, NVIDIA, AMD, Intel)",
+    "en": "Shader cache (DirectX, NVIDIA, AMD, Intel)"
   },
   "cleanup.shader_cache_about": {
     "ru": "Собранные шейдеры видеокарты. Пересоздаются сами; первый запуск игры после очистки может быть медленнее.",
@@ -101,8 +101,8 @@
     "en": "Browser history"
   },
   "cleanup.browser_history_about": {
-    "ru": "Посещённые сайты, загрузки, часто посещаемые и подсказки адресной строки в браузерах на Chromium (Chrome, Edge, Vivaldi, Brave, Яндекс, Opera). Можно хранить последние день, неделю или месяц — тогда из базы истории удаляется только то, что старше. История Firefox хранится вместе с закладками и не удаляется. Закладки и пароли не затрагиваются.",
-    "en": "Visited sites, downloads, the most visited and the address bar's suggestions in Chromium browsers (Chrome, Edge, Vivaldi, Brave, Yandex, Opera). The last day, week or month can be kept — then only what is older is removed from the history database. Firefox keeps its history together with the bookmarks, so it is not removed. Bookmarks and passwords are not touched."
+    "ru": "Посещённые сайты, загрузки, часто посещаемые, значки сайтов и подсказки адресной строки в браузерах на Chromium (Chrome, Edge, Vivaldi, Brave, Яндекс, Opera). Можно хранить последние день, неделю или месяц — тогда из базы истории удаляется только то, что старше. История Firefox хранится вместе с закладками и не удаляется. Закладки и пароли не затрагиваются.",
+    "en": "Visited sites, downloads, the most visited, site icons and the address bar's suggestions in Chromium browsers (Chrome, Edge, Vivaldi, Brave, Yandex, Opera). The last day, week or month can be kept — then only what is older is removed from the history database. Firefox keeps its history together with the bookmarks, so it is not removed. Bookmarks and passwords are not touched."
   },
   "cleanup.browser_cookies": {
     "ru": "Cookie браузеров",
@@ -153,8 +153,8 @@
     "en": "Programs' caches"
   },
   "cleanup.app_caches_about": {
-    "ru": "Кэши, которые программы пересоздают сами: миниатюры XnView MP, кэш Discord, Visual Studio Code и встроенного браузера Steam. Открытая программа не трогается.",
-    "en": "Caches the programs rebuild by themselves: XnView MP's thumbnails, the caches of Discord, Visual Studio Code and Steam's built-in browser. A program that is open is left."
+    "ru": "Кэши, которые программы пересоздают сами: миниатюры XnView MP, кэш Discord, Visual Studio Code, VSCodium, TradingView, Slack, Obsidian, Signal, Element, Termius и встроенного браузера Steam. Открытая программа не трогается.",
+    "en": "Caches the programs rebuild by themselves: XnView MP's thumbnails, the caches of Discord, Visual Studio Code, VSCodium, TradingView, Slack, Obsidian, Signal, Element, Termius and Steam's built-in browser. A program that is open is left."
   },
   "cleanup.app_caches_linux_about": {
     "ru": "Кэши, которые программы пересоздают сами: Visual Studio Code, VSCodium, Discord, Slack, Obsidian, Signal, Element, TradingView, Termius и встроенного браузера Steam. Вход, настройки и данные программ не затрагиваются. Открытая программа не трогается.",
@@ -165,12 +165,12 @@
     "en": "Telegram Desktop cache"
   },
   "cleanup.telegram_cache_about": {
-    "ru": "Загруженные фото, видео, стикеры и файлы чатов во всех учётных записях Telegram Desktop. Они снова загрузятся из облака Telegram, когда вы их откроете. Вход и переписка не затрагиваются. Закройте Telegram перед очисткой.",
-    "en": "The photos, videos, stickers and files of chats Telegram Desktop downloaded, in every account. They download again from Telegram's cloud when you open them. The sign-in and the chats are not touched. Close Telegram before the cleanup."
+    "ru": "Загруженные фото, видео, стикеры и файлы чатов во всех учётных записях Telegram Desktop и данные мини-приложений. Файлы снова загрузятся из облака Telegram, когда вы их откроете; в мини-приложения может понадобиться войти заново. Вход в Telegram и переписка не затрагиваются. Закройте Telegram перед очисткой.",
+    "en": "The photos, videos, stickers and files of chats Telegram Desktop downloaded, in every account, and the mini apps' data. The files download again from Telegram's cloud when you open them; mini apps may ask you to sign in again. The sign-in to Telegram and the chats are not touched. Close Telegram before the cleanup."
   },
   "cleanup.dev_caches": {
-    "ru": "Кэши npm, pip, Yarn и NuGet",
-    "en": "npm, pip, Yarn and NuGet caches"
+    "ru": "Кэши разработчика (npm, pip, uv, Yarn, NuGet, Cargo, Go, Gradle)",
+    "en": "Developer caches (npm, pip, uv, Yarn, NuGet, Cargo, Go, Gradle)"
   },
   "cleanup.dev_caches_about": {
     "ru": "Скачанные пакеты, которые менеджеры пакетов хранят про запас. Удалить безопасно — при следующей установке они скачаются снова; без интернета установить их будет нельзя.",
@@ -187,6 +187,14 @@
   "cleanup.driver_installers": {
     "ru": "Установщики драйверов NVIDIA",
     "en": "NVIDIA driver installers"
+  },
+  "cleanup.app_updaters": {
+    "ru": "Скачанные обновления программ",
+    "en": "Downloaded program updates"
+  },
+  "cleanup.app_updaters_about": {
+    "ru": "Установщики, которые программы на Electron скачали для своего обновления и оставили (AppData\\Local\\*-updater), старше суток. Сами программы не затрагиваются; нужное обновление они скачают снова.",
+    "en": "Installers that Electron programs downloaded to update themselves and left behind (AppData\\Local\\*-updater), older than a day. The programs themselves are not touched; they download an update they need again."
   },
   "cleanup.driver_installers_about": {
     "ru": "Распакованные установщики драйверов (C:\\NVIDIA\\DisplayDriver, C:\\AMD) и скачанные пакеты драйверов (ProgramData\\NVIDIA Corporation\\Downloader) старше суток. Установленный драйвер не затрагивается; для переустановки той же версии её придётся скачать снова.",
