@@ -213,14 +213,12 @@ impl Item {
     /// Windows' own components (a previous installation, superseded
     /// updates): removed from an administrator's window only.
     pub fn admin_only(&self) -> bool {
-        self.targets
-            .iter()
-            .any(|t| {
-                matches!(
-                    t.base,
-                    Base::VolumeCache | Base::ComponentStore | Base::Root | Base::Command
-                )
-            })
+        self.targets.iter().any(|t| {
+            matches!(
+                t.base,
+                Base::VolumeCache | Base::ComponentStore | Base::Root | Base::Command
+            )
+        })
     }
 
     /// Cleaned only as an analysis listed it and the window showed it: the

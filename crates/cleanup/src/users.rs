@@ -79,14 +79,14 @@ mod win {
     use windows::Win32::Security::{
         GetTokenInformation, ImpersonateLoggedOnUser, RevertToSelf, TokenUser, TOKEN_USER,
     };
-    use windows::Win32::System::RemoteDesktop::{
-        WTSEnumerateSessionsW, WTSFreeMemory, WTSQueryUserToken, WTS_CURRENT_SERVER_HANDLE,
-        WTS_SESSION_INFOW,
-    };
     use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
     use windows::Win32::System::Registry::{
         RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE,
         KEY_READ, RRF_RT_REG_SZ,
+    };
+    use windows::Win32::System::RemoteDesktop::{
+        WTSEnumerateSessionsW, WTSFreeMemory, WTSQueryUserToken, WTS_CURRENT_SERVER_HANDLE,
+        WTS_SESSION_INFOW,
     };
 
     use super::User;

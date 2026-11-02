@@ -652,7 +652,9 @@ mod win {
 
     /// Measure Windows' own cleanup handlers on C:\ — nothing is removed.
     fn service(user: &str, folder: &str) {
-        use own_backup_cleanup::{catalog, engine, users, Base, Item, Mode, Options, Roots, Target};
+        use own_backup_cleanup::{
+            catalog, engine, users, Base, Item, Mode, Options, Roots, Target,
+        };
 
         let people: Vec<_> = users::profiles()
             .into_iter()
