@@ -2,6 +2,46 @@
 
 # Changelog
 
+## 0.2.1-beta — 2026-11-02
+
+### Added
+
+- **A moving icon.** While a backup runs, the logo in the notification area turns its
+  arrow; on Windows the window's taskbar icon moves too.
+- **A system message when a backup starts,** with the job's name: in the corner of the
+  screen on Windows, through the desktop's notification service on Linux. Silent. The
+  notification-area icon shows it: while the icon is hidden there are no messages.
+- **Cleanup: new items and places.** The Remote Desktop cache, downloaded program updates
+  (off by default), the previous driver configuration (off); the uv, Go, Cargo and Gradle
+  caches; the caches of TradingView, Slack, Obsidian, Signal, Element, Termius and VSCodium;
+  Telegram's mini apps; the new NVIDIA and Intel shader cache folders; `LiveKernelReports`;
+  the temporary folders of services and Store programs.
+
+### Fixed
+
+- **Cleanup no longer removes files you unticked.** If the analysis had gone out of date,
+  for example because another cleanup ran first, unticked files went with the rest. The
+  cleanup now refuses and asks for a new analysis.
+- **A cleanup before a backup no longer counts as a run of the job.** It reset the progress
+  and the job's card, and if the service stopped during the copy, the missed copy was not
+  made again. Cancelling the job now stops it too.
+- **Cleanup: DISM now measures and cleans the component store (WinSxS).** Windows' handler
+  answered 0 bytes, so the item was empty even when a cleanup was due. The analysis shows
+  the upper limit ("up to …"): DISM does not say the exact amount.
+- **Cleanup: everything about old visits leaves the browser history.** When the last days
+  were kept, the database still held their search terms, annotations and clusters; now it
+  does not. Site icons are part of the item now.
+- **Cleanup: folders only their owner may open are no longer passed over silently.** The
+  service reads them with the logged-on user's rights (in Temp they can be gigabytes), and
+  shows what it could not read as left.
+- **Cleanup: items with a size but no file list no longer show as "empty".** Group sums and
+  the confirmation take unticked files into account.
+- **Cleanup: the Recycle Bin.** A folder with a link in it no longer stays there for good:
+  the link itself goes, and what it points to is not touched.
+- **Cleanup on Linux: the journal really shrinks.** The file being written goes to the
+  archive first; before, a large journal might not shrink at all.
+- **Job page:** the file block stays at the bottom during a backup too.
+
 ## 0.2.0-beta — 2026-10-31
 
 ### Added
