@@ -182,6 +182,10 @@ pub enum Refusal {
     /// A cleanup of an item cleaned only from its list
     /// ([`catalog::Item::reviewed`]) with no analysis to hold it to.
     ReviewFirst,
+    /// A cleanup with files unticked and no analysis to hold it to any more
+    /// (the service restarted, another cleanup ran): walking anew would remove
+    /// them too.
+    AnalysisGone,
     /// A junk mask refused by [`own_backup_cleanup::junk::check_mask`].
     BadMask(String),
     /// Folders added to the junk search by someone who is not an
@@ -376,7 +380,7 @@ impl Cleaner {
                     counted: report
                         .items
                         .iter()
-                        .map(|i| (i.id.clone(), i.tally.files))
+                        .map(|i| (i.id.clone(), i.tally.files + i.tally.entries))
                         .collect(),
                     listing: std::mem::take(&mut report.listing),
                 });
@@ -395,17 +399,29 @@ impl Cleaner {
                 if held.is_none() && items.iter().any(|i| i.reviewed()) {
                     return Err(Refusal::ReviewFirst);
                 }
+                if held.is_none() && !exclude.is_empty() {
+                    return Err(Refusal::AnalysisGone);
+                }
+                let unlisted = self.unlisted(&ids);
                 if let Some(only) = held.as_mut() {
                     for path in exclude {
                         only.remove(&PathBuf::from(path));
                     }
                 }
-                let report = match &held {
+                let mut report = match &held {
                     Some(only) => {
                         engine::run_only(items, &roots, people, options, &flag, progress, only)
                     }
                     None => engine::run(items, &roots, people, mode, options, &flag, progress),
                 };
+                // What the analysis counted but did not list stays, and is said to.
+                if held.is_some() {
+                    for item in &mut report.items {
+                        let more = unlisted.get(&item.id).copied().unwrap_or(0);
+                        item.tally.left_files += more;
+                        report.total.left_files += more;
+                    }
+                }
                 // What was analysed is gone or left now: a second cleanup
                 // walks again.
                 *self.last.lock().unwrap() = None;
@@ -413,6 +429,22 @@ impl Cleaner {
             }
         };
         Ok(report)
+    }
+
+    /// Per item, how many files the last analysis counted beyond those it
+    /// listed ([`engine::LIST_CAP`]): a cleanup held to the list leaves them.
+    fn unlisted(&self, ids: &[String]) -> std::collections::HashMap<String, u64> {
+        let last = self.last.lock().unwrap();
+        let Some(a) = last.as_ref() else {
+            return Default::default();
+        };
+        ids.iter()
+            .filter_map(|id| {
+                let listed = a.listing.get(id).map_or(0, |found| found.len() as u64);
+                let more = a.counted.get(id)?.saturating_sub(listed);
+                (more > 0).then(|| (id.clone(), more))
+            })
+            .collect()
     }
 
     /// The files the last analysis listed, when it was of exactly these
@@ -642,6 +674,52 @@ mod tests {
             .is_none());
     }
 
+    /// A file the window unticked is never removed, whatever happened to the
+    /// analysis since: with no list to hold the cleanup to, it is refused.
+    #[test]
+    fn a_cleanup_with_files_unticked_and_no_analysis_is_refused() {
+        let item = catalog::catalog()
+            .iter()
+            .find(|i| !i.reviewed() && !i.admin_only() && i.per_user())
+            .unwrap();
+        let go = |c: &Cleaner, exclude: &[String]| {
+            c.go(
+                &me(),
+                &[item],
+                &[],
+                Mode::Remove,
+                Options::default(),
+                exclude,
+                |_| {},
+            )
+        };
+        let unticked = ["/home/u/keep.txt".to_string()];
+        assert!(matches!(
+            go(&Cleaner::default(), &unticked),
+            Err(Refusal::AnalysisGone)
+        ));
+        assert!(
+            go(&Cleaner::default(), &[]).is_ok(),
+            "nothing unticked: it walks anew"
+        );
+    }
+
+    #[test]
+    fn what_the_analysis_counted_beyond_its_list_is_known() {
+        let c = analysed("S-1-5-21-1-1001");
+        let ids = ["temp_user".to_string(), "recycle_bin".to_string()];
+        assert!(c.unlisted(&ids).is_empty());
+        c.last
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .counted
+            .insert("temp_user".into(), 5);
+        assert_eq!(c.unlisted(&ids).get("temp_user"), Some(&2));
+        assert!(Cleaner::default().unlisted(&ids).is_empty());
+    }
+
     #[test]
     fn the_files_are_listed_a_page_at_a_time_largest_first_or_by_path() {
         let c = analysed("S-1-5-21-1-1001");
@@ -700,6 +778,7 @@ mod tests {
                     left_bytes: 5,
                     records: 0,
                     entries: 2,
+                    up_to: false,
                 },
                 running: vec![],
             }],
@@ -710,6 +789,7 @@ mod tests {
                 left_bytes: 5,
                 records: 0,
                 entries: 2,
+                up_to: false,
             },
             cancelled: false,
             listing: Default::default(),

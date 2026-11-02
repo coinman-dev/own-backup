@@ -238,6 +238,68 @@ fn the_recycle_bin_is_emptied_on_every_volume_but_its_desktop_ini() {
     assert!(dir.path().join("C/$Recycle.Bin/S-1-5-21-9/$Rx").exists());
 }
 
+/// A link in the bin no longer keeps the folder it was thrown away with there; what
+/// it points to is not touched.
+#[cfg(unix)]
+#[test]
+fn a_link_in_the_recycle_bin_goes_and_its_target_stays() {
+    static BIN: Item = Item {
+        id: "recycle_bin",
+        group: "temp",
+        default_on: true,
+        keys: &[],
+        targets: &[t(Base::RecycleBin, "", true, 0)],
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("C/$Recycle.Bin/S-1-5-21-1-2-3-1001");
+    let outside = dir.path().join("documents");
+    write(&outside.join("work.odt"), 50);
+    write(&bin.join("$RDIR/inside.bin"), 5);
+    std::os::unix::fs::symlink(&outside, bin.join("$RDIR/.venv")).unwrap();
+
+    let seen = go(&BIN, dir.path(), Mode::Analyze, Duration::ZERO);
+    assert_eq!((seen.total.files, seen.total.bytes), (2, 5));
+    let done = go(&BIN, dir.path(), Mode::Remove, Duration::ZERO);
+    assert_eq!(done.total.files, 2);
+    assert_eq!(done.total.left_files, 0);
+    assert!(!bin.join("$RDIR").exists(), "the folder goes with its link");
+    assert!(outside.join("work.odt").exists());
+}
+
+/// What low-rights programs keep is found below each user's application data.
+#[test]
+fn local_low_is_below_each_users_app_data() {
+    static LOW: Target = t(Base::LocalLowAppData, r"NVIDIA\DXCache", true, 0);
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(
+        folders(&LOW, &roots(dir.path()), &[user(dir.path())]),
+        [dir.path().join("Users/u/AppData/LocalLow/NVIDIA/DXCache")]
+    );
+}
+
+/// A folder nothing can open is said to have been left, not passed over as if it
+/// were empty: the owner's Temp had 1.4 GB of those, and the window said nothing.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_folder_that_cannot_be_read_is_counted_as_left() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: no arguments.
+    if unsafe { libc::geteuid() } == 0 {
+        return; // root reads everything
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let temp = dir.path().join(r"Users/u/AppData/Local/Temp");
+    write(&temp.join("a.tmp"), 100);
+    write(&temp.join("closed/inside.bin"), 1000);
+    fs::set_permissions(temp.join("closed"), fs::Permissions::from_mode(0o000)).unwrap();
+
+    let seen = go(&TEMP, dir.path(), Mode::Analyze, TWO_DAYS);
+    fs::set_permissions(temp.join("closed"), fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(seen.total.files, 1);
+    assert_eq!(seen.total.bytes, 100);
+    assert_eq!(seen.total.left_files, 1);
+}
+
 #[test]
 fn a_missing_target_is_nothing_to_clean() {
     let dir = tempfile::tempdir().unwrap();

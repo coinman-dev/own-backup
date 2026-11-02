@@ -113,6 +113,7 @@
   "cl_records": "history entries: {count}",
   "cl_entries": "registry entries: {count}",
   "cl_left_count": "left: {count}",
+  "cl_up_to": "up to {size}",
   "cl_keep_history": "Keep the history of:",
   "cl_keep_none": "nothing — remove it all",
   "cl_keep_day": "the last day",

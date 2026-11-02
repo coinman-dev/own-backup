@@ -1448,6 +1448,8 @@ export interface CleanupJunk {
 export interface CleanupTally {
   files: number;
   bytes: number;
+  /** `bytes` is the most this can free, not what it will. */
+  up_to?: boolean;
   left_files: number;
   left_bytes: number;
   /** History entries removed (or to be) from a database cut to its last days. */

@@ -12,7 +12,10 @@
 //!   original as it was;
 //! - by Chromium's own tables, each only when it is there: the visits older
 //!   than the date, then what only they kept — addresses with no visit left,
-//!   their search terms, old downloads, old "most visited" counts.
+//!   their search terms, old downloads, old "most visited" counts. None of those
+//!   tables cascades: search terms and titles of removed visits stayed in the
+//!   annotations and clusters until they were asked for by name (owner's Vivaldi,
+//!   2026-11-02: no visits at all, 64 such rows).
 //!
 //! Firefox is not edited: its database's triggers call functions only
 //! Firefox has, and its history shares the file with the bookmarks.
@@ -100,6 +103,50 @@ fn sibling(db: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(p)
 }
 
+/// What the database keeps about visits and addresses that are gone, and the counts
+/// of those that stay. Each table and column only when it is there.
+fn forget_visits(c: &Connection) -> Result<(), String> {
+    let run = |sql: String| c.execute(&sql, []).map(|_| ()).map_err(|e| e.to_string());
+    if table_exists(c, "visit_source") {
+        run("DELETE FROM visit_source WHERE id NOT IN (SELECT id FROM visits)".into())?;
+    }
+    for (table, column) in [
+        ("content_annotations", "visit_id"),
+        ("context_annotations", "visit_id"),
+        ("clusters_and_visits", "visit_id"),
+        ("cluster_visit_duplicates", "visit_id"),
+        ("cluster_visit_duplicates", "duplicate_visit_id"),
+    ] {
+        if column_exists(c, table, column) {
+            run(format!(
+                "DELETE FROM {table} WHERE {column} NOT IN (SELECT id FROM visits)"
+            ))?;
+        }
+    }
+    if column_exists(c, "clusters_and_visits", "cluster_id") {
+        for table in ["clusters", "cluster_keywords"] {
+            if column_exists(c, table, "cluster_id") {
+                run(format!(
+                    "DELETE FROM {table} WHERE cluster_id NOT IN \
+                     (SELECT cluster_id FROM clusters_and_visits)"
+                ))?;
+            }
+        }
+    }
+    if column_exists(c, "visited_links", "link_url_id") {
+        run("DELETE FROM visited_links WHERE link_url_id NOT IN (SELECT id FROM urls)".into())?;
+    }
+    if column_exists(c, "urls", "visit_count") {
+        run("UPDATE urls SET visit_count = \
+             (SELECT count(*) FROM visits WHERE visits.url = urls.id)"
+            .into())?;
+        if column_exists(c, "urls", "typed_count") {
+            run("UPDATE urls SET typed_count = min(typed_count, visit_count)".into())?;
+        }
+    }
+    Ok(())
+}
+
 fn trim_copy(db: &Path, copy: &Path, before: SystemTime) -> Result<u64, String> {
     std::fs::copy(db, copy).map_err(|e| format!("copy: {e}"))?;
     let removed = {
@@ -124,6 +171,7 @@ fn trim_copy(db: &Path, copy: &Path, before: SystemTime) -> Result<u64, String> 
             )?;
         }
         plain("DELETE FROM urls WHERE id NOT IN (SELECT url FROM visits)")?;
+        forget_visits(&tx)?;
         if table_exists(&tx, "segment_usage") {
             exec("DELETE FROM segment_usage WHERE time_slot < ?1")?;
             if table_exists(&tx, "segments") {
@@ -178,7 +226,15 @@ mod tests {
         let db = dir.join("History");
         let c = Connection::open(&db).unwrap();
         c.execute_batch(
-            "CREATE TABLE urls (id INTEGER PRIMARY KEY, url TEXT, title TEXT, last_visit_time INTEGER);
+            "CREATE TABLE urls (id INTEGER PRIMARY KEY, url TEXT, title TEXT, last_visit_time INTEGER,
+                                 visit_count INTEGER DEFAULT 0, typed_count INTEGER DEFAULT 0);
+             CREATE TABLE content_annotations (visit_id INTEGER PRIMARY KEY, search_terms TEXT);
+             CREATE TABLE context_annotations (visit_id INTEGER PRIMARY KEY, duration INTEGER);
+             CREATE TABLE clusters (cluster_id INTEGER PRIMARY KEY, label TEXT);
+             CREATE TABLE clusters_and_visits (cluster_id INTEGER, visit_id INTEGER, url_for_display TEXT);
+             CREATE TABLE cluster_keywords (cluster_id INTEGER, keyword TEXT);
+             CREATE TABLE cluster_visit_duplicates (visit_id INTEGER, duplicate_visit_id INTEGER);
+             CREATE TABLE visited_links (id INTEGER PRIMARY KEY, link_url_id INTEGER, top_level_url TEXT);
              CREATE TABLE visits (id INTEGER PRIMARY KEY, url INTEGER, visit_time INTEGER);
              CREATE TABLE visit_source (id INTEGER PRIMARY KEY, source INTEGER);
              CREATE TABLE keyword_search_terms (keyword_id INTEGER, url_id INTEGER, term TEXT);
@@ -194,8 +250,15 @@ mod tests {
         let new = chromium_time(now - Duration::from_secs(86400));
         // Two sites; the old one visited only a month ago, the new one both.
         c.execute_batch(&format!(
-            "INSERT INTO urls VALUES (1, 'https://old.example/', 'old', {old});
-             INSERT INTO urls VALUES (2, 'https://new.example/', 'new', {new});
+            "INSERT INTO urls VALUES (1, 'https://old.example/', 'old', {old}, 1, 1);
+             INSERT INTO urls VALUES (2, 'https://new.example/', 'new', {new}, 2, 2);
+             INSERT INTO content_annotations VALUES (1, 'old search'), (3, 'new search');
+             INSERT INTO context_annotations VALUES (2, 5), (3, 5);
+             INSERT INTO clusters VALUES (1, 'old cluster'), (2, 'new cluster');
+             INSERT INTO clusters_and_visits VALUES (1, 1, 'old.example'), (2, 3, 'new.example');
+             INSERT INTO cluster_keywords VALUES (1, 'old word'), (2, 'new word');
+             INSERT INTO cluster_visit_duplicates VALUES (1, 3), (3, 3);
+             INSERT INTO visited_links VALUES (1, 1, 'old.example'), (2, 2, 'new.example');
              INSERT INTO visits VALUES (1, 1, {old});
              INSERT INTO visits VALUES (2, 2, {old});
              INSERT INTO visits VALUES (3, 2, {new});
@@ -251,6 +314,59 @@ mod tests {
             "no copy left behind"
         );
         assert_eq!(count_old(&db, week).unwrap(), 0);
+    }
+
+    /// Search terms, clusters and links of the visits removed go with them, and
+    /// the counts of an address that stays are its visits that stay.
+    #[test]
+    fn nothing_of_a_removed_visit_stays_in_the_other_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = history(dir.path());
+        let week = SystemTime::now() - Duration::from_secs(7 * 86400);
+        trim(&db, week).unwrap();
+        for (sql, left) in [
+            ("SELECT count(*) FROM content_annotations", 1),
+            ("SELECT visit_id FROM content_annotations", 3),
+            ("SELECT count(*) FROM context_annotations", 1),
+            ("SELECT count(*) FROM clusters_and_visits", 1),
+            ("SELECT count(*) FROM clusters", 1),
+            ("SELECT cluster_id FROM clusters", 2),
+            ("SELECT count(*) FROM cluster_keywords", 1),
+            ("SELECT count(*) FROM cluster_visit_duplicates", 1),
+            ("SELECT count(*) FROM visited_links", 1),
+            ("SELECT link_url_id FROM visited_links", 2),
+            ("SELECT visit_count FROM urls", 1),
+            ("SELECT typed_count FROM urls", 1),
+        ] {
+            assert_eq!(count(&db, sql), left, "{sql}");
+        }
+        let text = std::fs::read(&db).unwrap();
+        for word in ["old search", "old cluster", "old word", "old.example"] {
+            assert!(
+                !text.windows(word.len()).any(|w| w == word.as_bytes()),
+                "{word} is still in the file"
+            );
+        }
+    }
+
+    /// Rows left by an earlier cleanup go too, with no old visit to remove.
+    #[test]
+    fn rows_of_visits_already_gone_are_removed_as_well() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = history(dir.path());
+        Connection::open(&db)
+            .unwrap()
+            .execute("INSERT INTO content_annotations VALUES (99, 'orphan')", [])
+            .unwrap();
+        let long_ago = SystemTime::now() - Duration::from_secs(90 * 86400);
+        assert_eq!(trim(&db, long_ago).unwrap(), 0);
+        assert_eq!(
+            count(
+                &db,
+                "SELECT count(*) FROM content_annotations WHERE visit_id = 99"
+            ),
+            0
+        );
     }
 
     /// A journal beside the database: the browser stopped mid-write, and the

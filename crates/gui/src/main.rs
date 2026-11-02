@@ -5,6 +5,7 @@
 // own_backup_common::tr! — see common/src/lang.rs.
 rust_i18n::i18n!("locales", fallback = "ru");
 
+mod busy_icon;
 mod commands;
 #[cfg(target_os = "linux")]
 mod device_watch;
@@ -667,6 +668,19 @@ fn main() {
                 }
             };
             shrink_if_the_screen_is_scaled_hard(app, &built);
+
+            // While a job runs, the window's button on the taskbar moves too.
+            #[cfg(windows)]
+            busy_icon::animate_window(
+                built.clone(),
+                app.default_window_icon().map(|icon| {
+                    tauri::image::Image::new_owned(
+                        icon.rgba().to_vec(),
+                        icon.width(),
+                        icon.height(),
+                    )
+                }),
+            );
 
             // A second start (the menu, the icon) asks this window to come
             // forward. On Wayland the compositor may only flash it in the

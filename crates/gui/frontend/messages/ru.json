@@ -113,6 +113,7 @@
   "cl_records": "записей истории: {count}",
   "cl_entries": "записей реестра: {count}",
   "cl_left_count": "оставлено: {count}",
+  "cl_up_to": "до {size}",
   "cl_keep_history": "Хранить историю:",
   "cl_keep_none": "не хранить — удалить всю",
   "cl_keep_day": "последний день",

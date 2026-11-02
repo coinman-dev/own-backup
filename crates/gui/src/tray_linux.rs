@@ -10,7 +10,10 @@
 //!
 //! The icon is shown exactly while the service is running: its presence is
 //! the answer to «is my backup service up». A person in the `own-backup`
-//! group is answered by the service's socket; anyone else by systemd.
+//! group is answered by the service's socket; anyone else by systemd. While a
+//! job is running the icon moves (`busy_icon`), more slowly than on Windows:
+//! every new picture is a file for the desktop to read. When a job starts, the
+//! desktop's notification service shows a message.
 //!
 //! Started at every login by the package's `/etc/xdg/autostart` entry. The
 //! settings switch is one person's choice, so it is kept the way the
@@ -19,14 +22,18 @@
 //! them alone.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use glib::ToVariant;
+use gtk::gio;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
+use crate::busy_icon::JobWatch;
 use crate::instance_linux::{self as instance, Claim};
 use own_backup_common::config::AppConfig;
 
@@ -35,6 +42,11 @@ use own_backup_common::config::AppConfig;
 const AUTOSTART_FILE: &str = "own-backup-tray.desktop";
 /// How often the service is asked.
 const POLL: Duration = Duration::from_secs(5);
+/// Every other frame of the strip, at this pace: the same turn as on Windows.
+const FRAME_EVERY: Duration = Duration::from_millis(300);
+const FRAME_STEP: usize = 2;
+/// The side of the picture given to the desktop, which scales it itself.
+const ICON_SIDE: u32 = 32;
 /// After a click started the window, how long another click starts nothing:
 /// the window takes a moment before it holds its name and answers.
 const START_GRACE: Duration = Duration::from_secs(5);
@@ -202,6 +214,12 @@ struct Tray {
     hide: MenuItem,
     icon: Option<Icon>,
     shown: Option<TrayIcon>,
+    /// What the service says about its jobs.
+    jobs: Arc<JobWatch>,
+    /// The frames as icons; empty if they did not load.
+    frames: Vec<Icon>,
+    next_frame: usize,
+    moving: bool,
     /// The language the menu was last written in.
     language: &'static str,
     /// One line in the log for an icon that would not be made, not one per tick.
@@ -233,10 +251,19 @@ impl Tray {
             hide,
             icon: load_icon(),
             shown: None,
+            jobs: crate::busy_icon::watch_jobs(),
+            frames: load_frames(),
+            next_frame: 0,
+            moving: false,
             language: own_backup_common::lang::code(),
             build_failed: false,
         }));
         tray.borrow_mut().follow_service();
+        let moving = tray.clone();
+        glib::timeout_add_local(FRAME_EVERY, move || {
+            moving.borrow_mut().follow_jobs();
+            glib::ControlFlow::Continue
+        });
         glib::timeout_add_local(POLL, move || {
             tray.borrow_mut().follow_service();
             glib::ControlFlow::Continue
@@ -274,6 +301,26 @@ impl Tray {
         self.follow_language();
     }
 
+    /// Tell about a job that started; the next frame while a job runs; the
+    /// program's own icon when it ends.
+    fn follow_jobs(&mut self) {
+        if let Some(text) = self.jobs.take_started() {
+            announce(&text);
+        }
+        let busy = self.jobs.busy() && !self.frames.is_empty();
+        let Some(shown) = &self.shown else {
+            return;
+        };
+        if busy {
+            let icon = self.frames[self.next_frame % self.frames.len()].clone();
+            self.next_frame = (self.next_frame + 1) % self.frames.len();
+            self.moving = true;
+            let _ = shown.set_icon(Some(icon));
+        } else if std::mem::take(&mut self.moving) {
+            let _ = shown.set_icon(self.icon.clone());
+        }
+    }
+
     /// The menu follows a change of language made in the window.
     fn follow_language(&mut self) {
         let now = own_backup_common::lang::code();
@@ -287,6 +334,52 @@ impl Tray {
             let _ = shown.set_tooltip(Some(own_backup_common::tr!("tray.tooltip")));
         }
     }
+}
+
+/// The desktop's message about a job. Its notification service is asked directly,
+/// as `notify-send` would, which not every system has. No answer means no message
+/// and nothing else: the job runs all the same.
+fn announce(text: &str) {
+    let connection = match gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) {
+        Ok(connection) => connection,
+        Err(error) => {
+            tracing::warn!(%error, "tray: no session bus, no message about the job");
+            return;
+        }
+    };
+    connection.call(
+        Some("org.freedesktop.Notifications"),
+        "/org/freedesktop/Notifications",
+        "org.freedesktop.Notifications",
+        "Notify",
+        Some(&notification(text)),
+        Some(glib::VariantTy::new("(u)").expect("a valid type string")),
+        gio::DBusCallFlags::NONE,
+        5000,
+        gio::Cancellable::NONE,
+        |answer| {
+            if let Err(error) = answer {
+                tracing::warn!(%error, "tray: the message about the job was not shown");
+            }
+        },
+    );
+}
+
+/// The arguments of `Notify`, in the specification's order. The desktop entry lets
+/// the desktop say whose message it is.
+fn notification(text: &str) -> glib::Variant {
+    let hints = HashMap::from([("desktop-entry".to_string(), "own-backup".to_variant())]);
+    (
+        "Own Backup",
+        0u32,
+        "own-backup",
+        "Own Backup",
+        text,
+        Vec::<String>::new(),
+        hints,
+        -1i32,
+    )
+        .to_variant()
 }
 
 /// The program's icon, from the same file the window's is made of.
@@ -315,6 +408,20 @@ fn load_icon() -> Option<Icon> {
         tracing::warn!("tray: the program's icon did not load, using the theme's");
     }
     decoded
+}
+
+/// Every `FRAME_STEP`th frame as an icon.
+fn load_frames() -> Vec<Icon> {
+    let Some(frames) = crate::busy_icon::Frames::load() else {
+        tracing::warn!("tray: the frames did not load, the icon stands still");
+        return Vec::new();
+    };
+    (0..frames.count)
+        .step_by(FRAME_STEP)
+        .filter_map(|index| {
+            Icon::from_rgba(frames.scaled(index, ICON_SIDE), ICON_SIDE, ICON_SIDE).ok()
+        })
+        .collect()
 }
 
 /// Is the service up? Its socket answers a member of the access group; the
@@ -408,6 +515,27 @@ mod tests {
         assert!(!enabled());
         let text = std::fs::read_to_string(dir.path().join("autostart").join(AUTOSTART_FILE));
         assert!(text.unwrap().contains("Hidden=true"));
+    }
+
+    #[test]
+    fn the_message_has_the_signature_the_desktop_expects() {
+        let message = notification("Backup started: Disk_C");
+        assert_eq!(message.type_().as_str(), "(susssasa{sv}i)");
+        assert_eq!(message.child_value(4).str(), Some("Backup started: Disk_C"));
+    }
+
+    /// Needs a session bus, so it is run by hand with `--ignored` under
+    /// `dbus-run-session`, with `dbus-monitor` or a real desktop to see the message.
+    #[test]
+    #[ignore]
+    fn the_message_reaches_the_session_bus() {
+        announce("Backup started: Disk_C_Win11");
+        let context = glib::MainContext::default();
+        let until = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < until {
+            context.iteration(false);
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]

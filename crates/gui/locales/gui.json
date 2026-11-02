@@ -68,6 +68,14 @@
     "ru": "Открыть Own Backup",
     "en": "Open Own Backup"
   },
+  "tray.job_started": {
+    "ru": "Началось резервное копирование: %{name}",
+    "en": "Backup started: %{name}"
+  },
+  "tray.job_started_unnamed": {
+    "ru": "Началось резервное копирование",
+    "en": "A backup has started"
+  },
   "tray.hide": {
     "ru": "Скрыть значок",
     "en": "Hide the icon"

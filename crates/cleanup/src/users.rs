@@ -72,11 +72,21 @@ mod win {
     use std::path::PathBuf;
 
     use windows::core::{PCWSTR, PWSTR};
-    use windows::Win32::Foundation::{ERROR_NO_MORE_ITEMS, ERROR_SUCCESS};
+    use windows::Win32::Foundation::{
+        CloseHandle, LocalFree, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, HANDLE, HLOCAL,
+    };
+    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows::Win32::Security::{
+        GetTokenInformation, ImpersonateLoggedOnUser, RevertToSelf, TokenUser, TOKEN_USER,
+    };
     use windows::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
     use windows::Win32::System::Registry::{
         RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE,
         KEY_READ, RRF_RT_REG_SZ,
+    };
+    use windows::Win32::System::RemoteDesktop::{
+        WTSEnumerateSessionsW, WTSFreeMemory, WTSQueryUserToken, WTS_CURRENT_SERVER_HANDLE,
+        WTS_SESSION_INFOW,
     };
 
     use super::User;
@@ -212,6 +222,81 @@ mod win {
         names
     }
 
+    /// The text form of the SID a token belongs to.
+    fn token_sid(token: HANDLE) -> Option<String> {
+        let mut size = 0u32;
+        // SAFETY: asks only for the size; the failure is the expected answer.
+        unsafe {
+            let _ = GetTokenInformation(token, TokenUser, None, 0, &mut size);
+        }
+        let mut buffer = vec![0u64; (size as usize).div_ceil(8)];
+        // SAFETY: the buffer holds `size` bytes, aligned for TOKEN_USER; the SID it
+        // points to lives in the buffer; the string is freed once.
+        unsafe {
+            GetTokenInformation(
+                token,
+                TokenUser,
+                Some(buffer.as_mut_ptr().cast()),
+                size,
+                &mut size,
+            )
+            .ok()?;
+            let user = &*(buffer.as_ptr() as *const TOKEN_USER);
+            let mut text = PWSTR::null();
+            ConvertSidToStringSidW(user.User.Sid, &mut text).ok()?;
+            let sid = text.to_string().ok();
+            let _ = LocalFree(HLOCAL(text.0.cast()));
+            sid
+        }
+    }
+
+    /// Act as the person with this SID, through a session of theirs.
+    pub(super) fn as_logged_on(sid: &str) -> Option<super::LoggedOn> {
+        let mut sessions: *mut WTS_SESSION_INFOW = std::ptr::null_mut();
+        let mut count = 0u32;
+        // SAFETY: out-parameters; the list is freed below and not used after.
+        unsafe {
+            WTSEnumerateSessionsW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &mut sessions, &mut count)
+                .ok()?;
+        }
+        // SAFETY: the system gave `count` entries at `sessions`.
+        let ids: Vec<u32> = unsafe { std::slice::from_raw_parts(sessions, count as usize) }
+            .iter()
+            .map(|s| s.SessionId)
+            .collect();
+        // SAFETY: allocated by the call above, freed once.
+        unsafe { WTSFreeMemory(sessions.cast()) };
+        for id in ids {
+            let mut token = HANDLE::default();
+            // SAFETY: an out-parameter; a session without a user answers an error.
+            if unsafe { WTSQueryUserToken(id, &mut token) }.is_err() {
+                continue;
+            }
+            let theirs = token_sid(token).is_some_and(|s| s.eq_ignore_ascii_case(sid));
+            // SAFETY: the token is ours; impersonation keeps its own reference.
+            let acting = theirs && unsafe { ImpersonateLoggedOnUser(token) }.is_ok();
+            // SAFETY: closed once.
+            unsafe {
+                let _ = CloseHandle(token);
+            }
+            if acting {
+                return Some(super::LoggedOn {
+                    _not_send: std::marker::PhantomData,
+                });
+            }
+        }
+        None
+    }
+
+    pub(super) fn revert() {
+        // SAFETY: no arguments; this thread is impersonating.
+        if let Err(e) = unsafe { RevertToSelf() } {
+            // A thread that stays someone else is unusable for the service.
+            tracing::error!(error = %e, "cleanup: the service's own rights could not be restored");
+            std::process::abort();
+        }
+    }
+
     pub(super) fn fixed_volumes() -> Vec<PathBuf> {
         // SAFETY: no arguments; a bit per present drive letter.
         let mask = unsafe { GetLogicalDrives() };
@@ -259,6 +344,33 @@ pub fn as_user(user: &User) -> std::io::Result<Option<AsUser>> {
     {
         let _ = user;
         Ok(None)
+    }
+}
+
+/// While it lives, this thread acts as `user`, if they are logged on (Windows, in
+/// the service): for a folder that only its owner may open, which keeps even
+/// LocalSystem out. Nobody to act as: `None`, and the folder stays unread.
+pub fn as_logged_on(user: &User) -> Option<LoggedOn> {
+    #[cfg(windows)]
+    {
+        win::as_logged_on(&user.sid)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = user;
+        None
+    }
+}
+
+/// See [`as_logged_on`]; the thread is itself again when dropped.
+pub struct LoggedOn {
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+#[cfg(windows)]
+impl Drop for LoggedOn {
+    fn drop(&mut self) {
+        win::revert();
     }
 }
 

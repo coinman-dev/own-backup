@@ -216,7 +216,7 @@ export function sourceSummary(job: Job): string {
  *  from two days earlier sat untouched on the disk. How the last attempt ENDED
  *  is still `last_run` — this is what there is to restore. */
 export function lastSuccessfulRun(job: Job): JobRun | null {
-  if (job.last_run?.status === 'success') return job.last_run;
+  if (job.last_run?.status === 'success' && job.last_run.operation !== 'cleanup') return job.last_run;
   return jobs.activity
     .filter((r) => r.job_id === job.id && r.operation !== 'verify' && r.status === 'success' && !!r.image_path)
     .reduce<JobRun | null>((best, r) => (!best || r.finished_at > best.finished_at ? r : best), null);

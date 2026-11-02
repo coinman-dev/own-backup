@@ -20,6 +20,11 @@
 //!       loads it privately, lists and removes the traces; checks that the
 //!       settings stay and that a hive held by someone else is left.
 //!
+//!   cleanup_probe service <user folder name> <folder in their Temp>
+//!       Run as LocalSystem, as the service is (a scheduled task does it): measures
+//!       the user's Temp and the component store through the real engine, then cleans
+//!       <folder in their Temp>, which only its owner may open.
+//!
 //!   cleanup_probe analyze [<id>...]          (Linux)
 //!       Every Linux item (or those named) for the users of this system —
 //!       measured, nothing removed. As a user: that user only; as root: every
@@ -150,6 +155,7 @@ mod win {
             Some("regtest") if args.len() == 2 => regtest(Path::new(&args[1])),
             Some("junktest") if args.len() == 2 => junktest(Path::new(&args[1])),
             Some("volcache") => volcache(&args[1..]),
+            Some("service") if args.len() == 3 => service(&args[1], &args[2]),
             _ => {
                 eprintln!(
                     "cleanup_probe analyze | selftest <empty folder> | regtest <empty folder>"
@@ -645,6 +651,63 @@ mod win {
     }
 
     /// Measure Windows' own cleanup handlers on C:\ — nothing is removed.
+    fn service(user: &str, folder: &str) {
+        use own_backup_cleanup::{
+            catalog, engine, users, Base, Item, Mode, Options, Roots, Target,
+        };
+
+        let people: Vec<_> = users::profiles()
+            .into_iter()
+            .filter(|u| u.name.eq_ignore_ascii_case(user))
+            .collect();
+        println!("users: {}", people.len());
+        let roots = Roots::of_this_system();
+        let cancel = AtomicBool::new(false);
+        let picked: Vec<_> = catalog::catalog()
+            .iter()
+            .filter(|i| ["temp_user", "update_cleanup"].contains(&i.id))
+            .collect();
+        let seen = engine::run(
+            &picked,
+            &roots,
+            &people,
+            Mode::Analyze,
+            Options::default(),
+            &cancel,
+            |_, _| {},
+        );
+        for i in &seen.items {
+            println!("analyze {:<16} {:?}", i.id, i.tally);
+        }
+        let target = Target {
+            base: Base::LocalAppData,
+            path: Box::leak(format!(r"Temp\{folder}").into_boxed_str()),
+            masks: &[],
+            recursive: true,
+            min_age_hours: 0,
+            keep: &[],
+            programs: &[],
+            trim: None,
+        };
+        let item = Item {
+            id: "owner_test",
+            group: "temp",
+            default_on: false,
+            targets: Box::leak(Box::new([target])),
+            keys: &[],
+        };
+        let done = engine::run(
+            &[&item],
+            &roots,
+            &people,
+            Mode::Remove,
+            Options::default(),
+            &cancel,
+            |_, _| {},
+        );
+        println!("remove  owner_test       {:?}", done.total);
+    }
+
     fn volcache(names: &[String]) {
         let all = [
             "Update Cleanup",

@@ -484,10 +484,14 @@
     }
     const records = t.records ?? 0;
     const entries = t.entries ?? 0;
-    if (t.files === 0 && t.left_files === 0 && !t.running?.length && records === 0 && entries === 0)
+    // Bytes with no files: what Windows' own tools report has no file list.
+    if (t.files === 0 && t.bytes === 0 && t.left_files === 0 && !t.running?.length && records === 0 && entries === 0)
       return m.cl_empty();
     const parts: string[] = [];
-    if (t.files > 0 || (records === 0 && entries === 0)) parts.push(formatBytes(t.bytes));
+    if (t.files > 0 || t.bytes > 0 || (records === 0 && entries === 0)) {
+      const size = formatBytes(t.bytes - (cleanupState.shown === 'analyze' ? excludedBytes(id) : 0));
+      parts.push(t.up_to ? m.cl_up_to({ size }) : size);
+    }
     if (records > 0) parts.push(m.cl_records({ count: records }));
     if (entries > 0) parts.push(m.cl_entries({ count: entries }));
     // A history database or a registry left has no size of its own.
@@ -510,7 +514,10 @@
   function groupBytes(groupItems: CleanupItem[]): number | null {
     const known = groupItems.filter((i) => items.has(i.id) && cleanupState.tallies[i.id]);
     if (known.length === 0) return null;
-    return known.reduce((s, i) => s + cleanupState.tallies[i.id].bytes, 0);
+    return known.reduce(
+      (s, i) => s + cleanupState.tallies[i.id].bytes - (cleanupState.shown === 'analyze' ? excludedBytes(i.id) : 0),
+      0,
+    );
   }
 
   const total = $derived(
@@ -522,6 +529,13 @@
   const focusedItem = $derived(
     (catalog?.groups ?? []).flatMap((g) => g.items).find((i) => i.id === focused) ?? null,
   );
+
+  function foundText(): string {
+    const size = formatBytes(total);
+    return m.cl_hint_found({
+      size: chosen().some((id) => cleanupState.tallies[id]?.up_to) ? m.cl_up_to({ size }) : size,
+    });
+  }
 
   function hint(): string {
     if (cleanupState.busy === 'analyze') return `${m.cl_hint_analyzing()} ${formatBytes(total)}`;
@@ -544,7 +558,7 @@
       }
       return m.cl_hint_done({ size });
     }
-    if (cleanupState.shown === 'analyze' && cleanupState.report) return m.cl_hint_found({ size: formatBytes(total) });
+    if (cleanupState.shown === 'analyze' && cleanupState.report) return foundText();
     if (cleanupState.stale) return m.cl_stale();
     return m.cl_hint_start();
   }
@@ -643,7 +657,7 @@
                   <span
                     class="size"
                     class:muted={!cleanupState.tallies[it.id] || !items.has(it.id)}
-                    title={cleanupState.tallies[it.id] ? m.cl_files({ count: cleanupState.tallies[it.id].files }) : ''}
+                    title={cleanupState.tallies[it.id]?.files ? m.cl_files({ count: cleanupState.tallies[it.id].files }) : ''}
                     >{sizeText(it.id)}</span
                   >
                   {#if cleanupState.shown === 'analyze' && !cleanupState.busy && listed(it.id)}
@@ -866,7 +880,7 @@
     >
       <p class="confirm-lead">{m.cl_confirm()}</p>
       {#if cleanupState.shown === 'analyze' && total > 0}
-        <p class="confirm-size">{m.cl_hint_found({ size: formatBytes(total) })}</p>
+        <p class="confirm-size">{foundText()}</p>
       {/if}
       <ul class="confirm-list">
         {#each names as it (it.id)}

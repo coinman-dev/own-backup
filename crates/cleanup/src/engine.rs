@@ -59,6 +59,9 @@ pub struct Tally {
     pub records: u64,
     /// Registry values and keys removed (or to be removed).
     pub entries: u64,
+    /// `bytes` is the most this can free, not what it will: nothing says more
+    /// exactly ([`crate::component_store`]).
+    pub up_to: bool,
 }
 
 impl Tally {
@@ -69,6 +72,7 @@ impl Tally {
         self.bytes += other.bytes;
         self.left_files += other.left_files;
         self.left_bytes += other.left_bytes;
+        self.up_to |= other.up_to;
     }
 }
 
@@ -149,10 +153,21 @@ impl Roots {
     }
 }
 
+/// The folders in `dir` whose name `part` matches, links and junctions never.
+fn matching(dir: &Path, part: &str) -> std::io::Result<Vec<PathBuf>> {
+    Ok(fs::read_dir(dir)?
+        .flatten()
+        .filter(|e| matches_mask(part, &e.file_name().to_string_lossy()))
+        .filter(|e| fs::symlink_metadata(e.path()).is_ok_and(|m| m.is_dir() && !is_link(&m)))
+        .map(|e| e.path())
+        .collect())
+}
+
 /// `a\b` (Windows) or `a/b` (Linux) below `base`, part by part (the tests
 /// run anywhere). A part with `*` or `?` is every folder there whose name it
-/// matches — folders only, links and junctions never.
-fn below(base: &Path, path: &str) -> Vec<PathBuf> {
+/// matches — folders only, links and junctions never. A folder only `user` may
+/// open is read with their rights ([`open_dir`]).
+fn below(base: &Path, path: &str, user: Option<&User>) -> Vec<PathBuf> {
     let mut found = vec![base.to_path_buf()];
     for part in path.split(['\\', '/']).filter(|s| !s.is_empty()) {
         if !part.contains(['*', '?']) {
@@ -161,12 +176,13 @@ fn below(base: &Path, path: &str) -> Vec<PathBuf> {
         }
         found = found
             .iter()
-            .filter_map(|dir| fs::read_dir(dir).ok())
-            .flatten()
-            .flatten()
-            .filter(|e| matches_mask(part, &e.file_name().to_string_lossy()))
-            .filter(|e| fs::symlink_metadata(e.path()).is_ok_and(|m| m.is_dir() && !is_link(&m)))
-            .map(|e| e.path())
+            .flat_map(|dir| match matching(dir, part) {
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    let _owner = user.and_then(crate::users::as_logged_on);
+                    matching(dir, part).unwrap_or_default()
+                }
+                other => other.unwrap_or_default(),
+            })
             .collect();
         found.sort();
     }
@@ -180,36 +196,37 @@ pub fn folders(target: &Target, roots: &Roots, users: &[User]) -> Vec<PathBuf> {
     let per_user = |sub: &str| -> Vec<PathBuf> {
         users
             .iter()
-            .flat_map(|u| below(&u.profile.join("AppData").join(sub), target.path))
+            .flat_map(|u| below(&u.profile.join("AppData").join(sub), target.path, Some(u)))
             .collect()
     };
     match target.base {
-        Base::Windows => below(&roots.windows, target.path),
-        Base::ProgramData => below(&roots.program_data, target.path),
+        Base::Windows => below(&roots.windows, target.path, None),
+        Base::ProgramData => below(&roots.program_data, target.path, None),
         Base::LocalAppData => per_user("Local"),
         Base::RoamingAppData => per_user("Roaming"),
+        Base::LocalLowAppData => per_user("LocalLow"),
         Base::Junk => users.iter().map(|u| u.profile.clone()).collect(),
-        Base::VolumeCache | Base::Command => Vec::new(),
+        Base::VolumeCache | Base::ComponentStore | Base::Command => Vec::new(),
         Base::Home => users
             .iter()
-            .flat_map(|u| below(&u.profile, target.path))
+            .flat_map(|u| below(&u.profile, target.path, Some(u)))
             .collect(),
-        Base::Root => below(&roots.fs_root, target.path),
+        Base::Root => below(&roots.fs_root, target.path, None),
         Base::SystemDrive => below(
             roots.windows.parent().unwrap_or(&roots.windows),
             target.path,
+            None,
         ),
         Base::Profile => users
             .iter()
-            .flat_map(|u| below(&u.profile, target.path))
+            .flat_map(|u| below(&u.profile, target.path, Some(u)))
             .collect(),
         Base::RecycleBin => users
             .iter()
             .flat_map(|u| {
-                roots
-                    .volumes
-                    .iter()
-                    .flat_map(move |v| below(&v.join("$Recycle.Bin").join(&u.sid), target.path))
+                roots.volumes.iter().flat_map(move |v| {
+                    below(&v.join("$Recycle.Bin").join(&u.sid), target.path, Some(u))
+                })
             })
             .collect(),
     }
@@ -330,6 +347,21 @@ pub(crate) fn run_at_with(
             if open(target.programs) {
                 continue;
             }
+            if target.base == Base::ComponentStore {
+                match crate::component_store::run(mode == Mode::Remove, cancel) {
+                    Ok(found) => {
+                        tally.bytes += found.bytes;
+                        tally.up_to |= found.up_to;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) => {
+                        tracing::info!(error = %e, "cleanup: DISM failed");
+                        tally.left_files += 1;
+                    }
+                }
+                progress(item.id, &tally);
+                continue;
+            }
             if matches!(target.base, Base::VolumeCache | Base::Command) {
                 let done = if target.base == Base::Command {
                     crate::linux_system::run(target.path, mode == Mode::Remove, cancel)
@@ -378,6 +410,7 @@ pub(crate) fn run_at_with(
                     crate::junk::walk(
                         std::slice::from_ref(place),
                         junk,
+                        owner,
                         mode,
                         now,
                         cancel,
@@ -418,6 +451,8 @@ pub(crate) fn run_at_with(
                         only,
                         found: (mode == Mode::Analyze).then_some(&mut found),
                         options: &options,
+                        user,
+                        as_owner: false,
                     };
                     walk.root(&folder);
                 }
@@ -475,6 +510,10 @@ struct Walk<'a> {
     /// Analysis: where the files found go.
     found: Option<&'a mut Vec<Found>>,
     options: &'a Options,
+    /// Whose folder this is, if it is one person's.
+    user: Option<&'a User>,
+    /// This thread already acts as that person.
+    as_owner: bool,
 }
 
 impl Walk<'_> {
@@ -494,9 +533,24 @@ impl Walk<'_> {
 
     /// Clean one folder; whether it is empty now (in analysis: would be).
     fn dir(&mut self, dir: &Path) -> bool {
-        let Ok(entries) = fs::read_dir(dir) else {
-            return false;
+        let (entries, rights) = match open_dir(dir, self.user, self.as_owner) {
+            Opened::Entries(entries, rights) => (entries, rights),
+            Opened::Gone => return false,
+            Opened::Closed => {
+                self.tally.left_files += 1;
+                return false;
+            }
         };
+        let was_owner = self.as_owner;
+        self.as_owner |= rights.is_some();
+        let _rights = rights;
+        let empty = self.entries(entries);
+        self.as_owner = was_owner;
+        empty
+    }
+
+    /// Clean what a folder holds; whether nothing stays.
+    fn entries(&mut self, entries: fs::ReadDir) -> bool {
         let mut left = false;
         for entry in entries {
             if self.cancel.load(Ordering::Relaxed) {
@@ -507,21 +561,28 @@ impl Walk<'_> {
                 continue;
             };
             let path = entry.path();
-            let Ok(meta) = fs::symlink_metadata(&path) else {
-                left = true;
-                continue;
+            let meta = match fs::symlink_metadata(&path) {
+                Ok(meta) => meta,
+                Err(e) => {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        self.tally.left_files += 1;
+                    }
+                    left = true;
+                    continue;
+                }
             };
-            if is_link(&meta) {
+            let link = is_link(&meta);
+            if link && !self.links_go() {
                 left = true;
                 continue;
             }
             // Sockets, pipes, devices: never a cleaner's (a program listens
             // on a socket in its cache folder — Zed's in ~/.cache/zed).
-            if !meta.is_dir() && !meta.is_file() {
+            if !link && !meta.is_dir() && !meta.is_file() {
                 left = true;
                 continue;
             }
-            if meta.is_dir() {
+            if !link && meta.is_dir() {
                 let emptied = self.target.recursive && self.dir(&path) && self.old_enough(&meta);
                 if !emptied || (self.mode == Mode::Remove && fs::remove_dir(&path).is_err()) {
                     left = true;
@@ -545,7 +606,7 @@ impl Walk<'_> {
                 left = true;
                 continue;
             }
-            let size = meta.len();
+            let size = if link { 0 } else { meta.len() };
             match self.mode {
                 Mode::Analyze => {
                     self.tally.files += 1;
@@ -560,7 +621,7 @@ impl Walk<'_> {
                         }
                     }
                 }
-                Mode::Remove => match remove_file(&path, &meta) {
+                Mode::Remove => match self.remove(&path, &meta, link) {
                     Ok(()) => {
                         self.tally.files += 1;
                         self.tally.bytes += size;
@@ -581,6 +642,34 @@ impl Walk<'_> {
         !left
     }
 
+    /// A link in the trash was thrown away with the folder it is in, and only the
+    /// link goes: what it points to stays, and the folder no longer waits for it.
+    fn links_go(&self) -> bool {
+        self.target.base == Base::RecycleBin
+            || (self.target.base == Base::Home
+                && self.target.path.starts_with(".local/share/Trash"))
+    }
+
+    /// Remove one file or link; refused, once more with its owner's rights.
+    fn remove(&self, path: &Path, meta: &Metadata, link: bool) -> std::io::Result<()> {
+        let once = || {
+            if link {
+                remove_link(path)
+            } else {
+                remove_file(path, meta)
+            }
+        };
+        match once() {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && !self.as_owner => {
+                match self.user.and_then(crate::users::as_logged_on) {
+                    Some(_owner) => once(),
+                    None => Err(e),
+                }
+            }
+            done => done,
+        }
+    }
+
     /// This target's database is cut down to its last days, not removed.
     fn trims(&self) -> bool {
         self.target.trim == Some(Trim::ChromiumHistory) && self.options.history_keep_days > 0
@@ -591,6 +680,11 @@ impl Walk<'_> {
     fn trim(&mut self, db: &Path) {
         let days = u64::from(self.options.history_keep_days);
         let before = self.now - Duration::from_secs(days * 24 * 3600);
+        // With its owner's rights: the edited copy that takes the database's place
+        // stays theirs, not the service's.
+        let _owner = (self.mode == Mode::Remove && !self.as_owner)
+            .then(|| self.user.and_then(crate::users::as_logged_on))
+            .flatten();
         let done = match self.mode {
             Mode::Analyze => crate::history::count_old(db, before),
             Mode::Remove => crate::history::trim(db, before),
@@ -771,6 +865,44 @@ pub(crate) fn is_link(meta: &Metadata) -> bool {
     {
         meta.file_type().is_symlink()
     }
+}
+
+/// A folder opened for walking. Lives for a moment on the stack.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum Opened {
+    /// Its entries, and its owner's rights if it took them.
+    Entries(fs::ReadDir, Option<crate::users::LoggedOn>),
+    /// Not there any more: nothing to say.
+    Gone,
+    /// It could not be read, and has been logged.
+    Closed,
+}
+
+/// A folder only its owner may open keeps even the service out: what a PyInstaller
+/// program leaves in Temp is 1.4 GB of that on the owner's machine (2026-11-02). Its
+/// owner's rights open it, unless this thread has them already (`as_owner`).
+pub(crate) fn open_dir(dir: &Path, user: Option<&User>, as_owner: bool) -> Opened {
+    let error = match fs::read_dir(dir) {
+        Ok(entries) => return Opened::Entries(entries, None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Opened::Gone,
+        Err(e) => e,
+    };
+    let owner = (error.kind() == std::io::ErrorKind::PermissionDenied && !as_owner)
+        .then(|| user.and_then(crate::users::as_logged_on))
+        .flatten();
+    if owner.is_some() {
+        if let Ok(entries) = fs::read_dir(dir) {
+            return Opened::Entries(entries, owner);
+        }
+    }
+    tracing::info!(folder = %dir.display(), %error, "cleanup: a folder could not be read, left");
+    Opened::Closed
+}
+
+/// Only the link: neither call enters a folder, and removing a folder that holds
+/// anything fails.
+fn remove_link(path: &Path) -> std::io::Result<()> {
+    fs::remove_file(path).or_else(|_| fs::remove_dir(path))
 }
 
 pub(crate) fn remove_file(path: &Path, meta: &Metadata) -> std::io::Result<()> {

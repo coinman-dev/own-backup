@@ -211,7 +211,8 @@ pub fn make_writable(path: &str) -> Result<(), String> {
     let Some((v, dir)) = volume_holding(list(), path) else {
         return Ok(());
     };
-    let options = run("findmnt", &["-n", "-o", "OPTIONS", "--mountpoint", &dir]).unwrap_or_default();
+    let options =
+        run("findmnt", &["-n", "-o", "OPTIONS", "--mountpoint", &dir]).unwrap_or_default();
     if options.trim().split(',').next() == Some("rw") {
         return Ok(());
     }

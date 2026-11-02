@@ -23,6 +23,7 @@ rust_i18n::i18n!("locales", fallback = "ru");
 
 pub mod catalog;
 mod catalog_linux;
+pub mod component_store;
 pub mod engine;
 pub mod history;
 pub mod junk;
