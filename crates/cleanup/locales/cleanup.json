@@ -17,16 +17,16 @@
     "en": "The user's temporary files"
   },
   "cleanup.temp_user_about": {
-    "ru": "Папка Temp пользователя (AppData\\Local\\Temp): то, что программы и установщики оставили после себя. Удаляются файлы старше суток — то, чем запущенная программа пользуется сейчас, остаётся.",
-    "en": "The user's Temp folder (AppData\\Local\\Temp): what programs and installers left behind. Files older than a day are removed — what a running program uses now stays."
+    "ru": "Папка Temp пользователя (AppData\\Local\\Temp) и временные папки программ из Магазина: то, что программы и установщики оставили после себя. Удаляются файлы старше суток — то, чем запущенная программа пользуется сейчас, остаётся.",
+    "en": "The user's Temp folder (AppData\\Local\\Temp) and the temporary folders of Store programs: what programs and installers left behind. Files older than a day are removed — what a running program uses now stays."
   },
   "cleanup.temp_windows": {
     "ru": "Временные файлы Windows",
     "en": "Windows temporary files"
   },
   "cleanup.temp_windows_about": {
-    "ru": "Папка Windows\\Temp: временные файлы служб и установщиков. Удаляются файлы старше суток.",
-    "en": "The Windows\\Temp folder: temporary files of services and installers. Files older than a day are removed."
+    "ru": "Папка Windows\\Temp и временные папки системных служб: файлы служб и установщиков. Удаляются файлы старше суток.",
+    "en": "The Windows\\Temp folder and the temporary folders of system services: files of services and installers. Files older than a day are removed."
   },
   "cleanup.recycle_bin": {
     "ru": "Корзина",
@@ -49,16 +49,16 @@
     "en": "Crash dumps"
   },
   "cleanup.crash_dumps_about": {
-    "ru": "Снимки памяти после сбоев системы (MEMORY.DMP, Minidump) и программ (AppData\\Local\\CrashDumps). Нужны только для разбора сбоя.",
-    "en": "Memory snapshots after system failures (MEMORY.DMP, Minidump) and program crashes (AppData\\Local\\CrashDumps). Needed only to investigate the failure."
+    "ru": "Снимки памяти после сбоев системы (MEMORY.DMP, Minidump, LiveKernelReports) и программ (AppData\\Local\\CrashDumps). Нужны только для разбора сбоя.",
+    "en": "Memory snapshots after system failures (MEMORY.DMP, Minidump, LiveKernelReports) and program crashes (AppData\\Local\\CrashDumps). Needed only to investigate the failure."
   },
   "cleanup.windows_logs": {
     "ru": "Журналы установки Windows",
     "en": "Windows setup logs"
   },
   "cleanup.windows_logs_about": {
-    "ru": "Журналы обслуживания и обновления Windows (Logs\\CBS, DISM, WindowsUpdate) старше недели. Журналы событий Windows не затрагиваются.",
-    "en": "Windows servicing and update logs (Logs\\CBS, DISM, WindowsUpdate) older than a week. The Windows event logs are not touched."
+    "ru": "Журналы обслуживания, обновления и установки Windows (Logs\\CBS, DISM, WindowsUpdate, waasmedic, Panther, USOShared и другие) старше недели. Журналы событий Windows не затрагиваются.",
+    "en": "Windows servicing, update and setup logs (Logs\\CBS, DISM, WindowsUpdate, waasmedic, Panther, USOShared and others) older than a week. The Windows event logs are not touched."
   },
   "cleanup.inet_cache": {
     "ru": "Кэш WinINet",
@@ -189,8 +189,8 @@
     "en": "NVIDIA driver installers"
   },
   "cleanup.driver_installers_about": {
-    "ru": "Распакованный установщик драйвера (C:\\NVIDIA\\DisplayDriver) и скачанные пакеты драйверов (ProgramData\\NVIDIA Corporation\\Downloader) старше суток. Установленный драйвер не затрагивается; для переустановки той же версии её придётся скачать снова.",
-    "en": "The unpacked driver installer (C:\\NVIDIA\\DisplayDriver) and the downloaded driver packages (ProgramData\\NVIDIA Corporation\\Downloader) older than a day. The installed driver is not touched; to reinstall the same version you will have to download it again."
+    "ru": "Распакованные установщики драйверов (C:\\NVIDIA\\DisplayDriver, C:\\AMD) и скачанные пакеты драйверов (ProgramData\\NVIDIA Corporation\\Downloader) старше суток. Установленный драйвер не затрагивается; для переустановки той же версии её придётся скачать снова.",
+    "en": "The unpacked driver installers (C:\\NVIDIA\\DisplayDriver, C:\\AMD) and the downloaded driver packages (ProgramData\\NVIDIA Corporation\\Downloader) older than a day. The installed driver is not touched; to reinstall the same version you will have to download it again."
   },
   "cleanup.group_junk": {
     "ru": "Мусор по маскам",
@@ -259,8 +259,8 @@
     "en": "Windows Update Cleanup (WinSxS)"
   },
   "cleanup.update_cleanup_about": {
-    "ru": "Старые версии компонентов, которые заменили установленные обновления, — штатным средством Windows, как «Очистка диска». После неё эти обновления нельзя будет удалить. Подсчёт и очистка могут занять несколько минут.",
-    "en": "Old versions of components that installed updates replaced — by Windows' own means, as Disk Cleanup does. Afterwards those updates cannot be uninstalled. Measuring and cleaning may take several minutes."
+    "ru": "Старые версии компонентов, которые заменили установленные обновления, — средством Windows DISM. После очистки эти обновления нельзя будет удалить. DISM не сообщает точный объём: при анализе показан верхний предел, сколько освободилось на самом деле — после очистки. Подсчёт занимает около минуты, очистка может занять несколько минут.",
+    "en": "Old versions of components that installed updates replaced — by Windows' DISM tool. Afterwards those updates cannot be uninstalled. DISM does not say the exact amount: the analysis shows the upper limit, and what was really freed is shown after the cleanup. Measuring takes about a minute, cleaning may take several minutes."
   },
   "cleanup.previous_windows": {
     "ru": "Предыдущая установка Windows (Windows.old)",
@@ -489,6 +489,22 @@
   "cleanup.rdp_history_about": {
     "ru": "Список компьютеров, к которым вы подключались (mstsc), запомненные имена пользователей для них и файл последнего подключения Default.rdp — его настройки вернутся к стандартным. Сохранённые пароли (диспетчер учётных данных) не удаляются.",
     "en": "The computers you connected to (mstsc), the user names remembered for them and the last connection's file Default.rdp — its settings return to the defaults. Saved passwords (Credential Manager) are not removed."
+  },
+  "cleanup.rdp_cache": {
+    "ru": "Кэш удалённого рабочего стола",
+    "en": "Remote Desktop cache"
+  },
+  "cleanup.rdp_cache_about": {
+    "ru": "Картинки, которые клиент удалённого рабочего стола сохранил для ускорения (AppData\\Local\\Microsoft\\Terminal Server Client\\Cache). Подключения и пароли не затрагиваются.",
+    "en": "Pictures the Remote Desktop client kept to work faster (AppData\\Local\\Microsoft\\Terminal Server Client\\Cache). Connections and passwords are not touched."
+  },
+  "cleanup.last_good": {
+    "ru": "Прежняя конфигурация драйверов (LastGood)",
+    "en": "Previous driver configuration (LastGood)"
+  },
+  "cleanup.last_good_about": {
+    "ru": "Копии заменённых файлов драйверов, которые Windows оставляет при их обновлении (Windows\\LastGood, LastGood.Tmp), старше недели. В Windows 10 и 11 они не используются для обычного запуска, но откатить драйвер по этим файлам будет нельзя.",
+    "en": "Copies of replaced driver files that Windows leaves when updating them (Windows\\LastGood, LastGood.Tmp), older than a week. Windows 10 and 11 do not use them for a normal start, but a driver can no longer be rolled back from these files."
   },
   "cleanup.prefetch": {
     "ru": "Prefetch",

@@ -484,10 +484,12 @@
     }
     const records = t.records ?? 0;
     const entries = t.entries ?? 0;
-    if (t.files === 0 && t.left_files === 0 && !t.running?.length && records === 0 && entries === 0)
+    // Bytes with no files: what Windows' own tools report has no file list.
+    if (t.files === 0 && t.bytes === 0 && t.left_files === 0 && !t.running?.length && records === 0 && entries === 0)
       return m.cl_empty();
     const parts: string[] = [];
-    if (t.files > 0 || (records === 0 && entries === 0)) parts.push(formatBytes(t.bytes));
+    if (t.files > 0 || t.bytes > 0 || (records === 0 && entries === 0))
+      parts.push(t.up_to ? m.cl_up_to({ size: formatBytes(t.bytes) }) : formatBytes(t.bytes));
     if (records > 0) parts.push(m.cl_records({ count: records }));
     if (entries > 0) parts.push(m.cl_entries({ count: entries }));
     // A history database or a registry left has no size of its own.
@@ -544,7 +546,12 @@
       }
       return m.cl_hint_done({ size });
     }
-    if (cleanupState.shown === 'analyze' && cleanupState.report) return m.cl_hint_found({ size: formatBytes(total) });
+    if (cleanupState.shown === 'analyze' && cleanupState.report) {
+      const size = formatBytes(total);
+      return m.cl_hint_found({
+        size: chosen().some((id) => cleanupState.tallies[id]?.up_to) ? m.cl_up_to({ size }) : size,
+      });
+    }
     if (cleanupState.stale) return m.cl_stale();
     return m.cl_hint_start();
   }

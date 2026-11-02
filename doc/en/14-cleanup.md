@@ -46,16 +46,18 @@ run. The result goes into Activity as "Scheduled automatic cleanup" or
 
 | Item | Where | What stays |
 |---|---|---|
-| The user's temporary files | `AppData\Local\Temp` | files younger than a day |
-| Windows temporary files | `Windows\Temp` | files younger than a day |
+| The user's temporary files | `AppData\Local\Temp`, `AppData\Local\Packages\*\AC\Temp` | files younger than a day |
+| Windows temporary files | `Windows\Temp`, the temporary folders of system services | files younger than a day |
 | Recycle Bin | the user's `$Recycle.Bin` on every drive | — |
 | Windows error reports | `ProgramData\Microsoft\Windows\WER`, `AppData\Local\Microsoft\Windows\WER` | — |
-| Crash dumps | `Windows\MEMORY.DMP`, `Windows\Minidump`, `AppData\Local\CrashDumps` | — |
-| Windows setup logs | `Windows\Logs\CBS`, `DISM`, `WindowsUpdate` | logs younger than a week |
+| Crash dumps | `Windows\MEMORY.DMP`, `Windows\Minidump`, `Windows\LiveKernelReports`, `AppData\Local\CrashDumps` | — |
+| Windows setup logs | `Windows\Logs\CBS`, `DISM`, `WindowsUpdate`, `waasmedic`, `SIH`, `NetSetup`, `MoSetup`; `Windows\Panther`, `Windows\debug`; `ProgramData\USOShared\Logs` | logs younger than a week |
 | WinINet cache | `AppData\Local\Microsoft\Windows\INetCache` | — |
 | Shader cache | `D3DSCache`, the NVIDIA and AMD caches | — |
+| Remote Desktop cache | `AppData\Local\Microsoft\Terminal Server Client\Cache` | a Remote Desktop client that is open |
 | Thumbnail cache (off by default) | `AppData\Local\Microsoft\Windows\Explorer` | files Explorer holds |
 | Prefetch (off by default) | `Windows\Prefetch` | — |
+| Previous driver configuration (off by default) | `Windows\LastGood`, `Windows\LastGood.Tmp` | files younger than a week |
 | Windows Update cache | `Windows\SoftwareDistribution\Download` | files younger than a day; the update history `DataStore`; what is not installed yet Windows downloads again |
 | Browser cache | the caches of Chrome, Edge, Vivaldi, Brave, Yandex, Opera, Firefox, Thunderbird in every profile | a browser that is open |
 | Browser history (off by default) | `History` of Chromium browsers — whole, or what is older than the days kept (the database is edited on a copy and checked); `Visited Links`, `Top Sites`, `Shortcuts` | bookmarks, passwords; Firefox history (it shares a database with the bookmarks); a database left with a crash journal |
@@ -72,25 +74,29 @@ run. The result goes into Activity as "Scheduled automatic cleanup" or
 | Telegram Desktop cache (off by default) | `tdata\user_data*\cache`, `media_cache` of every account | the sign-in and the chats; Telegram open |
 | npm, pip, Yarn and NuGet caches (off by default) | `npm-cache\_cacache`, `pip\cache`, `Yarn\Cache`, `NuGet\v3-cache` | — |
 | Programs' logs | the log folders of qBittorrent, Zed, DaVinci Resolve, OBS Studio, npm | logs younger than a week; DaVinci Resolve's projects and project library; a program that is open |
-| NVIDIA driver installers (off by default) | `C:\NVIDIA\DisplayDriver`, `ProgramData\NVIDIA Corporation\Downloader\*` | younger than a day; the installed driver |
+| Driver installers (off by default) | `C:\NVIDIA\DisplayDriver`, `C:\AMD`, `ProgramData\NVIDIA Corporation\Downloader\*` | younger than a day; the installed driver |
 
 ### Windows updates and components
 
 What Windows keeps for itself is removed not file by file but by Windows'
-own handlers — the ones Disk Cleanup (cleanmgr) runs: they measure and
-remove by themselves. Only a computer's administrator may remove these
+own tools — DISM and the handlers Disk Cleanup (cleanmgr) runs: they measure
+and remove by themselves. Only a computer's administrator may remove these
 items (the window need not be run "as administrator" — the service does
 the work); their size shows to any user.
 
-| Item | Windows handler | After the cleanup |
+| Item | Windows tool | After the cleanup |
 |---|---|---|
-| Windows Update Cleanup (WinSxS) (off by default) | Update Cleanup | replaced updates cannot be uninstalled; measuring and cleaning take up to several minutes |
+| Windows Update Cleanup (WinSxS) (off by default) | DISM (`/AnalyzeComponentStore`, `/StartComponentCleanup`) | replaced updates cannot be uninstalled; measuring takes about a minute, cleaning up to several minutes |
 | Previous Windows installation (Windows.old) (off by default) | Previous Installations | no going back to the previous Windows version |
 | Delivery Optimization files | Delivery Optimization Files | — |
 | Windows setup temporary files and logs | Temporary Setup Files, Windows Upgrade Log Files, Windows Reset Log Files, Upgrade Discarded Files | — |
 | Microsoft Defender files | Windows Defender | — |
 | Old driver packages (off by default) | Device Driver Packages | no rolling back to the earlier driver |
 | Windows installation files (ESD) (off by default) | Windows ESD installation files | "Reset this PC" only with a cloud download or installation media |
+
+DISM does not say how much cleaning the component store will free. The analysis
+shows **up to …** for this item: the backups and disabled features WinSxS keeps,
+which is the upper limit. What was really freed shows after the cleanup.
 
 ### Files by masks
 
@@ -179,6 +185,8 @@ On Linux the service runs as root, and the items are Linux's own:
   service cleans. An ordinary user has a "Restart as administrator" button —
   Windows asks for an administrator's password.
 - Restore points and the Windows event logs are not removed.
+- A folder that could not be read is counted as left. A folder only its owner may
+  open is read with that user's rights, if they are logged on.
 - **An open browser is left.** Its folders are skipped, and the item says
   "close: …". Edge may keep running in the background after its window is
   closed — then turn off "Continue running background extensions and apps"

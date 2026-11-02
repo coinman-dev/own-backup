@@ -46,16 +46,18 @@
 
 | Пункт | Где | Что остаётся |
 |---|---|---|
-| Временные файлы пользователя | `AppData\Local\Temp` | файлы моложе суток |
-| Временные файлы Windows | `Windows\Temp` | файлы моложе суток |
+| Временные файлы пользователя | `AppData\Local\Temp`, `AppData\Local\Packages\*\AC\Temp` | файлы моложе суток |
+| Временные файлы Windows | `Windows\Temp`, временные папки системных служб | файлы моложе суток |
 | Корзина | `$Recycle.Bin` пользователя на каждом диске | — |
 | Отчёты об ошибках Windows | `ProgramData\Microsoft\Windows\WER`, `AppData\Local\Microsoft\Windows\WER` | — |
-| Аварийные дампы | `Windows\MEMORY.DMP`, `Windows\Minidump`, `AppData\Local\CrashDumps` | — |
-| Журналы установки Windows | `Windows\Logs\CBS`, `DISM`, `WindowsUpdate` | журналы моложе недели |
+| Аварийные дампы | `Windows\MEMORY.DMP`, `Windows\Minidump`, `Windows\LiveKernelReports`, `AppData\Local\CrashDumps` | — |
+| Журналы установки Windows | `Windows\Logs\CBS`, `DISM`, `WindowsUpdate`, `waasmedic`, `SIH`, `NetSetup`, `MoSetup`; `Windows\Panther`, `Windows\debug`; `ProgramData\USOShared\Logs` | журналы моложе недели |
 | Кэш WinINet | `AppData\Local\Microsoft\Windows\INetCache` | — |
 | Кэш шейдеров | `D3DSCache`, кэши NVIDIA и AMD | — |
+| Кэш удалённого рабочего стола | `AppData\Local\Microsoft\Terminal Server Client\Cache` | открытый клиент удалённого рабочего стола |
 | Кэш миниатюр (по умолчанию выкл.) | `AppData\Local\Microsoft\Windows\Explorer` | файлы, которые держит Проводник |
 | Prefetch (по умолчанию выкл.) | `Windows\Prefetch` | — |
+| Прежняя конфигурация драйверов (по умолчанию выкл.) | `Windows\LastGood`, `Windows\LastGood.Tmp` | файлы моложе недели |
 | Кэш обновлений Windows | `Windows\SoftwareDistribution\Download` | файлы моложе суток; журнал обновлений `DataStore`; неустановленное Windows скачает снова |
 | Кэш браузеров | кэш Chrome, Edge, Vivaldi, Brave, Яндекс, Opera, Firefox, Thunderbird во всех профилях | открытый браузер |
 | История браузеров (по умолчанию выкл.) | `History` браузеров на Chromium — целиком или старше выбранного срока (база правится на копии и проверяется); `Visited Links`, `Top Sites`, `Shortcuts` | закладки, пароли; история Firefox (она в одной базе с закладками); база с журналом аварийной записи |
@@ -72,25 +74,30 @@
 | Кэш Telegram Desktop (по умолчанию выкл.) | `tdata\user_data*\cache`, `media_cache` всех учётных записей | вход и переписка; открытый Telegram |
 | Кэши npm, pip, Yarn и NuGet (по умолчанию выкл.) | `npm-cache\_cacache`, `pip\cache`, `Yarn\Cache`, `NuGet\v3-cache` | — |
 | Журналы программ | папки журналов qBittorrent, Zed, DaVinci Resolve, OBS Studio, npm | журналы моложе недели; проекты и база проектов DaVinci Resolve; открытая программа |
-| Установщики драйверов NVIDIA (по умолчанию выкл.) | `C:\NVIDIA\DisplayDriver`, `ProgramData\NVIDIA Corporation\Downloader\*` | моложе суток; установленный драйвер |
+| Установщики драйверов (по умолчанию выкл.) | `C:\NVIDIA\DisplayDriver`, `C:\AMD`, `ProgramData\NVIDIA Corporation\Downloader\*` | моложе суток; установленный драйвер |
 
 ### Обновления и компоненты Windows
 
-То, что Windows хранит для себя, удаляется не по файлам, а штатными
-обработчиками Windows — теми же, что вызывает «Очистка диска» (cleanmgr):
+То, что Windows хранит для себя, удаляется не по файлам, а её собственными
+средствами — DISM и обработчиками, которые вызывает «Очистка диска» (cleanmgr):
 они сами считают объём и сами удаляют. Удалять эти пункты может только
 администратор компьютера (окно запускать «от имени администратора» не
 нужно — работу делает служба); объём виден любому пользователю.
 
-| Пункт | Обработчик Windows | Что после очистки |
+| Пункт | Средство Windows | Что после очистки |
 |---|---|---|
-| Очистка обновлений Windows (WinSxS) (по умолчанию выкл.) | Update Cleanup | заменённые обновления нельзя удалить; подсчёт и очистка — до нескольких минут |
+| Очистка обновлений Windows (WinSxS) (по умолчанию выкл.) | DISM (`/AnalyzeComponentStore`, `/StartComponentCleanup`) | заменённые обновления нельзя удалить; подсчёт — около минуты, очистка — до нескольких минут |
 | Предыдущая установка Windows (Windows.old) (по умолчанию выкл.) | Previous Installations | вернуться к прежней версии Windows нельзя |
 | Файлы оптимизации доставки | Delivery Optimization Files | — |
 | Временные файлы и журналы установки Windows | Temporary Setup Files, Windows Upgrade Log Files, Windows Reset Log Files, Upgrade Discarded Files | — |
 | Служебные файлы Microsoft Defender | Windows Defender | — |
 | Старые пакеты драйверов (по умолчанию выкл.) | Device Driver Packages | к прежнему драйверу не откатиться |
 | Файлы установки Windows (ESD) (по умолчанию выкл.) | Windows ESD installation files | «Вернуть компьютер в исходное состояние» — только с загрузкой из облака или с носителя |
+
+DISM не сообщает, сколько освободит очистка хранилища компонентов. При анализе
+у пункта написано **до …**: это резервные копии и отключённые компоненты, которые
+хранит WinSxS, то есть верхний предел. Сколько освободилось на самом деле, видно
+после очистки.
 
 ### Файлы по маскам
 
@@ -169,7 +176,9 @@
   создания), — то, чем сейчас пользуется программа или установщик, остаётся.
 - **Ссылки и точки соединения не проходятся.** То, на что они указывают,
   остаётся целым; облачные файлы-заглушки (OneDrive) тоже не трогаются.
-- **Занятые файлы пропускаются** и считаются отдельно.
+- **Занятые файлы пропускаются** и считаются отдельно. Папка, которую не удалось
+  прочитать, тоже считается отдельно. Папку, открытую только её владельцу, служба
+  читает с правами этого пользователя, если он вошёл в систему.
 - **Чужие папки — только администратору.** Обычный пользователь чистит
   только свои папки; администратор компьютера может отметить любого
   пользователя. Окно для этого не нужно запускать «от имени

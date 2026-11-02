@@ -238,6 +238,29 @@ fn the_recycle_bin_is_emptied_on_every_volume_but_its_desktop_ini() {
     assert!(dir.path().join("C/$Recycle.Bin/S-1-5-21-9/$Rx").exists());
 }
 
+/// A folder nothing can open is said to have been left, not passed over as if it
+/// were empty: the owner's Temp had 1.4 GB of those, and the window said nothing.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_folder_that_cannot_be_read_is_counted_as_left() {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: no arguments.
+    if unsafe { libc::geteuid() } == 0 {
+        return; // root reads everything
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let temp = dir.path().join(r"Users/u/AppData/Local/Temp");
+    write(&temp.join("a.tmp"), 100);
+    write(&temp.join("closed/inside.bin"), 1000);
+    fs::set_permissions(temp.join("closed"), fs::Permissions::from_mode(0o000)).unwrap();
+
+    let seen = go(&TEMP, dir.path(), Mode::Analyze, TWO_DAYS);
+    fs::set_permissions(temp.join("closed"), fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(seen.total.files, 1);
+    assert_eq!(seen.total.bytes, 100);
+    assert_eq!(seen.total.left_files, 1);
+}
+
 #[test]
 fn a_missing_target_is_nothing_to_clean() {
     let dir = tempfile::tempdir().unwrap();

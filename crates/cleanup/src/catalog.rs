@@ -36,6 +36,9 @@ pub enum Base {
     /// One of Windows' own cleanup handlers, named by the target's path
     /// ([`crate::volume_cache`]), on the system volume.
     VolumeCache,
+    /// The component store, DISM's to measure and clean
+    /// ([`crate::component_store`]).
+    ComponentStore,
     /// Linux: a user's home folder (`/home/anna`).
     Home,
     /// Linux: the system's root (`/`) — root's to clean.
@@ -212,7 +215,12 @@ impl Item {
     pub fn admin_only(&self) -> bool {
         self.targets
             .iter()
-            .any(|t| matches!(t.base, Base::VolumeCache | Base::Root | Base::Command))
+            .any(|t| {
+                matches!(
+                    t.base,
+                    Base::VolumeCache | Base::ComponentStore | Base::Root | Base::Command
+                )
+            })
     }
 
     /// Cleaned only as an analysis listed it and the window showed it: the
@@ -320,14 +328,32 @@ static ITEMS: &[Item] = &[
         group: "temp",
         default_on: true,
         keys: &[],
-        targets: &[tree(Base::LocalAppData, "Temp", DAY)],
+        targets: &[
+            tree(Base::LocalAppData, "Temp", DAY),
+            // A Store program's own.
+            tree(Base::LocalAppData, r"Packages\*\AC\Temp", DAY),
+        ],
     },
     Item {
         id: "temp_windows",
         group: "temp",
         default_on: true,
         keys: &[],
-        targets: &[tree(Base::Windows, "Temp", DAY)],
+        targets: &[
+            tree(Base::Windows, "Temp", DAY),
+            // The services' own, LocalService's and NetworkService's among them.
+            tree(Base::Windows, r"ServiceProfiles\*\AppData\Local\Temp", DAY),
+            tree(
+                Base::Windows,
+                r"System32\config\systemprofile\AppData\Local\Temp",
+                DAY,
+            ),
+            tree(
+                Base::Windows,
+                r"SysWOW64\config\systemprofile\AppData\Local\Temp",
+                DAY,
+            ),
+        ],
     },
     Item {
         id: "recycle_bin",
@@ -367,6 +393,11 @@ static ITEMS: &[Item] = &[
             files(Base::Windows, "Minidump", &["*.dmp"], 0),
             files(Base::Windows, "", &["MEMORY.DMP"], 0),
             files(Base::LocalAppData, "CrashDumps", &["*.dmp"], 0),
+            // Windows' reports of a driver or the kernel in trouble: gigabytes at times.
+            Target {
+                masks: &["*.dmp"],
+                ..tree(Base::Windows, "LiveKernelReports", 0)
+            },
         ],
     },
     Item {
@@ -378,6 +409,13 @@ static ITEMS: &[Item] = &[
             files(Base::Windows, r"Logs\CBS", &["*.log", "*.cab"], WEEK),
             files(Base::Windows, r"Logs\DISM", &["*.log"], WEEK),
             files(Base::Windows, r"Logs\WindowsUpdate", &["*.etl"], WEEK),
+            tree(Base::Windows, r"Logs\waasmedic", WEEK),
+            tree(Base::Windows, r"Logs\SIH", WEEK),
+            tree(Base::Windows, r"Logs\NetSetup", WEEK),
+            tree(Base::Windows, r"Logs\MoSetup", WEEK),
+            files(Base::Windows, "Panther", &["*.log"], WEEK),
+            files(Base::Windows, "debug", &["*.log"], WEEK),
+            tree(Base::ProgramData, r"USOShared\Logs", WEEK),
         ],
     },
     // --- caches ------------------------------------------------------------
@@ -402,6 +440,20 @@ static ITEMS: &[Item] = &[
             tree(Base::LocalAppData, r"AMD\GLCache", 0),
             tree(Base::ProgramData, r"NVIDIA Corporation\NV_Cache", 0),
         ],
+    },
+    Item {
+        id: "rdp_cache",
+        group: "caches",
+        default_on: true,
+        keys: &[],
+        targets: &[of_program(
+            tree(
+                Base::LocalAppData,
+                r"Microsoft\Terminal Server Client\Cache",
+                0,
+            ),
+            &["mstsc.exe"],
+        )],
     },
     Item {
         id: "thumbnails",
@@ -756,6 +808,8 @@ static ITEMS: &[Item] = &[
         targets: &[
             // What the NVIDIA installer unpacks before it installs.
             tree(Base::SystemDrive, r"NVIDIA\DisplayDriver", DAY),
+            // What AMD's unpacks.
+            tree(Base::SystemDrive, "AMD", DAY),
             // The driver packages it downloaded; each in its own folder.
             tree(Base::ProgramData, r"NVIDIA Corporation\Downloader\*", DAY),
         ],
@@ -768,7 +822,10 @@ static ITEMS: &[Item] = &[
         id: "update_cleanup",
         group: "windows",
         default_on: false,
-        targets: &[handler("Update Cleanup")],
+        targets: &[Target {
+            base: Base::ComponentStore,
+            ..handler("")
+        }],
         keys: &[],
     },
     Item {
@@ -817,6 +874,16 @@ static ITEMS: &[Item] = &[
         default_on: false,
         targets: &[handler("Windows ESD installation files")],
         keys: &[],
+    },
+    Item {
+        id: "last_good",
+        group: "windows",
+        default_on: false,
+        keys: &[],
+        targets: &[
+            tree(Base::Windows, "LastGood", WEEK),
+            tree(Base::Windows, "LastGood.Tmp", WEEK),
+        ],
     },
     Item {
         id: "update_cache",
@@ -1146,6 +1213,8 @@ pub fn label_both(id: &str) -> Localized {
         "shader_cache" => tr_both!("cleanup.shader_cache"),
         "thumbnails" => tr_both!("cleanup.thumbnails"),
         "prefetch" => tr_both!("cleanup.prefetch"),
+        "rdp_cache" => tr_both!("cleanup.rdp_cache"),
+        "last_good" => tr_both!("cleanup.last_good"),
         "browser_cache" => tr_both!("cleanup.browser_cache"),
         "browser_history" => tr_both!("cleanup.browser_history"),
         "browser_cookies" => tr_both!("cleanup.browser_cookies"),
@@ -1204,6 +1273,8 @@ pub fn about(id: &str) -> String {
         "shader_cache" => tr!("cleanup.shader_cache_about"),
         "thumbnails" => tr!("cleanup.thumbnails_about"),
         "prefetch" => tr!("cleanup.prefetch_about"),
+        "rdp_cache" => tr!("cleanup.rdp_cache_about"),
+        "last_good" => tr!("cleanup.last_good_about"),
         "browser_cache" => tr!("cleanup.browser_cache_about"),
         "browser_history" => tr!("cleanup.browser_history_about"),
         "browser_cookies" => tr!("cleanup.browser_cookies_about"),
@@ -1426,7 +1497,10 @@ mod tests {
         );
         for i in catalog().iter().filter(|i| i.admin_only()) {
             assert_eq!(i.group, "windows", "{}", i.id);
-            assert!(i.targets.iter().all(|t| t.base == Base::VolumeCache));
+            assert!(i
+                .targets
+                .iter()
+                .all(|t| matches!(t.base, Base::VolumeCache | Base::ComponentStore)));
             assert!(!i.reviewed() && !i.per_user());
         }
     }

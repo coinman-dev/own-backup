@@ -59,6 +59,9 @@ pub struct Tally {
     pub records: u64,
     /// Registry values and keys removed (or to be removed).
     pub entries: u64,
+    /// `bytes` is the most this can free, not what it will: nothing says more
+    /// exactly ([`crate::component_store`]).
+    pub up_to: bool,
 }
 
 impl Tally {
@@ -69,6 +72,7 @@ impl Tally {
         self.bytes += other.bytes;
         self.left_files += other.left_files;
         self.left_bytes += other.left_bytes;
+        self.up_to |= other.up_to;
     }
 }
 
@@ -189,7 +193,7 @@ pub fn folders(target: &Target, roots: &Roots, users: &[User]) -> Vec<PathBuf> {
         Base::LocalAppData => per_user("Local"),
         Base::RoamingAppData => per_user("Roaming"),
         Base::Junk => users.iter().map(|u| u.profile.clone()).collect(),
-        Base::VolumeCache | Base::Command => Vec::new(),
+        Base::VolumeCache | Base::ComponentStore | Base::Command => Vec::new(),
         Base::Home => users
             .iter()
             .flat_map(|u| below(&u.profile, target.path))
@@ -330,6 +334,21 @@ pub(crate) fn run_at_with(
             if open(target.programs) {
                 continue;
             }
+            if target.base == Base::ComponentStore {
+                match crate::component_store::run(mode == Mode::Remove, cancel) {
+                    Ok(found) => {
+                        tally.bytes += found.bytes;
+                        tally.up_to |= found.up_to;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) => {
+                        tracing::info!(error = %e, "cleanup: DISM failed");
+                        tally.left_files += 1;
+                    }
+                }
+                progress(item.id, &tally);
+                continue;
+            }
             if matches!(target.base, Base::VolumeCache | Base::Command) {
                 let done = if target.base == Base::Command {
                     crate::linux_system::run(target.path, mode == Mode::Remove, cancel)
@@ -418,6 +437,8 @@ pub(crate) fn run_at_with(
                         only,
                         found: (mode == Mode::Analyze).then_some(&mut found),
                         options: &options,
+                        user,
+                        as_owner: false,
                     };
                     walk.root(&folder);
                 }
@@ -475,6 +496,10 @@ struct Walk<'a> {
     /// Analysis: where the files found go.
     found: Option<&'a mut Vec<Found>>,
     options: &'a Options,
+    /// Whose folder this is, if it is one person's.
+    user: Option<&'a User>,
+    /// This thread already acts as that person.
+    as_owner: bool,
 }
 
 impl Walk<'_> {
@@ -494,9 +519,36 @@ impl Walk<'_> {
 
     /// Clean one folder; whether it is empty now (in analysis: would be).
     fn dir(&mut self, dir: &Path) -> bool {
-        let Ok(entries) = fs::read_dir(dir) else {
-            return false;
+        let (entries, rights) = match fs::read_dir(dir) {
+            Ok(entries) => (entries, None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(e) => {
+                // A folder only its owner may open keeps even the service out:
+                // what a PyInstaller program leaves in Temp is 1.4 GB of that on
+                // the owner's machine (2026-11-02). Its owner's rights open it.
+                let owner = (e.kind() == std::io::ErrorKind::PermissionDenied && !self.as_owner)
+                    .then(|| self.user.and_then(crate::users::as_logged_on))
+                    .flatten();
+                match owner.as_ref().map(|_| fs::read_dir(dir)) {
+                    Some(Ok(entries)) => (entries, owner),
+                    _ => {
+                        tracing::info!(folder = %dir.display(), error = %e, "cleanup: a folder could not be read, left");
+                        self.tally.left_files += 1;
+                        return false;
+                    }
+                }
+            }
         };
+        let was_owner = self.as_owner;
+        self.as_owner |= rights.is_some();
+        let _rights = rights;
+        let empty = self.entries(entries);
+        self.as_owner = was_owner;
+        empty
+    }
+
+    /// Clean what a folder holds; whether nothing stays.
+    fn entries(&mut self, entries: fs::ReadDir) -> bool {
         let mut left = false;
         for entry in entries {
             if self.cancel.load(Ordering::Relaxed) {
