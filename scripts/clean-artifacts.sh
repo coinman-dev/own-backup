@@ -39,12 +39,26 @@
 #            удалением ветки сохраняются в backup/agent-branches-<время>.bundle.
 #            Ветка с правками, которых в dev нет, остаётся — решать человеку.
 #   --all    = --stand --agents
+#   --tmp    восстановимое в tmp/ (в --all не входит: систему для сборки .deb
+#            потом придётся скачивать заново):
+#              tmp/deb-noble-target — кэш сборки .deb;
+#              tmp/deb-noble        — система Ubuntu 24.04 для сборки .deb; её
+#                                     файлы — root's, поэтому нужен sudo. Не
+#                                     удаляется, пока в ней что-то смонтировано:
+#                                     сборка подключает туда /dev, /proc и САМ
+#                                     ЭТОТ РЕПОЗИТОРИЙ;
+#              tmp/vm-res           — файлы и журналы проверок последнего выпуска;
+#              *.log, *.out, *.tar.gz, *.bundle в корне tmp/.
+#            Остаётся всегда: tmp/sync и tmp/linux-audit (скрипты синхронизации
+#            и сборки выпуска, которых нет в git), прочие скрипты и папки —
+#            среди них улики старых проверок; решать человеку.
 #
 # Использование:
 #   scripts/clean-artifacts.sh                  # ПРОБНЫЙ ПРОГОН — что уйдёт и сколько это
 #   scripts/clean-artifacts.sh --force          # собственно удалить артефакты
 #   scripts/clean-artifacts.sh --all            # показать и стенд, и агентов
-#   scripts/clean-artifacts.sh --force --all    # удалить всё перечисленное
+#   scripts/clean-artifacts.sh --force --all    # удалить артефакты, стенд и агентов
+#   sudo scripts/clean-artifacts.sh --force --tmp   # и восстановимое в tmp/
 #   scripts/clean-artifacts.sh --archive [OUT]  # собрать лёгкий .tar.gz (ничего не удаляя)
 #                                               # по умолчанию — в ТЕКУЩИЙ каталог
 #   scripts/clean-artifacts.sh --archive --with-git [OUT]   # ...вместе с историей .git
@@ -117,6 +131,7 @@ MODE="dry"          # dry | force | archive
 WITH_GIT=0
 DO_STAND=0
 DO_AGENTS=0
+DO_TMP=0
 OUT=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -126,6 +141,7 @@ while [ $# -gt 0 ]; do
     --stand)      DO_STAND=1 ;;
     --agents)     DO_AGENTS=1 ;;
     --all)        DO_STAND=1; DO_AGENTS=1 ;;
+    --tmp)        DO_TMP=1 ;;
     -h|--help)    usage ;;
     -*)           echo "неизвестный ключ: $1" >&2; exit 2 ;;
     *)            OUT="$1" ;;   # позиционный → путь архива
@@ -300,6 +316,63 @@ if [ "$DO_AGENTS" -eq 1 ]; then
   fi
 fi
 
+# ── восстановимое в tmp/ ───────────────────────────────────────────────────
+# Что-то смонтировано в каталоге или под ним? Сборка .deb подключает в
+# tmp/deb-noble/src сам репозиторий: rm -rf прошёл бы по нему. Тот же раздел —
+# значит, --one-file-system не спасёт; спасает только этот вопрос. Не смогли
+# спросить (нет /proc/mounts) — считаем, что смонтировано.
+mounted_below() {
+  local dir
+  dir="$(cd "$1" && pwd -P)" || return 0
+  [ -r /proc/mounts ] || return 0
+  awk -v d="$dir" '{ gsub(/\\040/, " ", $2); if ($2 == d || index($2, d "/") == 1) found = 1 } END { exit !found }' /proc/mounts
+}
+
+if [ "$DO_TMP" -eq 1 ]; then
+  echo
+  echo "Восстановимое в tmp/:"
+  tmp_kb=0
+  for d in tmp/deb-noble-target tmp/deb-noble tmp/vm-res; do
+    [ -d "$d" ] || continue
+    [ -L "$d" ] && continue
+    if mounted_below "$d"; then
+      note "" "$d — в нём что-то смонтировано (идёт сборка .deb?), остаётся"
+      continue
+    fi
+    # Чужие каталоги внутри (root's) пользователю не прочитать: размер тогда неполный.
+    kb=$(du -skx "$d" 2>/dev/null | cut -f1 || true)
+    note "$(( ${kb:-0} / 1024 ))M" "$d/"
+    if [ "$MODE" = "force" ]; then
+      rm -rf --one-file-system -- "$d" 2>/dev/null || true
+      if [ -e "$d" ]; then
+        echo "            удалён не весь: там файлы root — sudo scripts/clean-artifacts.sh --force --tmp"
+        continue
+      fi
+    fi
+    tmp_kb=$(( tmp_kb + ${kb:-0} ))
+  done
+  shopt -s nullglob
+  loose=0
+  for f in tmp/*.log tmp/*.out tmp/*.tar.gz tmp/*.bundle; do
+    [ -f "$f" ] || continue
+    [ -L "$f" ] && continue
+    loose=$(( loose + 1 ))
+    tmp_kb=$(( tmp_kb + $(du -sk "$f" | cut -f1) ))
+    [ "$MODE" = "force" ] && rm -f -- "$f"
+  done
+  shopt -u nullglob
+  [ "$loose" -gt 0 ] && note "" "$loose журнал(ов) и архив(ов) в корне tmp/"
+  printf '  итого: ~%s МБ\n' "$(( tmp_kb / 1024 ))"
+  kept=""
+  for d in tmp/*/; do
+    d="${d%/}"
+    case "$d" in tmp/deb-noble-target|tmp/deb-noble|tmp/vm-res) continue ;; esac
+    [ -d "$d" ] && kept="$kept ${d#tmp/}"
+  done
+  [ -n "$kept" ] && echo "  остаются (решать человеку):$kept"
+  [ "$total_kb" -eq 0 ] && [ "$tmp_kb" -gt 0 ] && found=1
+fi
+
 if [ "$MODE" = "force" ]; then
   echo
   echo "Удалено. ✓  (код, .cargo/config.toml, .ai, design/, image/ на месте)"
@@ -307,6 +380,6 @@ if [ "$MODE" = "force" ]; then
 elif [ "$found" -ne 0 ]; then
   echo
   echo "Это был ПРОБНЫЙ ПРОГОН — ничего не удалено."
-  echo "  удалить:        scripts/clean-artifacts.sh --force [--stand] [--agents | --all]"
+  echo "  удалить:        scripts/clean-artifacts.sh --force [--stand] [--agents | --all] [--tmp]"
   echo "  вместо этого архив: scripts/clean-artifacts.sh --archive"
 fi
