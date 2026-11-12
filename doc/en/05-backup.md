@@ -140,6 +140,29 @@ changed, because the versions already made must stay one chain.
   - With *Full*: **Cleanup rules for old backups** — keep the latest N, delete
     backups older than N days, keep the first.
 
+### Cleanup
+
+The **Cleanup** tab cleans the disk before every copy of this job, so the copy
+carries no junk.
+
+- **Clean the disk before the copy** turns it on. The service cleans by itself,
+  before the copy, with no window. If the cleanup cannot run (another one is going
+  on, for example), the copy is made all the same.
+- **Cleanup profile** — what is cleaned: one of the profiles saved in the
+  **Cleanup** section with **Save profile as…**, or **The automatic cleanup set**
+  (what is set there in **Automatic cleanup settings**). Below, **What is cleaned**
+  lists the profile's items and how many users.
+- A profile that was deleted shows as **A deleted profile**: nothing is cleaned
+  before the copy then — choose another. An empty profile cleans nothing either.
+- **Files by masks** are never removed before a copy: they go only after their
+  list was looked through.
+
+A cleanup before a copy goes into **Activity** as a line of its own, "Cleanup
+before the copy "…"". It does not count as a run of the job: the job's card and
+its schedule do not take it into account. **Cancel** on the job stops it too,
+except a cleanup of Windows updates (WinSxS) already started — Windows finishes
+that one by itself. More on the items: [Disk cleanup](14-cleanup.md).
+
 ### Exclusions
 
 ![Exclusions](../images/en/wizard-exclusions.png)

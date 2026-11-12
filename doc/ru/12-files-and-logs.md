@@ -6,6 +6,7 @@
 |---|---|
 | Программа | `C:\Program Files\OwnBackup` |
 | Настройки, задания, история запусков, сохранённые пароли томов | `C:\ProgramData\OwnBackup` (`config.toml`, `jobs.json`, `activity.json`, `metadata.db`) — доступно только SYSTEM и администраторам |
+| Набор автоочистки и профили очистки | `C:\ProgramData\OwnBackup\cleanup-auto.json`, `cleanup-profiles.json` |
 | Журнал службы, файл на день, хранится тридцать дней | `C:\Program Files\OwnBackup\Logs\own-backup-service-<дата>.log` |
 | Журналы окна и значка | `C:\ProgramData\OwnBackup\Logs\` |
 | Копии записей загрузки перед каждым изменением | `C:\ProgramData\OwnBackup\boot` |
@@ -18,6 +19,7 @@
 | Окно и командная строка | `/usr/bin/own-backup-gui`, `/usr/bin/own-backup-cli` |
 | Служба | `/usr/libexec/own-backup/own-backup-service`, юнит `own-backup.service` |
 | Настройки, задания, история, ключи | `/var/lib/own-backup` |
+| Набор автоочистки и профили очистки | `/var/lib/own-backup/cleanup-auto.json`, `cleanup-profiles.json` |
 | Журнал службы | journald (`journalctl -u own-backup`) и `/var/log/own-backup` |
 | Копии записей загрузки | `/var/lib/own-backup/boot` |
 

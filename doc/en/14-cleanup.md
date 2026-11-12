@@ -28,19 +28,41 @@ and the users' are within its reach. Linux has items of its own — see
 
 The chosen items and users are remembered.
 
+Unticked files are always respected. If the analysis has gone out of date (the
+service restarted, another cleanup ran) and some files are unticked, **Clean up**
+removes nothing and asks you to press **Analyse** again.
+
+## Cleanup profiles
+
+What is ticked on the page can be saved under a name of your own: at the bottom of
+the list, the **Cleanup profile** row, **Save profile as…**. The items, the users
+and the ages (browser history, masks) are saved. The same name replaces the
+earlier profile. Saved profiles:
+
+- are chosen in a backup job, on its **Cleanup** tab: before the copy the disk is
+  cleaned by the one chosen (see [Backup](05-backup.md#cleanup));
+- are opened with the **Profile:** list at the top of the page — the page's ticks
+  become the profile's; **your own choice** is your ticks.
+
+The service keeps a profile with the rights of whoever saved it; only an
+administrator of the computer may change or delete someone else's. A profile some
+job cleans by cannot be deleted.
+
 ## Automatic cleanup and cleanup before a copy
 
-Below the list is **Automatic cleanup** with a **Set up…** button. The
+At the top of the page is the **Automatic cleanup settings** button. The
 service cleans by itself, with no window: on a schedule (daily, weekly on
 chosen days, monthly; a missed cleanup can run after the computer starts)
 and before the copy of jobs whose Cleanup tab (in the backup settings) ticks **"Clean the disk
-before the copy"**. What is ticked on the page when Save is pressed is
+before the copy"** — by the profile chosen there or by the automatic cleanup
+set. What is ticked on the page when Save is pressed is
 cleaned, for the ticked users, with the same ages. **Files by masks are
 not part of it** — they go only after their list was looked through. The
 set is saved with the rights of whoever saved it and checked again at each
 run. The result goes into Activity as "Scheduled automatic cleanup" or
 "Cleanup before the copy "…"". If the cleanup before a copy cannot run
-(another one is going on, say), the copy is made anyway.
+(another one is going on, say), the copy is made anyway. It does not count as
+a run of the job, and **Cancel** on the job stops it too.
 
 ## What is removed
 
