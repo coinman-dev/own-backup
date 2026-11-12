@@ -6,6 +6,7 @@
 |---|---|
 | The program | `C:\Program Files\OwnBackup` |
 | Settings, jobs, run history, remembered volume passwords | `C:\ProgramData\OwnBackup` (`config.toml`, `jobs.json`, `activity.json`, `metadata.db`) — readable by SYSTEM and administrators only |
+| The automatic cleanup set and cleanup profiles | `C:\ProgramData\OwnBackup\cleanup-auto.json`, `cleanup-profiles.json` |
 | Service log, one file a day, thirty days kept | `C:\Program Files\OwnBackup\Logs\own-backup-service-<date>.log` |
 | Window and tray logs | `C:\ProgramData\OwnBackup\Logs\` |
 | Copies of boot entries made before every change | `C:\ProgramData\OwnBackup\boot` |
@@ -18,6 +19,7 @@
 | The window and the command line | `/usr/bin/own-backup-gui`, `/usr/bin/own-backup-cli` |
 | The service | `/usr/libexec/own-backup/own-backup-service`, unit `own-backup.service` |
 | Settings, jobs, history, keys | `/var/lib/own-backup` |
+| The automatic cleanup set and cleanup profiles | `/var/lib/own-backup/cleanup-auto.json`, `cleanup-profiles.json` |
 | Service log | journald (`journalctl -u own-backup`) and `/var/log/own-backup` |
 | Copies of boot entries | `/var/lib/own-backup/boot` |
 

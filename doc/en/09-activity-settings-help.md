@@ -11,7 +11,11 @@ The history of backups, restores and scheduled checks, newest first.
   (the service was stopped during the run — the schedule repeats it), *Scheduled
   backup not started* (for example a password is not saved);
 - *Restore completed*, *Restore failed*, *Restore cancelled*;
-- *Copies verified*, *Verification failed*, *Verification cancelled*.
+- *Copies verified*, *Verification failed*, *Verification cancelled*;
+- *Disk cleanup*, *Disk cleanup cancelled*, *Scheduled automatic cleanup*,
+  *Cleanup before the copy "…"* — with how much was freed, how many files and
+  registry entries were removed, what stayed in use and which items were cleaned
+  ([Disk cleanup](14-cleanup.md)).
 
 Under it: notes and errors in red, and the details — **Type** (full,
 incremental, differential), **Format**, **Size**, **Speed**, **Duration**,

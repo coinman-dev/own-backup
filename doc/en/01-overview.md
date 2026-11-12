@@ -65,13 +65,13 @@ token. No network port is opened.
 ![The Backup page with a job selected](../images/en/backup-dashboard.png)
 
 The left column is the menu: **Backup**, **Restore**, **Boot menu**, **Tools**,
-**Activity**, **Settings**, **Help**. The next column on the **Backup** page
+**Activity**, **Cleanup** ([Disk cleanup](14-cleanup.md)), **Settings**, **Help**. The next column on the **Backup** page
 lists the backup jobs; the right part shows the selected job: what it backs up,
 where to, when it last ran and what the backup holds by file type.
 
 ## Prerelease status
 
-0.1.6-beta is a prerelease, and the first with a Linux version. Before relying
+0.2.1-beta is a prerelease; the Linux version is new since 0.1.6-beta. Before relying
 on a backup, check it: restore it to a spare disk or a virtual machine, or at
 least mount it and open a few files. On Linux especially — that version is new.
 
