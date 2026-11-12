@@ -1,0 +1,626 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Own Backup — block-level backup of Windows and Linux disks</title>
+<meta name="description" content="Own Backup makes block-level images of Windows and Linux disks and volumes: full, incremental and differential backups in VHDX, qcow2 and encrypted OBK, with bootable recovery media.">
+
+<!-- The page is dark by design. These three lines tell the browser and the
+     Dark Reader extension so: it must not be recoloured a second time. -->
+<meta name="color-scheme" content="dark">
+<meta name="darkreader-lock">
+<meta name="theme-color" content="#0f0e19">
+
+<meta property="og:type" content="website">
+<meta property="og:title" content="Own Backup — block-level backup of Windows and Linux disks">
+<meta property="og:description" content="Full, incremental and differential disk images in VHDX, qcow2 and encrypted OBK. Bootable recovery media. No ads, no telemetry.">
+<meta property="og:url" content="https://coinman-dev.github.io/own-backup/">
+<meta property="og:image" content="https://coinman-dev.github.io/own-backup/img/en/backup-dashboard.png">
+<meta name="twitter:card" content="summary_large_image">
+
+<link rel="icon" type="image/png" href="assets/favicon.png">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+<link rel="stylesheet" href="styles.css">
+<script>document.documentElement.classList.add('js');</script>
+</head>
+<body>
+
+<svg class="sprite" aria-hidden="true" focusable="false">
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 3 3 8l9 5 9-5-9-5Z"/><path d="m3 13 9 5 9-5"/><path d="m3 17.5 9 5 9-5" opacity=".55"/></symbol>
+  <symbol id="i-camera" viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="14" rx="3"/><circle cx="12" cy="13" r="3.6"/><path d="M8 6 9.5 3.5h5L16 6"/></symbol>
+  <symbol id="i-scissors" viewBox="0 0 24 24"><circle cx="6" cy="7" r="2.6"/><circle cx="6" cy="17" r="2.6"/><path d="M8.2 8.4 20 17M8.2 15.6 20 7"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4.5" y="10.5" width="15" height="10" rx="2.5"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/><path d="M12 14.5v2.5"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4.2"/><path d="M11 12 20 3M16.5 6.5l2.5 2.5M14 9l2 2"/></symbol>
+  <symbol id="i-swap" viewBox="0 0 24 24"><path d="M4 8h15M15 4l4 4-4 4"/><path d="M20 16H5M9 12l-4 4 4 4"/></symbol>
+  <symbol id="i-restore" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.6-5.9"/><path d="M4 4v5h5"/><path d="M12 8v4.5l3 1.8"/></symbol>
+  <symbol id="i-drive" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><circle cx="12" cy="12" r="3.2"/><circle cx="12" cy="12" r=".6"/><path d="M17.5 16.5h.5"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M12 3 4.5 6v5.5c0 4.6 3.1 8 7.5 9.5 4.4-1.5 7.5-4.900 7.500-9.500V6L12 3Z"/><path d="m8.800 12 2.300 2.300 4.200-4.600"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.500"/><path d="M12 7.500V12l3.200 2"/></symbol>
+  <symbol id="i-boot" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12.500" rx="2.500"/><path d="M8 20.500h8M12 16.500v4"/><path d="M7.500 8.500h6M7.500 12h9"/></symbol>
+  <symbol id="i-tree" viewBox="0 0 24 24"><path d="M4 5.500h6l1.800 2H20v11H4v-13Z"/><path d="M8.500 12h7M8.500 15h4.500"/></symbol>
+  <symbol id="i-usb" viewBox="0 0 24 24"><rect x="7" y="9" width="10" height="12" rx="2"/><path d="M9 9V3.500h6V9"/><path d="M11 6h.010M13 6h.010"/></symbol>
+  <symbol id="i-broom" viewBox="0 0 24 24"><path d="m14 4 6 6"/><path d="m16 6-6.500 6.500"/><path d="M9.500 12.500 4 15l5 5 2.500-5.500"/><path d="M6.500 17.500 5 21M9 19l-.5 2"/></symbol>
+  <symbol id="i-window" viewBox="0 0 24 24"><rect x="3" y="4.500" width="18" height="15" rx="2.500"/><path d="M3 9h18"/><path d="M6.500 6.800h.010M9 6.800h.010"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.200"/><path d="M12 2.800v2.400M12 18.800v2.400M2.800 12h2.400M18.800 12h2.400M5.500 5.500l1.700 1.700M16.800 16.800l1.700 1.700M5.500 18.500l1.700-1.700M16.800 7.200l1.700-1.700"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4.500" width="18" height="15" rx="2.500"/><path d="m7 10 3 2.500L7 15M12.500 15H17"/></symbol>
+  <symbol id="i-cloud-off" viewBox="0 0 24 24"><path d="M7 18.500h10.500a3.500 3.500 0 0 0 1.200-6.800A6 6 0 0 0 9 8"/><path d="M6.300 10.200A4.300 4.300 0 0 0 7 18.500"/><path d="m3.500 3.500 17 17"/></symbol>
+  <symbol id="i-files-off" viewBox="0 0 24 24"><path d="M7 3.500h7l4 4v13H7v-17Z"/><path d="M14 3.500v4h4"/><path d="m3.500 3.500 17 17"/></symbol>
+  <symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M3 12s3.300-6 9-6 9 6 9 6-3.300 6-9 6-9-6-9-6Z"/><circle cx="12" cy="12" r="2.800"/><path d="m3.500 3.500 17 17"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3.500v11M7.500 10.500 12 15l4.500-4.500"/><path d="M4.500 19.500h15"/></symbol>
+  <symbol id="i-github" viewBox="0 0 24 24"><path stroke="none" fill="currentColor" d="M12 2a10 10 0 0 0-3.160 19.490c.5.090.680-.220.680-.480v-1.700c-2.780.6-3.370-1.340-3.370-1.340-.450-1.160-1.110-1.470-1.110-1.470-.910-.620.070-.610.070-.610 1 .070 1.530 1.030 1.530 1.030.890 1.530 2.340 1.090 2.910.830.090-.650.350-1.090.630-1.340-2.220-.250-4.550-1.110-4.550-4.940 0-1.090.390-1.980 1.030-2.680-.1-.250-.450-1.270.1-2.650 0 0 .840-.270 2.750 1.020a9.560 9.560 0 0 1 5 0c1.910-1.290 2.750-1.020 2.750-1.020.550 1.380.2 2.400.1 2.650.640.7 1.030 1.590 1.030 2.680 0 3.840-2.340 4.680-4.570 4.930.360.310.680.920.680 1.850v2.740c0 .270.180.580.690.480A10 10 0 0 0 12 2Z"/></symbol>
+  <symbol id="i-windows" viewBox="0 0 24 24"><path stroke="none" fill="currentColor" d="M3 5.300 10.800 4.200v7.300H3V5.300Zm8.800-1.250L21 2.700v8.800h-9.200V4.050ZM3 12.500h7.800v7.300L3 18.700v-6.200Zm8.800 0H21v8.800l-9.200-1.300v-7.500Z"/></symbol>
+  <symbol id="i-linux" viewBox="0 0 24 24"><path d="M12 3c-2.200 0-3.500 1.800-3.500 4.200 0 1.900-.5 3-1.700 4.700C5.500 13.800 4.500 15.800 4.500 18c0 1.200 1 1.500 2.200 1.500 1.300 0 2.300 1 5.300 1s4-1 5.300-1c1.200 0 2.200-.300 2.200-1.500 0-2.200-1-4.200-2.300-6.100-1.200-1.700-1.700-2.800-1.700-4.700C15.500 4.800 14.200 3 12 3Z"/><path d="M10.300 7.500h.010M13.700 7.500h.010M10.500 10.200c.9.700 2.100.700 3 0"/></symbol>
+  <symbol id="i-disc" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.500"/><circle cx="12" cy="12" r="2.200"/><path d="M12 6.200a5.800 5.800 0 0 1 5.800 5.800" opacity=".6"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.500" y="8.500" width="11" height="11" rx="2"/><path d="M15.500 8.500v-2a2 2 0 0 0-2-2h-7a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h2"/></symbol>
+  <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14M13.500 6.500 19 12l-5.500 5.500"/></symbol>
+  <symbol id="i-book" viewBox="0 0 24 24"><path d="M4.500 5.500c2.500-1 5-1 7.500.5v13c-2.500-1.500-5-1.500-7.500-.5v-13Z"/><path d="M19.500 5.500c-2.500-1-5-1-7.500.5v13c2.500-1.500 5-1.500 7.500-.5v-13Z"/></symbol>
+</svg>
+
+<div class="progress" aria-hidden="true"><span id="progressBar"></span></div>
+
+<header class="nav" id="nav">
+  <div class="wrap nav__in">
+    <a class="brand" href="#top" aria-label="Own Backup">
+      <img src="assets/logo.png" alt="" width="40" height="35">
+      <span>OWN BACKUP</span>
+    </a>
+    <nav class="nav__links" aria-label="Sections">
+      <a href="#how" data-i18n="nav.how">How it works</a>
+      <a href="#features" data-i18n="nav.features">Features</a>
+      <a href="#screens" data-i18n="nav.screens">Screens</a>
+      <a href="#recovery" data-i18n="nav.recovery">Recovery</a>
+      <a href="#docs" data-i18n="nav.docs">Guide</a>
+    </nav>
+    <div class="nav__side">
+      <div class="lang" role="group" aria-label="Language">
+        <button type="button" data-lang="en" aria-pressed="true">EN</button>
+        <button type="button" data-lang="ru" aria-pressed="false">RU</button>
+      </div>
+      <a class="iconbtn" href="https://github.com/coinman-dev/own-backup" aria-label="GitHub" rel="noopener">
+        <svg class="ic"><use href="#i-github"/></svg>
+      </a>
+      <a class="btn btn--go btn--sm" href="#download"><svg class="ic"><use href="#i-download"/></svg><span data-i18n="nav.download">Download</span></a>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+
+<!-- ───────────────────────── Hero ───────────────────────── -->
+<section class="hero">
+  <canvas class="hero__cells" id="heroCells" aria-hidden="true"></canvas>
+  <div class="hero__glow" aria-hidden="true"></div>
+  <div class="wrap hero__in">
+    <div class="hero__text">
+      <a class="pill" href="https://github.com/coinman-dev/own-backup/releases" data-release-link rel="noopener">
+        <i class="pill__dot"></i>
+        <span><b data-version>0.2.1-beta</b> · <span data-i18n="hero.pill">prerelease for Windows and Linux</span></span>
+      </a>
+      <h1 class="hero__title">
+        <span class="line"><span data-i18n="hero.t1">Disk images,</span></span>
+        <span class="line"><span class="grad" data-i18n="hero.t2">block by block.</span></span>
+      </h1>
+      <p class="hero__lead" data-i18n="hero.lead">Own Backup copies whole disks and volumes of Windows and Linux. Only used clusters go into the image; excluded files do not go at all. Restore a partition, a disk or single files — and, from the boot medium, the very disk the system boots from.</p>
+      <div class="hero__cta">
+        <a class="btn btn--go" href="https://github.com/coinman-dev/own-backup/releases/download/v0.2.1-beta/own-backup-install_0.2.1-beta.exe" data-asset="exe" data-os="win">
+          <svg class="ic"><use href="#i-windows"/></svg><span data-i18n="hero.win">Download for Windows</span>
+        </a>
+        <a class="btn btn--line" href="https://github.com/coinman-dev/own-backup/releases/download/v0.2.1-beta/own-backup_0.2.1.beta_amd64.deb" data-asset="deb" data-os="linux">
+          <svg class="ic"><use href="#i-linux"/></svg><span data-i18n="hero.linux">Download .deb for Linux</span>
+        </a>
+      </div>
+      <p class="hero__note" data-i18n="hero.note">Free for noncommercial use · No ads, no telemetry, no update checks</p>
+    </div>
+
+    <div class="hero__shot" id="heroShot">
+      <div class="shot3d">
+        <div class="frame">
+          <img data-shot="backup-dashboard" src="img/en/backup-dashboard.png" width="1584" height="992" alt="Own Backup: the Backup page with jobs, the last backup of each and what is in it" data-i18n-alt="hero.alt">
+        </div>
+        <img class="hero__logo" src="assets/logo.png" alt="" width="396" height="348">
+        <div class="chip3d chip3d--a"><svg class="ic"><use href="#i-lock"/></svg>AES-256-GCM</div>
+        <div class="chip3d chip3d--b"><svg class="ic"><use href="#i-check"/></svg>xxHash64</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="wrap">
+    <ul class="stats">
+      <li><b data-count="9">9</b><span data-i18n="stat.fs">filesystems read by used blocks only</span></li>
+      <li><b data-count="3">3</b><span data-i18n="stat.fmt">image formats: VHDX, qcow2, OBK</span></li>
+      <li><b data-count="256">256</b><span data-i18n="stat.aes">bit AES-GCM encryption of the archive</span></li>
+      <li><b>0</b><span data-i18n="stat.tel">bytes of telemetry sent anywhere</span></li>
+    </ul>
+  </div>
+
+  <div class="marquee" aria-hidden="true">
+    <div class="marquee__track" id="marquee">
+      <span>NTFS</span><span>ReFS</span><span>FAT32</span><span>exFAT</span><span>ext2</span><span>ext3</span><span>ext4</span><span>XFS</span><span>btrfs</span><span class="alt">BitLocker</span><span class="alt">LUKS</span><span class="alt">LVM</span><span class="alt">VSS</span><span>UEFI</span><span>Secure Boot</span><span class="alt">zstd</span><span class="alt">AES-256-GCM</span><span class="alt">xxHash64</span><span>VHDX</span><span>qcow2</span><span>OBK</span><span class="alt">iSCSI</span>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────── How a copy is made ───────────────────── -->
+<section class="sec" id="how">
+  <div class="wrap">
+    <header class="sec__head reveal">
+      <p class="eyebrow" data-i18n="how.eyebrow">How it works</p>
+      <h2 data-i18n="how.title">Not file by file. Block by block.</h2>
+      <p class="lead" data-i18n="how.lead">A backup keeps a partition or a whole disk the way it was, so it can be put back exactly — including the disk the system boots from. Own Backup reads the used blocks of the filesystem and writes them into one image file.</p>
+    </header>
+
+    <div class="pipe reveal">
+      <div class="pipe__stage">
+        <div class="pipe__canvas"><canvas id="pipeCanvas" role="img" aria-label="Animation: used blocks of a disk are read from a snapshot, compressed, encrypted and written into an image file" data-i18n-aria="how.canvas"></canvas></div>
+        <div class="pipe__bar">
+          <ul class="legend">
+            <li><i class="sw sw--used"></i><span data-i18n="how.lg.used">used</span></li>
+            <li><i class="sw sw--free"></i><span data-i18n="how.lg.free">free — skipped</span></li>
+            <li><i class="sw sw--excl"></i><span data-i18n="how.lg.excl">excluded — not read</span></li>
+          </ul>
+          <ul class="counters">
+            <li><b id="cRead">0</b><span data-i18n="how.c.read">blocks written</span></li>
+            <li><b id="cFree">0</b><span data-i18n="how.c.free">free skipped</span></li>
+            <li><b id="cExcl">0</b><span data-i18n="how.c.excl">excluded</span></li>
+          </ul>
+        </div>
+      </div>
+
+      <ol class="steps" id="pipeSteps">
+        <li data-step="1">
+          <h3 data-i18n="how.s1.t">Freeze</h3>
+          <p data-i18n="how.s1.d">A snapshot first: VSS on Windows, LVM or device-mapper on Linux. Open files land in the copy in a consistent state.</p>
+        </li>
+        <li data-step="2">
+          <h3 data-i18n="how.s2.t">Read only what is used</h3>
+          <p data-i18n="how.s2.d">Free space is skipped. Excluded files are not read at all, and their names are removed from the filesystem inside the image.</p>
+        </li>
+        <li data-step="3">
+          <h3 data-i18n="how.s3.t">Compress</h3>
+          <p data-i18n="how.s3.d">zstd in qcow2 and OBK, level 1 to 19: a trade of size for speed.</p>
+        </li>
+        <li data-step="4">
+          <h3 data-i18n="how.s4.t">Encrypt</h3>
+          <p data-i18n="how.s4.d">OBK is encrypted with AES-256-GCM and opens with a password or a recovery key.</p>
+        </li>
+        <li data-step="5">
+          <h3 data-i18n="how.s5.t">Verify</h3>
+          <p data-i18n="how.s5.d">Every block has an xxHash64 checksum: check right after the copy, on a schedule or at any time.</p>
+        </li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────── Features ───────────────────────── -->
+<section class="sec sec--alt" id="features">
+  <div class="wrap">
+    <header class="sec__head reveal">
+      <p class="eyebrow" data-i18n="feat.eyebrow">What it can do</p>
+      <h2 data-i18n="feat.title">Everything a disk needs to come back</h2>
+    </header>
+
+    <div class="cards" data-stagger>
+      <article class="card reveal">
+        <svg class="ic ic--lg"><use href="#i-layers"/></svg>
+        <h3 data-i18n="feat.1.t">Full, incremental, differential</h3>
+        <p data-i18n="feat.1.d">Volumes and whole disks — on a schedule, on an event or by hand. A job can keep a sliding window of increments, the oldest folded into the base.</p>
+      </article>
+      <article class="card reveal">
+        <svg class="ic ic--lg"><use href="#i-camera"/></svg>
+        <h3 data-i18n="feat.2.t">A running system</h3>
+        <p data-i18n="feat.2.d">Copied from a snapshot: VSS on Windows, LVM or device-mapper on Linux. Nothing has to be closed.</p>
+      </article>
+      <article class="card reveal">
+        <svg class="ic ic--lg"><use href="#i-scissors"/></svg>
+        <h3 data-i18n="feat.3.t">Exclusions that really exclude</h3>
+        <p data-i18n="feat.3.d">Matched files are not read, and their entries are removed from the filesystem inside the image — not left as empty ghosts.</p>
+      </article>
+      <article class="card reveal">
+        <svg class="ic ic--lg"><use href="#i-lock"/></svg>
+        <h3 data-i18n="feat.4.t">Encrypted archives</h3>
+        <p data-i18n="feat.4.d">The OBK format: zstd and AES-256-GCM. It opens with your password or with the recovery key shown once at creation.</p>
+      </article>
+      <article class="card reveal">
+        <svg class="ic ic--lg"><use href="#i-key"/></svg>
+        <h3 data-i18n="feat.5.t">BitLocker and LUKS sources</h3>
+        <p data-i18n="feat.5.d">BitLocker volumes, locked ones included, are copied decrypted — with the password or the 48-digit recovery key; LUKS volumes with their passphrase.</p>
+      </article>
+      <article class="card reveal">
+        <svg class="ic ic--lg"><use href="#i-swap"/></svg>
+        <h3 data-i18n="feat.6.t">Windows ⇄ Linux</h3>
+        <p data-i18n="feat.6.d">A backup made on one system opens, validates and restores on the other.</p>
+      </article>
+      <article class="card reveal">
+        <svg class="ic ic--lg"><use href="#i-restore"/></svg>
+        <h3 data-i18n="feat.7.t">Restore a bootable disk</h3>
+        <p data-i18n="feat.7.d">A partition or a whole disk, UEFI boot entries included — with a guard against overwriting the disk the system runs from.</p>
+      </article>
+      <article class="card reveal">
+        <svg class="ic ic--lg"><use href="#i-drive"/></svg>
+        <h3 data-i18n="feat.8.t">A backup as a disk</h3>
+        <p data-i18n="feat.8.d">Mount a backup and copy single files out. On Windows it goes through Windows' own iSCSI initiator: no third-party driver is installed.</p>
+      </article>
+      <article class="card reveal">
+        <svg class="ic ic--lg"><use href="#i-check"/></svg>
+        <h3 data-i18n="feat.9.t">Checksums on every block</h3>
+        <p data-i18n="feat.9.d">xxHash64 in the image's own metadata. Verification needs nothing but the image.</p>
+      </article>
+      <article class="card reveal">
+        <svg class="ic ic--lg"><use href="#i-clock"/></svg>
+        <h3 data-i18n="feat.10.t">Schedules and events</h3>
+        <p data-i18n="feat.10.d">Logon, startup, a destination disk plugged in. Retries, wake from sleep, an optional shutdown afterwards. A busy action waits in a queue instead of being refused.</p>
+      </article>
+      <article class="card reveal">
+        <svg class="ic ic--lg"><use href="#i-boot"/></svg>
+        <h3 data-i18n="feat.11.t">Boot menu</h3>
+        <p data-i18n="feat.11.d">See and edit the UEFI boot entries: what the firmware offers and where it leads.</p>
+      </article>
+      <article class="card reveal">
+        <svg class="ic ic--lg"><use href="#i-tree"/></svg>
+        <h3 data-i18n="feat.12.t">Linux partitions in Total Commander</h3>
+        <p data-i18n="feat.12.d">A Windows plugin shows the files of ext2/3/4 and btrfs partitions of this computer, also inside LVM and LUKS — read-only and in place.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────── Versions and chains ───────────────────── -->
+<section class="sec" id="chains">
+  <div class="wrap">
+    <header class="sec__head reveal">
+      <p class="eyebrow" data-i18n="ch.eyebrow">Versions and chains</p>
+      <h2 data-i18n="ch.title">Every run adds a version</h2>
+      <p class="lead" data-i18n="ch.lead">A full version and the increments after it form a chain. The job's retention settings decide how chains grow and which versions go.</p>
+    </header>
+
+    <div class="chain reveal" id="chain">
+      <div class="tabs" role="tablist">
+        <button type="button" role="tab" aria-selected="true" data-mode="inc" data-i18n="ch.tab.inc">Incremental</button>
+        <button type="button" role="tab" aria-selected="false" data-mode="diff" data-i18n="ch.tab.diff">Differential</button>
+        <button type="button" role="tab" aria-selected="false" data-mode="cons" data-i18n="ch.tab.cons">Consolidation</button>
+      </div>
+      <div class="chain__stage">
+        <svg class="chain__links" id="chainLinks" aria-hidden="true"></svg>
+        <div class="chain__row" id="chainRow" aria-hidden="true"></div>
+      </div>
+      <div class="chain__text">
+        <p data-mode-text="inc" data-i18n="ch.inc">Blocks changed since the previous version. After a set number of versions a new full version starts the next chain; old chains are deleted whole once they are no longer needed.</p>
+        <p data-mode-text="diff" data-i18n="ch.diff" hidden>Blocks changed since the last full version. Each differential depends only on its full version — and grows as changes pile up.</p>
+        <p data-mode-text="cons" data-i18n="ch.cons" hidden>One chain: the oldest increment is folded into the full version, so there is always one full version and a sliding window of increments.</p>
+        <p class="fine" data-i18n="ch.fine">To restore an incremental version the program reads the whole chain under it. A chain is never longer than 60 images.</p>
+      </div>
+    </div>
+
+    <div class="formats" data-stagger>
+      <article class="fmt reveal">
+        <header><h3>VHDX</h3><span class="tag" data-i18n="fmt.vhdx.tag">mounts in Windows by itself</span></header>
+        <dl>
+          <div><dt data-i18n="fmt.comp">Compression</dt><dd class="no" data-i18n="fmt.none">none</dd></div>
+          <div><dt data-i18n="fmt.enc">Encryption</dt><dd class="no" data-i18n="fmt.none">none</dd></div>
+        </dl>
+        <p data-i18n="fmt.vhdx.d">Windows' own virtual disk format.</p>
+      </article>
+      <article class="fmt reveal">
+        <header><h3>qcow2</h3><span class="tag" data-i18n="fmt.qcow.tag">smaller files</span></header>
+        <dl>
+          <div><dt data-i18n="fmt.comp">Compression</dt><dd class="yes">zstd</dd></div>
+          <div><dt data-i18n="fmt.enc">Encryption</dt><dd class="no" data-i18n="fmt.none">none</dd></div>
+        </dl>
+        <p data-i18n="fmt.qcow.d">The QEMU/KVM virtual disk format.</p>
+      </article>
+      <article class="fmt fmt--hot reveal">
+        <header><h3>OBK</h3><span class="tag" data-i18n="fmt.obk.tag">encrypted</span></header>
+        <dl>
+          <div><dt data-i18n="fmt.comp">Compression</dt><dd class="yes">zstd</dd></div>
+          <div><dt data-i18n="fmt.enc">Encryption</dt><dd class="yes">AES-256-GCM</dd></div>
+        </dl>
+        <p data-i18n="fmt.obk.d">Own Backup's encrypted format: a password or a recovery key opens it.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────── Screens ───────────────────────── -->
+<section class="sec sec--alt" id="screens">
+  <div class="wrap">
+    <header class="sec__head reveal">
+      <p class="eyebrow" data-i18n="sc.eyebrow">A first look</p>
+      <h2 data-i18n="sc.title">One window for the whole job</h2>
+      <p class="lead" data-i18n="sc.lead">The interface is in English and Russian, with light, dark and system themes.</p>
+    </header>
+
+    <div class="gallery reveal" id="gallery">
+      <div class="gallery__tabs" role="tablist">
+        <button type="button" role="tab" data-shot-tab="backup-dashboard" data-i18n="sc.t.backup">Backup</button>
+        <button type="button" role="tab" data-shot-tab="backup-progress" data-i18n="sc.t.progress">A run</button>
+        <button type="button" role="tab" data-shot-tab="wizard-source" data-i18n="sc.t.source">Source</button>
+        <button type="button" role="tab" data-shot-tab="wizard-scheme" data-i18n="sc.t.scheme">Scheme</button>
+        <button type="button" role="tab" data-shot-tab="wizard-exclusions" data-i18n="sc.t.excl">Exclusions</button>
+        <button type="button" role="tab" data-shot-tab="restore" data-i18n="sc.t.restore">Restore</button>
+        <button type="button" role="tab" data-shot-tab="boot-menu" data-i18n="sc.t.boot">Boot menu</button>
+        <button type="button" role="tab" data-shot-tab="tools" data-i18n="sc.t.tools">Tools</button>
+        <button type="button" role="tab" data-shot-tab="cleanup" data-i18n="sc.t.cleanup">Cleanup</button>
+        <button type="button" role="tab" data-shot-tab="activity" data-i18n="sc.t.activity">Activity</button>
+      </div>
+      <div class="frame frame--big">
+        <img id="galleryImg" data-shot="backup-dashboard" src="img/en/backup-dashboard.png" width="1584" height="992" alt="" loading="lazy">
+        <img id="galleryImg2" class="is-under" src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==" width="1584" height="992" alt="" aria-hidden="true">
+      </div>
+      <p class="gallery__cap" id="galleryCap" aria-live="polite"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────── Recovery ───────────────────────── -->
+<section class="sec" id="recovery">
+  <div class="wrap">
+    <header class="sec__head reveal">
+      <p class="eyebrow" data-i18n="rc.eyebrow">Restore and boot media</p>
+      <h2 data-i18n="rc.title">When the system will not start</h2>
+      <p class="lead" data-i18n="rc.lead">The running system cannot overwrite itself. A boot medium is a small operating system with the same Own Backup window on it — started from a USB stick, a CD or an ISO.</p>
+    </header>
+
+    <div class="split">
+      <div class="split__col reveal">
+        <div class="orbit" aria-hidden="true">
+          <svg viewBox="0 0 200 200">
+            <circle class="orbit__ring" cx="100" cy="100" r="78"/>
+            <circle class="orbit__ring orbit__ring--2" cx="100" cy="100" r="56"/>
+            <g transform="translate(200 0) scale(-1 1)">
+              <path class="orbit__arc" d="M100 22a78 78 0 1 1-67.500 39"/>
+              <path class="orbit__head" d="M34 78 32.500 61 17 68.500"/>
+            </g>
+            <rect class="orbit__disk" x="72" y="76" width="56" height="48" rx="9"/>
+            <circle class="orbit__spindle" cx="100" cy="100" r="11"/>
+            <circle class="orbit__dot" cx="100" cy="100" r="2.500"/>
+          </svg>
+        </div>
+        <h3 data-i18n="rc.r.t">Restore</h3>
+        <ul class="ticks">
+          <li data-i18n="rc.r.1">a single partition;</li>
+          <li data-i18n="rc.r.2">a whole disk — with its partition table and boot code, so it boots again;</li>
+          <li data-i18n="rc.r.3">single files — mount the backup as a disk and copy them;</li>
+          <li data-i18n="rc.r.4">onto a new, empty disk or another computer.</li>
+        </ul>
+        <p class="fine" data-i18n="rc.r.guard">The disk the system runs from and its EFI partition are protected from being overwritten.</p>
+      </div>
+
+      <div class="split__col reveal">
+        <div class="media">
+          <article class="media__card">
+            <svg class="ic ic--lg"><use href="#i-windows"/></svg>
+            <div>
+              <h3 data-i18n="rc.m1.t">Based on Windows Recovery Environment</h3>
+              <p data-i18n="rc.m1.d">Built on this computer from what is already on it: its own WinRE, the program with its window and, if you wish, this computer's drivers. Reads NTFS and ReFS natively.</p>
+            </div>
+          </article>
+          <article class="media__card">
+            <svg class="ic ic--lg"><use href="#i-linux"/></svg>
+            <div>
+              <h3 data-i18n="rc.m2.t">Based on Linux (Debian 13 live)</h3>
+              <p data-i18n="rc.m2.d">UEFI with Secure Boot, or BIOS. The Linux window builds it and writes it onto a stick; the Windows window downloads it ready and checks it against the release's checksums.</p>
+            </div>
+          </article>
+          <div class="callout">
+            <svg class="ic"><use href="#i-usb"/></svg>
+            <p data-i18n="rc.now"><b>Build it now</b>, while the computer works — and check that the computer starts from it.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────── Cleanup ───────────────────────── -->
+<section class="sec sec--alt" id="cleanup">
+  <div class="wrap duo">
+    <div class="duo__text reveal">
+      <p class="eyebrow" data-i18n="cl.eyebrow">Disk cleanup</p>
+      <h2 data-i18n="cl.title">Less to copy, nothing removed blindly</h2>
+      <p class="lead" data-i18n="cl.lead">Temporary files, error reports, crash dumps, caches, the Recycle Bin and the traces of work — on Windows and on Linux. The service does it, so the system's folders and the users' are both within reach.</p>
+      <ul class="ticks">
+        <li data-i18n="cl.1"><b>Analysis first.</b> Every item shows its size and the list of files; untick a file and it stays.</li>
+        <li data-i18n="cl.2"><b>Profiles.</b> Save a set under a name and pick it in a backup job — the disk is cleaned before the copy.</li>
+        <li data-i18n="cl.3"><b>Automatic cleanup</b> on a schedule, done by the service with no window.</li>
+        <li data-i18n="cl.4"><b>Windows components</b> by Windows' own handlers; on Linux — apt, logs and snap.</li>
+      </ul>
+    </div>
+    <div class="duo__shot reveal">
+      <div class="frame tilt" data-tilt>
+        <img data-shot="cleanup" src="img/en/cleanup.png" width="1584" height="992" loading="lazy" alt="The Cleanup page after an analysis" data-i18n-alt="cl.alt">
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────── Inside ───────────────────────── -->
+<section class="sec" id="inside">
+  <div class="wrap">
+    <header class="sec__head reveal">
+      <p class="eyebrow" data-i18n="in.eyebrow">How it is built</p>
+      <h2 data-i18n="in.title">Three programs, one local channel</h2>
+      <p class="lead" data-i18n="in.lead">The window and the service talk over a channel available to this computer only — a named pipe on Windows, a Unix socket on Linux — with an access token. No network port is opened.</p>
+    </header>
+
+    <div class="arch reveal">
+      <div class="arch__node">
+        <svg class="ic ic--lg"><use href="#i-window"/></svg>
+        <h3 data-i18n="in.w.t">Window</h3>
+        <p data-i18n="in.w.d">What you see: creates jobs, shows progress and history, starts restores. Runs without administrator rights and asks the service for everything.</p>
+      </div>
+      <div class="arch__wire" aria-hidden="true"><i></i><i></i><i></i></div>
+      <div class="arch__node arch__node--core">
+        <svg class="ic ic--lg"><use href="#i-gear"/></svg>
+        <h3 data-i18n="in.s.t">Service</h3>
+        <p data-i18n="in.s.d">Does everything that needs administrator rights: reads disks, takes snapshots, writes and restores images, runs the schedule — also while the window is closed.</p>
+        <p class="mono"><span>OwnBackup · LocalSystem</span><span>own-backup · systemd</span></p>
+      </div>
+      <div class="arch__wire arch__wire--rev" aria-hidden="true"><i></i><i></i><i></i></div>
+      <div class="arch__node">
+        <svg class="ic ic--lg"><use href="#i-terminal"/></svg>
+        <h3 data-i18n="in.c.t">Command line</h3>
+        <p data-i18n="in.c.d"><code>own-backup-cli</code> — the same actions from a terminal or a script.</p>
+      </div>
+    </div>
+
+    <div class="term reveal" id="term">
+      <div class="term__bar"><i></i><i></i><i></i><span>own-backup-cli</span></div>
+      <pre class="term__body" id="termBody" aria-label="Command line examples"><span class="p">$</span> own-backup-cli jobs list
+<span class="c"># The configured jobs, with their ids.</span>
+<span class="p">$</span> own-backup-cli jobs run 3f2a…
+<span class="c"># Queues a job, like “Back up now”.</span>
+<span class="p">$</span> own-backup-cli verify "F:\Backup\Disk_C_Win11\Disk_C_Win11_disk4_inc_20261024-185102.obk"
+<span class="c"># Validates an image (with its chain) against its checksums.</span></pre>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────── Limits ───────────────────────── -->
+<section class="sec sec--alt" id="limits">
+  <div class="wrap">
+    <header class="sec__head reveal">
+      <p class="eyebrow" data-i18n="lm.eyebrow">What it does not do</p>
+      <h2 data-i18n="lm.title">Honest about the edges</h2>
+    </header>
+    <div class="nots" data-stagger>
+      <article class="not reveal">
+        <svg class="ic ic--lg"><use href="#i-cloud-off"/></svg>
+        <h3 data-i18n="lm.1.t">No cloud of its own</h3>
+        <p data-i18n="lm.1.d">It does not copy to a cloud or over the network by itself: a backup is written to a folder — a local disk, a USB disk or a mounted network share.</p>
+      </article>
+      <article class="not reveal">
+        <svg class="ic ic--lg"><use href="#i-files-off"/></svg>
+        <h3 data-i18n="lm.2.t">No file sync</h3>
+        <p data-i18n="lm.2.d">It does not synchronise files or keep versions of single files. To get one file back, mount the backup and copy it.</p>
+      </article>
+      <article class="not reveal">
+        <svg class="ic ic--lg"><use href="#i-eye-off"/></svg>
+        <h3 data-i18n="lm.3.t">Nothing sent anywhere</h3>
+        <p data-i18n="lm.3.d">No advertising, no telemetry, no update checks.</p>
+      </article>
+    </div>
+    <div class="beta reveal">
+      <span class="beta__tag">beta</span>
+      <p data-i18n="lm.beta"><b>This is a prerelease; the Linux version is new since 0.1.6-beta.</b> Check an important backup by restoring it to a spare disk or a virtual machine before you rely on it — on Linux especially.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ───────────────────────── Download ───────────────────────── -->
+<section class="sec sec--dl" id="download">
+  <div class="wrap">
+    <header class="sec__head reveal">
+      <p class="eyebrow" data-i18n="dl.eyebrow">Download</p>
+      <h2><span data-i18n="dl.title">Own Backup</span> <span class="grad" data-version>0.2.1-beta</span></h2>
+      <p class="lead" data-i18n="dl.lead">Free for noncommercial use — at home, in study, in research.</p>
+    </header>
+
+    <div class="dls" data-stagger>
+      <article class="dl reveal" data-os="win">
+        <svg class="ic ic--xl"><use href="#i-windows"/></svg>
+        <h3 data-i18n="dl.win.t">Windows installer</h3>
+        <p class="dl__req">Windows 10 / 11 · x64</p>
+        <p data-i18n="dl.win.d">Installs the program for all users of the computer and starts its backup service. Needs administrator rights.</p>
+        <a class="btn btn--go" href="https://github.com/coinman-dev/own-backup/releases/download/v0.2.1-beta/own-backup-install_0.2.1-beta.exe" data-asset="exe">
+          <svg class="ic"><use href="#i-download"/></svg><span data-asset-name="exe">own-backup-install_0.2.1-beta.exe</span>
+        </a>
+        <p class="dl__size" data-asset-size="exe">17 MB</p>
+      </article>
+
+      <article class="dl reveal" data-os="linux">
+        <svg class="ic ic--xl"><use href="#i-linux"/></svg>
+        <h3 data-i18n="dl.deb.t">Linux package</h3>
+        <p class="dl__req">Ubuntu 24.04+ · Debian 13+ · amd64</p>
+        <p data-i18n="dl.deb.d">Installs the program, starts its service and adds you to the <code>own-backup</code> group — sign in again to open the window.</p>
+        <a class="btn btn--go" href="https://github.com/coinman-dev/own-backup/releases/download/v0.2.1-beta/own-backup_0.2.1.beta_amd64.deb" data-asset="deb">
+          <svg class="ic"><use href="#i-download"/></svg><span data-asset-name="deb">own-backup_0.2.1.beta_amd64.deb</span>
+        </a>
+        <p class="dl__size" data-asset-size="deb">18 MB</p>
+        <div class="cmd">
+          <code id="debCmd">sudo apt install ./own-backup_0.2.1.beta_amd64.deb</code>
+          <button type="button" class="cmd__copy" data-copy="#debCmd" aria-label="Copy" data-i18n-aria="dl.copy"><svg class="ic"><use href="#i-copy"/></svg></button>
+        </div>
+      </article>
+
+      <article class="dl reveal">
+        <svg class="ic ic--xl"><use href="#i-disc"/></svg>
+        <h3 data-i18n="dl.iso.t">Linux boot medium</h3>
+        <p class="dl__req" data-i18n="dl.iso.req">UEFI with Secure Boot, or BIOS</p>
+        <p data-i18n="dl.iso.d">Boots a computer from a CD or a USB stick to back up or restore its disks, Windows ones included. The window writes it onto a stick.</p>
+        <a class="btn btn--line" href="https://github.com/coinman-dev/own-backup/releases/download/v0.2.1-beta/OwnBackup-Linux-0.2.1.beta_amd64.iso" data-asset="iso">
+          <svg class="ic"><use href="#i-download"/></svg><span data-asset-name="iso">OwnBackup-Linux-0.2.1.beta_amd64.iso</span>
+        </a>
+        <p class="dl__size" data-asset-size="iso">626 MB</p>
+      </article>
+    </div>
+
+    <p class="dl__more reveal">
+      <a href="https://github.com/coinman-dev/own-backup/releases" rel="noopener" data-i18n="dl.all">All releases</a>
+      <a href="https://github.com/coinman-dev/own-backup/blob/main/CHANGELOG.md" rel="noopener" data-href-ru="https://github.com/coinman-dev/own-backup/blob/main/CHANGELOG.ru_RU.md" data-i18n="dl.changes">Changelog</a>
+      <a href="https://github.com/coinman-dev/own-backup/releases/download/v0.2.1-beta/SHA256SUMS.txt" data-asset="sums" rel="noopener">SHA256SUMS.txt</a>
+    </p>
+    <p class="fine center reveal" data-i18n="dl.req">The window needs the Microsoft Edge WebView2 Runtime — part of Windows 11, and the installer says so if a Windows 10 does not have it. On Linux the package brings WebKitGTK and the rest of what the window needs.</p>
+  </div>
+</section>
+
+<!-- ───────────────────────── Guide ───────────────────────── -->
+<section class="sec" id="docs">
+  <div class="wrap">
+    <header class="sec__head reveal">
+      <p class="eyebrow" data-i18n="dc.eyebrow">User guide</p>
+      <h2 data-i18n="dc.title">Fourteen chapters, no fluff</h2>
+    </header>
+    <ol class="toc" data-stagger>
+      <li class="reveal"><a data-doc="01-overview.md" href="https://github.com/coinman-dev/own-backup/blob/main/doc/en/01-overview.md" rel="noopener"><b data-i18n="dc.1.t">What Own Backup is</b><span data-i18n="dc.1.d">What it does and does not do, on one page.</span></a></li>
+      <li class="reveal"><a data-doc="02-installation.md" href="https://github.com/coinman-dev/own-backup/blob/main/doc/en/02-installation.md" rel="noopener"><b data-i18n="dc.2.t">Installation</b><span data-i18n="dc.2.d">Windows and Linux: requirements, install, update, remove.</span></a></li>
+      <li class="reveal"><a data-doc="03-concepts.md" href="https://github.com/coinman-dev/own-backup/blob/main/doc/en/03-concepts.md" rel="noopener"><b data-i18n="dc.3.t">Concepts</b><span data-i18n="dc.3.d">Jobs, versions and chains, formats, encryption, exclusions, snapshots.</span></a></li>
+      <li class="reveal"><a data-doc="04-quick-start.md" href="https://github.com/coinman-dev/own-backup/blob/main/doc/en/04-quick-start.md" rel="noopener"><b data-i18n="dc.4.t">Quick start</b><span data-i18n="dc.4.d">The first backup and its check.</span></a></li>
+      <li class="reveal"><a data-doc="05-backup.md" href="https://github.com/coinman-dev/own-backup/blob/main/doc/en/05-backup.md" rel="noopener"><b data-i18n="dc.5.t">Backup</b><span data-i18n="dc.5.d">The job list, the job page, the wizard and all its options.</span></a></li>
+      <li class="reveal"><a data-doc="06-restore.md" href="https://github.com/coinman-dev/own-backup/blob/main/doc/en/06-restore.md" rel="noopener"><b data-i18n="dc.6.t">Restore</b><span data-i18n="dc.6.d">A partition or a whole disk, encrypted backups, single files.</span></a></li>
+      <li class="reveal"><a data-doc="07-boot-menu.md" href="https://github.com/coinman-dev/own-backup/blob/main/doc/en/07-boot-menu.md" rel="noopener"><b data-i18n="dc.7.t">Boot menu</b><span data-i18n="dc.7.d">UEFI boot entries.</span></a></li>
+      <li class="reveal"><a data-doc="08-tools.md" href="https://github.com/coinman-dev/own-backup/blob/main/doc/en/08-tools.md" rel="noopener"><b data-i18n="dc.8.t">Tools</b><span data-i18n="dc.8.d">Mount a backup as a disk, validate an image, hidden partitions.</span></a></li>
+      <li class="reveal"><a data-doc="09-activity-settings-help.md" href="https://github.com/coinman-dev/own-backup/blob/main/doc/en/09-activity-settings-help.md" rel="noopener"><b data-i18n="dc.9.t">Activity, Settings, Help</b><span data-i18n="dc.9.d">The history of runs and the program's settings.</span></a></li>
+      <li class="reveal"><a data-doc="10-bootable-media.md" href="https://github.com/coinman-dev/own-backup/blob/main/doc/en/10-bootable-media.md" rel="noopener"><b data-i18n="dc.10.t">Bootable media</b><span data-i18n="dc.10.d">Building it, writing it to a stick, working from it.</span></a></li>
+      <li class="reveal"><a data-doc="11-command-line.md" href="https://github.com/coinman-dev/own-backup/blob/main/doc/en/11-command-line.md" rel="noopener"><b data-i18n="dc.11.t">Command line</b><span data-i18n="dc.11.d">own-backup-cli: jobs, disks and images, boot media.</span></a></li>
+      <li class="reveal"><a data-doc="12-files-and-logs.md" href="https://github.com/coinman-dev/own-backup/blob/main/doc/en/12-files-and-logs.md" rel="noopener"><b data-i18n="dc.12.t">Files, folders and logs</b><span data-i18n="dc.12.d">Where everything is kept.</span></a></li>
+      <li class="reveal"><a data-doc="13-troubleshooting.md" href="https://github.com/coinman-dev/own-backup/blob/main/doc/en/13-troubleshooting.md" rel="noopener"><b data-i18n="dc.13.t">Troubleshooting and FAQ</b><span data-i18n="dc.13.d">Where to look first, and answers to questions.</span></a></li>
+      <li class="reveal"><a data-doc="14-cleanup.md" href="https://github.com/coinman-dev/own-backup/blob/main/doc/en/14-cleanup.md" rel="noopener"><b data-i18n="dc.14.t">Disk cleanup</b><span data-i18n="dc.14.d">What is removed, profiles, automatic cleanup, cleanup before a copy.</span></a></li>
+    </ol>
+  </div>
+</section>
+
+</main>
+
+<footer class="foot">
+  <div class="wrap foot__in">
+    <div class="foot__brand">
+      <img src="assets/logo.png" alt="" width="56" height="49" loading="lazy">
+      <div>
+        <b>Own Backup</b>
+        <p data-i18n="ft.tag">Block-level backup of Windows and Linux disks and volumes.</p>
+      </div>
+    </div>
+    <div class="foot__lic">
+      <h3 data-i18n="ft.lic.t">Licence</h3>
+      <p data-i18n="ft.lic.d">PolyForm Noncommercial 1.0.0: free for noncommercial use. The source code is available to study and modify; this is a source-available licence, not open source in the OSI sense. Commercial use needs a separate licence.</p>
+    </div>
+    <nav class="foot__links" aria-label="Links">
+      <a href="https://github.com/coinman-dev/own-backup" rel="noopener">GitHub</a>
+      <a href="https://github.com/coinman-dev/own-backup/releases" rel="noopener" data-i18n="ft.releases">Releases</a>
+      <a href="https://github.com/coinman-dev/own-backup/blob/main/LICENSE" rel="noopener" data-i18n="ft.license">Licence text</a>
+      <a href="https://github.com/coinman-dev/own-backup/blob/main/COMMERCIAL-LICENSE.md" rel="noopener" data-i18n="ft.commercial">Commercial licence</a>
+      <a href="https://github.com/coinman-dev/own-backup/blob/main/THIRD-PARTY-NOTICES.md" rel="noopener" data-i18n="ft.third">Third-party notices</a>
+      <a href="https://github.com/coinman-dev/own-backup/issues" rel="noopener" data-i18n="ft.issues">Report a problem</a>
+    </nav>
+  </div>
+  <div class="wrap foot__base">
+    <p data-i18n="ft.page">This page sets no cookies and loads no trackers or third-party fonts. The release version comes from the GitHub API.</p>
+  </div>
+</footer>
+
+<script src="i18n.js"></script>
+<script src="main.js"></script>
+</body>
+</html>
