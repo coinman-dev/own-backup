@@ -1,5 +1,7 @@
 # Disk cleanup (Windows and Linux)
 
+![The Cleanup page after an analysis](../images/en/cleanup.png)
+
 The **Cleanup** section removes what programs and Windows leave behind:
 temporary files, error reports, crash dumps, setup logs, caches, the
 Recycle Bin and the traces of work — browser history, recent documents. The
