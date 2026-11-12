@@ -3,8 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Own Backup — block-level backup of Windows and Linux disks</title>
-<meta name="description" content="Own Backup makes block-level images of Windows and Linux disks and volumes: full, incremental and differential backups in VHDX, qcow2 and encrypted OBK, with bootable recovery media.">
+<title>Own Backup (beta) — block-level backup of Windows and Linux disks</title>
+<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">
+<link rel="canonical" href="https://coinman-dev.github.io/own-backup/">
+<meta name="description" content="Own Backup (public beta) makes block-level images of Windows and Linux disks and volumes: full, incremental and differential backups in VHDX, qcow2 and encrypted OBK, with bootable recovery media.">
 
 <!-- The page is dark by design. These three lines tell the browser and the
      Dark Reader extension so: it must not be recoloured a second time. -->
@@ -13,11 +15,36 @@
 <meta name="theme-color" content="#0f0e19">
 
 <meta property="og:type" content="website">
-<meta property="og:title" content="Own Backup — block-level backup of Windows and Linux disks">
+<meta property="og:title" content="Own Backup (beta) — block-level backup of Windows and Linux disks">
+<meta property="og:site_name" content="Own Backup">
+<meta property="og:locale" content="en_US">
+<meta property="og:locale:alternate" content="ru_RU">
 <meta property="og:description" content="Full, incremental and differential disk images in VHDX, qcow2 and encrypted OBK. Bootable recovery media. No ads, no telemetry.">
 <meta property="og:url" content="https://coinman-dev.github.io/own-backup/">
 <meta property="og:image" content="https://coinman-dev.github.io/own-backup/img/en/backup-dashboard.png">
 <meta name="twitter:card" content="summary_large_image">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "Own Backup",
+  "alternateName": "Own Backup (beta)",
+  "applicationCategory": "UtilitiesApplication",
+  "applicationSubCategory": "Backup software",
+  "operatingSystem": "Windows 10, Windows 11, Ubuntu 24.04, Debian 13",
+  "softwareVersion": "0.2.1-beta",
+  "releaseNotes": "https://github.com/coinman-dev/own-backup/blob/main/CHANGELOG.md",
+  "description": "Block-level backup of Windows and Linux disks and volumes: full, incremental and differential images in VHDX, qcow2 and encrypted OBK, with bootable recovery media. Public beta.",
+  "url": "https://coinman-dev.github.io/own-backup/",
+  "downloadUrl": "https://github.com/coinman-dev/own-backup/releases",
+  "codeRepository": "https://github.com/coinman-dev/own-backup",
+  "license": "https://polyformproject.org/licenses/noncommercial/1.0.0",
+  "isAccessibleForFree": true,
+  "inLanguage": ["en", "ru"],
+  "image": "https://coinman-dev.github.io/own-backup/img/en/backup-dashboard.png",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+}
+</script>
 
 <link rel="icon" type="image/png" href="assets/favicon.png">
 <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
@@ -59,11 +86,19 @@
 
 <div class="progress" aria-hidden="true"><span id="progressBar"></span></div>
 
+<aside class="betabar" role="note">
+  <div class="wrap betabar__in">
+    <span class="betabar__tag">beta</span>
+    <p><b data-i18n="bar.t">Beta — public testing.</b> <span data-i18n="bar.d">The program is under active development: check a backup by restoring it before you rely on it.</span> <a href="#limits" data-i18n="bar.more">Details</a></p>
+  </div>
+</aside>
+
 <header class="nav" id="nav">
   <div class="wrap nav__in">
     <a class="brand" href="#top" aria-label="Own Backup">
       <img src="assets/logo.png" alt="" width="40" height="35">
       <span>OWN BACKUP</span>
+      <em class="brand__beta">beta</em>
     </a>
     <nav class="nav__links" aria-label="Sections">
       <a href="#how" data-i18n="nav.how">How it works</a>
@@ -95,7 +130,7 @@
     <div class="hero__text">
       <a class="pill" href="https://github.com/coinman-dev/own-backup/releases" data-release-link rel="noopener">
         <i class="pill__dot"></i>
-        <span><b data-version>0.2.1-beta</b> · <span data-i18n="hero.pill">prerelease for Windows and Linux</span></span>
+        <span><b data-version>0.2.1-beta</b> · <span data-i18n="hero.pill">public beta testing · Windows and Linux</span></span>
       </a>
       <h1 class="hero__title">
         <span class="line"><span data-i18n="hero.t1">Disk images,</span></span>

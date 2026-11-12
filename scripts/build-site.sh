@@ -38,6 +38,8 @@ for lang in en ru; do
     cp "$src" "$out/img/$lang/"
   done
 done
+# Дата изменения в карте сайта — день сборки.
+sed -i "s/__LASTMOD__/$(date +%F)/" "$out/sitemap.xml"
 # Без Jekyll: файлы отдаются как есть.
 : > "$out/.nojekyll"
 
