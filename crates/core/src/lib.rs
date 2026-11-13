@@ -642,6 +642,17 @@ pub struct JobRun {
     /// weekly copy cut off by a restart was taken as done and skipped).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub interrupted: bool,
+    /// A `cancelled` run whose copy WAS made: the image is written and
+    /// published, and only the check after it was stopped — by a person, or
+    /// by the service stopping. Such a run served its slot (never
+    /// `interrupted`: repeating it would only make another copy), but it
+    /// stays `cancelled`, so retention and consolidation, which delete and
+    /// rewrite older copies, do not run on an image nobody read back. The
+    /// window says "copy made, check stopped" from this flag, not from the
+    /// words of `error` (09.11.2026: a shutdown during the check was reported
+    /// as "the copy will be made after the next start" over a finished copy).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub verify_cancelled: bool,
     /// The scheduler did not start this run: its time came, and something the
     /// run needs was missing (a saved password of an encrypted source).
     /// Recorded so the person sees it in the history instead of a schedule
@@ -1023,6 +1034,26 @@ const ACTIVITY_CAP: usize = 200;
 #[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
 fn verify_cancelled_message() -> String {
     tr!("lib.verify_cancelled").into_owned()
+}
+
+/// A run cancelled while the service was stopping (Windows shutting down or
+/// restarting, the program being updated), not by a person.
+///
+/// If the copy itself was cut off, the run is `interrupted`: the schedule does
+/// not count it, and a job that catches up missed runs makes the copy after the
+/// next start. If only the check after a finished copy was cut off
+/// (`verify_cancelled`), the copy exists: the run served its slot and says so —
+/// it is not repeated, and it does not promise a copy that is already there.
+fn settle_stopped_run(run: &mut JobRun, stopping: bool) {
+    if run.status != "cancelled" || !stopping {
+        return;
+    }
+    if run.verify_cancelled {
+        run.error = tr!("lib.verify_interrupted_by_stop").into_owned();
+    } else {
+        run.interrupted = true;
+        run.error = tr!("lib.interrupted_by_stop").into_owned();
+    }
 }
 
 /// Check again after emitting progress: a CancelRunning request can arrive
@@ -2441,12 +2472,7 @@ pub async fn run_queue_worker(
         };
         let mut run = run;
         run.set_layout_changed(layout_note);
-        // Cancelled because the service is stopping, not by a person: said
-        // so, and not counted as the schedule's run (`interrupted`).
-        if run.status == "cancelled" && busy.stopping() {
-            run.interrupted = true;
-            run.error = tr!("lib.interrupted_by_stop").into_owned();
-        }
+        settle_stopped_run(&mut run, busy.stopping());
         // How the run ended goes into the log as well as into its record. A
         // failure used to be written only to the record: on 2026-09-25 the log
         // said "Starting queued backup" and then nothing at all, and the reason
@@ -4071,6 +4097,9 @@ async fn perform_backup(
                 // because nobody checked it. Retention and consolidation do not
                 // run — a cancelled read must not delete anything.
                 if verify_cancelled {
+                    // The copy is made only if this was the last volume: the
+                    // ones after it were never copied.
+                    run.verify_cancelled = idx + 1 == volumes.len();
                     fatal = Some(("cancelled".into(), verify_cancelled_message()));
                     break;
                 }
@@ -4275,6 +4304,7 @@ async fn perform_disk_backup(
             if verify_cancelled {
                 run.status = "cancelled".into();
                 run.error = verify_cancelled_message();
+                run.verify_cancelled = true;
                 return run;
             }
             let protected = [(disk_token, image_path)];
@@ -4568,6 +4598,8 @@ async fn perform_backup(
         // Recorded first, so the finished image is findable in the history;
         // then the run stops short of success, and retention does not run.
         if verify_cancelled {
+            // Made only if this was the last volume (see the Windows loop).
+            run.verify_cancelled = idx + 1 == volumes.len();
             fatal = Some(("cancelled".into(), verify_cancelled_message()));
             break;
         }
@@ -4826,6 +4858,7 @@ async fn perform_disk_backup(
     if verify_cancelled {
         run.status = "cancelled".into();
         run.error = verify_cancelled_message();
+        run.verify_cancelled = true;
         return run;
     }
     let protected = [(tag, image_path)];
@@ -5526,6 +5559,75 @@ mod tests {
             "the schedule counts from the run that served its slot"
         );
         worker.abort();
+    }
+
+    /// 09.11.2026: Windows shut down while the check after a finished copy
+    /// was running. The copy is there, so the run is not `interrupted` (the
+    /// schedule would make another one) and does not promise a copy "after the
+    /// next start"; it stays `cancelled`, so nothing older is deleted.
+    #[test]
+    fn a_check_cut_off_by_a_stop_keeps_the_copy_it_checked() {
+        let mut run = JobRun {
+            status: "cancelled".into(),
+            error: verify_cancelled_message(),
+            verify_cancelled: true,
+            ..Default::default()
+        };
+        settle_stopped_run(&mut run, true);
+        assert_eq!(run.status, "cancelled");
+        assert!(!run.interrupted, "the copy served its slot");
+        assert!(run.verify_cancelled);
+        assert_eq!(run.error, tr!("lib.verify_interrupted_by_stop"));
+    }
+
+    #[test]
+    fn a_copy_cut_off_by_a_stop_is_interrupted() {
+        let mut run = JobRun {
+            status: "cancelled".into(),
+            error: tr!("lib.cancelled_by_user").into_owned(),
+            ..Default::default()
+        };
+        settle_stopped_run(&mut run, true);
+        assert!(run.interrupted);
+        assert_eq!(run.error, tr!("lib.interrupted_by_stop"));
+    }
+
+    #[test]
+    fn a_check_a_person_stopped_keeps_its_own_words() {
+        let mut run = JobRun {
+            status: "cancelled".into(),
+            error: verify_cancelled_message(),
+            verify_cancelled: true,
+            ..Default::default()
+        };
+        settle_stopped_run(&mut run, false);
+        assert!(!run.interrupted);
+        assert_eq!(run.error, verify_cancelled_message());
+        // Finished runs are never touched, stopping or not.
+        let mut done = JobRun {
+            status: "success".into(),
+            ..Default::default()
+        };
+        settle_stopped_run(&mut done, true);
+        assert!(!done.interrupted && done.error.is_empty());
+    }
+
+    /// Old history has no `verify_cancelled`; new history leaves it out when
+    /// false, so files stay as they were for runs it does not concern.
+    #[test]
+    fn verify_cancelled_is_optional_in_the_history() {
+        let old: JobRun =
+            serde_json::from_str(r#"{"id":"a","job_id":"j","status":"cancelled"}"#).unwrap();
+        assert!(!old.verify_cancelled);
+        let text = serde_json::to_string(&JobRun::default()).unwrap();
+        assert!(!text.contains("verify_cancelled"));
+        let marked = JobRun {
+            verify_cancelled: true,
+            ..Default::default()
+        };
+        assert!(serde_json::to_string(&marked)
+            .unwrap()
+            .contains("\"verify_cancelled\":true"));
     }
 
     #[tokio::test]

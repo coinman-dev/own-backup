@@ -425,6 +425,10 @@
             </button>
           </div>
         {/if}
+      {:else if lastRun?.status === 'cancelled' && lastRun.verify_cancelled}
+        <!-- The copy is there; only the check after it was stopped. Said, so
+             the cancelled sign above does not read as "no copy". -->
+        <div class="banner warn"><span>{m.dash_unverified({ date: formatDate(lastRun.finished_at), error: lastRun.error ?? '' })}</span></div>
       {:else if lastRun?.status === 'error'}
         <!-- When: the stats below date the last COPY, and without its own
              time this banner read as if that copy had failed. -->
@@ -634,6 +638,7 @@
   .banner { margin-top: 22px; border-radius: 8px; padding: 13px 16px; display: flex; align-items: center; gap: 12px; background: var(--accent-soft); font-size: 13.5px; line-height: 1.5; color: var(--text); }
   .banner.err { background: var(--error-soft); border: 1px solid var(--error-line); color: var(--error-text); }
   .banner.info { background: var(--info-soft); border: 1px solid var(--info-line); color: var(--info-text); }
+  .banner.warn { background: var(--warning-soft); border: 1px solid var(--warning-line); color: var(--warning-text); }
   .bdot { width: 20px; height: 20px; border-radius: 50%; background: var(--success); flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
   .bicon { flex-shrink: 0; }
   .banner .banner-x { margin-left: auto; flex-shrink: 0; width: 22px; height: 22px; border: none; background: none; color: var(--text-muted); cursor: pointer; border-radius: 4px; display: flex; align-items: center; justify-content: center; }

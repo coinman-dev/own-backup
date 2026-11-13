@@ -536,6 +536,8 @@ export interface JobRun {
   status: 'success' | 'error' | 'cancelled' | string;
   /** Cancelled because the service stopped (shutdown, restart, update), not by a person. */
   interrupted?: boolean;
+  /** Cancelled, but the copy WAS made: only the check after it was stopped (by a person or a stop). */
+  verify_cancelled?: boolean;
   /** The scheduler did not start it: something it needed (a saved volume password) was missing. */
   skipped?: boolean;
   image_path: string;

@@ -87,6 +87,10 @@
     "ru": "Копия создана, но проверка отменена пользователем — образ не проверен.",
     "en": "The backup was created, but the validation was cancelled by the user — the image has not been validated."
   },
+  "lib.verify_interrupted_by_stop": {
+    "ru": "Копия создана, но проверка после неё прервана: служба остановилась — компьютер выключался или перезагружался, либо обновлялась программа. Образ не проверен; старые версии в этот раз не удалялись.",
+    "en": "The backup was created, but the validation after it was interrupted: the service stopped — the computer was shutting down or restarting, or the program was being updated. The image has not been validated; older versions were not removed this time."
+  },
   "lib.shutdown_message": {
     "ru": "Own Backup: копия «%{job}» готова, компьютер выключится",
     "en": "Own Backup: backup “%{job}” is done, the computer will shut down"

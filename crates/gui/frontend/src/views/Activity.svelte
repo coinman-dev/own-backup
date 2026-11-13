@@ -173,11 +173,11 @@
                         : m.act_cleanup_done())
                 : r.operation === 'verify'
                 ? (r.status === 'success' ? m.act_verify_done() : r.status === 'cancelled' ? m.act_verify_cancelled() : m.act_verify_failed())
-                : (r.status === 'success' ? m.act_backup_done() : r.skipped ? m.act_backup_skipped() : r.interrupted ? m.act_backup_interrupted() : r.status === 'cancelled' ? m.act_backup_cancelled() : m.act_backup_failed())}
+                : (r.status === 'success' ? m.act_backup_done() : r.skipped ? m.act_backup_skipped() : r.verify_cancelled ? m.act_backup_unverified() : r.interrupted ? m.act_backup_interrupted() : r.status === 'cancelled' ? m.act_backup_cancelled() : m.act_backup_failed())}
               {#if r.job_name && r.operation !== 'cleanup'}— {r.job_name}{/if}
               <span class="time">{formatDate(r.finished_at || r.started_at)}</span>
             </div>
-            {#if (r.status === 'error' || r.interrupted) && r.error}
+            {#if (r.status === 'error' || r.interrupted || r.verify_cancelled) && r.error}
               <div class="note">{r.error}</div>
             {/if}
             {#if r.status === 'error' && r.error_kind === 'key_protection'}
