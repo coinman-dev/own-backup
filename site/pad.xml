@@ -124,7 +124,7 @@ This is a public beta: check an important backup by restoring it before you rely
       <Application_Info_URL>https://coinman-dev.github.io/own-backup/</Application_Info_URL>
       <Application_Order_URL></Application_Order_URL>
       <Application_Screenshot_URL>https://coinman-dev.github.io/own-backup/img/en/backup-dashboard.png</Application_Screenshot_URL>
-      <Application_Icon_URL>https://coinman-dev.github.io/own-backup/assets/icon-32.png</Application_Icon_URL>
+      <Application_Icon_URL>https://coinman-dev.github.io/own-backup/assets/icon-512.png</Application_Icon_URL>
       <Application_XML_File_URL>https://coinman-dev.github.io/own-backup/pad.xml</Application_XML_File_URL>
     </Application_URLs>
     <Download_URLs>
