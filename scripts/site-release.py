@@ -9,6 +9,10 @@
 apt, softwareVersion в JSON-LD и канал: data-channel="beta" для пререлиза,
 "stable" для обычного выпуска (тогда пометки beta скрыты, см. styles.css).
 
+Рядом лежащий pad.xml (описание для каталогов программ) получает версию, дату
+и статус выпуска, ссылки и размер установщика; его обязательные поля и
+ограничения длины проверяются при каждой сборке.
+
 Ту же работу на лету делает main.js в браузере посетителя; этот скрипт нужен,
 чтобы правильную версию видели поисковые роботы и браузеры без скриптов.
 
@@ -78,11 +82,102 @@ class Page:
         self.sub(tag_rx, fix, required)
 
 
+# Ограничения PAD 3.11 на длину текстов (в символах).
+PAD_LIMITS = {
+    'Keywords': 250, 'Char_Desc_45': 45, 'Char_Desc_80': 80, 'Char_Desc_250': 250,
+    'Char_Desc_450': 450, 'Char_Desc_2000': 2000,
+}
+PAD_REQUIRED = [
+    'Company_Info/Company_Name', 'Company_Info/Company_WebSite_URL',
+    'Company_Info/Contact_Info/Author_Email', 'Company_Info/Contact_Info/Contact_Email',
+    'Program_Info/Program_Name', 'Program_Info/Program_Version', 'Program_Info/Program_Type',
+    'Program_Info/Program_Release_Status', 'Program_Info/Program_OS_Support',
+    'Program_Info/Program_Category_Class', 'Program_Info/File_Info/File_Size_Bytes',
+    'Program_Descriptions/English/Char_Desc_45', 'Program_Descriptions/English/Char_Desc_80',
+    'Program_Descriptions/English/Char_Desc_250', 'Program_Descriptions/English/Char_Desc_450',
+    'Program_Descriptions/English/Char_Desc_2000',
+    'Web_Info/Application_URLs/Application_Info_URL', 'Web_Info/Application_URLs/Application_XML_File_URL',
+    'Web_Info/Download_URLs/Primary_Download_URL',
+]
+# Фразы о бете в PAD и чем они становятся у обычного выпуска.
+PAD_BETA = [
+    ('Public beta. What is new:', 'What is new:'),
+    ('Public beta, free for noncommercial use.', 'Free for noncommercial use.'),
+    ('Публичная бета, бесплатно для некоммерческого', 'Бесплатно для некоммерческого'),
+    ('This is a public beta: check an important backup by restoring it before you rely on it. ', ''),
+    ('Это публичная бета: прежде чем полагаться на важную копию, проверьте её восстановлением. ', ''),
+]
+
+
+def check_pad(text):
+    """Ошибки PAD: пустые обязательные поля и превышенные длины."""
+    import xml.etree.ElementTree as ET
+    try:
+        root = ET.fromstring(text.encode('utf-8'))
+    except ET.ParseError as e:
+        return ['не XML: %s' % e]
+    errors = []
+    for p in PAD_REQUIRED:
+        el = root.find(p)
+        if el is None or not (el.text or '').strip():
+            errors.append('пусто: ' + p)
+    descs = root.find('Program_Descriptions')
+    for lang in (list(descs) if descs is not None else []):
+        for name, limit in PAD_LIMITS.items():
+            el = lang.find(name)
+            n = len((el.text or '') if el is not None else '')
+            if n > limit:
+                errors.append('%s/%s: %d символов, можно %d' % (lang.tag, name, n, limit))
+    return errors
+
+
+def update_pad(text, rel, assets, version, stable):
+    p = Page(text)
+
+    def el(name, value):
+        p.sub('(<%s>)[^<]*(</%s>)' % (name, name), lambda m: m.group(1) + value + m.group(2))
+
+    date = rel.get('published_at') or rel.get('created_at') or ''
+    m = re.match(r'(\d{4})-(\d{2})-(\d{2})', date)
+    if m:
+        el('Program_Release_Year', m.group(1))
+        el('Program_Release_Month', m.group(2))
+        el('Program_Release_Day', m.group(3))
+    el('Program_Version', version)
+    el('Program_Release_Status', 'Major Update' if stable else 'Beta')
+    p.sub(r'(<Program_Change_Info>[^<]*?)https://\S+?(</Program_Change_Info>)',
+          lambda m: m.group(1) + rel['html_url'] + m.group(2))
+    size = assets['exe']['size']
+    el('File_Size_Bytes', str(size))
+    el('File_Size_K', str(round(size / 1024)))
+    el('File_Size_MB', '%.2f' % (size / 1048576))
+    el('Primary_Download_URL', assets['exe']['browser_download_url'])
+    el('Secondary_Download_URL', assets['deb']['browser_download_url'])
+    if 'iso' in assets:
+        el('Additional_Download_URL_1', assets['iso']['browser_download_url'])
+    if stable:
+        for beta, final in PAD_BETA:
+            p.sub(re.escape(beta), lambda _, f=final: f)
+    return p
+
+
 def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
     path = sys.argv[1]
     repo = sys.argv[2] if len(sys.argv) > 2 else 'coinman-dev/own-backup'
+
+    # PAD рядом со страницей проверяется всегда, даже без сети.
+    pad_path = os.path.join(os.path.dirname(path), 'pad.xml')
+    pad = None
+    if os.path.exists(pad_path):
+        with open(pad_path, encoding='utf-8') as f:
+            pad = f.read()
+        errors = check_pad(pad)
+        if errors:
+            print('site-release: pad.xml: %s' % '; '.join(errors), file=sys.stderr)
+            return 1
+
     try:
         rel, assets = pick(fetch(repo))
     except Exception as e:  # сеть, лимит API, ответ не JSON
@@ -117,6 +212,16 @@ def main():
     if p.missing:
         print('site-release: в странице не найдено: %s' % p.missing, file=sys.stderr)
         return 1
+
+    if pad is not None:
+        pp = update_pad(pad, rel, assets, version, stable)
+        errors = ['не найдено: %s' % m for m in pp.missing] + check_pad(pp.s)
+        if errors:
+            print('site-release: pad.xml: %s' % '; '.join(errors), file=sys.stderr)
+            return 1
+        with open(pad_path, 'w', encoding='utf-8', newline='\n') as f:
+            f.write(pp.s)
+
     with open(path, 'w', encoding='utf-8', newline='\n') as f:
         f.write(p.s)
     print('site-release: %s (%s), файлы: %s' % (
