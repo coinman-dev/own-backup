@@ -78,7 +78,13 @@ code { font-size: 0.9em; color: var(--accent-text); background: var(--accent-sof
 
 .wrap { width: min(var(--wrap), 100% - 48px); margin-inline: auto; }
 
-/* ───────── beta notice ───────── */
+/* ───────── beta notice ─────────
+   data-channel on <html> follows the latest release: "beta" for a prerelease,
+   "stable" for a release (scripts/site-release.py at build, main.js live). */
+
+html[data-channel="stable"] [data-beta],
+html:not([data-channel="stable"]) [data-stable] { display: none !important; }
+
 
 .betabar { position: relative; z-index: 51; border-bottom: 1px solid rgba(240, 180, 58, 0.35); background: linear-gradient(90deg, rgba(240, 180, 58, 0.16), rgba(255, 138, 43, 0.12) 50%, rgba(240, 180, 58, 0.16)), var(--bg); }
 .betabar__in { display: flex; align-items: center; justify-content: center; gap: 14px; padding-block: 9px; }

@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="dark" data-channel="beta">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -86,7 +86,7 @@
 
 <div class="progress" aria-hidden="true"><span id="progressBar"></span></div>
 
-<aside class="betabar" role="note">
+<aside class="betabar" role="note" data-beta>
   <div class="wrap betabar__in">
     <span class="betabar__tag">beta</span>
     <p><b data-i18n="bar.t">Beta — public testing.</b> <span data-i18n="bar.d">The program is under active development: check a backup by restoring it before you rely on it.</span> <a href="#limits" data-i18n="bar.more">Details</a></p>
@@ -98,7 +98,7 @@
     <a class="brand" href="#top" aria-label="Own Backup">
       <img src="assets/logo.png" alt="" width="40" height="35">
       <span>OWN BACKUP</span>
-      <em class="brand__beta">beta</em>
+      <em class="brand__beta" data-beta>beta</em>
     </a>
     <nav class="nav__links" aria-label="Sections">
       <a href="#how" data-i18n="nav.how">How it works</a>
@@ -130,7 +130,7 @@
     <div class="hero__text">
       <a class="pill" href="https://github.com/coinman-dev/own-backup/releases" data-release-link rel="noopener">
         <i class="pill__dot"></i>
-        <span><b data-version>0.2.1-beta</b> · <span data-i18n="hero.pill">public beta testing · Windows and Linux</span></span>
+        <span><b data-version>0.2.1-beta</b> · <span data-i18n="hero.pill" data-beta>public beta testing · Windows and Linux</span><span data-i18n="hero.pill.stable" data-stable>release for Windows and Linux</span></span>
       </a>
       <h1 class="hero__title">
         <span class="line"><span data-i18n="hero.t1">Disk images,</span></span>
@@ -536,7 +536,7 @@
         <p data-i18n="lm.3.d">No advertising, no telemetry, no update checks.</p>
       </article>
     </div>
-    <div class="beta reveal">
+    <div class="beta reveal" data-beta>
       <span class="beta__tag">beta</span>
       <p data-i18n="lm.beta"><b>This is a prerelease; the Linux version is new since 0.1.6-beta.</b> Check an important backup by restoring it to a spare disk or a virtual machine before you rely on it — on Linux especially.</p>
     </div>

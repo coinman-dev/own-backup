@@ -65,9 +65,9 @@
       });
     });
 
-    document.title = t('meta.title');
+    document.title = channelText(t('meta.title'));
     var md = $('meta[name="description"]');
-    if (md) md.content = t('meta.desc');
+    if (md) md.content = channelText(t('meta.desc'));
 
     $$('img[data-shot]').forEach(function (img) {
       var src = 'img/' + lang + '/' + img.dataset.shot + '.png';
@@ -86,6 +86,11 @@
 
     if (remember) { try { localStorage.setItem('ob-lang', lang); } catch (e) { /* private mode */ } }
     langHooks.forEach(function (fn) { fn(); });
+  }
+
+  function stable() { return document.documentElement.dataset.channel === 'stable'; }
+  function channelText(s) {
+    return stable() ? s.replace(/ \((?:public beta|beta|бета|публичная бета)\)/g, '').replace(/ Public beta\./, '') : s;
   }
 
   function initialLang() {
@@ -929,7 +934,11 @@
     function apply(rel) {
       if (!rel || !rel.tag || !rel.assets) return;
       var a = rel.assets;
-      if (!a.exe || !a.deb) return; // a release still being published
+      if (!a.exe || !a.deb) return;
+      document.documentElement.dataset.channel = rel.prerelease ? 'beta' : 'stable';
+      document.title = channelText(t('meta.title'));
+      var md = $('meta[name="description"]');
+      if (md) md.content = channelText(t('meta.desc'));
       $$('[data-version]').forEach(function (el) { el.textContent = rel.tag.replace(/^v/, ''); });
       $$('[data-release-link]').forEach(function (el) { el.href = rel.url; });
       Object.keys(a).forEach(function (k) {
@@ -943,22 +952,33 @@
     }
 
     var cached = null;
-    try { cached = JSON.parse(sessionStorage.getItem('ob-release') || 'null'); } catch (e) { /* ignore */ }
+    try { cached = JSON.parse(sessionStorage.getItem('ob-release2') || 'null'); } catch (e) { /* ignore */ }
     if (cached && Date.now() - cached.at < 3600e3) { apply(cached); return; }
     if (!window.fetch) return;
 
-    fetch('https://api.github.com/repos/' + REPO + '/releases?per_page=5', { headers: { Accept: 'application/vnd.github+json' } })
+    function kind(name) {
+      return /^own-backup-install.*\.exe$/i.test(name) ? 'exe' : /\.deb$/i.test(name) ? 'deb' : /\.iso$/i.test(name) ? 'iso' : /^SHA256SUMS/i.test(name) ? 'sums' : '';
+    }
+    // The newest published release that already has the installer and the
+    // package: while a release's files are still uploading, the one before it.
+    // scripts/site-release.py picks the same at build time.
+    fetch('https://api.github.com/repos/' + REPO + '/releases?per_page=10', { headers: { Accept: 'application/vnd.github+json' } })
       .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
       .then(function (list) {
-        var rel = (list || []).filter(function (r) { return !r.draft; })[0];
-        if (!rel) return;
-        var out = { at: Date.now(), tag: rel.tag_name, url: rel.html_url, assets: {} };
-        (rel.assets || []).forEach(function (x) {
-          var k = /^own-backup-install.*\.exe$/i.test(x.name) ? 'exe' : /\.deb$/i.test(x.name) ? 'deb' : /\.iso$/i.test(x.name) ? 'iso' : /^SHA256SUMS/i.test(x.name) ? 'sums' : '';
-          if (k) out.assets[k] = { name: x.name, url: x.browser_download_url, size: x.size };
+        var out = null;
+        (list || []).some(function (rel) {
+          if (rel.draft) return false;
+          var o = { at: Date.now(), tag: rel.tag_name, url: rel.html_url, prerelease: !!rel.prerelease, assets: {} };
+          (rel.assets || []).forEach(function (x) {
+            var k = kind(x.name);
+            if (k && !o.assets[k]) o.assets[k] = { name: x.name, url: x.browser_download_url, size: x.size };
+          });
+          if (o.assets.exe && o.assets.deb) { out = o; return true; }
+          return false;
         });
+        if (!out) return;
         apply(out);
-        try { sessionStorage.setItem('ob-release', JSON.stringify(out)); } catch (e) { /* ignore */ }
+        try { sessionStorage.setItem('ob-release2', JSON.stringify(out)); } catch (e) { /* ignore */ }
       })
       .catch(function () { /* the built-in links stay */ });
   })();

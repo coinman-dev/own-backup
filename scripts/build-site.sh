@@ -10,6 +10,15 @@
 # Снимки экрана в site/ не хранятся: они берутся из руководства, поэтому сайт
 # показывает то же, что и doc/. Ветка gh-pages каждый раз пишется заново одним
 # коммитом: это витрина, а не история. Исходники сайта живут в site/ на dev.
+#
+# Версию, ссылки и размеры файлов выпуска сборка берёт из API GitHub
+# (scripts/site-release.py): в странице последний полный выпуск, и его видят
+# поисковики. Без сети простая сборка оставляет запасные значения из
+# site/index.html, а --publish останавливается. После каждого выпуска сайт
+# пересобирает .github/workflows/site.yml.
+#
+# Для запуска в GitHub Actions: SITE_REMOTE (куда отправлять), SITE_GIT_NAME и
+# SITE_GIT_EMAIL (автор коммита), SITE_COMMIT_MESSAGE.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -38,6 +47,15 @@ for lang in en ru; do
     cp "$src" "$out/img/$lang/"
   done
 done
+
+# Последний выпуск — в страницу.
+py="$(command -v python3 || command -v python || true)"
+[ -n "$py" ] || { echo "Нужен Python 3" >&2; exit 1; }
+if ! "$py" "$root/scripts/site-release.py" "$out/index.html"; then
+  [ "$publish" = 1 ] && { echo "Без данных о выпуске сайт не публикуется" >&2; exit 1; }
+  echo "Предупреждение: в странице остались значения из site/index.html" >&2
+fi
+
 # Дата изменения в карте сайта — день сборки.
 sed -i "s/__LASTMOD__/$(date +%F)/" "$out/sitemap.xml"
 # Без Jekyll: файлы отдаются как есть.
@@ -46,16 +64,16 @@ sed -i "s/__LASTMOD__/$(date +%F)/" "$out/sitemap.xml"
 echo "Сайт собран: $out ($(du -sh "$out" | cut -f1))"
 [ "$publish" = 1 ] || exit 0
 
-remote="$(git -C "$root" remote get-url origin)"
+remote="${SITE_REMOTE:-$(git -C "$root" remote get-url origin)}"
 rev="$(git -C "$root" rev-parse --short HEAD)"
 msg="${SITE_COMMIT_MESSAGE:-Сайт: сборка из $rev}"
-name="$(git -C "$root" config user.name)"
-email="$(git -C "$root" config user.email)"
+name="${SITE_GIT_NAME:-$(git -C "$root" config user.name)}"
+email="${SITE_GIT_EMAIL:-$(git -C "$root" config user.email)}"
 
 cd "$out"
 git init -q -b gh-pages
 git -c user.name="$name" -c user.email="$email" add -A
 git -c user.name="$name" -c user.email="$email" commit -q -m "$msg"
-git push -f "$remote" gh-pages:gh-pages
+git push -q -f "$remote" gh-pages:gh-pages
 rm -rf "$out/.git"
 echo "Отправлено в gh-pages: https://coinman-dev.github.io/own-backup/"
