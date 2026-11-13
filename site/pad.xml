@@ -50,7 +50,7 @@
     <Program_Type>Freeware</Program_Type>
     <Program_Release_Status>Beta</Program_Release_Status>
     <Program_Install_Support>Install and Uninstall</Program_Install_Support>
-    <Program_OS_Support>Win10,Win11,Linux,Linux Gnome</Program_OS_Support>
+    <Program_OS_Support>Windows 10,Windows 11,Linux</Program_OS_Support>
     <Program_Language>English,Russian</Program_Language>
     <Program_Change_Info>Public beta. What is new: https://github.com/coinman-dev/own-backup/releases/tag/v0.2.1-beta</Program_Change_Info>
     <Program_Specific_Category>Utilities</Program_Specific_Category>
