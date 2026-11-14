@@ -50,6 +50,17 @@ spoke at the time of the run.
 **Save** applies the general settings. The service writes them, so no
 administrator prompt is needed.
 
+### Update checks
+
+At startup, the program checks GitHub for new releases **once a week** (the
+default), **once a month**, or never (**Disabled**). A newer version opens a
+dialog with the installed and available version numbers. **Open release page**
+opens GitHub; downloading and running the installer is still manual, there is
+no automatic update. **Check now** checks immediately, even when the schedule
+is disabled. A beta version also checks beta releases; a stable version checks
+only stable releases. No information about the user, jobs or backups is sent
+during a check.
+
 ### Appearance
 
 - **Theme** — *Light*, *Dark*, *Same as the system*. The sun and moon buttons

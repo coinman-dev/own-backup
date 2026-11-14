@@ -39,8 +39,8 @@ from.
 Windows 10/11, x64. The window needs the Microsoft Edge WebView2 Runtime — part
 of Windows 11, and the installer says so if a Windows 10 does not have it.
 Linux: Ubuntu 24.04 or newer, Debian 13 or newer, amd64; the package brings
-WebKitGTK and the rest of what the window needs. No advertising, no
-telemetry, no update checks.
+WebKitGTK and the rest of what the window needs. No advertising or telemetry.
+Update checks contact only GitHub and can be disabled in Settings.
 [All releases](https://github.com/coinman-dev/own-backup/releases) ·
 [Changelog](CHANGELOG.md).
 

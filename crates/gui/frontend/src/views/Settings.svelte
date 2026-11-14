@@ -7,6 +7,7 @@
   import { m } from '../lib/paraglide/messages';
   import { examplePath } from '../lib/paths';
   import { isWindows } from '../lib/platformStore.svelte';
+  import { showAvailableUpdate } from '../lib/updateStore.svelte';
 
   /** The config as it was loaded, kept whole. Saving edits a copy of it rather
    *  than building a fresh object out of the fields this page shows — which is
@@ -17,6 +18,10 @@
   let compressionLevel = $state(3);
   let logLevel = $state<'info' | 'debug'>('info');
   let logMirrorDir = $state('');
+  let updateCheckInterval = $state<'weekly' | 'monthly' | 'disabled'>('weekly');
+  let updateChecking = $state(false);
+  let updateCheckMessage: (() => string) | null = $state(null);
+  let updateCheckError: string | null = $state(null);
   let serviceStatus: ServiceStatus | null = $state(null);
   let isLoading = $state(true);
   let error: string | null = $state(null);
@@ -57,6 +62,10 @@
       const saved = String(cfg.log_level ?? '').toLowerCase();
       logLevel = saved === 'debug' || saved === 'trace' ? 'debug' : 'info';
       logMirrorDir = (cfg.log_mirror_dir as string) ?? '';
+      const updateInterval = String(cfg.update_check_interval ?? 'weekly');
+      updateCheckInterval = updateInterval === 'monthly' || updateInterval === 'disabled'
+        ? updateInterval
+        : 'weekly';
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -84,10 +93,35 @@
         default_compression_level: compressionLevel,
         log_level: logLevel,
         log_mirror_dir: logMirrorDir.trim(),
+        update_check_interval: updateCheckInterval,
       });
       saveMessage = m.set_saved;
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async function checkUpdatesNow() {
+    updateChecking = true;
+    updateCheckMessage = null;
+    updateCheckError = null;
+    saveMessage = null;
+    try {
+      const result = await api.checkForUpdates(true);
+      if (result.status === 'available') {
+        showAvailableUpdate(result);
+        const version = result.latest_version ?? '';
+        updateCheckMessage = () => m.set_updates_found({ version });
+      } else if (result.status === 'disabled') {
+        updateCheckMessage = m.set_updates_unavailable;
+      } else {
+        const version = result.current_version;
+        updateCheckMessage = () => m.set_updates_current({ version });
+      }
+    } catch (e: unknown) {
+      updateCheckError = m.set_updates_failed({ error: e instanceof Error ? e.message : String(e) });
+    } finally {
+      updateChecking = false;
     }
   }
 
@@ -214,8 +248,9 @@
     </div>
   {:else}
     <div class="settings-grid">
-      <div class="card">
-        <h2 class="section-title">{m.set_general()}</h2>
+      <div class="main-column">
+        <div class="card">
+          <h2 class="section-title">{m.set_general()}</h2>
 
         <!-- Shown, not edited: the service takes its folder from where it is
              installed and never read this value, so a field that accepted a
@@ -268,8 +303,30 @@
           <p class="help-text">{m.set_log_mirror_help()}</p>
         </div>
 
-        <div class="form-actions">
-          <button class="btn btn-primary" onclick={handleSave}>{m.common_save()}</button>
+          <div class="form-actions">
+            <button class="btn btn-primary" onclick={handleSave}>{m.common_save()}</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2 class="section-title">{m.set_updates()}</h2>
+          <div class="form-group">
+            <label for="update-check-interval">{m.set_updates_interval()}</label>
+            <select id="update-check-interval" class="form-select" bind:value={updateCheckInterval}>
+              <option value="weekly">{m.set_updates_weekly()}</option>
+              <option value="monthly">{m.set_updates_monthly()}</option>
+              <option value="disabled">{m.set_updates_disabled()}</option>
+            </select>
+            <p class="help-text">{m.set_updates_help()}</p>
+          </div>
+          {#if updateCheckMessage}<p class="update-result">{updateCheckMessage()}</p>{/if}
+          {#if updateCheckError}<p class="update-result update-error" role="alert">{updateCheckError}</p>{/if}
+          <div class="form-actions update-actions">
+            <button class="btn btn-secondary" onclick={checkUpdatesNow} disabled={updateChecking}>
+              {updateChecking ? m.set_updates_checking() : m.set_updates_now()}
+            </button>
+            <button class="btn btn-primary" onclick={handleSave}>{m.common_save()}</button>
+          </div>
         </div>
       </div>
 
@@ -484,7 +541,7 @@
     box-shadow: none;
   }
 
-  /* Right column: «Оформление» above «Состояние службы». */
+  .main-column,
   .side-column {
     display: flex;
     flex-direction: column;
@@ -647,6 +704,22 @@
     margin-top: 20px;
     display: flex;
     justify-content: flex-end;
+  }
+
+  .update-actions {
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .update-result {
+    margin: 12px 0 0;
+    color: var(--success-text);
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+
+  .update-error {
+    color: var(--error-text);
   }
 
   .status-grid {

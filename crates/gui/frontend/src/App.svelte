@@ -15,6 +15,8 @@
   import Cleanup from './views/Cleanup.svelte';
   import Settings from './views/Settings.svelte';
   import About from './views/About.svelte';
+  import UpdateAvailableModal from './components/UpdateAvailableModal.svelte';
+  import { updateNotification, showAvailableUpdate } from './lib/updateStore.svelte';
   import type { ViewName } from './lib/types';
   import { m } from './lib/paraglide/messages';
   import { onLocale } from './lib/i18n.svelte';
@@ -130,10 +132,12 @@
     initEngine();
     initJobs();
     initWaiting();
+    api.checkForUpdates().then(showAvailableUpdate, () => {});
   });
 </script>
 
 <PathPicker />
+<UpdateAvailableModal info={updateNotification.available} onClose={() => (updateNotification.available = null)} />
 
 <div class="app-layout">
   <Sidebar {currentView} onNavigate={handleNavigate} />

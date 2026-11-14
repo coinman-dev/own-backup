@@ -3127,6 +3127,7 @@ dependencies = [
  "prost-build",
  "rusqlite",
  "rust-i18n",
+ "semver",
  "serde",
  "serde_json",
  "sha2",

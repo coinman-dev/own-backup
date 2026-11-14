@@ -1489,3 +1489,10 @@ export interface CleanupOptions {
   history_keep_days: number;
   junk?: CleanupJunk;
 }
+
+export interface UpdateCheckResult {
+  status: 'disabled' | 'not_due' | 'current' | 'available';
+  current_version: string;
+  latest_version?: string;
+  release_url?: string;
+}

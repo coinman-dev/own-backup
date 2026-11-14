@@ -804,6 +804,8 @@ fn main() {
             commands::settings::set_tray_icon_enabled,
             commands::settings::platform_info,
             commands::settings::relaunch_elevated,
+            commands::updates::check_for_updates,
+            commands::updates::open_update_release,
             // The boot medium has no taskbar to say which layout is active.
             commands::keyboard::keyboard_layout,
             // …and every password field says it too, beside its eye.
