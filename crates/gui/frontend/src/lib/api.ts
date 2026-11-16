@@ -168,6 +168,7 @@ export const api = {
   cancelRunningBackup: () => invoke<void>('cancel_running_backup'),
   getRunQueue: () => invoke<QueueSnapshot>('get_run_queue'),
   listActivity: () => invoke<JobRun[]>('list_activity'),
+  clearActivity: () => invoke<{ runs: number; restores: number }>('clear_activity'),
 
   // --- engine ops (Restore / Tools) ---
   // Each takes what the person typed to open an ENCRYPTED copy. A manual

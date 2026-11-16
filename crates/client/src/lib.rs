@@ -372,6 +372,18 @@ impl BackupClient {
         parse(&reply.json)
     }
 
+    /// Clear the history; what the program still needs of it stays (the
+    /// service's `ClearActivity`).
+    pub async fn clear_activity(&mut self) -> Result<serde_json::Value> {
+        let reply = self
+            .inner
+            .clear_activity(self.request(proto::Empty {}))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
     /// Subscribe to orchestration events (progress / queue / finished).
     pub async fn stream_events(&mut self) -> Result<impl Stream<Item = ClientEvent>> {
         self.stream_events_with_status().await.map_err(status)

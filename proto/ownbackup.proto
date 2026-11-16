@@ -24,6 +24,9 @@ service BackupService {
   rpc CancelRunning(Empty) returns (Empty);          // signal-cancel the running job
   rpc GetQueue(Empty) returns (JsonReply);           // JSON: QueueSnapshot
   rpc ListActivity(Empty) returns (JsonReply);       // JSON: [JobRun]
+  // Clear the history: keeps per job its last scheduled run and last good
+  // copy, and unread restore reports. JSON: {"runs": n, "restores": n}
+  rpc ClearActivity(Empty) returns (JsonReply);
   rpc StreamEvents(Empty) returns (stream Event);    // progress / queue / finished
 
   // --- Encrypted volumes ---

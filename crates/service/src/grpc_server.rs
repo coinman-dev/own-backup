@@ -1566,6 +1566,23 @@ impl BackupService for BackupServiceImpl {
         json_reply(&runs)
     }
 
+    async fn clear_activity(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        let store = self.state.store.clone();
+        let data_dir = self.state.config.data_dir.clone();
+        let (runs, restores) = tokio::task::spawn_blocking(move || {
+            Ok::<_, std::io::Error>((
+                store.clear_activity()?,
+                own_backup_core::restore_exec::clear_read_history(&data_dir)?,
+            ))
+        })
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map_err(|e| Status::internal(e.to_string()))?;
+        info!(runs, restores, "gRPC: ClearActivity");
+        json_reply(&serde_json::json!({ "runs": runs, "restores": restores }))
+    }
+
     type StreamEventsStream = Pin<Box<dyn Stream<Item = Result<Event, Status>> + Send>>;
 
     async fn stream_events(

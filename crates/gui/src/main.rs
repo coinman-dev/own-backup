@@ -754,6 +754,7 @@ fn main() {
             commands::backup_jobs::cancel_running_backup,
             commands::backup_jobs::get_run_queue,
             commands::backup_jobs::list_activity,
+            commands::backup_jobs::clear_activity,
             // --- engine ops used by Restore/Tools ---
             commands::engine::inspect_backup_image,
             commands::engine::restore_now,

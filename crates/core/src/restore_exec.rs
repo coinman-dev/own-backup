@@ -111,6 +111,22 @@ pub fn acknowledge_in_history(data_dir: &std::path::Path, plan_id: uuid::Uuid) -
     true
 }
 
+/// Remove the restores whose report has been read («Активность» →
+/// «Очистить»). An unread report stays: the restore page still has to show
+/// it, and a run that is not over yet is never acknowledged. Returns how many
+/// went.
+pub fn clear_read_history(data_dir: &std::path::Path) -> std::io::Result<usize> {
+    let path = data_dir.join(HISTORY_FILE);
+    let mut history = read_history(data_dir);
+    let before = history.len();
+    history.retain(|r| !r.acknowledged || r.status == RunStatus::Running);
+    let removed = before - history.len();
+    if removed > 0 {
+        write_history(&path, &history)?;
+    }
+    Ok(removed)
+}
+
 fn write_history(path: &std::path::Path, history: &[RestoreRunState]) -> std::io::Result<()> {
     // Written through a temporary file: a half-written history is worse than
     // none, because it looks readable and is not.

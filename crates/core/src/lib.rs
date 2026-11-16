@@ -1507,6 +1507,41 @@ impl JobStore {
         activity
     }
 
+    /// Forget the history the person asked to clear («Активность» →
+    /// «Очистить»), keeping what the program itself reads from it: for each
+    /// job that still exists, its newest run that served the schedule
+    /// ([`Self::last_scheduled_start`]) and its newest successful copy
+    /// ([`Self::last_success`]). Without the first a job that catches up
+    /// missed runs would start a copy at once; without the second the
+    /// planning would lose the copy it continues from. Returns how many runs
+    /// went.
+    pub fn clear_activity(&self) -> std::io::Result<usize> {
+        let jobs: std::collections::HashSet<String> = self
+            .jobs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|j| j.id.clone())
+            .collect();
+        let mut activity = self.activity.lock().unwrap();
+        let before = activity.len();
+        let mut served = std::collections::HashSet::new();
+        let mut succeeded = std::collections::HashSet::new();
+        // Newest first, so the first of each kind is the one kept.
+        activity.retain(|r| {
+            if !jobs.contains(&r.job_id) || !r.is_backup() {
+                return false;
+            }
+            let serves = !r.interrupted && !r.skipped && served.insert(r.job_id.clone());
+            let success = r.status == "success" && succeeded.insert(r.job_id.clone());
+            serves || success
+        });
+        let removed = before - activity.len();
+        write_json(&self.activity_path, &*activity)?;
+        info!(removed, kept = activity.len(), "activity cleared");
+        Ok(removed)
+    }
+
     /// Most recent successful run of a job. Chain planning keys on this, not
     /// on `last_run`: a failed or cancelled run must not reset an incremental
     /// chain back to a full backup.
@@ -6311,6 +6346,52 @@ mod tests {
             store.get("job1").unwrap().last_run.unwrap().image_path,
             good.image_path
         );
+    }
+
+    /// «Очистить» в «Активности»: уходит всё, кроме того, на что опирается сама
+    /// программа, — последнего состоявшегося запуска (расписание) и последней
+    /// удачной копии (планирование цепочки) каждого существующего задания.
+    #[test]
+    fn clearing_the_history_keeps_what_the_schedule_and_the_chain_need() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::load(dir.path());
+        let (job, good, _) = job_with_last(dir.path(), "incremental", "incremental", 1, true);
+        store.upsert(job).unwrap();
+        let run = |id: &str, job_id: &str, status: &str| JobRun {
+            id: id.into(),
+            job_id: job_id.into(),
+            status: status.into(),
+            started_at: format!("2026-11-{id}T10:00:00Z"),
+            ..Default::default()
+        };
+        // Oldest first: record_run puts each new one on top.
+        store.record_run(run("01", "job1", "success")).unwrap();
+        store.record_run(good.clone()).unwrap();
+        store.record_run(run("03", "job1", "error")).unwrap();
+        store
+            .record_run(JobRun {
+                interrupted: true,
+                ..run("04", "job1", "cancelled")
+            })
+            .unwrap();
+        store.record_run(run("05", "gone", "success")).unwrap();
+        store
+            .record_run(JobRun {
+                operation: "cleanup".into(),
+                ..run("06", "job1", "success")
+            })
+            .unwrap();
+        let served_before = store.last_scheduled_start("job1");
+
+        let removed = store.clear_activity().unwrap();
+        let left: Vec<String> = store.activity().iter().map(|r| r.id.clone()).collect();
+        assert_eq!(left, vec!["03".to_string(), good.id.clone()], "{left:?}");
+        assert_eq!(removed, 4);
+        assert_eq!(store.last_scheduled_start("job1"), served_before);
+        assert_eq!(store.last_success("job1").unwrap().id, good.id);
+        // On disk as well.
+        let reloaded = JobStore::load(dir.path());
+        assert_eq!(reloaded.activity().len(), 2);
     }
 
     #[test]

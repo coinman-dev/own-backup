@@ -229,3 +229,9 @@ pub async fn get_run_queue(state: State<'_, GuiState>) -> Result<QueueSnapshot, 
 pub async fn list_activity(state: State<'_, GuiState>) -> Result<Vec<JobRun>, String> {
     state.link.client().await?.list_activity().await
 }
+
+/// «Активность» → «Очистить».
+#[tauri::command]
+pub async fn clear_activity(state: State<'_, GuiState>) -> Result<serde_json::Value, String> {
+    state.link.client().await?.clear_activity().await
+}
