@@ -424,6 +424,59 @@ static ITEMS: &[Item] = &[
             files(Base::Windows, "Panther", &["*.log"], WEEK),
             files(Base::Windows, "debug", &["*.log"], WEEK),
             tree(Base::ProgramData, r"USOShared\Logs", WEEK),
+            // What another cleaner still found here after ours (16.11.2026),
+            // the safe part of it. Not taken, on purpose: the ESE journals of
+            // live databases (catroot2, SoftwareDistribution\DataStore,
+            // WebCache), the running ETW sessions (LogFiles\WMI\*.etl,
+            // RtBackup), Measured Boot and setupapi.dev.log.
+            tree(Base::Windows, r"debug\WIA", WEEK),
+            files(
+                Base::Windows,
+                "",
+                &["PFRO.log", "setupact.log", "setuperr.log"],
+                WEEK,
+            ),
+            files(Base::Windows, "Logs", &["StorGroupPolicy.log"], WEEK),
+            tree(Base::Windows, r"System32\LogFiles\setupcln", WEEK),
+            // Rotated generations only (`NtfsLog.etl.006`); the session's own
+            // file is open.
+            files(
+                Base::Windows,
+                r"System32\LogFiles\WMI",
+                &["*.etl.???"],
+                WEEK,
+            ),
+            files(
+                Base::Windows,
+                "SoftwareDistribution",
+                &["ReportingEvents.log"],
+                WEEK,
+            ),
+            files(Base::Windows, r"Performance\WinSAT", &["winsat.log"], WEEK),
+            files(
+                Base::Windows,
+                r"Microsoft.NET\Framework\v4.0.30319",
+                &["ngen.log", "ngen_service.log"],
+                WEEK,
+            ),
+            files(
+                Base::Windows,
+                r"Microsoft.NET\Framework64\v4.0.30319",
+                &["ngen.log", "ngen_service.log"],
+                WEEK,
+            ),
+            files(
+                Base::Windows,
+                r"ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization\Logs",
+                &["*.etl"],
+                WEEK,
+            ),
+            files(
+                Base::ProgramData,
+                r"Microsoft\Windows\Power Efficiency Diagnostics",
+                &["*.etl"],
+                WEEK,
+            ),
         ],
     },
     // --- caches ------------------------------------------------------------
@@ -466,6 +519,27 @@ static ITEMS: &[Item] = &[
             ),
             &["mstsc.exe"],
         )],
+    },
+    // Revocation lists and certificates CryptoAPI fetched: fetched again when
+    // asked for. Hundreds of small files in each profile and the services'.
+    Item {
+        id: "cert_cache",
+        group: "caches",
+        default_on: true,
+        keys: &[],
+        targets: &[
+            tree(Base::LocalLowAppData, r"Microsoft\CryptnetUrlCache", DAY),
+            tree(
+                Base::Windows,
+                r"System32\config\systemprofile\AppData\LocalLow\Microsoft\CryptnetUrlCache",
+                DAY,
+            ),
+            tree(
+                Base::Windows,
+                r"ServiceProfiles\*\AppData\LocalLow\Microsoft\CryptnetUrlCache",
+                DAY,
+            ),
+        ],
     },
     Item {
         id: "thumbnails",
@@ -571,6 +645,18 @@ static ITEMS: &[Item] = &[
             ),
         ],
     },
+    // How often and when each program was started — what «Пуск» counts its
+    // most used ones from. The `Count` values only; the GUID keys stay.
+    Item {
+        id: "user_assist",
+        group: "traces",
+        default_on: false,
+        targets: &[],
+        keys: &[reg(
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist\*\Count",
+            false,
+        )],
+    },
     Item {
         id: "rdp_history",
         group: "traces",
@@ -639,7 +725,11 @@ static ITEMS: &[Item] = &[
         id: "apps_recent",
         group: "programs",
         default_on: false,
-        targets: &[],
+        // MPC-HC's playlist of what was last played.
+        targets: &[of_program(
+            files(Base::RoamingAppData, "MPC-HC", &["default.mpcpl"], 0),
+            MPC_HC,
+        )],
         keys: &[
             reg_of(
                 r"Software\Microsoft\Windows\CurrentVersion\Applets\Paint\Recent File List",
@@ -1178,6 +1268,8 @@ fn browser_items() -> Vec<Item> {
                     crashes.push(of(b, roaming, format!(r"{app}\Crash Reports\{sub}"), &[]));
                 }
                 crashes.push(of(b, roaming, format!(r"{profile}\minidumps"), &[]));
+                // The crash helper's log beside them; its `glean` state stays.
+                crashes.push(of(b, roaming, format!(r"{app}\Crash Reports"), &["*.log"]));
             }
         }
     }
@@ -1296,6 +1388,7 @@ pub fn label_both(id: &str) -> Localized {
         "inet_cache" => tr_both!("cleanup.inet_cache"),
         "shader_cache" => tr_both!("cleanup.shader_cache"),
         "thumbnails" => tr_both!("cleanup.thumbnails"),
+        "cert_cache" => tr_both!("cleanup.cert_cache"),
         "prefetch" => tr_both!("cleanup.prefetch"),
         "rdp_cache" => tr_both!("cleanup.rdp_cache"),
         "last_good" => tr_both!("cleanup.last_good"),
@@ -1307,6 +1400,7 @@ pub fn label_both(id: &str) -> Localized {
         "recent_docs" => tr_both!("cleanup.recent_docs"),
         "jump_lists" => tr_both!("cleanup.jump_lists"),
         "run_history" => tr_both!("cleanup.run_history"),
+        "user_assist" => tr_both!("cleanup.user_assist"),
         "rdp_history" => tr_both!("cleanup.rdp_history"),
         "office_recent" => tr_both!("cleanup.office_recent"),
         "apps_recent" => tr_both!("cleanup.apps_recent"),
@@ -1357,6 +1451,7 @@ pub fn about(id: &str) -> String {
         "inet_cache" => tr!("cleanup.inet_cache_about"),
         "shader_cache" => tr!("cleanup.shader_cache_about"),
         "thumbnails" => tr!("cleanup.thumbnails_about"),
+        "cert_cache" => tr!("cleanup.cert_cache_about"),
         "prefetch" => tr!("cleanup.prefetch_about"),
         "rdp_cache" => tr!("cleanup.rdp_cache_about"),
         "last_good" => tr!("cleanup.last_good_about"),
@@ -1368,6 +1463,7 @@ pub fn about(id: &str) -> String {
         "recent_docs" => tr!("cleanup.recent_docs_about"),
         "jump_lists" => tr!("cleanup.jump_lists_about"),
         "run_history" => tr!("cleanup.run_history_about"),
+        "user_assist" => tr!("cleanup.user_assist_about"),
         "rdp_history" => tr!("cleanup.rdp_history_about"),
         "office_recent" => tr!("cleanup.office_recent_about"),
         "apps_recent" => tr!("cleanup.apps_recent_about"),
@@ -1588,6 +1684,40 @@ mod tests {
                 .iter()
                 .all(|t| matches!(t.base, Base::VolumeCache | Base::ComponentStore)));
             assert!(!i.reviewed() && !i.per_user());
+        }
+    }
+
+    /// Журналы, которые нашла чужая программа очистки (16.11.2026): берём только
+    /// безопасное. Старые поколения журналов WMI уходят, а файл, в который сейчас
+    /// пишет сессия, остаётся. Живые журналы баз и сессий в список не попадают.
+    #[test]
+    fn only_rotated_wmi_logs_and_no_live_journals() {
+        let logs = catalog().iter().find(|i| i.id == "windows_logs").unwrap();
+        let wmi = logs
+            .targets
+            .iter()
+            .find(|t| t.path == r"System32\LogFiles\WMI")
+            .expect("WMI target");
+        let hits = |name: &str| {
+            wmi.masks
+                .iter()
+                .any(|m| crate::engine::matches_mask(m, name))
+        };
+        assert!(hits("NtfsLog.etl.006"));
+        assert!(hits("Diagtrack-Listener.etl.001"));
+        assert!(!hits("NtfsLog.etl"), "the session's own file is open");
+        assert!(!wmi.recursive, "RtBackup below it is live");
+        for t in logs.targets {
+            for live in [
+                "catroot2",
+                "DataStore",
+                "WebCache",
+                "MeasuredBoot",
+                "RtBackup",
+            ] {
+                assert!(!t.path.contains(live), "{} must not be cleaned", t.path);
+            }
+            assert!(!t.masks.contains(&"setupapi.dev.log"));
         }
     }
 }

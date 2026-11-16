@@ -57,8 +57,8 @@
     "en": "Windows setup logs"
   },
   "cleanup.windows_logs_about": {
-    "ru": "Журналы обслуживания, обновления и установки Windows (Logs\\CBS, DISM, WindowsUpdate, waasmedic, Panther, USOShared и другие) старше недели. Журналы событий Windows не затрагиваются.",
-    "en": "Windows servicing, update and setup logs (Logs\\CBS, DISM, WindowsUpdate, waasmedic, Panther, USOShared and others) older than a week. The Windows event logs are not touched."
+    "ru": "Журналы обслуживания, обновления и установки Windows (Logs\\CBS, DISM, WindowsUpdate, waasmedic, Panther, USOShared, setupcln, PFRO.log, ngen.log, старые поколения LogFiles\\WMI и другие) старше недели. Журналы событий Windows и журналы работающих баз и служб не затрагиваются.",
+    "en": "Windows servicing, update and setup logs (Logs\\CBS, DISM, WindowsUpdate, waasmedic, Panther, USOShared, setupcln, PFRO.log, ngen.log, old LogFiles\\WMI generations and others) older than a week. The Windows event logs and the journals of running databases and services are not touched."
   },
   "cleanup.inet_cache": {
     "ru": "Кэш WinINet",
@@ -75,6 +75,14 @@
   "cleanup.shader_cache_about": {
     "ru": "Собранные шейдеры видеокарты. Пересоздаются сами; первый запуск игры после очистки может быть медленнее.",
     "en": "Compiled graphics shaders. They are rebuilt by themselves; the first start of a game after the cleanup may be slower."
+  },
+  "cleanup.cert_cache": {
+    "ru": "Кэш сертификатов",
+    "en": "Certificate cache"
+  },
+  "cleanup.cert_cache_about": {
+    "ru": "Списки отзыва и сертификаты, которые Windows скачала для проверки подписей (LocalLow\\Microsoft\\CryptnetUrlCache у пользователей и служб), старше суток. При следующей проверке Windows скачает нужные снова.",
+    "en": "Revocation lists and certificates Windows downloaded to check signatures (LocalLow\\Microsoft\\CryptnetUrlCache of users and services), older than a day. Windows downloads what it needs again at the next check."
   },
   "cleanup.thumbnails": {
     "ru": "Кэш миниатюр",
@@ -125,8 +133,8 @@
     "en": "Browser crash reports"
   },
   "cleanup.browser_crashes_about": {
-    "ru": "Отчёты и дампы, которые браузеры (Chrome, Edge, Vivaldi, Brave, Яндекс, Firefox, Thunderbird) собирают при сбоях, отправленные и ждущие отправки.",
-    "en": "Reports and dumps browsers (Chrome, Edge, Vivaldi, Brave, Yandex, Firefox, Thunderbird) collect when they crash, sent and waiting to be sent."
+    "ru": "Отчёты и дампы, которые браузеры (Chrome, Edge, Vivaldi, Brave, Яндекс, Firefox, Thunderbird) собирают при сбоях, отправленные и ждущие отправки, и журнал их помощника отчётов.",
+    "en": "Reports and dumps browsers (Chrome, Edge, Vivaldi, Brave, Yandex, Firefox, Thunderbird) collect when they crash, sent and waiting to be sent, and their crash helper's log."
   },
   "cleanup.group_programs": {
     "ru": "Программы",
@@ -145,8 +153,8 @@
     "en": "Programs' recent files"
   },
   "cleanup.apps_recent_about": {
-    "ru": "Недавние файлы Paint, WordPad, Проигрывателя Windows Media, MPC-HC (вместе с местом, где остановлен просмотр), Adobe Acrobat Reader, история папок и архивов 7-Zip и WinRAR, последний раздел редактора реестра. Настройки программ — например, избранные папки 7-Zip — остаются.",
-    "en": "The recent files of Paint, WordPad, Windows Media Player, MPC-HC (with where playback stopped), Adobe Acrobat Reader, the folder and archive history of 7-Zip and WinRAR, Registry Editor's last key. The programs' settings — 7-Zip's folder shortcuts, say — stay."
+    "ru": "Недавние файлы Paint, WordPad, Проигрывателя Windows Media, MPC-HC (вместе с местом, где остановлен просмотр, и текущим плейлистом), Adobe Acrobat Reader, история папок и архивов 7-Zip и WinRAR, последний раздел редактора реестра. Настройки программ — например, избранные папки 7-Zip — остаются.",
+    "en": "The recent files of Paint, WordPad, Windows Media Player, MPC-HC (with where playback stopped, and its current playlist), Adobe Acrobat Reader, the folder and archive history of 7-Zip and WinRAR, Registry Editor's last key. The programs' settings — 7-Zip's folder shortcuts, say — stay."
   },
   "cleanup.app_caches": {
     "ru": "Кэши программ",
@@ -465,6 +473,14 @@
   "cleanup.group_traces_linux": {
     "ru": "Следы работы",
     "en": "Usage traces"
+  },
+  "cleanup.user_assist": {
+    "ru": "Статистика запуска программ",
+    "en": "Program launch statistics"
+  },
+  "cleanup.user_assist_about": {
+    "ru": "Сколько раз и когда запускалась каждая программа (реестр, Explorer\\UserAssist). По ней меню «Пуск» показывает часто используемые программы — после очистки этот список начнётся заново.",
+    "en": "How many times and when each program was started (registry, Explorer\\UserAssist). The Start menu shows its most used programs from it; after cleaning, that list starts over."
   },
   "cleanup.recent_docs": {
     "ru": "Недавние документы",
