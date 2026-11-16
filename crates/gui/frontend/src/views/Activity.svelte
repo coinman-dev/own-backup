@@ -140,7 +140,7 @@
   <div class="head">
     <h1>{m.act_title()}</h1>
     <div class="actions">
-      <button class="refresh" disabled={items.length === 0} onclick={() => { clearError = ''; confirmClear = true; }}>{m.act_clear()}</button>
+      <button class="refresh danger" disabled={items.length === 0} onclick={() => { clearError = ''; confirmClear = true; }}>{m.act_clear()}</button>
       <button class="refresh" onclick={refresh}>{m.common_refresh()}</button>
     </div>
   </div>
@@ -331,6 +331,9 @@
   .refresh { background: var(--card-bg); border: 1px solid var(--border-strong); border-radius: 6px; padding: 7px 16px; font-size: 13px; font-weight: 600; color: var(--text); cursor: pointer; font-family: var(--font); transition: background-color .15s ease; }
   .refresh:hover:not(:disabled) { background: var(--panel2); }
   .refresh:disabled { opacity: .45; cursor: default; }
+  /* Removes records: a hint of red, as the other buttons that delete. */
+  .refresh.danger { background: var(--error-soft); border-color: var(--error-line); color: var(--error-text); }
+  .refresh.danger:hover:not(:disabled) { background: var(--error-line); }
   .actions { display: flex; gap: 8px; }
   .pager { display: flex; align-items: center; justify-content: center; gap: 14px; margin: 14px 0; font-size: 13px; color: var(--text-secondary); }
   .empty { color: var(--text-muted); font-size: 14px; padding: 20px 0; }
