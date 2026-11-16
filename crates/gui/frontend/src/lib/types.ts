@@ -1475,7 +1475,12 @@ export interface CleanupReport {
 export interface CleanupProgress extends CleanupTally {
   mode: 'analyze' | 'run';
   item: string;
+  /** Only on a report of what `item` is busy with — it counts nothing:
+   *  'started', or DISM's step on the component store. */
+  stage?: CleanupStage;
 }
+
+export type CleanupStage = 'started' | 'store_analyze' | 'store_cleanup' | 'store_recount';
 
 /** A page of the files an analysis found for one item. */
 export interface CleanupFilesPage {

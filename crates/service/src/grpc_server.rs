@@ -4627,7 +4627,10 @@ impl BackupService for BackupServiceImpl {
         let report = tokio::task::spawn_blocking(move || {
             let mut last: Option<std::time::Instant> = None;
             cleaner.go(&asker, &chosen, &people, mode, options, &exclude, |p| {
-                if last.is_none_or(|t| t.elapsed().as_millis() >= 200) {
+                // What an item is busy with is said once per step and never
+                // thinned out: dropped, the window would name the wrong item
+                // through a DISM step of many minutes.
+                if p.tally.stage.is_some() || last.is_none_or(|t| t.elapsed().as_millis() >= 200) {
                     last = Some(std::time::Instant::now());
                     emit_engine(&events, "cleanup", &p);
                 }

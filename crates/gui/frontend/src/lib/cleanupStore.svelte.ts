@@ -2,7 +2,7 @@
 // another section and back must not lose them (owner, 2026-10-28). Nothing
 // here survives closing the window — the service's own list of an analysis
 // does not either (it is in memory, and the next analysis replaces it).
-import type { CleanupReport, CleanupTally } from './types';
+import type { CleanupReport, CleanupStage, CleanupTally } from './types';
 
 export const cleanupState = $state({
   /** Per item: what the last analysis found, or what the last cleanup removed. */
@@ -11,6 +11,9 @@ export const cleanupState = $state({
   shown: 'none' as 'none' | 'analyze' | 'run',
   /** An analysis or a cleanup this window started is under way. */
   busy: null as 'analyze' | 'run' | null,
+  /** While it is: the item being worked on, and what it is doing when the
+   *  service said (DISM's steps take minutes with no count to show). */
+  current: null as { item: string; stage: CleanupStage | null } | null,
   report: null as CleanupReport | null,
   /** The users or options changed after an analysis. */
   stale: false,

@@ -62,6 +62,38 @@ pub struct Tally {
     /// `bytes` is the most this can free, not what it will: nothing says more
     /// exactly ([`crate::component_store`]).
     pub up_to: bool,
+    /// Set only on a report that says what the item is BUSY with, before its
+    /// counts have anything to say ([`Stage`]); never on a count, never in a
+    /// report. The window shows it on the line of the running cleanup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<Stage>,
+}
+
+/// What an item is doing while its counts stand still — for the window, so a
+/// minutes-long step does not look like a hang (owner, 16.11.2026: «Очистка…
+/// 3.99 GiB» stood still for ten minutes while DISM cleaned the component store).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Stage {
+    /// The item has begun.
+    Started,
+    /// DISM is measuring the component store.
+    StoreAnalyze,
+    /// DISM is cleaning the component store: not interruptible, and it can
+    /// take up to an hour.
+    StoreCleanup,
+    /// DISM is measuring the store again to say what the cleanup freed.
+    StoreRecount,
+}
+
+impl Tally {
+    /// A report of what an item is busy with, and nothing counted.
+    pub fn busy(stage: Stage) -> Self {
+        Self {
+            stage: Some(stage),
+            ..Self::default()
+        }
+    }
 }
 
 impl Tally {
@@ -325,6 +357,7 @@ pub(crate) fn run_at_with(
         listing: Listing::new(),
     };
     for item in items {
+        progress(item.id, &Tally::busy(Stage::Started));
         let mut tally = Tally::default();
         let mut found = Vec::new();
         let mut running: Vec<String> = Vec::new();
@@ -348,7 +381,8 @@ pub(crate) fn run_at_with(
                 continue;
             }
             if target.base == Base::ComponentStore {
-                match crate::component_store::run(mode == Mode::Remove, cancel) {
+                let mut said = |stage: Stage| progress(item.id, &Tally::busy(stage));
+                match crate::component_store::run(mode == Mode::Remove, cancel, &mut said) {
                     Ok(found) => {
                         tally.bytes += found.bytes;
                         tally.up_to |= found.up_to;
