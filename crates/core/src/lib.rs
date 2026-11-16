@@ -3738,11 +3738,24 @@ fn recover_interrupted_consolidations(
     job: &Job,
     folder: &Path,
     keys: Option<&own_backup_backup::seal::context::ArchiveKeys>,
-) -> Option<String> {
-    use own_backup_backup::consolidate::resume_pending_with_keys;
+    tail: Option<&RunTail<'_>>,
+) -> Option<(&'static str, String)> {
+    use own_backup_backup::consolidate::{resume_pending_with, StepProgress};
 
-    let report = match resume_pending_with_keys(folder, keys) {
+    // A step being finished reads its base back if its marker says so, which
+    // is minutes on a big image — shown on the screen like any other step.
+    let mut quiet = |_: StepProgress| -> own_backup_common::Result<()> { Ok(()) };
+    let mut shown = tail.map(|tail| consolidation_reporter(tail, None, keys));
+    let progress: &mut dyn FnMut(StepProgress) -> own_backup_common::Result<()> =
+        match shown.as_mut() {
+            Some(report) => report,
+            None => &mut quiet,
+        };
+    let report = match resume_pending_with(folder, keys, progress) {
         Ok(r) => r,
+        Err(own_backup_common::OwnBackupError::Cancelled) => {
+            return Some(("cancelled", tr!("lib.cancelled_by_user").into_owned()));
+        }
         Err(e) => {
             warn!(job = %job.name, error = %e, "Could not scan for interrupted consolidations");
             return None; // the folder could not be read; the run's own checks will say so
@@ -3773,7 +3786,10 @@ fn recover_interrupted_consolidations(
         return None;
     }
     let bases = ours.join(", ");
-    Some(tr!("lib.consolidation_unfinished", bases = bases).into_owned())
+    Some((
+        "error",
+        tr!("lib.consolidation_unfinished", bases = bases).into_owned(),
+    ))
 }
 
 /// Does this image belong to the given job? Asked of the image's own sidecar,
@@ -3797,43 +3813,151 @@ fn belongs_to_job(image: &Path, job_id: &str) -> bool {
         .unwrap_or(true)
 }
 
+/// Where the end of a run reports what it is doing, and whether it was asked
+/// to stop — what consolidation needs to be seen and to be cancellable.
+pub(crate) struct RunTail<'a> {
+    pub(crate) sink: &'a Arc<dyn EventSink>,
+    pub(crate) cancel: &'a AtomicBool,
+    pub(crate) job_id: &'a str,
+}
+
+/// How the consolidation of a run ended, beyond how many increments it folded.
+#[derive(Debug, Default)]
+pub(crate) struct ConsolidationResult {
+    pub(crate) folded: u32,
+    pub(crate) stop: Option<ConsolidationStop>,
+}
+
+#[derive(Debug)]
+pub(crate) enum ConsolidationStop {
+    /// Cancelled half-way: the step's marker stays and the next run finishes
+    /// it, its check included. The copy this run made is not affected.
+    Cancelled,
+    /// A step failed after its marker was written — the base it was folding
+    /// into is in a state nobody has confirmed, and every later run of the
+    /// job stops on that marker until it is resolved. Said now, in this run,
+    /// rather than discovered by the next one.
+    Failed(String),
+}
+
+/// What a consolidation step tells the window: `consolidate` while it folds
+/// (no count, the bar runs), `consolidate-verify` while it reads the base back.
+fn consolidation_reporter<'a>(
+    tail: &'a RunTail<'a>,
+    image: Option<&'a Path>,
+    keys: Option<&'a own_backup_backup::seal::context::ArchiveKeys>,
+) -> impl FnMut(own_backup_backup::consolidate::StepProgress) -> own_backup_common::Result<()> + 'a
+{
+    use own_backup_backup::consolidate::StepProgress;
+
+    // The base being rewritten. A step finished at the start of a run is
+    // found by its marker, and the progress line then names no file.
+    let image_file_name = image
+        .and_then(Path::file_name)
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut last_permille = u64::MAX;
+    let mut last_emit = std::time::Instant::now();
+    let mut rate: Option<VerifyRate> = None;
+    move |p| {
+        if tail.cancel.load(Ordering::SeqCst) {
+            return Err(own_backup_common::OwnBackupError::Cancelled);
+        }
+        let (phase, done, total, mbps) = match p {
+            StepProgress::Folding => ("consolidate", 0, 0, 0.0),
+            StepProgress::Checking { done, total } => {
+                let rate = rate
+                    .get_or_insert_with(|| VerifyRate::new(image.unwrap_or(Path::new("")), keys));
+                ("consolidate-verify", done, total, rate.sample(done))
+            }
+        };
+        let permille = if total > 0 { done * 1000 / total } else { 0 };
+        let phase_changed = matches!(p, StepProgress::Folding)
+            || matches!(p, StepProgress::Checking { done: 0, .. });
+        if phase_changed || permille != last_permille || last_emit.elapsed().as_millis() >= 400 {
+            last_permille = permille;
+            last_emit = std::time::Instant::now();
+            tail.sink.job_progress(JobProgress {
+                job_id: tail.job_id.to_string(),
+                phase: phase.into(),
+                percent: permille / 10,
+                blocks_done: done,
+                blocks_total: total,
+                speed_mbps: mbps,
+                volume_index: 0,
+                volume_count: 1,
+                volume: String::new(),
+                image_file_name: image_file_name.clone(),
+                categories: Vec::new(),
+                excluded_files: None,
+                excluded_bytes: None,
+                stalled_secs: None,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// The read-back a step owes before its increment is deleted, from the job's
+/// own check setting: none when the job does not check its copies; the
+/// blocks the fold wrote when it checks "only the latest copy"; otherwise the
+/// whole base, which every older version stands on.
+fn fold_check(job: &Job) -> Option<own_backup_backup::consolidate::FoldCheck> {
+    use own_backup_backup::consolidate::FoldCheck;
+    if !job.advanced.validate_after {
+        None
+    } else if job.advanced.verify_latest_only {
+        Some(FoldCheck::Folded)
+    } else {
+        Some(FoldCheck::Whole)
+    }
+}
+
 /// Fold overflowed increments into their base after a successful run.
 ///
 /// Runs AFTER [`apply_retention`] on purpose: retention deletes whole chains,
 /// and folding an increment into a base that is about to be deleted anyway is
-/// pure wear. Failures are logged and never fail the run — the backup itself
-/// already succeeded, and a chain that did not get consolidated is a chain
-/// that is merely longer than asked for, not a broken one.
+/// pure wear. And after the check of the new copy: a copy that did not read
+/// back stops the run before anything older is rewritten.
+///
+/// Each step reads the rewritten base back before deleting the increment it
+/// absorbed (when the job checks its copies, [`fold_check`]). A step that
+/// fails before its marker is written leaves the chain as it was — merely
+/// longer than asked — and is only logged. One that fails after it is
+/// reported ([`ConsolidationStop::Failed`]): that chain is now waiting on a
+/// human or on the next run's recovery.
 fn apply_consolidation(
     job: &Job,
     protected: &[(String, PathBuf)],
     keys: Option<&own_backup_backup::seal::context::ArchiveKeys>,
-) -> u32 {
+    tail: &RunTail<'_>,
+) -> ConsolidationResult {
     use own_backup_backup::chains::{list_job_chains_strict, plan_consolidation};
-    use own_backup_backup::consolidate::consolidate_step_with_keys;
+    use own_backup_backup::consolidate::{consolidate_step_with, marker_path, StepOptions};
 
+    let mut result = ConsolidationResult::default();
     let Some(keep) = job.scheme.rolling_incrementals else {
-        return 0;
+        return result;
     };
     // Differential chains hang every child off the base, so moving the base
     // forward would silently rebase the rest. `plan_consolidation` refuses
     // them too; bailing here keeps the log quiet about a thing we never do.
     if job.scheme.method != "incremental" {
-        return 0;
+        return result;
     }
     let folder = PathBuf::from(&job.dest_folder);
+    let check = fold_check(job);
     // One step at a time, re-reading the folder after each: a step changes the
     // very chain the next decision is made from. The cap is a backstop against
     // a step that reports success without shortening anything — a loop that
     // never ends would be a far worse bug than a chain left one version long.
     const MAX_STEPS: usize = 64;
-    let mut folded = 0u32;
     for _ in 0..MAX_STEPS {
         let chains = match list_job_chains_strict(&folder, &job.id) {
             Ok(c) => c,
             Err(e) => {
                 warn!(job = %job.name, error = %e, "Consolidation scan failed");
-                return folded;
+                return result;
             }
         };
         let groups: std::collections::HashSet<(String, Option<String>)> = protected
@@ -3857,11 +3981,21 @@ fn apply_consolidation(
                 })
             })
             .find_map(|c| plan_consolidation(c, keep));
-        let Some(step) = step else { return folded };
+        let Some(step) = step else { return result };
 
-        match consolidate_step_with_keys(&step, keys) {
+        let base = step.base.image_path.clone();
+        let mut report = consolidation_reporter(tail, Some(&base), keys);
+        let outcome = consolidate_step_with(
+            &step,
+            &mut StepOptions {
+                keys,
+                check,
+                progress: &mut report,
+            },
+        );
+        match outcome {
             Ok(outcome) => {
-                folded += 1;
+                result.folded += 1;
                 info!(
                     job = %job.name,
                     base = %outcome.base.display(),
@@ -3870,20 +4004,33 @@ fn apply_consolidation(
                     "Consolidation: increment folded into the base"
                 );
             }
+            Err(own_backup_common::OwnBackupError::Cancelled) => {
+                warn!(job = %job.name, base = %base.display(),
+                    "Consolidation cancelled — the next run finishes the step");
+                result.stop = Some(ConsolidationStop::Cancelled);
+                return result;
+            }
             Err(e) => {
+                let started = marker_path(&base).exists();
                 warn!(
                     job = %job.name,
-                    base = %step.base.image_path.display(),
+                    base = %base.display(),
                     increment = %step.victim.image_path.display(),
                     error = %e,
-                    "Consolidation step failed — the chain is left as it was"
+                    marker_left = started,
+                    "Consolidation step failed"
                 );
-                return folded;
+                if started {
+                    result.stop = Some(ConsolidationStop::Failed(
+                        tr!("lib.consolidation_failed", error = e).into_owned(),
+                    ));
+                }
+                return result;
             }
         }
     }
     warn!(job = %job.name, "Consolidation stopped at the step cap — chains stay longer than asked");
-    folded
+    result
 }
 
 fn run_skeleton(job: &Job) -> JobRun {
@@ -3945,9 +4092,16 @@ async fn perform_backup(
     // FIRST, before the format check, before a parent is chosen and long
     // before anything is written: finish what a crash left half-done. Every
     // decision below reads these chains (audit AUD-06).
-    if let Some(msg) = recover_interrupted_consolidations(job, &folder, keys.as_ref()) {
+    let tail = RunTail {
+        sink,
+        cancel,
+        job_id: &job.id,
+    };
+    if let Some((status, msg)) =
+        recover_interrupted_consolidations(job, &folder, keys.as_ref(), Some(&tail))
+    {
         run.finished_at = chrono::Utc::now().to_rfc3339();
-        run.status = "error".into();
+        run.status = status.into();
         run.error = msg;
         return run;
     }
@@ -4127,7 +4281,7 @@ async fn perform_backup(
         }
     }
 
-    totals.finish(run, fatal, job, keys.as_ref())
+    totals.finish(run, fatal, job, keys.as_ref(), &tail)
 }
 
 /// Back up a whole disk (bootable copy) into ONE image with the real GPT and
@@ -4308,7 +4462,12 @@ async fn perform_disk_backup(
                 return run;
             }
             let protected = [(disk_token, image_path)];
-            backup_run::retain_and_consolidate(&mut run, job, &protected, keys.as_ref());
+            let tail = RunTail {
+                sink,
+                cancel,
+                job_id: &job.id,
+            };
+            backup_run::retain_and_consolidate(&mut run, job, &protected, keys.as_ref(), &tail);
         }
         Ok(Err(OwnBackupError::Cancelled)) => {
             run.status = "cancelled".into();
@@ -4367,9 +4526,16 @@ async fn perform_backup(
     // FIRST, before the format check, before a parent is chosen and long
     // before anything is written: finish what a crash left half-done. Every
     // decision below reads these chains (audit AUD-06).
-    if let Some(msg) = recover_interrupted_consolidations(job, &folder, keys.as_ref()) {
+    let tail = RunTail {
+        sink,
+        cancel,
+        job_id: &job.id,
+    };
+    if let Some((status, msg)) =
+        recover_interrupted_consolidations(job, &folder, keys.as_ref(), Some(&tail))
+    {
         run.finished_at = chrono::Utc::now().to_rfc3339();
-        run.status = "error".into();
+        run.status = status.into();
         run.error = msg;
         return run;
     }
@@ -4605,7 +4771,7 @@ async fn perform_backup(
         }
     }
 
-    totals.finish(run, fatal, job, keys.as_ref())
+    totals.finish(run, fatal, job, keys.as_ref(), &tail)
 }
 
 /// A device-mapper snapshot whose store the destination could not keep
@@ -4862,7 +5028,12 @@ async fn perform_disk_backup(
         return run;
     }
     let protected = [(tag, image_path)];
-    backup_run::retain_and_consolidate(&mut run, job, &protected, keys.as_ref());
+    let tail = RunTail {
+        sink,
+        cancel,
+        job_id: &job.id,
+    };
+    backup_run::retain_and_consolidate(&mut run, job, &protected, keys.as_ref(), &tail);
     run
 }
 
@@ -6792,9 +6963,9 @@ mod tests {
 
         let mut job = Job::default();
         job.id = "job1".into();
-        let stop = recover_interrupted_consolidations(&job, dir.path(), None);
+        let stop = recover_interrupted_consolidations(&job, dir.path(), None, None);
         assert!(stop.is_some(), "запуск обязан остановиться");
-        assert!(stop.unwrap().contains("a_full.vhdx"));
+        assert!(stop.unwrap().1.contains("a_full.vhdx"));
     }
 
     /// Чужая застрявшая цепочка в общей папке — проблема того задания, а не
@@ -6811,7 +6982,7 @@ mod tests {
 
         let mut job = Job::default();
         job.id = "job1".into();
-        assert!(recover_interrupted_consolidations(&job, dir.path(), None).is_none());
+        assert!(recover_interrupted_consolidations(&job, dir.path(), None, None).is_none());
     }
 
     /// Папка без маркеров — обычный случай, и он ничего не стоит.
@@ -6821,7 +6992,7 @@ mod tests {
         put_image_of_job(dir.path(), "c_full.vhdx", "job1");
         let mut job = Job::default();
         job.id = "job1".into();
-        assert!(recover_interrupted_consolidations(&job, dir.path(), None).is_none());
+        assert!(recover_interrupted_consolidations(&job, dir.path(), None, None).is_none());
     }
 
     /// Базу, у которой вообще не прочитать принадлежность, считаем своей:
@@ -6839,7 +7010,7 @@ mod tests {
 
         let mut job = Job::default();
         job.id = "job1".into();
-        assert!(recover_interrupted_consolidations(&job, dir.path(), None).is_some());
+        assert!(recover_interrupted_consolidations(&job, dir.path(), None, None).is_some());
     }
 
     // --- «Удалить задание вместе с копиями» (аудит AUD-09) ------------------

@@ -41,11 +41,21 @@
   // once stood behind a hung USB device under "сброс кэша" (2026-10-24).
   const releasing = $derived(progress?.phase === 'release');
   const opening = $derived(progress?.phase === 'exclusions-open');
+  // After the copy and its check: the oldest increment folded into the full
+  // copy (no count — the bar runs), then that full copy read back before the
+  // increment is deleted. Minutes of work that used to show as a check frozen
+  // at 100 % (16.11.2026: 3.5 min on a 64 GB base).
+  const consolidating = $derived(progress?.phase === 'consolidate');
+  const consolidateChecking = $derived(progress?.phase === 'consolidate-verify');
   /* Бегущая полоса — только когда считать нечего. У удаления исключённых
      файлов итог есть (сколько путей велено удалить), поэтому там обычная
      шкала и честное «Осталось»; «сброс кэша» итога не имеет никогда. */
   const indetBar = $derived(
-    finalizing || releasing || opening || (excluding && (progress?.blocks_total ?? 0) === 0),
+    finalizing ||
+      releasing ||
+      opening ||
+      consolidating ||
+      ((excluding || consolidateChecking) && (progress?.blocks_total ?? 0) === 0),
   );
   /** The job copies an encrypted container (BitLocker/LUKS) that it opens with
    *  a password: the copy then holds the volume DECRYPTED. Without archive
@@ -107,6 +117,8 @@
     const p = progress;
     if (!p || p.phase === 'prepare') return 0;
     if (p.phase === 'scheduled-verify') return p.percent;
+    // The copy and its check are both behind; what is left is older versions.
+    if (p.phase === 'consolidate' || p.phase === 'consolidate-verify') return 100;
     if (['finalize', 'release', 'exclusions-open', 'exclusions'].includes(p.phase))
       return job.advanced.validate_after ? 50 : 100;
     if (job.advanced.validate_after) {
@@ -353,6 +365,8 @@
           {:else if excluding || opening}{m.dash_phase_exclusions()}
           {:else if releasing}{m.dash_phase_release()}
           {:else if finalizing}{m.dash_phase_finalize()}
+          {:else if consolidating}{m.dash_phase_consolidate()}
+          {:else if consolidateChecking}{m.dash_phase_consolidate_verify()}
           {:else if verifying}{verifyLabel}
           {:else}{m.dash_phase_backup()}{/if}
         </span>
@@ -376,6 +390,8 @@
               {m.dash_release_note()}
             {:else if finalizing}
               {m.dash_finalizing_note()}
+            {:else if consolidating || (consolidateChecking && progress.blocks_total === 0)}
+              {m.dash_consolidate_note()}
             {:else}
               <!-- Пробел перед «·» пишется явно: в начале блока {#if} Svelte
                    его срезает, и получалось «блоков· 85.1 МБ/с». -->
@@ -384,7 +400,7 @@
           </span>
         {/if}
       </div>
-      <div class="bar"><div class="bar-fill" class:verify={verifying} class:indet={indetBar} style="width:{indetBar ? 100 : (progress?.percent ?? 0)}%"></div></div>
+      <div class="bar"><div class="bar-fill" class:verify={verifying || consolidateChecking} class:indet={indetBar} style="width:{indetBar ? 100 : (progress?.percent ?? 0)}%"></div></div>
       <div class="progress-meta">
         <span class="route" title="{sourceSummary(job)} → {destPath}">
           {sourceSummary(job)} → {destPath}

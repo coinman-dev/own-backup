@@ -106,6 +106,50 @@ pub struct ConsolidationOutcome {
     pub duration: Duration,
 }
 
+/// Reading the base back after the fold — before the increment is deleted.
+///
+/// The check after a copy reads what the copy wrote, and only then does the
+/// run consolidate; but consolidation REWRITES the base every older point
+/// stands on, so a check made before it says nothing about what it left. A
+/// base that came out of the fold wrong is found here, while the increment
+/// still exists, the marker still names the step, and every later run stops
+/// on it instead of writing new copies onto a broken chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FoldCheck {
+    /// Every block of the base's new state: the whole image is read.
+    Whole,
+    /// Only the blocks the fold wrote — the ones the increment stored.
+    Folded,
+}
+
+/// What a step is doing, for a progress line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepProgress {
+    /// The increment is being folded in and the next one repointed. The
+    /// fold reports no count.
+    Folding,
+    /// The base is being read back: `done` of `total` blocks.
+    Checking { done: u64, total: u64 },
+}
+
+/// A step's key, check and progress.
+pub struct StepOptions<'a> {
+    pub keys: Option<&'a ArchiveKeys>,
+    /// Read the base back before the increment is deleted. Recorded in the
+    /// marker, so a step finished after a crash is checked as well.
+    pub check: Option<FoldCheck>,
+    /// Told what the step is doing. An `Err` (normally `Cancelled`) stops the
+    /// step where it stands: the increment and the marker stay, and the next
+    /// run finishes it — the check included.
+    pub progress: &'a mut dyn FnMut(StepProgress) -> Result<()>,
+}
+
+/// For callers that report nothing.
+fn quiet(_: StepProgress) -> Result<()> {
+    Ok(())
+}
+
 /// Crash marker. Holds file NAMES, not paths: a backup folder that has been
 /// moved or remounted under a different letter must still resume.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,6 +178,10 @@ struct Marker {
     /// never grows old, so an age-based rule would never fire.
     #[serde(default)]
     chain_started_at: Option<String>,
+    /// The read-back this step owes before the increment may go. Absent in
+    /// markers written before the check existed: those finish as they did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    check: Option<FoldCheck>,
 }
 
 /// Marker file for a given base image.
@@ -558,13 +606,80 @@ fn remove_quietly(path: &Path) {
     }
 }
 
+/// Read the folded base back against the checksums it now carries — the
+/// increment's, which describe the whole state the base has taken on.
+fn check_base(
+    base: &Path,
+    victim: &Path,
+    check: FoldCheck,
+    keys: Option<&ArchiveKeys>,
+    progress: &mut dyn FnMut(StepProgress) -> Result<()>,
+) -> Result<()> {
+    use crate::engine_core::verify::{verify_blocks, Blocks};
+
+    let which = match check {
+        FoldCheck::Whole => Blocks::All,
+        FoldCheck::Folded => Blocks::StoredIn(victim),
+    };
+    progress(StepProgress::Checking { done: 0, total: 0 })?;
+    let summary = verify_blocks(base, keys, which, |done, total| {
+        progress(StepProgress::Checking { done, total })
+    })?;
+    if !summary.valid() {
+        warn!(
+            base = %base.display(),
+            increment = %victim.display(),
+            mismatched = summary.mismatched_blocks.len(),
+            "Consolidation: the base does not read back as the increment described it — \
+             the increment and the marker stay"
+        );
+        return Err(OwnBackupError::ChainBroken(
+            tr!(
+                "consolidate.check_failed",
+                path = base.display(),
+                count = summary.mismatched_blocks.len()
+            )
+            .into_owned(),
+        ));
+    }
+    info!(
+        base = %base.display(),
+        blocks = summary.blocks_checked,
+        whole = check == FoldCheck::Whole,
+        secs = summary.duration.as_secs(),
+        "Consolidation: the base read back correctly"
+    );
+    Ok(())
+}
+
 /// Perform one consolidation step, from wherever a previous attempt left off.
+#[cfg_attr(not(test), allow(dead_code))]
 fn execute(
     base: &Path,
     victim: &Path,
     next: Option<&Path>,
     keys: Option<&ArchiveKeys>,
 ) -> Result<ConsolidationOutcome> {
+    execute_with(
+        base,
+        victim,
+        next,
+        &mut StepOptions {
+            keys,
+            check: None,
+            progress: &mut quiet,
+        },
+    )
+}
+
+/// [`execute`] with a check of the result and a progress report.
+fn execute_with(
+    base: &Path,
+    victim: &Path,
+    next: Option<&Path>,
+    opts: &mut StepOptions<'_>,
+) -> Result<ConsolidationOutcome> {
+    let keys = opts.keys;
     let started = Instant::now();
     let container = container_of(base)?;
     let marker_file = marker_path(base);
@@ -634,10 +749,15 @@ fn execute(
                         .clone()
                         .or_else(|| Some(manifest.created_at.clone()))
                 }),
+                check: None,
             }
         }
     };
+    // A check once promised stays promised: a resume asks for none of its
+    // own, and must still read the base back before the increment goes.
+    marker.check = marker.check.or(opts.check);
 
+    (opts.progress)(StepProgress::Folding)?;
     write_marker(&marker_file, &marker)?;
 
     // The increment describes the state the base is about to hold.
@@ -738,6 +858,14 @@ fn execute(
         }
     }
 
+    // The base the rest of the chain hangs off has just been rewritten. Read
+    // it back while the increment still exists: a failure here keeps the
+    // increment and the marker, so no later run writes onto this chain or
+    // deletes from it until the check passes.
+    if let Some(check) = marker.check {
+        check_base(base, victim, check, keys, &mut *opts.progress)?;
+    }
+
     // Only now is the increment redundant. Its deletion is the step's last
     // phase and has to be CHECKABLE: reporting a shortened window while the
     // increment is still on disk sends the caller straight back to planning
@@ -780,11 +908,27 @@ pub fn consolidate_step_with_keys(
     step: &ConsolidationStep,
     keys: Option<&ArchiveKeys>,
 ) -> Result<ConsolidationOutcome> {
-    execute(
+    consolidate_step_with(
+        step,
+        &mut StepOptions {
+            keys,
+            check: None,
+            progress: &mut quiet,
+        },
+    )
+}
+
+/// The same, reading the base back before the increment is deleted and
+/// saying what it is doing — what a job run uses.
+pub fn consolidate_step_with(
+    step: &ConsolidationStep,
+    opts: &mut StepOptions<'_>,
+) -> Result<ConsolidationOutcome> {
+    execute_with(
         &step.base.image_path,
         &step.victim.image_path,
         step.next.as_ref().map(|i| i.image_path.as_path()),
-        keys,
+        opts,
     )
 }
 
@@ -799,6 +943,17 @@ pub fn resume_pending(folder: &Path) -> Result<ResumeReport> {
 
 /// The same, for a job whose chain may be encrypted.
 pub fn resume_pending_with_keys(folder: &Path, keys: Option<&ArchiveKeys>) -> Result<ResumeReport> {
+    resume_pending_with(folder, keys, &mut quiet)
+}
+
+/// The same, saying what a step being finished is doing. A step whose marker
+/// promised a check of the base is checked here too, before its increment
+/// is deleted.
+pub fn resume_pending_with(
+    folder: &Path,
+    keys: Option<&ArchiveKeys>,
+    progress: &mut dyn FnMut(StepProgress) -> Result<()>,
+) -> Result<ResumeReport> {
     let mut report = ResumeReport::default();
     let entries = match std::fs::read_dir(folder) {
         Ok(e) => e,
@@ -868,8 +1023,17 @@ pub fn resume_pending_with_keys(folder: &Path, keys: Option<&ArchiveKeys>) -> Re
             merged = marker.merged,
             "Consolidation: finishing a step interrupted earlier"
         );
-        match execute(&base, &victim, next.as_deref(), keys) {
+        let mut opts = StepOptions {
+            keys,
+            check: None,
+            progress: &mut *progress,
+        };
+        match execute_with(&base, &victim, next.as_deref(), &mut opts) {
             Ok(_) => report.finished.push(path.clone()),
+            // Stopped by the caller, not failed: the marker stays and the
+            // next pass takes the step up again. Said as itself, so a run
+            // being cancelled is not reported as a chain in an unknown state.
+            Err(OwnBackupError::Cancelled) => return Err(OwnBackupError::Cancelled),
             Err(e) => {
                 warn!(
                     base = %base.display(),
@@ -1427,6 +1591,7 @@ mod tests {
             merged: true,
             folded_before: 0,
             chain_started_at: Some("2026-01-01T00:00:00Z".into()),
+            check: None,
         };
         write_marker(&marker_path(&base), &marker).unwrap();
         crate::qcow2::merge_child_into_parent(&base, &inc1).unwrap();
@@ -1462,6 +1627,7 @@ mod tests {
             merged: true,
             folded_before: 0,
             chain_started_at: Some("2026-01-01T00:00:00Z".into()),
+            check: None,
         };
         write_marker(&marker_path(&base), &marker).unwrap();
         let report = resume_pending(dir.path()).unwrap();
@@ -1633,6 +1799,7 @@ mod tests {
             merged: false,
             folded_before: 0,
             chain_started_at: None,
+            check: None,
         };
         write_marker(&marker_path(&base), &marker).unwrap();
 
@@ -1661,6 +1828,7 @@ mod tests {
             merged: false,
             folded_before: 0,
             chain_started_at: None,
+            check: None,
         };
         write_marker(&path, &marker).unwrap();
         marker.merged = true;
@@ -1977,6 +2145,7 @@ mod tests {
             merged: true,
             folded_before: 0,
             chain_started_at: Some("2026-01-01T00:00:00Z".into()),
+            check: None,
         };
         write_marker(&marker_path(&base), &marker).unwrap();
         let promoted = promote(
@@ -2086,5 +2255,242 @@ mod tests {
                 "{bad:?} должно быть отвергнуто"
             );
         }
+    }
+
+    // ── Reading the base back after the fold ────────────────────────────
+
+    /// The volume a stack of layers reads as: later layers win, unwritten
+    /// clusters read zeros.
+    fn volume_of(layers: &[&[(u64, u8)]]) -> Vec<u8> {
+        let mut volume = vec![0u8; VOLUME_LEN as usize];
+        for layer in layers {
+            for &(index, fill) in *layer {
+                let at = (index * CS) as usize;
+                volume[at..at + CS as usize].fill(fill);
+            }
+        }
+        volume
+    }
+
+    fn true_sums(volume: &[u8]) -> Vec<BlockChecksum> {
+        crate::engine_core::testkit::checksums(volume, 4096)
+    }
+
+    const BASE_DATA: &[(u64, u8)] = &[(1, 0x11), (2, 0x11)];
+    const INC1_DATA: &[(u64, u8)] = &[(2, 0x22), (3, 0x22)];
+    const INC2_DATA: &[(u64, u8)] = &[(3, 0x33), (4, 0x33)];
+
+    /// base ← inc1 ← inc2 whose sidecars carry the REAL checksums of the
+    /// states they describe — except that inc1's, when `inc1_lies_about` names
+    /// a cluster, describes that cluster wrong: a base that took inc1's
+    /// description then does not read back as it says.
+    fn checkable_chain(dir: &Path, inc1_lies_about: Option<u64>) -> (PathBuf, PathBuf, PathBuf) {
+        let (base, base_id) = put_image(
+            dir,
+            "k_C_full_1.qcow2",
+            None,
+            ChainRole::Full,
+            "2026-01-01T00:00:00Z",
+            BackupType::Full,
+            None,
+            BASE_DATA,
+            &true_sums(&volume_of(&[BASE_DATA])),
+            None,
+        );
+        let mut inc1_state = volume_of(&[BASE_DATA, INC1_DATA]);
+        if let Some(cluster) = inc1_lies_about {
+            inc1_state[(cluster * CS) as usize] ^= 0xFF;
+        }
+        let (inc1, inc1_id) = put_image(
+            dir,
+            "k_C_inc_2.qcow2",
+            Some("k_C_full_1.qcow2"),
+            ChainRole::Incremental,
+            "2026-01-02T00:00:00Z",
+            BackupType::Incremental,
+            Some(base_id),
+            INC1_DATA,
+            &true_sums(&inc1_state),
+            None,
+        );
+        let (inc2, _) = put_image(
+            dir,
+            "k_C_inc_3.qcow2",
+            Some("k_C_inc_2.qcow2"),
+            ChainRole::Incremental,
+            "2026-01-03T00:00:00Z",
+            BackupType::Incremental,
+            Some(inc1_id),
+            INC2_DATA,
+            &true_sums(&volume_of(&[BASE_DATA, INC1_DATA, INC2_DATA])),
+            None,
+        );
+        (base, inc1, inc2)
+    }
+
+    /// Run one checked step, recording what it reported.
+    fn checked_step(
+        base: &Path,
+        inc1: &Path,
+        inc2: &Path,
+        check: FoldCheck,
+    ) -> (Result<ConsolidationOutcome>, Vec<StepProgress>) {
+        let mut seen = Vec::new();
+        let mut record = |p: StepProgress| {
+            seen.push(p);
+            Ok(())
+        };
+        let result = execute_with(
+            base,
+            inc1,
+            Some(inc2),
+            &mut StepOptions {
+                keys: None,
+                check: Some(check),
+                progress: &mut record,
+            },
+        );
+        (result, seen)
+    }
+
+    fn last_total(seen: &[StepProgress]) -> u64 {
+        match seen.last() {
+            Some(StepProgress::Checking { done, total }) => {
+                assert_eq!(done, total, "the check ran to the end");
+                *total
+            }
+            other => panic!("the step ended on {other:?}, not on the check"),
+        }
+    }
+
+    /// The step folds, then reads the whole base back, and only then deletes
+    /// the increment — and says so in that order.
+    #[test]
+    fn a_checked_step_reads_the_base_back_before_the_increment_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, inc1, inc2) = checkable_chain(dir.path(), None);
+        let leaf_before = read_volume(&inc2);
+
+        let (result, seen) = checked_step(&base, &inc1, &inc2, FoldCheck::Whole);
+        result.unwrap();
+
+        assert_eq!(seen.first(), Some(&StepProgress::Folding));
+        assert_eq!(
+            last_total(&seen),
+            VOLUME_LEN / 4096,
+            "every block of the base"
+        );
+        assert!(!inc1.exists());
+        assert!(!marker_path(&base).exists());
+        assert_eq!(read_volume(&inc2), leaf_before);
+    }
+
+    /// A base that does not read back as the increment described it: the
+    /// increment and the marker stay, and finishing the step later reads the
+    /// base again — it does not quietly complete the deletion.
+    #[test]
+    fn a_base_that_fails_the_check_keeps_the_increment_and_the_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, inc1, inc2) = checkable_chain(dir.path(), Some(3));
+
+        let (result, _) = checked_step(&base, &inc1, &inc2, FoldCheck::Whole);
+        let error = result.unwrap_err();
+        assert!(matches!(error, OwnBackupError::ChainBroken(_)), "{error}");
+        assert!(inc1.exists(), "the increment stays");
+        let marker = read_marker(&marker_path(&base)).expect("the marker stays");
+        assert!(marker.merged);
+        assert_eq!(marker.check, Some(FoldCheck::Whole), "the check is owed");
+
+        let report = resume_pending(dir.path()).unwrap();
+        assert!(report.finished.is_empty());
+        assert_eq!(report.stuck_bases(), vec![base.clone()]);
+        assert!(inc1.exists(), "still there after the resume");
+    }
+
+    /// «Только записанное объединением»: читаются лишь блоки, которые хранил
+    /// влитый инкремент. Ошибка в описании блока, которого он не хранил, этой
+    /// проверкой не видна — а полной видна.
+    #[test]
+    fn the_folded_check_reads_only_what_the_fold_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, inc1, inc2) = checkable_chain(dir.path(), Some(1));
+        let (result, seen) = checked_step(&base, &inc1, &inc2, FoldCheck::Folded);
+        result.unwrap();
+        let per_cluster = CS / 4096;
+        assert_eq!(
+            last_total(&seen),
+            INC1_DATA.len() as u64 * per_cluster,
+            "the two clusters inc1 stored"
+        );
+        assert!(!inc1.exists());
+
+        let dir = tempfile::tempdir().unwrap();
+        let (base, inc1, inc2) = checkable_chain(dir.path(), Some(1));
+        let (result, _) = checked_step(&base, &inc1, &inc2, FoldCheck::Whole);
+        assert!(result.is_err(), "reading everything finds it");
+        assert!(inc1.exists());
+    }
+
+    /// Stopped during the check: nothing is deleted, the marker remembers the
+    /// check, and the next resume — which asks for no check of its own — does
+    /// it before finishing the step.
+    #[test]
+    fn a_check_stopped_half_way_is_done_by_the_next_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, inc1, inc2) = checkable_chain(dir.path(), None);
+
+        let mut stop = |p: StepProgress| match p {
+            StepProgress::Checking { done, .. } if done > 3 => Err(OwnBackupError::Cancelled),
+            _ => Ok(()),
+        };
+        let result = execute_with(
+            &base,
+            &inc1,
+            Some(&inc2),
+            &mut StepOptions {
+                keys: None,
+                check: Some(FoldCheck::Whole),
+                progress: &mut stop,
+            },
+        );
+        assert!(matches!(result, Err(OwnBackupError::Cancelled)));
+        assert!(inc1.exists());
+        assert_eq!(
+            read_marker(&marker_path(&base)).unwrap().check,
+            Some(FoldCheck::Whole)
+        );
+
+        let mut seen = Vec::new();
+        let mut record = |p: StepProgress| {
+            seen.push(p);
+            Ok(())
+        };
+        let report = resume_pending_with(dir.path(), None, &mut record).unwrap();
+        assert_eq!(report.finished.len(), 1);
+        assert_eq!(last_total(&seen), VOLUME_LEN / 4096);
+        assert!(!inc1.exists());
+        assert!(!marker_path(&base).exists());
+
+        // And a resume that is itself stopped says so, rather than reporting
+        // the chain as stuck.
+        let dir = tempfile::tempdir().unwrap();
+        let (base, inc1, inc2) = checkable_chain(dir.path(), None);
+        let mut stop_at_check = |p: StepProgress| match p {
+            StepProgress::Checking { .. } => Err(OwnBackupError::Cancelled),
+            _ => Ok(()),
+        };
+        let _ = execute_with(
+            &base,
+            &inc1,
+            Some(&inc2),
+            &mut StepOptions {
+                keys: None,
+                check: Some(FoldCheck::Whole),
+                progress: &mut stop_at_check,
+            },
+        );
+        let resumed = resume_pending_with(dir.path(), None, &mut stop_at_check);
+        assert!(matches!(resumed, Err(OwnBackupError::Cancelled)));
+        assert!(inc1.exists());
     }
 }

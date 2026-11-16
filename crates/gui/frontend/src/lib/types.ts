@@ -852,6 +852,10 @@ export interface JobProgress {
    * 'exclusions' = post-copy true-removal / in-image exclusion pass
    *                (blocks_done counts processed entries; minutes on big volumes)
    * 'verify'     = post-backup validation
+   * 'consolidate' = the oldest increment being folded into the full copy
+   *                (no granular progress)
+   * 'consolidate-verify' = that full copy read back before the increment is
+   *                deleted (blocks_done of blocks_total)
    */
   phase: 'prepare' | 'backup' | 'finalize' | 'exclusions' | 'verify' | string;
   percent: number;

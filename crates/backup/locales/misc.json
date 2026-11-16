@@ -93,6 +93,10 @@
     "ru": "не удалось удалить %{path}: %{error}",
     "en": "could not delete %{path}: %{error}"
   },
+  "consolidate.check_failed": {
+    "ru": "после объединения версий базовая копия %{path} не прошла проверку: %{count} блоков не совпали с контрольными суммами. Влитая копия не удалена",
+    "en": "after merging versions the base backup %{path} failed the check: %{count} blocks did not match their checksums. The merged backup was not deleted"
+  },
   "consolidate.marker_bad_name": {
     "ru": "маркер консолидации называет %{name} — это не имя файла в папке копий",
     "en": "the consolidation marker names %{name} — that is not a file name in the backup folder"

@@ -139,6 +139,31 @@ pub fn verify_image_scoped(
     image_path: &Path,
     keys: Option<&crate::seal::context::ArchiveKeys>,
     scope: VerifyScope,
+    progress: impl FnMut(u64, u64) -> Result<()>,
+) -> Result<VerifySummary> {
+    let which = match scope {
+        VerifyScope::Everything => Blocks::All,
+        VerifyScope::LatestCopyOnly => Blocks::StoredIn(image_path),
+    };
+    verify_blocks(image_path, keys, which, progress)
+}
+
+/// Which blocks of an image's state a check reads.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Blocks<'a> {
+    /// Every block the state is made of.
+    All,
+    /// Only the blocks the given file of the same chain stores itself — the
+    /// image being checked, or (after a consolidation) the increment that
+    /// was just folded into it: those are the blocks the fold rewrote.
+    StoredIn(&'a Path),
+}
+
+/// Read `image_path`'s state back and compare it with its sidecar's checksums.
+pub(crate) fn verify_blocks(
+    image_path: &Path,
+    keys: Option<&crate::seal::context::ArchiveKeys>,
+    which: Blocks<'_>,
     mut progress: impl FnMut(u64, u64) -> Result<()>,
 ) -> Result<VerifySummary> {
     let started = Instant::now();
@@ -157,10 +182,10 @@ pub fn verify_image_scoped(
     // The sidecar of an increment describes the WHOLE state, so reading all
     // of it walks every copy underneath. For "latest only" the file itself is
     // asked which blocks it holds, and only those are read.
-    let only: Option<std::collections::HashSet<u64>> = match scope {
-        VerifyScope::Everything => None,
-        VerifyScope::LatestCopyOnly => Some(blocks_stored_in_this_file(
-            image_path,
+    let only: Option<std::collections::HashSet<u64>> = match which {
+        Blocks::All => None,
+        Blocks::StoredIn(file) => Some(blocks_stored_in_this_file(
+            file,
             &sidecar.info.container,
             chain_key.as_ref(),
             data_offset,
