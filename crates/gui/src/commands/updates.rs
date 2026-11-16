@@ -193,12 +193,27 @@ pub async fn check_for_updates(
     outcome
 }
 
+/// The program's site, shown in «Справка».
+pub const PROJECT_SITE: &str = "https://coinman-dev.github.io/own-backup/";
+
 #[tauri::command]
 pub fn open_update_release(url: String) -> Result<(), String> {
     let prefix = format!("https://github.com/{GITHUB_REPO}/releases/tag/");
     if !url.starts_with(&prefix) {
         return Err("not an Own Backup release URL".into());
     }
+    open_in_browser(&url)
+}
+
+/// Open the program's site. The address is fixed here, not taken from the
+/// window: nothing the page sends can make this open anything else.
+#[tauri::command]
+pub fn open_project_site() -> Result<(), String> {
+    open_in_browser(PROJECT_SITE)
+}
+
+/// Hand an https address to the person's browser.
+fn open_in_browser(url: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         use windows::core::{w, PCWSTR};
@@ -218,7 +233,8 @@ pub fn open_update_release(url: String) -> Result<(), String> {
         };
         if result.0 as usize <= 32 {
             return Err(format!(
-                "Windows could not open the release page: {}",
+                "Windows could not open {}: {}",
+                String::from_utf16_lossy(&url[..url.len() - 1]),
                 result.0 as usize
             ));
         }
@@ -230,12 +246,12 @@ pub fn open_update_release(url: String) -> Result<(), String> {
             .arg(url)
             .spawn()
             .map(|_| ())
-            .map_err(|e| format!("cannot open the release page: {e}"))
+            .map_err(|e| format!("cannot open {url}: {e}"))
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     {
         let _ = url;
-        Err("opening a release page is supported on Windows and Linux".into())
+        Err("opening a web page is supported on Windows and Linux".into())
     }
 }
 

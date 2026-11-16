@@ -305,6 +305,7 @@ export const api = {
   saveConfig: (config: Record<string, unknown>) => invoke<void>('save_config', { config }),
   checkForUpdates: (force = false) => invoke<UpdateCheckResult>('check_for_updates', { force }),
   openUpdateRelease: (url: string) => invoke<void>('open_update_release', { url }),
+  openProjectSite: () => invoke<void>('open_project_site'),
   /** The resolved language (`ru`/`en`): the GUI process's own messages and,
    *  through the config, the service's. */
   setUiLanguage: (lang: string) => invoke<void>('set_ui_language', { lang }),

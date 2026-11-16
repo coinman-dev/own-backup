@@ -1283,6 +1283,7 @@
   "mb_start": "Start",
   "about_title": "Help",
   "about_description": "Backups of whole disks and volumes, block by block: only used clusters go into a backup, and excluded files do not go in at all. A backup can be encrypted with a password. From a backup you can restore a partition, a disk or individual files — and, from bootable media, even the disk the system boots from.",
+  "about_site": "Program website",
   "about_ui_version": "Interface version",
   "about_service": "Service",
   "about_link": "Connection to the service",
