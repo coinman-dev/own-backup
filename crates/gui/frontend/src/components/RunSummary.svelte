@@ -1,14 +1,18 @@
 <script lang="ts">
-  // What a finished copy has to say about itself. The job's page shows it as a
-  // card the user can close for good, so the same words stay in Activity.
+  // What a finished copy has to say about itself. Activity shows all of it.
+  // The job's page shows it `brief`: a card of a few lines the user can close
+  // for good — what was made, and how many remarks there are, with a way to
+  // Activity for their text (owner, 16.11.2026: the full text grew to eleven
+  // lines over the job's page).
   import { media } from '../lib/mediaStore.svelte';
   import { isWindows } from '../lib/platformStore.svelte';
   import { jobs } from '../lib/jobStore.svelte';
   import { formatBytes } from '../lib/format';
   import type { JobRun } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
+  import { goTo } from '../lib/navStore.svelte';
 
-  let { run }: { run: JobRun } = $props();
+  let { run, brief = false }: { run: JobRun; brief?: boolean } = $props();
 
   const KIND_LABELS: Record<string, () => string> = {
     incremental: m.kind_incremental,
@@ -27,7 +31,29 @@
       !!job?.exclusions.enabled &&
       job.exclusions.patterns.length > 0,
   );
+  /** Everything below the first line of the full summary, counted. */
+  const remarks = $derived(
+    (exclusionsIgnored ? 1 : 0) +
+      (run.excluded_entries_kept ? 1 : 0) +
+      (run.layout_changed ? 1 : 0) +
+      (run.notes?.length ?? 0),
+  );
 </script>
+
+{#if brief}
+{m.dash_brief_created({ kind, size: formatBytes(run.bytes_copied) })}
+{#if run.consolidated_increments > 0}
+  {m.dash_brief_consolidated({ count: run.consolidated_increments })}
+{/if}
+{#if run.excluded_files > 0}
+  {m.dash_excluded_files({ count: run.excluded_files, size: formatBytes(run.excluded_bytes) })}
+{/if}
+{#if remarks > 0}
+  <br />
+  {m.dash_brief_remarks({ count: remarks })}
+  <button class="to-activity" onclick={() => goTo('activity')}>{m.dash_brief_details()}</button>
+{/if}
+{:else}
 
 <!-- `vss_used` is "read from a snapshot" on both systems: VSS on
      Windows, an LVM or device-mapper snapshot on Linux. -->
@@ -68,3 +94,16 @@
   <br />
   {note}
 {/each}
+{/if}
+
+<style>
+  .to-activity {
+    border: none;
+    background: none;
+    padding: 0;
+    font: inherit;
+    color: var(--accent-text);
+    text-decoration: underline;
+    cursor: pointer;
+  }
+</style>

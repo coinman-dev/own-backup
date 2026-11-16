@@ -435,7 +435,7 @@
             <span class="bdot">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
             </span>
-            <span><RunSummary run={lastRun} /></span>
+            <span class="brief"><RunSummary run={lastRun} brief /></span>
             <button class="banner-x" title={m.common_close()} aria-label={m.common_close()} onclick={() => closeSummary(lastRun.id)}>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
             </button>
@@ -657,6 +657,8 @@
   .banner.warn { background: var(--warning-soft); border: 1px solid var(--warning-line); color: var(--warning-text); }
   .bdot { width: 20px; height: 20px; border-radius: 50%; background: var(--success); flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
   .bicon { flex-shrink: 0; }
+  /* At most six lines, whatever the numbers come to; the rest is in Activity. */
+  .banner .brief { display: -webkit-box; -webkit-line-clamp: 6; line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
   .banner .banner-x { margin-left: auto; flex-shrink: 0; width: 22px; height: 22px; border: none; background: none; color: var(--text-muted); cursor: pointer; border-radius: 4px; display: flex; align-items: center; justify-content: center; }
   .banner .banner-x:hover { background: var(--track); color: var(--head); }
   /* .footer is global (styles/global.css) — full-width bar, same on every page. */
