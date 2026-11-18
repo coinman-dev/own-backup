@@ -853,6 +853,9 @@ fn execute_with(
     let mut checked = false;
     // The base was rebuilt into a fresh file: nothing to compact.
     let mut rebuilt = false;
+    // Folded in place with everything else provably untouched: the check
+    // reads only what the fold wrote.
+    let mut narrowed = false;
     if !marker.merged {
         match container {
             "qcow2" => {
@@ -929,6 +932,12 @@ fn execute_with(
             }
             "obk" => {
                 let key = chain_key_for(base, keys)?;
+                // What the fold must not touch, before it: the base's other
+                // clusters and the records they name.
+                let untouched = match marker.check {
+                    Some(FoldCheck::Whole) => Some(obk_untouched(base, victim, &key)?),
+                    _ => None,
+                };
                 let progress = &mut *opts.progress;
                 let stats = crate::seal::obk::fold_child_into_base_with(
                     base,
@@ -962,6 +971,27 @@ fn execute_with(
                     already_applied = stats.already_applied,
                     "Consolidation: increment folded into the encrypted base"
                 );
+                // A fold in place appends the increment's records and writes
+                // a new index; every other record stays where it was, as it
+                // was. If the new index names exactly the same records at the
+                // same places for those clusters, they are the records the
+                // check of the copy has just read — and only what the fold
+                // wrote needs reading.
+                if let Some(before) = untouched {
+                    if !stats.already_applied && obk_untouched(base, victim, &key)? == before {
+                        narrowed = true;
+                        info!(
+                            base = %base.display(),
+                            untouched = before.len(),
+                            "Consolidation: the base's other clusters keep their records —                              only what the fold wrote is read back"
+                        );
+                    } else {
+                        warn!(
+                            base = %base.display(),
+                            "Consolidation: the base's index changed beyond the fold —                              the whole base is read back"
+                        );
+                    }
+                }
             }
             other => {
                 return Err(OwnBackupError::ImageFormat(format!(
@@ -1023,6 +1053,7 @@ fn execute_with(
     // increment and the marker, so no later run writes onto this chain or
     // deletes from it until the check passes.
     if let Some(check) = marker.check.filter(|_| !checked) {
+        let check = if narrowed { FoldCheck::Folded } else { check };
         check_base(base, victim, check, keys, &mut *opts.progress)?;
     }
 
@@ -1056,6 +1087,30 @@ fn execute_with(
         "Consolidation complete"
     );
     Ok(outcome)
+}
+
+/// The base's clusters `victim` does not define, each with the record its
+/// index names and the cluster-table entry that says where it lies. Read from
+/// the index and the tables only — no data.
+fn obk_untouched(
+    base: &Path,
+    victim: &Path,
+    key: &ChainKey,
+) -> Result<Vec<(u64, crate::seal::obk::ClusterState, u64)>> {
+    use crate::seal::obk::ObkImage;
+    let defined: std::collections::HashSet<u64> = ObkImage::open_path(victim, key)?
+        .defined_cluster_states()?
+        .into_iter()
+        .map(|(cluster, _)| cluster)
+        .collect();
+    let mut image = ObkImage::open_path(base, key)?;
+    let mut out = Vec::new();
+    for (cluster, state) in image.defined_cluster_states()? {
+        if !defined.contains(&cluster) {
+            out.push((cluster, state, image.raw_l2_entry(cluster)?));
+        }
+    }
+    Ok(out)
 }
 
 /// Is this `.obk` fold better done as a rebuild of the base
@@ -2982,6 +3037,11 @@ mod tests {
             })
             .last();
         assert_eq!(last, Some((2, 2)), "both of inc1's clusters: {seen:?}");
+        assert_eq!(
+            last_total(&seen),
+            2 * OBK_CLUSTER / 4096,
+            "only the blocks the fold wrote are read back"
+        );
         assert!(!inc1.exists());
     }
 }
