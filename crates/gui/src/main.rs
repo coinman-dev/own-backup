@@ -751,6 +751,7 @@ fn main() {
             commands::backup_jobs::decrypt_volume,
             commands::backup_jobs::run_backup_job,
             commands::backup_jobs::cancel_queued_job,
+            commands::backup_jobs::set_shutdown_after_run,
             commands::backup_jobs::cancel_running_backup,
             commands::backup_jobs::get_run_queue,
             commands::backup_jobs::list_activity,

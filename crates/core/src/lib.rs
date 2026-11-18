@@ -1699,6 +1699,9 @@ struct QueueState {
     pending: VecDeque<String>,
     current: Option<String>,
     background_operations: usize,
+    /// The job whose run, when it ends, switches the computer off — asked for
+    /// on the job's page for this run only, the job's own setting untouched.
+    shutdown_after: Option<String>,
 }
 
 /// Keeps scheduled checks visible to the after-backup power decision while
@@ -1733,6 +1736,36 @@ impl RunQueue {
         QueueSnapshot {
             current: q.current.clone(),
             pending: q.pending.iter().cloned().collect(),
+            shutdown_after: q.shutdown_after.clone(),
+        }
+    }
+
+    /// Switch the computer off when `id`'s run ends — or not any more. Only
+    /// for a job that is running or waiting; `false` otherwise, and nothing
+    /// is remembered for a run that is not coming.
+    pub fn set_shutdown_after(&self, id: &str, on: bool) -> bool {
+        let mut q = self.state.lock().unwrap();
+        let queued = q.current.as_deref() == Some(id) || q.pending.iter().any(|j| j == id);
+        if on {
+            if !queued {
+                return false;
+            }
+            q.shutdown_after = Some(id.to_string());
+        } else if q.shutdown_after.as_deref() == Some(id) {
+            q.shutdown_after = None;
+        }
+        true
+    }
+
+    /// Whether `id`'s run that is ending was asked to switch the computer
+    /// off; the request is used up either way.
+    pub fn take_shutdown_after(&self, id: &str) -> bool {
+        let mut q = self.state.lock().unwrap();
+        if q.shutdown_after.as_deref() == Some(id) {
+            q.shutdown_after = None;
+            true
+        } else {
+            false
         }
     }
 
@@ -1789,6 +1822,10 @@ impl Default for RunQueue {
 pub struct QueueSnapshot {
     pub current: Option<String>,
     pub pending: Vec<String>,
+    /// The job whose run ends with the computer switched off, asked for on
+    /// its page for this run only ([`RunQueue::set_shutdown_after`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shutdown_after: Option<String>,
 }
 
 /// Progress payload for a running backup.
@@ -2543,6 +2580,9 @@ pub async fn run_queue_worker(
         }
         store.clear_running(&job.id);
 
+        // Asked on the job's page for this run: used up here, whatever the
+        // run's end, so it never carries over to a later one.
+        let shutdown_once = queue.take_shutdown_after(&job.id);
         queue.finish();
         sink.queue_changed(queue.snapshot());
 
@@ -2576,7 +2616,12 @@ pub async fn run_queue_worker(
         // Sleep / shut down — not while a retry is pending, and never after a
         // run someone cancelled: they are at the machine.
         if !retrying && run.status != "cancelled" && !*stop.borrow() {
-            after_backup(&job.advanced.after_backup, &job.name, &queue);
+            let action = if shutdown_once {
+                "shutdown"
+            } else {
+                job.advanced.after_backup.as_str()
+            };
+            after_backup(action, &job.name, &queue);
         }
         sink.job_finished(run);
         if *stop.borrow() {
@@ -5954,6 +5999,28 @@ mod tests {
     /// Asking "is it queued?" and queueing it are one step, or two callers
     /// arriving together both find it absent and both add it — and the job
     /// runs twice.
+    /// «Выключить компьютер при завершении»: only for a job that is running
+    /// or waiting, shown to every window, and used up by that run's end.
+    #[test]
+    fn a_shutdown_asked_for_one_run_is_used_up_by_it() {
+        let queue = RunQueue::new();
+        assert!(!queue.set_shutdown_after("a", true), "not queued: refused");
+        assert_eq!(queue.snapshot().shutdown_after, None);
+
+        queue.enqueue("a");
+        assert!(queue.set_shutdown_after("a", true));
+        assert_eq!(queue.snapshot().shutdown_after.as_deref(), Some("a"));
+        assert!(queue.set_shutdown_after("a", false));
+        assert_eq!(queue.snapshot().shutdown_after, None);
+
+        queue.set_shutdown_after("a", true);
+        assert!(queue.start("a"));
+        assert!(!queue.take_shutdown_after("b"));
+        assert!(queue.take_shutdown_after("a"));
+        assert!(!queue.take_shutdown_after("a"), "used up");
+        assert_eq!(queue.snapshot().shutdown_after, None);
+    }
+
     #[test]
     fn a_job_is_queued_once_however_many_ask() {
         let queue = RunQueue::new();

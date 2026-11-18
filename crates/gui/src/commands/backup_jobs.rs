@@ -207,6 +207,21 @@ pub async fn run_backup_job(state: State<'_, GuiState>, id: String) -> Result<()
     state.link.client().await?.run_job(&id).await
 }
 
+/// Switch the computer off when this job's run ends — this run only.
+#[tauri::command]
+pub async fn set_shutdown_after_run(
+    state: State<'_, GuiState>,
+    id: String,
+    on: bool,
+) -> Result<serde_json::Value, String> {
+    state
+        .link
+        .client()
+        .await?
+        .set_shutdown_after_run(&id, on)
+        .await
+}
+
 /// Remove a still-pending job from the queue.
 #[tauri::command]
 pub async fn cancel_queued_job(state: State<'_, GuiState>, id: String) -> Result<(), String> {

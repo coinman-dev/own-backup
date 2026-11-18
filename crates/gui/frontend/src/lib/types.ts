@@ -838,6 +838,8 @@ export interface DecryptResult {
 export interface QueueSnapshot {
   current: string | null;
   pending: string[];
+  /** The job whose run ends with the computer switched off (this run only). */
+  shutdown_after?: string | null;
 }
 
 export interface JobProgress {

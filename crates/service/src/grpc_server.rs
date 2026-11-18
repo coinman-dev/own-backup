@@ -1620,6 +1620,33 @@ impl BackupService for BackupServiceImpl {
         Ok(Response::new(Empty {}))
     }
 
+    async fn set_shutdown_after_run(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[derive(serde::Deserialize)]
+        struct Payload {
+            job_id: String,
+            on: bool,
+        }
+        let p: Payload = serde_json::from_str(&req.into_inner().json)
+            .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+        if !self.state.queue.set_shutdown_after(&p.job_id, p.on) {
+            return Err(Status::failed_precondition(
+                "the job is neither running nor waiting",
+            ));
+        }
+        info!(job = %p.job_id, on = p.on, "gRPC: SetShutdownAfterRun");
+        let snapshot = self.state.queue.snapshot();
+        // Every window shows the same tick.
+        let _ = self.state.events.send(Event {
+            kind: "queue".into(),
+            json: serde_json::to_string(&snapshot).unwrap_or_default(),
+        });
+        json_reply(&snapshot)
+    }
+
     async fn get_queue(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
         json_reply(&self.state.queue.snapshot())

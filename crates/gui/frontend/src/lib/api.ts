@@ -165,6 +165,8 @@ export const api = {
     invoke<DecryptResult>('decrypt_volume', { volume, password, remember }),
   runBackupJob: (id: string) => invoke<void>('run_backup_job', { id }),
   cancelQueuedJob: (id: string) => invoke<void>('cancel_queued_job', { id }),
+  setShutdownAfterRun: (id: string, on: boolean) =>
+    invoke<QueueSnapshot>('set_shutdown_after_run', { id, on }),
   cancelRunningBackup: () => invoke<void>('cancel_running_backup'),
   getRunQueue: () => invoke<QueueSnapshot>('get_run_queue'),
   listActivity: () => invoke<JobRun[]>('list_activity'),

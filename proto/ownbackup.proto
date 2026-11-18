@@ -23,6 +23,9 @@ service BackupService {
   rpc CancelQueued(IdRequest) returns (Empty);       // drop a still-pending job
   rpc CancelRunning(Empty) returns (Empty);          // signal-cancel the running job
   rpc GetQueue(Empty) returns (JsonReply);           // JSON: QueueSnapshot
+  // Switch the computer off when this job's run ends (this run only).
+  // JSON in: { "job_id": string, "on": bool } -> out: QueueSnapshot
+  rpc SetShutdownAfterRun(JsonRequest) returns (JsonReply);
   rpc ListActivity(Empty) returns (JsonReply);       // JSON: [JobRun]
   // Clear the history: keeps per job its last scheduled run and last good
   // copy, and unread restore reports. JSON: {"runs": n, "restores": n}

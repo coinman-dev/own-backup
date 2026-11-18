@@ -374,6 +374,23 @@ impl BackupClient {
 
     /// Clear the history; what the program still needs of it stays (the
     /// service's `ClearActivity`).
+    /// Switch the computer off when `job_id`'s run ends (this run only).
+    pub async fn set_shutdown_after_run(
+        &mut self,
+        job_id: &str,
+        on: bool,
+    ) -> Result<serde_json::Value> {
+        let reply = self
+            .inner
+            .set_shutdown_after_run(self.request(proto::JsonRequest {
+                json: serde_json::json!({ "job_id": job_id, "on": on }).to_string(),
+            }))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
     pub async fn clear_activity(&mut self) -> Result<serde_json::Value> {
         let reply = self
             .inner

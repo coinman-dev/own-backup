@@ -76,6 +76,21 @@
   });
   /** How the last attempt ended — the ✓/✕ and the banner under the stats. */
   const lastRun = $derived(job.last_run);
+  /** The job itself switches the computer off after every copy. */
+  const jobShutsDown = $derived(job.advanced.after_backup === 'shutdown');
+  let shutdownBusy = $state(false);
+  let shutdownErr = $state('');
+  async function toggleShutdown(on: boolean) {
+    shutdownBusy = true;
+    shutdownErr = '';
+    try {
+      jobs.queue = await api.setShutdownAfterRun(job.id, on);
+    } catch (e) {
+      shutdownErr = String(e);
+    } finally {
+      shutdownBusy = false;
+    }
+  }
   const lastVerification = $derived(job.last_verification);
   /** What the job HAS: the newest copy, its size and what is in it. A failed
    *  attempt after it changes nothing about that (see `lastSuccessfulRun`). */
@@ -549,6 +564,21 @@
       {:else}
         {m.dash_schedule({ schedule: job.schedule.kind === 'none' ? m.dash_sched_none() : (SCHED_LABELS[job.schedule.kind]?.() ?? job.schedule.kind) })}
       {/if}
+      <!-- For this run only: the job's own "after the copy" stays as it is.
+           When the job already switches off after every copy, the tick says
+           so and cannot be taken off here. -->
+      {#if running || status === 'queued'}
+        <label class="shutdown" title={jobShutsDown ? m.dash_shutdown_by_job() : m.dash_shutdown_hint()}>
+          <input
+            type="checkbox"
+            checked={jobShutsDown || jobs.queue.shutdown_after === job.id}
+            disabled={jobShutsDown || shutdownBusy}
+            onchange={(e) => toggleShutdown((e.target as HTMLInputElement).checked)}
+          />
+          {m.dash_shutdown_after()}
+        </label>
+        {#if shutdownErr}<div class="shutdown-err">{shutdownErr}</div>{/if}
+      {/if}
     </div>
     <button class="btn outline" onclick={onEdit} disabled={running}>{m.dash_options()}</button>
     {#if running}
@@ -565,6 +595,8 @@
 
 <style>
   .page { height: 100%; display: flex; flex-direction: column; }
+  .shutdown { display: flex; align-items: center; gap: 8px; margin-top: 6px; cursor: pointer; }
+  .shutdown-err { margin-top: 4px; color: var(--error-text); font-size: 12px; }
   .dash { flex: 1; overflow: auto; width: 100%; padding: 34px 44px 20px; display: flex; flex-direction: column; }
   .bottom { margin-top: auto; flex-shrink: 0; }
   .flow { display: flex; align-items: stretch; justify-content: center; }
