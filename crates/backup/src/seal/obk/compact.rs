@@ -119,6 +119,13 @@ pub(super) fn build_sibling(
             .as_ref()
             .map(|o| ObkImage::open_path(o.child, chain))
             .transpose()?;
+        // Plain handles for the large reads; the images keep theirs for the
+        // index and the cluster tables.
+        let mut source_file = std::fs::File::open(path)?;
+        let mut child_file = overlay
+            .as_ref()
+            .map(|o| std::fs::File::open(o.child))
+            .transpose()?;
         // What the sibling holds, cluster by cluster.
         let mut plan: BTreeMap<u64, (Origin, ClusterState)> = source
             .defined_cluster_states()?
@@ -216,25 +223,56 @@ pub(super) fn build_sibling(
                             .as_mut()
                             .ok_or_else(|| bad("compaction plan names a missing increment"))?,
                     };
-                    let offset =
-                        match decode_l2_entry(image.raw_l2_entry(cluster)?, header.cluster_bits)? {
-                            ClusterDescriptor::Compressed { host_offset, .. } => host_offset,
-                            _ => return Err(bad("present data has no descriptor")),
-                        };
-                    at.push((from, offset, i));
+                    let place = image.data_record_at(cluster)?;
+                    at.push((from, place.offset, i, place));
                 }
             }
-            at.sort_unstable();
+            at.sort_unstable_by_key(|&(from, offset, i, _)| (from, offset, i));
             let mut records: Vec<Option<crate::seal::cluster::SealedRecord>> =
                 std::iter::repeat_with(|| None).take(part.len()).collect();
-            for (from, _, i) in at {
-                let image = match from {
-                    Origin::Image => &mut source,
-                    Origin::Child => child
+            // Records that lie close together are read in one request and
+            // cut apart in memory: one record per request kept the heads
+            // hopping over the gaps the replaced versions left (18.11.2026,
+            // 330 reads a second of 100 KB on the owner's disk).
+            let mut start = 0;
+            while start < at.len() {
+                let from = at[start].0;
+                let first = at[start].1;
+                let mut end = start;
+                let mut span_end = first + at[start].3.capped as u64;
+                while end + 1 < at.len() {
+                    let (next_from, next_offset, _, next) = at[end + 1];
+                    let next_end = next_offset + next.capped as u64;
+                    if next_from != from
+                        || next_offset > span_end + super::COALESCE_GAP
+                        || next_end.max(span_end) - first > super::COALESCE_SPAN
+                    {
+                        break;
+                    }
+                    span_end = span_end.max(next_end);
+                    end += 1;
+                }
+                let file = match from {
+                    Origin::Image => &mut source_file,
+                    Origin::Child => child_file
                         .as_mut()
                         .ok_or_else(|| bad("compaction plan names a missing increment"))?,
                 };
-                records[i] = Some(image.authenticated_data_record(part[i].0)?);
+                let span = read_span(file, first, (span_end - first) as usize)?;
+                let image = match from {
+                    Origin::Image => &source,
+                    Origin::Child => child
+                        .as_ref()
+                        .ok_or_else(|| bad("compaction plan names a missing increment"))?,
+                };
+                for &(_, offset, i, place) in &at[start..=end] {
+                    let from_here = (offset - first) as usize;
+                    let bytes = span
+                        [from_here.min(span.len())..(from_here + place.capped).min(span.len())]
+                        .to_vec();
+                    records[i] = Some(image.authenticate_data_record(part[i].0, &place, bytes)?);
+                }
+                start = end + 1;
             }
             for (i, &(cluster, _, state)) in part.iter().enumerate() {
                 progress(SiblingPhase::Copy, (b * batch + i) as u64, total)?;
@@ -291,7 +329,9 @@ pub(super) fn build_sibling(
         }
         drop(output);
         drop(child);
-        drop(source); // close handles before Windows publication
+        drop(child_file);
+        drop(source);
+        drop(source_file); // close handles before Windows publication
         progress(SiblingPhase::ReadBack, rest_total, rest_total)?;
         Ok(CompactionStats {
             before_bytes: before,
@@ -300,6 +340,24 @@ pub(super) fn build_sibling(
             defined_clusters: expected.len() as u64,
         })
     })
+}
+
+/// `len` bytes from `offset`, fewer only where the file ends.
+fn read_span(file: &mut std::fs::File, offset: u64, len: usize) -> Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    file.seek(SeekFrom::Start(offset))?;
+    let mut buf = vec![0u8; len];
+    let mut filled = 0;
+    while filled < len {
+        match file.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    buf.truncate(filled);
+    Ok(buf)
 }
 
 /// A conservative bound on the bytes the image's current state needs.

@@ -119,17 +119,63 @@ pub const MAX_OPEN_HEADER_BYTES: usize = 32 * 1024;
 /// and a compaction ran at 27 MB/s read and 30 MB/s write together (18.11.2026)
 /// where the same disk reads 98 MB/s alone. In batches the heads travel once
 /// per batch. Small under test, so the batch boundaries are exercised.
+///
+/// The batch grows with the memory that is free: an eighth of it, between
+/// 128 MiB and 1 GiB. A bigger batch sends the heads between the files read
+/// and the file written fewer times.
 #[cfg(not(test))]
 pub(crate) const COPY_BATCH_BYTES: u64 = 128 << 20;
+#[cfg(not(test))]
+const COPY_BATCH_MAX: u64 = 1 << 30;
 #[cfg(test)]
 pub(crate) const COPY_BATCH_BYTES: u64 = 3 << 12;
 /// The write buffer of those passes: written out in large sequential pieces.
 pub(crate) const COPY_WRITE_BUFFER: usize = 64 << 20;
 
+/// Bytes of one copy batch, now.
+pub(crate) fn copy_batch_bytes() -> u64 {
+    #[cfg(not(test))]
+    {
+        available_memory()
+            .map(|free| (free / 8).clamp(COPY_BATCH_BYTES, COPY_BATCH_MAX))
+            .unwrap_or(COPY_BATCH_BYTES)
+    }
+    #[cfg(test)]
+    COPY_BATCH_BYTES
+}
+
 /// Clusters of `cluster_size` in one copy batch, at least one.
 pub(crate) fn copy_batch_clusters(cluster_size: u64) -> usize {
-    (COPY_BATCH_BYTES / cluster_size.max(1)).max(1) as usize
+    (copy_batch_bytes() / cluster_size.max(1)).max(1) as usize
 }
+
+/// Physical memory free for use now, if the system says.
+#[cfg(all(target_os = "windows", not(test)))]
+fn available_memory() -> Option<u64> {
+    use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut st = MEMORYSTATUSEX {
+        dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: the structure's size is set, as the API requires.
+    unsafe { GlobalMemoryStatusEx(&mut st) }
+        .ok()
+        .map(|_| st.ullAvailPhys)
+}
+
+#[cfg(all(not(target_os = "windows"), not(test)))]
+fn available_memory() -> Option<u64> {
+    let info = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = info.lines().find(|l| l.starts_with("MemAvailable:"))?;
+    let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    kib.checked_mul(1024)
+}
+
+/// How far apart two records may lie and still be read in one request: a
+/// hard disk reads 2 MiB in about the time one seek costs.
+pub(crate) const COALESCE_GAP: u64 = 2 << 20;
+/// The largest single read of several records.
+pub(crate) const COALESCE_SPAN: u64 = 64 << 20;
 
 pub const MIN_OBK_CLUSTER_BITS: u32 = 12;
 pub const MAX_OBK_CLUSTER_BITS: u32 = 21;
