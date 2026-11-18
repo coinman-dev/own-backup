@@ -106,6 +106,26 @@ pub const MAX_OPEN_HEADER_BYTES: usize = 32 * 1024;
 /// AEAD records do not fit the qcow2 compressed descriptor below this cluster
 /// size: the descriptor can address at most two clusters' worth of bytes, and a
 /// record is one cluster plus 100 bytes of framing and tag.
+/// How much a pass that copies records between two places of one disk
+/// reads before it writes (fold, compaction).
+///
+/// Reading one record and writing the next by turns sends a hard disk's heads
+/// between the two places for every record: on the owner's SMR disk a fold
+/// and a compaction ran at 27 MB/s read and 30 MB/s write together (18.11.2026)
+/// where the same disk reads 98 MB/s alone. In batches the heads travel once
+/// per batch. Small under test, so the batch boundaries are exercised.
+#[cfg(not(test))]
+pub(crate) const COPY_BATCH_BYTES: u64 = 128 << 20;
+#[cfg(test)]
+pub(crate) const COPY_BATCH_BYTES: u64 = 3 << 12;
+/// The write buffer of those passes: written out in large sequential pieces.
+pub(crate) const COPY_WRITE_BUFFER: usize = 64 << 20;
+
+/// Clusters of `cluster_size` in one copy batch, at least one.
+pub(crate) fn copy_batch_clusters(cluster_size: u64) -> usize {
+    (COPY_BATCH_BYTES / cluster_size.max(1)).max(1) as usize
+}
+
 pub const MIN_OBK_CLUSTER_BITS: u32 = 12;
 pub const MAX_OBK_CLUSTER_BITS: u32 = 21;
 

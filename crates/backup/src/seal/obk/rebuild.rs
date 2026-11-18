@@ -270,44 +270,60 @@ fn apply_changed_with_in_place(
     let has_parent = root.parent_backup_id.is_some();
 
     file.seek(SeekFrom::Start(append_at))?;
-    for &cluster in &changed {
-        let data = read_cluster(cluster)?;
-        if data.len() as u64 != cluster_size {
-            return Err(bad(format!(
-                "cluster {cluster} is {} bytes, expected {cluster_size}",
-                data.len()
-            )));
-        }
-        if data.iter().all(|&b| b == 0) {
-            // A cluster of zeros costs no record: in a child it overrides the
-            // parent, in a full backup it is simply not there.
-            if has_parent {
-                states.insert(cluster, ClusterState::Zero);
-            } else {
-                states.remove(&cluster);
+    // Read a batch of clusters, then write it: see `COPY_BATCH_BYTES`. The
+    // header is written only after all of it is flushed and synced, so a
+    // crash part-way leaves the previous image exactly as it was.
+    {
+        let order: Vec<u64> = changed.iter().copied().collect();
+        let mut out = std::io::BufWriter::with_capacity(super::COPY_WRITE_BUFFER, &mut file);
+        for part in order.chunks(super::copy_batch_clusters(cluster_size)) {
+            let mut batch = Vec::with_capacity(part.len());
+            for &cluster in part {
+                batch.push((cluster, read_cluster(cluster)?));
             }
-            continue;
+            for (cluster, data) in batch {
+                if data.len() as u64 != cluster_size {
+                    return Err(bad(format!(
+                        "cluster {cluster} is {} bytes, expected {cluster_size}",
+                        data.len()
+                    )));
+                }
+                if data.iter().all(|&b| b == 0) {
+                    // A cluster of zeros costs no record: in a child it overrides the
+                    // parent, in a full backup it is simply not there.
+                    if has_parent {
+                        states.insert(cluster, ClusterState::Zero);
+                    } else {
+                        states.remove(&cluster);
+                    }
+                    continue;
+                }
+                let compressed =
+                    Zeroizing::new(zstd::bulk::compress(&data, zstd_level).map_err(|e| {
+                        own_backup_common::OwnBackupError::Compression(e.to_string())
+                    })?);
+                let (encoding, payload) = if (compressed.len() as u64) < cluster_size {
+                    (Encoding::Zstd, &compressed[..])
+                } else {
+                    (Encoding::Raw, &data[..])
+                };
+                let record = data_writer.seal(cluster, encoding, cluster_size as u32, payload)?;
+                let host_offset = tables.write_packed(&mut out, &record.bytes)?;
+                let entry = encode_compressed_l2_entry(
+                    host_offset,
+                    record.bytes.len() as u64,
+                    header.cluster_bits,
+                )?;
+                tables.set_entry(cluster, entry)?;
+                states.insert(cluster, ClusterState::Present(record.id));
+                #[cfg(test)]
+                super::publication_faults::hit(
+                    super::publication_faults::Point::RecordAppended,
+                    path,
+                );
+            }
         }
-        let compressed = Zeroizing::new(
-            zstd::bulk::compress(&data, zstd_level)
-                .map_err(|e| own_backup_common::OwnBackupError::Compression(e.to_string()))?,
-        );
-        let (encoding, payload) = if (compressed.len() as u64) < cluster_size {
-            (Encoding::Zstd, &compressed[..])
-        } else {
-            (Encoding::Raw, &data[..])
-        };
-        let record = data_writer.seal(cluster, encoding, cluster_size as u32, payload)?;
-        let host_offset = tables.write_packed(&mut file, &record.bytes)?;
-        let entry = encode_compressed_l2_entry(
-            host_offset,
-            record.bytes.len() as u64,
-            header.cluster_bits,
-        )?;
-        tables.set_entry(cluster, entry)?;
-        states.insert(cluster, ClusterState::Present(record.id));
-        #[cfg(test)]
-        super::publication_faults::hit(super::publication_faults::Point::RecordAppended, path);
+        out.flush()?;
     }
 
     // Clusters the pass did not touch keep the records they already had, and

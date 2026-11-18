@@ -31,9 +31,9 @@ pub fn compact_image(path: &Path, chain: &ChainKey) -> Result<CompactionStats> {
 }
 
 /// `done/total` covers copying and full readback (two ticks per defined cluster).
-/// Cancellation/errors preserve the original and its children. The transaction
-/// copies the complete original first to preserve its permissions, then rebuilds
-/// that sibling: peak free-space requirements include the entire original size.
+/// Cancellation/errors preserve the original and its children. The sibling
+/// starts empty with the original's permissions and receives only the live
+/// records: peak free space is the compacted size, not the original's.
 pub fn compact_image_with_progress(
     path: &Path,
     chain: &ChainKey,
@@ -46,7 +46,7 @@ pub fn compact_image_with_progress(
         .checked_add(1)
         .ok_or_else(|| bad("compaction generation overflow"))?;
     let before = std::fs::metadata(path)?.len();
-    super::transaction::replace(path, chain, |stage| {
+    super::transaction::replace_fresh(path, chain, |stage| {
         let mut source = ObkImage::open_path(path, chain)?;
         let header = source.file_header().clone();
         let open = header.open.clone();
@@ -87,27 +87,59 @@ pub fn compact_image_with_progress(
             chain_started_at: open.chain_started_at.clone(),
         };
         let file = OpenOptions::new().write(true).truncate(true).open(stage)?;
-        let mut writer = ObkWriter::new(BufWriter::new(file), chain, opts)?;
+        let mut writer = ObkWriter::new(
+            BufWriter::with_capacity(super::COPY_WRITE_BUFFER, file),
+            chain,
+            opts,
+        )?;
         writer.set_generation(generation);
         let total = (states.len() as u64)
             .checked_mul(2)
             .ok_or_else(|| bad("compaction progress overflow"))?;
         let mut copied = 0;
-        for (done, &(cluster, state)) in states.iter().enumerate() {
-            progress(done as u64, total)?;
-            match state {
-                ClusterState::Present(_) => {
-                    writer.relocate_record(cluster, source.authenticated_data_record(cluster)?)?;
-                    copied += 1;
+        let batch = super::copy_batch_clusters(header.cluster_size);
+        for (b, part) in states.chunks(batch).enumerate() {
+            // The batch's records, read in the order they lie in the file —
+            // an original image and the folds appended to it are two runs in
+            // cluster order each — then written: see `COPY_BATCH_BYTES`.
+            let mut at = Vec::new();
+            for (i, &(cluster, state)) in part.iter().enumerate() {
+                if matches!(state, ClusterState::Present(_)) {
+                    let offset = match decode_l2_entry(
+                        source.raw_l2_entry(cluster)?,
+                        header.cluster_bits,
+                    )? {
+                        ClusterDescriptor::Compressed { host_offset, .. } => host_offset,
+                        _ => return Err(bad("present data has no descriptor")),
+                    };
+                    at.push((offset, i));
                 }
-                ClusterState::Zero => {
-                    if source.raw_l2_entry(cluster)? != OFLAG_ZERO {
-                        return Err(bad("zero index/L2 disagree"));
+            }
+            at.sort_unstable();
+            let mut records: Vec<Option<crate::seal::cluster::SealedRecord>> =
+                std::iter::repeat_with(|| None).take(part.len()).collect();
+            for (_, i) in at {
+                records[i] = Some(source.authenticated_data_record(part[i].0)?);
+            }
+            for (i, &(cluster, state)) in part.iter().enumerate() {
+                progress((b * batch + i) as u64, total)?;
+                match state {
+                    ClusterState::Present(_) => {
+                        let record = records[i]
+                            .take()
+                            .ok_or_else(|| bad("compaction batch lost a record"))?;
+                        writer.relocate_record(cluster, record)?;
+                        copied += 1;
                     }
-                    writer.write_zero_cluster(cluster)?;
-                }
-                ClusterState::Absent => {
-                    return Err(bad("compaction index listed an absent cluster"))
+                    ClusterState::Zero => {
+                        if source.raw_l2_entry(cluster)? != OFLAG_ZERO {
+                            return Err(bad("zero index/L2 disagree"));
+                        }
+                        writer.write_zero_cluster(cluster)?;
+                    }
+                    ClusterState::Absent => {
+                        return Err(bad("compaction index listed an absent cluster"))
+                    }
                 }
             }
         }
