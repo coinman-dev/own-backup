@@ -66,6 +66,7 @@
 //! using the images: after a completed backup, inside the job runner, with an
 //! explicit check that nothing has them mounted.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -652,6 +653,78 @@ fn check_base(
     Ok(())
 }
 
+/// Read the sibling that is about to replace the base — the base as the step
+/// leaves it — against the checksums the promoted sidecar carries, before it
+/// is published. The step's check, made where a failure still costs nothing:
+/// the old base is untouched, the sibling is discarded, the marker stays.
+///
+/// Returns the guest clusters the check read through the authenticated
+/// reader; the rebuild reads the rest back, so the new base is read once.
+fn check_sibling(
+    stage: &Path,
+    base: &Path,
+    sidecar: &Sidecar,
+    key: &crate::seal::ChainKey,
+    progress: &mut dyn FnMut(StepProgress) -> Result<()>,
+) -> Result<std::collections::HashSet<u64>> {
+    use crate::engine_core::verify::{verify_state, Blocks};
+
+    progress(StepProgress::Checking { done: 0, total: 0 })?;
+    let summary = verify_state(stage, sidecar, Some(key), Blocks::All, |done, total| {
+        progress(StepProgress::Checking { done, total })
+    })?;
+    if !summary.valid() {
+        warn!(
+            base = %base.display(),
+            mismatched = summary.mismatched_blocks.len(),
+            "Consolidation: the rebuilt base does not read back as the increment described it — \
+             it is discarded, the old base and the increment stay"
+        );
+        return Err(OwnBackupError::ChainBroken(
+            tr!(
+                "consolidate.sibling_check_failed",
+                path = base.display(),
+                count = summary.mismatched_blocks.len()
+            )
+            .into_owned(),
+        ));
+    }
+    info!(
+        base = %base.display(),
+        blocks = summary.blocks_checked,
+        secs = summary.duration.as_secs(),
+        "Consolidation: the rebuilt base read back correctly before replacing the old one"
+    );
+    let cs = crate::seal::obk::ObkImage::open_path(stage, key)?.cluster_size();
+    let block_size = sidecar.manifest.block_size as u64;
+    let volume_len = sidecar.manifest.source_disk.size_bytes;
+    let data_offset = sidecar.info.volume_data_offset;
+    let mut covered = std::collections::HashSet::new();
+    for entry in &sidecar.checksums {
+        let start = entry.block_number * block_size;
+        if start >= volume_len {
+            continue;
+        }
+        let len = block_size.min(volume_len - start);
+        covered.extend((data_offset + start) / cs..=(data_offset + start + len - 1) / cs);
+    }
+    Ok(covered)
+}
+
+/// The fold and compaction progress of a step: the phase, every 128 MiB of
+/// records — often enough for a cancel to be heard, rarely enough not to
+/// flood the window.
+fn sibling_tick(
+    progress: &mut dyn FnMut(StepProgress) -> Result<()>,
+    phase: crate::seal::obk::SiblingPhase,
+    done: u64,
+) -> Result<()> {
+    if phase == crate::seal::obk::SiblingPhase::Copy && done.is_multiple_of(2048) {
+        progress(StepProgress::Folding)?;
+    }
+    Ok(())
+}
+
 /// Perform one consolidation step, from wherever a previous attempt left off.
 #[cfg_attr(not(test), allow(dead_code))]
 fn execute(
@@ -769,6 +842,11 @@ fn execute_with(
     )?;
 
     let mut bytes_orphaned = 0u64;
+    // The base was rebuilt and its rebuilt state read back before it was
+    // published, so the check after the step is already made.
+    let mut checked = false;
+    // The base was rebuilt into a fresh file: nothing to compact.
+    let mut rebuilt = false;
     if !marker.merged {
         match container {
             "qcow2" => {
@@ -794,6 +872,55 @@ fn execute_with(
             // The fold carries the promotion with it: an encrypted image keeps
             // its sidecar inside the container, and the rebuild that puts the
             // increment's clusters in is the one write that can replace it.
+            "obk" if obk_fold_rebuilds(base, victim, keys)? => {
+                let key = chain_key_for(base, keys)?;
+                let progress = RefCell::new(&mut *opts.progress);
+                let mut tick = |phase: crate::seal::obk::SiblingPhase, done: u64, _total: u64| {
+                    sibling_tick(&mut **progress.borrow_mut(), phase, done)
+                };
+                let mut read = |stage: &Path| {
+                    check_sibling(stage, base, &promoted, &key, &mut |p| {
+                        (*progress.borrow_mut())(p)
+                    })
+                };
+                let check: Option<crate::seal::obk::SiblingCheck<'_>> = match marker.check {
+                    Some(_) => Some(&mut read),
+                    None => None,
+                };
+                let stats = crate::seal::obk::fold_into_fresh_base(
+                    base,
+                    victim,
+                    &key,
+                    &sealed_blob(&promoted)?,
+                    crate::seal::obk::RebuildIdentity {
+                        backup_id: promoted.manifest.backup_id,
+                        created_at: promoted.manifest.created_at.clone(),
+                        consolidated_increments: promoted.info.consolidated_increments,
+                        chain_started_at: promoted.info.chain_started_at.clone(),
+                    },
+                    &mut tick,
+                    check,
+                )?;
+                match stats {
+                    Some(stats) => {
+                        checked = marker.check.is_some();
+                        rebuilt = true;
+                        info!(
+                            base = %base.display(),
+                            increment = %victim.display(),
+                            before = stats.before_bytes,
+                            after = stats.after_bytes,
+                            records = stats.records_copied,
+                            "Consolidation: increment folded into a rebuilt encrypted base"
+                        );
+                    }
+                    None => info!(
+                        base = %base.display(),
+                        increment = %victim.display(),
+                        "Consolidation: the rebuilt base was published by an earlier attempt"
+                    ),
+                }
+            }
             "obk" => {
                 let key = chain_key_for(base, keys)?;
                 let stats = crate::seal::obk::fold_child_into_base(
@@ -845,13 +972,31 @@ fn execute_with(
     #[cfg(test)]
     fault_tests::hit(fault_tests::Point::RepointedBeforeDelete, base)?;
 
-    if container == "obk" {
+    if container == "obk" && !rebuilt {
         let key = chain_key_for(base, keys)?;
         // Keep the consolidation marker and victim until optional maintenance
         // has published safely. After a crash either complete base is readable;
         // retrying this phase preserves its identity and parent relationships.
-        if let Some(compacted) = crate::seal::obk::compact_if_needed(base, &key)? {
+        // The step's check reads the compacted sibling before it is published
+        // — the one read of the new base instead of a read-back and a check.
+        let sidecar = match marker.check {
+            Some(_) => Some(read_sidecar_of(base, keys)?),
+            None => None,
+        };
+        let progress = RefCell::new(&mut *opts.progress);
+        let mut read = |stage: &Path| match &sidecar {
+            Some(sidecar) => check_sibling(stage, base, sidecar, &key, &mut |p| {
+                (*progress.borrow_mut())(p)
+            }),
+            None => Ok(Default::default()),
+        };
+        let check: Option<crate::seal::obk::SiblingCheck<'_>> = match sidecar {
+            Some(_) => Some(&mut read),
+            None => None,
+        };
+        if let Some(compacted) = crate::seal::obk::compact_if_needed_checked(base, &key, check)? {
             bytes_orphaned = 0;
+            checked = marker.check.is_some();
             info!(base = %base.display(), before = compacted.before_bytes,
                 after = compacted.after_bytes, reclaimed = compacted.reclaimed_bytes(),
                 "Consolidation: obsolete encrypted records reclaimed");
@@ -862,7 +1007,7 @@ fn execute_with(
     // it back while the increment still exists: a failure here keeps the
     // increment and the marker, so no later run writes onto this chain or
     // deletes from it until the check passes.
-    if let Some(check) = marker.check {
+    if let Some(check) = marker.check.filter(|_| !checked) {
         check_base(base, victim, check, keys, &mut *opts.progress)?;
     }
 
@@ -896,6 +1041,23 @@ fn execute_with(
         "Consolidation complete"
     );
     Ok(outcome)
+}
+
+/// Is this `.obk` fold better done as a rebuild of the base
+/// ([`crate::seal::obk::fold_into_fresh_base`]) than in place?
+///
+/// Also when the base already carries the increment's identity: a fold an
+/// earlier attempt published and could not record. The rebuild sees that and
+/// does nothing, where the in-place fold would append the whole increment
+/// again.
+fn obk_fold_rebuilds(base: &Path, victim: &Path, keys: Option<&ArchiveKeys>) -> Result<bool> {
+    let key = chain_key_for(base, keys)?;
+    if crate::seal::obk::ObkImage::open_path(base, &key)?.backup_id()
+        == crate::seal::obk::ObkImage::open_path(victim, &key)?.backup_id()
+    {
+        return Ok(true);
+    }
+    crate::seal::obk::fold_leaves_base_worth_compacting(base, victim, &key)
 }
 
 /// Run one step planned by [`crate::chains::plan_consolidation`].
@@ -2492,5 +2654,292 @@ mod tests {
         let resumed = resume_pending_with(dir.path(), None, &mut stop_at_check);
         assert!(matches!(resumed, Err(OwnBackupError::Cancelled)));
         assert!(inc1.exists());
+    }
+    // ── An encrypted fold done as one rebuild of the base ───────────────
+
+    /// Relative clusters of the test volume, as guest clusters of an `.obk`.
+    const OBK_VOLUME_START: u64 = DEFAULT_PARTITION_OFFSET / OBK_CLUSTER;
+
+    fn obk_layer(rel: &[(u64, u8)]) -> Vec<(u64, u8)> {
+        rel.iter()
+            .map(|&(c, fill)| (OBK_VOLUME_START + c, fill))
+            .collect()
+    }
+
+    fn obk_volume_of(layers: &[&[(u64, u8)]]) -> Vec<u8> {
+        let mut volume = vec![0u8; VOLUME_LEN as usize];
+        for layer in layers {
+            for &(rel, fill) in *layer {
+                let at = (rel * OBK_CLUSTER) as usize;
+                volume[at..at + OBK_CLUSTER as usize].fill(fill);
+            }
+        }
+        volume
+    }
+
+    const OBK_BASE: &[(u64, u8)] = &[(1, 0x11), (2, 0x11), (5, 0x15)];
+    const OBK_INC1: &[(u64, u8)] = &[(2, 0x22), (3, 0x22)];
+    const OBK_INC2: &[(u64, u8)] = &[(3, 0x33), (4, 0x33)];
+
+    /// An encrypted base ← inc1 ← inc2 with the real checksums of the states
+    /// they describe (inc1's wrong about `inc1_lies_about`), and a base whose
+    /// file is mostly dead space: folding inc1 in place would leave it worth
+    /// compacting at once, so the step rebuilds it.
+    fn obk_checkable_chain(
+        dir: &Path,
+        keys: &crate::seal::context::ArchiveKeys,
+        inc1_lies_about: Option<u64>,
+    ) -> (PathBuf, PathBuf, PathBuf) {
+        let session = keys.start_chain().unwrap();
+        let (base, base_id) = put_obk(
+            dir,
+            "r_C_full_1.obk",
+            keys,
+            &session,
+            ChainRole::Full,
+            "2026-01-01T00:00:00Z",
+            BackupType::Full,
+            None,
+            &obk_layer(OBK_BASE),
+            &true_sums(&obk_volume_of(&[OBK_BASE])),
+        );
+        let mut inc1_state = obk_volume_of(&[OBK_BASE, OBK_INC1]);
+        if let Some(rel) = inc1_lies_about {
+            inc1_state[(rel * OBK_CLUSTER) as usize] ^= 0xFF;
+        }
+        let (inc1, inc1_id) = put_obk(
+            dir,
+            "r_C_inc_2.obk",
+            keys,
+            &session,
+            ChainRole::Incremental,
+            "2026-01-02T00:00:00Z",
+            BackupType::Incremental,
+            Some((base_id, "r_C_full_1.obk")),
+            &obk_layer(OBK_INC1),
+            &true_sums(&inc1_state),
+        );
+        let (inc2, _) = put_obk(
+            dir,
+            "r_C_inc_3.obk",
+            keys,
+            &session,
+            ChainRole::Incremental,
+            "2026-01-03T00:00:00Z",
+            BackupType::Incremental,
+            Some((inc1_id, "r_C_inc_2.obk")),
+            &obk_layer(OBK_INC2),
+            &true_sums(&obk_volume_of(&[OBK_BASE, OBK_INC1, OBK_INC2])),
+        );
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&base)
+            .unwrap()
+            .set_len(128 * 1024 * 1024)
+            .unwrap();
+        (base, inc1, inc2)
+    }
+
+    fn obk_checked_step(
+        base: &Path,
+        inc1: &Path,
+        inc2: &Path,
+        keys: &crate::seal::context::ArchiveKeys,
+        progress: &mut dyn FnMut(StepProgress) -> Result<()>,
+    ) -> Result<ConsolidationOutcome> {
+        execute_with(
+            base,
+            inc1,
+            Some(inc2),
+            &mut StepOptions {
+                keys: Some(keys),
+                check: Some(FoldCheck::Whole),
+                progress,
+            },
+        )
+    }
+
+    fn checks_started(seen: &[StepProgress]) -> usize {
+        seen.iter()
+            .filter(|p| matches!(p, StepProgress::Checking { done: 0, total: 0 }))
+            .count()
+    }
+
+    /// Nothing but the stage's own files may be left of a rebuild that did
+    /// not publish.
+    fn no_stage_left(dir: &Path) {
+        let left: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".own-backup-obk"))
+            .collect();
+        assert!(left.is_empty(), "stage files left: {left:?}");
+    }
+
+    /// The fold and the compaction in one rebuild: the base comes out small,
+    /// the leaf reads what it read, and the new base is read ONCE — before it
+    /// replaced the old one — instead of a read-back and a check after.
+    #[test]
+    fn an_encrypted_fold_worth_compacting_is_one_rebuild_read_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = obk_keys();
+        let (base, inc1, inc2) = obk_checkable_chain(dir.path(), &keys, None);
+        let leaf_before = read_obk(&inc2, &keys);
+        let inc1_id = obk_sidecar(&inc1, &keys).manifest.backup_id;
+
+        let mut seen = Vec::new();
+        let outcome = obk_checked_step(&base, &inc1, &inc2, &keys, &mut |p| {
+            seen.push(p);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(outcome.bytes_orphaned, 0);
+        assert!(!inc1.exists());
+        assert!(!marker_path(&base).exists());
+        no_stage_left(dir.path());
+        assert!(std::fs::metadata(&base).unwrap().len() < 8 * 1024 * 1024);
+        assert_eq!(read_obk(&inc2, &keys), leaf_before);
+        assert_eq!(
+            checks_started(&seen),
+            1,
+            "the new base is read once: {seen:?}"
+        );
+        assert_eq!(last_total(&seen), VOLUME_LEN / 4096);
+        let promoted = obk_sidecar(&base, &keys);
+        assert_eq!(promoted.manifest.backup_id, inc1_id);
+        assert_eq!(promoted.info.consolidated_increments, 1);
+        assert_eq!(
+            promoted.info.chain_started_at.as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
+        let header = crate::seal::obk::read_open_header(&base).unwrap();
+        assert_eq!(header.backup_id, inc1_id);
+        assert_eq!(header.consolidated_increments, 1);
+    }
+
+    /// A rebuilt base that does not read back as the increment described it
+    /// is never published: the old base is byte for byte what it was, the
+    /// increment and the marker stay, and no stage is left behind.
+    #[test]
+    fn a_rebuilt_base_that_fails_the_check_is_not_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = obk_keys();
+        let (base, inc1, inc2) = obk_checkable_chain(dir.path(), &keys, Some(5));
+        let before = std::fs::read(&base).unwrap();
+
+        let error = obk_checked_step(&base, &inc1, &inc2, &keys, &mut |_| Ok(())).unwrap_err();
+        assert!(matches!(error, OwnBackupError::ChainBroken(_)), "{error}");
+        assert_eq!(
+            std::fs::read(&base).unwrap(),
+            before,
+            "the old base is untouched"
+        );
+        assert!(inc1.exists());
+        let marker = read_marker(&marker_path(&base)).expect("the marker stays");
+        assert!(!marker.merged, "nothing was folded");
+        no_stage_left(dir.path());
+    }
+
+    /// Stopped half-way through the rebuild's check: the old base is intact,
+    /// and the next resume does the whole step again, checked.
+    #[test]
+    fn a_rebuild_stopped_half_way_leaves_the_base_and_is_redone() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = obk_keys();
+        let (base, inc1, inc2) = obk_checkable_chain(dir.path(), &keys, None);
+        let leaf_before = read_obk(&inc2, &keys);
+        let before = std::fs::read(&base).unwrap();
+
+        let result = obk_checked_step(&base, &inc1, &inc2, &keys, &mut |p| match p {
+            StepProgress::Checking { done, .. } if done > 3 => Err(OwnBackupError::Cancelled),
+            _ => Ok(()),
+        });
+        assert!(matches!(result, Err(OwnBackupError::Cancelled)));
+        assert_eq!(std::fs::read(&base).unwrap(), before);
+        assert!(inc1.exists());
+        no_stage_left(dir.path());
+
+        let mut seen = Vec::new();
+        let mut record = |p: StepProgress| {
+            seen.push(p);
+            Ok(())
+        };
+        let report = resume_pending_with(dir.path(), Some(&keys), &mut record).unwrap();
+        assert_eq!(report.finished.len(), 1, "{report:?}");
+        assert_eq!(checks_started(&seen), 1);
+        assert!(!inc1.exists());
+        assert!(!marker_path(&base).exists());
+        assert_eq!(read_obk(&inc2, &keys), leaf_before);
+    }
+
+    /// A small increment over a base with no dead space is still folded in
+    /// place: rebuilding the whole base for it would write far more.
+    #[test]
+    fn a_small_fold_stays_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = obk_keys();
+        let (base, inc1, _) = obk_checkable_chain(dir.path(), &keys, None);
+        let key = keys.open_chain_of(&base).unwrap().key;
+        assert!(crate::seal::obk::fold_leaves_base_worth_compacting(&base, &inc1, &key).unwrap());
+        // Without the dead tail the same pair is not worth a rebuild.
+        crate::seal::obk::compact_image(&base, &key).unwrap();
+        assert!(!crate::seal::obk::fold_leaves_base_worth_compacting(&base, &inc1, &key).unwrap());
+    }
+    /// The rebuilt base was published and the step stopped before it could
+    /// say so in the marker. The resume sees the base already carries the
+    /// increment, does not fold it again, and finishes the step.
+    #[test]
+    fn a_published_rebuild_is_not_folded_again_by_the_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = obk_keys();
+        let (base, inc1, inc2) = obk_checkable_chain(dir.path(), &keys, None);
+        let leaf_before = read_obk(&inc2, &keys);
+        let key = keys.open_chain_of(&base).unwrap().key;
+        let marker = Marker {
+            version: MARKER_VERSION,
+            started_at: "2026-01-03T01:00:00Z".into(),
+            base: "r_C_full_1.obk".into(),
+            victim: "r_C_inc_2.obk".into(),
+            next: Some("r_C_inc_3.obk".into()),
+            merged: false,
+            folded_before: 0,
+            chain_started_at: Some("2026-01-01T00:00:00Z".into()),
+            check: None,
+        };
+        write_marker(&marker_path(&base), &marker).unwrap();
+        let promoted = promote(
+            &base,
+            obk_sidecar(&inc1, &keys),
+            1,
+            Some("2026-01-01T00:00:00Z".into()),
+        )
+        .unwrap();
+        crate::seal::obk::fold_into_fresh_base(
+            &base,
+            &inc1,
+            &key,
+            &sealed_blob(&promoted).unwrap(),
+            crate::seal::obk::RebuildIdentity {
+                backup_id: promoted.manifest.backup_id,
+                created_at: promoted.manifest.created_at.clone(),
+                consolidated_increments: 1,
+                chain_started_at: Some("2026-01-01T00:00:00Z".into()),
+            },
+            &mut |_, _, _| Ok(()),
+            None,
+        )
+        .unwrap()
+        .expect("rebuilt");
+        let published = std::fs::read(&base).unwrap();
+
+        let report = resume_pending_with_keys(dir.path(), Some(&keys)).unwrap();
+        assert!(report.all_finished(), "{report:?}");
+        assert_eq!(std::fs::read(&base).unwrap(), published, "not folded again");
+        assert!(!inc1.exists());
+        assert!(!marker_path(&base).exists());
+        assert_eq!(read_obk(&inc2, &keys), leaf_before);
+        assert_eq!(obk_sidecar(&base, &keys).info.consolidated_increments, 1);
     }
 }

@@ -1,7 +1,7 @@
 //! Publish a validated sibling containing only current encrypted records.
 //! Data ciphertext/identities remain unchanged; index and metadata get fresh
 //! encryption sessions. Callers hold exclusive access as for consolidation.
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::OpenOptions;
 use std::io::BufWriter;
 use std::path::Path;
@@ -9,6 +9,9 @@ use std::path::Path;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use own_backup_common::Result;
 
+use zeroize::Zeroizing;
+
+use super::rebuild::RebuildIdentity;
 use super::{bad, ClusterState, ObkCompression, ObkImage, ObkWriter, ObkWriterOptions};
 use crate::qcow2::{decode_l2_entry, ClusterDescriptor, OFLAG_ZERO};
 use crate::seal::{wrap::WrappedChainKey, ChainKey};
@@ -39,7 +42,66 @@ pub fn compact_image_with_progress(
     chain: &ChainKey,
     mut progress: impl FnMut(u64, u64) -> Result<()>,
 ) -> Result<CompactionStats> {
-    progress(0, 0)?;
+    build_sibling(
+        path,
+        chain,
+        None,
+        &mut |phase, done, total| match phase {
+            SiblingPhase::Copy => progress(done, total * 2),
+            SiblingPhase::ReadBack => progress(total + done, total * 2),
+        },
+        None,
+    )
+}
+
+/// What a sibling rebuild is at, for [`build_sibling`]'s progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SiblingPhase {
+    /// Records being written into the sibling: `done` of `total` clusters.
+    Copy,
+    /// Clusters the caller's check did not read, read back and authenticated.
+    ReadBack,
+}
+
+/// A check of the finished sibling before it replaces the image: given the
+/// sibling's path, it reads what it wants and returns the guest clusters it
+/// has read through the authenticated reader. The rest is read back after it,
+/// so every record of the sibling is read exactly once.
+pub type SiblingCheck<'a> = &'a mut dyn FnMut(&Path) -> Result<HashSet<u64>>;
+
+/// An increment to lay over the image while it is rebuilt — the fold and the
+/// compaction of a consolidation in one pass ([`super::fold::fold_into_fresh_base`]).
+pub(super) struct Overlay<'a> {
+    pub child: &'a Path,
+    /// The sidecar the folded image carries: the increment's, promoted.
+    pub metadata: &'a [u8],
+    pub identity: RebuildIdentity,
+}
+
+/// Where a record of the sibling comes from.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Origin {
+    Image,
+    Child,
+}
+
+/// Rebuild `path` into an empty sibling holding only the records its current
+/// state needs, check the sibling, and publish it in the image's place.
+///
+/// With an `overlay` the state is the image's with the increment's clusters
+/// over it: every record — the image's and the increment's alike — is moved
+/// whole, as ciphertext under the same chain (FORMAT.md: a complete record may
+/// be copied anywhere inside its chain without a new encryption). Nothing is
+/// decompressed or re-encrypted, and the image itself is not written to: until
+/// the rename it is exactly what it was.
+pub(super) fn build_sibling(
+    path: &Path,
+    chain: &ChainKey,
+    overlay: Option<Overlay<'_>>,
+    progress: &mut dyn FnMut(SiblingPhase, u64, u64) -> Result<()>,
+    check: Option<SiblingCheck<'_>>,
+) -> Result<CompactionStats> {
+    progress(SiblingPhase::Copy, 0, 0)?;
     let generation = ObkImage::open_path(path, chain)?
         .open_header()
         .header_generation
@@ -53,8 +115,42 @@ pub fn compact_image_with_progress(
         if open.header_generation.checked_add(1) != Some(generation) {
             return Err(bad("image changed before compaction started"));
         }
-        let states = source.defined_cluster_states()?;
-        let metadata = source.sealed_metadata()?;
+        let mut child = overlay
+            .as_ref()
+            .map(|o| ObkImage::open_path(o.child, chain))
+            .transpose()?;
+        // What the sibling holds, cluster by cluster.
+        let mut plan: BTreeMap<u64, (Origin, ClusterState)> = source
+            .defined_cluster_states()?
+            .into_iter()
+            .map(|(cluster, state)| (cluster, (Origin::Image, state)))
+            .collect();
+        if let Some(child) = child.as_mut() {
+            if header.backing_file.is_some() || open.parent_backup_id.is_some() {
+                return Err(bad("only a full backup can absorb an increment"));
+            }
+            for (cluster, state) in child.defined_cluster_states()? {
+                match state {
+                    ClusterState::Present(_) => {
+                        plan.insert(cluster, (Origin::Child, state));
+                    }
+                    // An increment's explicit zero over a full backup: the
+                    // full backup without a cluster there reads zeros.
+                    ClusterState::Zero => {
+                        plan.remove(&cluster);
+                    }
+                    ClusterState::Absent => {
+                        return Err(bad("the increment's index listed an absent cluster"))
+                    }
+                }
+            }
+        }
+        let plan: Vec<(u64, Origin, ClusterState)> =
+            plan.into_iter().map(|(c, (f, s))| (c, f, s)).collect();
+        let metadata = match &overlay {
+            Some(o) => Zeroizing::new(o.metadata.to_vec()),
+            None => source.sealed_metadata()?,
+        };
         let reserve = source
             .root()
             .meta_chunks
@@ -66,7 +162,7 @@ pub fn compact_image_with_progress(
             })
             .sum::<usize>()
             .max(metadata.len());
-        let opts = ObkWriterOptions {
+        let mut opts = ObkWriterOptions {
             chain_id: open.chain_id,
             backup_id: open.backup_id,
             parent_backup_id: open.parent_backup_id,
@@ -86,6 +182,15 @@ pub fn compact_image_with_progress(
             consolidated_increments: open.consolidated_increments,
             chain_started_at: open.chain_started_at.clone(),
         };
+        // The one rebuild that changes who the image is: the base of a
+        // consolidated chain becomes the increment it absorbed.
+        if let Some(o) = &overlay {
+            opts.backup_id = o.identity.backup_id;
+            opts.created_at = o.identity.created_at.clone();
+            opts.consolidated_increments = o.identity.consolidated_increments;
+            opts.chain_started_at = o.identity.chain_started_at.clone();
+        }
+        let has_parent = opts.parent_backup_id.is_some();
         let file = OpenOptions::new().write(true).truncate(true).open(stage)?;
         let mut writer = ObkWriter::new(
             BufWriter::with_capacity(super::COPY_WRITE_BUFFER, file),
@@ -93,42 +198,54 @@ pub fn compact_image_with_progress(
             opts,
         )?;
         writer.set_generation(generation);
-        let total = (states.len() as u64)
-            .checked_mul(2)
-            .ok_or_else(|| bad("compaction progress overflow"))?;
+        let total = plan.len() as u64;
+        // What the sibling's index must say once written.
+        let mut expected: Vec<(u64, ClusterState)> = Vec::with_capacity(plan.len());
         let mut copied = 0;
         let batch = super::copy_batch_clusters(header.cluster_size);
-        for (b, part) in states.chunks(batch).enumerate() {
-            // The batch's records, read in the order they lie in the file —
-            // an original image and the folds appended to it are two runs in
-            // cluster order each — then written: see `COPY_BATCH_BYTES`.
+        for (b, part) in plan.chunks(batch).enumerate() {
+            // The batch's records, read file by file in the order they lie on
+            // the disk — an original image and the folds appended to it are
+            // runs in cluster order each — then written: see `COPY_BATCH_BYTES`.
             let mut at = Vec::new();
-            for (i, &(cluster, state)) in part.iter().enumerate() {
+            for (i, &(cluster, from, state)) in part.iter().enumerate() {
                 if matches!(state, ClusterState::Present(_)) {
-                    let offset = match decode_l2_entry(
-                        source.raw_l2_entry(cluster)?,
-                        header.cluster_bits,
-                    )? {
-                        ClusterDescriptor::Compressed { host_offset, .. } => host_offset,
-                        _ => return Err(bad("present data has no descriptor")),
+                    let image = match from {
+                        Origin::Image => &mut source,
+                        Origin::Child => child
+                            .as_mut()
+                            .ok_or_else(|| bad("compaction plan names a missing increment"))?,
                     };
-                    at.push((offset, i));
+                    let offset =
+                        match decode_l2_entry(image.raw_l2_entry(cluster)?, header.cluster_bits)? {
+                            ClusterDescriptor::Compressed { host_offset, .. } => host_offset,
+                            _ => return Err(bad("present data has no descriptor")),
+                        };
+                    at.push((from, offset, i));
                 }
             }
             at.sort_unstable();
             let mut records: Vec<Option<crate::seal::cluster::SealedRecord>> =
                 std::iter::repeat_with(|| None).take(part.len()).collect();
-            for (_, i) in at {
-                records[i] = Some(source.authenticated_data_record(part[i].0)?);
+            for (from, _, i) in at {
+                let image = match from {
+                    Origin::Image => &mut source,
+                    Origin::Child => child
+                        .as_mut()
+                        .ok_or_else(|| bad("compaction plan names a missing increment"))?,
+                };
+                records[i] = Some(image.authenticated_data_record(part[i].0)?);
             }
-            for (i, &(cluster, state)) in part.iter().enumerate() {
-                progress((b * batch + i) as u64, total)?;
+            for (i, &(cluster, _, state)) in part.iter().enumerate() {
+                progress(SiblingPhase::Copy, (b * batch + i) as u64, total)?;
                 match state {
                     ClusterState::Present(_) => {
                         let record = records[i]
                             .take()
                             .ok_or_else(|| bad("compaction batch lost a record"))?;
+                        let id = record.id;
                         writer.relocate_record(cluster, record)?;
+                        expected.push((cluster, ClusterState::Present(id)));
                         copied += 1;
                     }
                     ClusterState::Zero => {
@@ -136,6 +253,9 @@ pub fn compact_image_with_progress(
                             return Err(bad("zero index/L2 disagree"));
                         }
                         writer.write_zero_cluster(cluster)?;
+                        if has_parent {
+                            expected.push((cluster, ClusterState::Zero));
+                        }
                     }
                     ClusterState::Absent => {
                         return Err(bad("compaction index listed an absent cluster"))
@@ -150,46 +270,52 @@ pub fn compact_image_with_progress(
             .sync_all()?;
         let after = std::fs::metadata(stage)?.len();
         let mut output = ObkImage::open_path(stage, chain)?;
-        if output.defined_cluster_states()? != states || output.sealed_metadata()? != metadata {
+        if output.defined_cluster_states()? != expected || output.sealed_metadata()? != metadata {
             return Err(bad("compaction changed the index or metadata"));
         }
-        for (done, &(cluster, _)) in states.iter().enumerate() {
-            progress(states.len() as u64 + done as u64, total)?;
+        let covered = match check {
+            Some(check) => check(stage)?,
+            None => HashSet::new(),
+        };
+        let rest: Vec<u64> = expected
+            .iter()
+            .map(|&(cluster, _)| cluster)
+            .filter(|cluster| !covered.contains(cluster))
+            .collect();
+        let rest_total = rest.len() as u64;
+        for (done, &cluster) in rest.iter().enumerate() {
+            progress(SiblingPhase::ReadBack, done as u64, rest_total)?;
             if output.read_cluster(cluster)?.is_none() {
                 return Err(bad("compacted data is absent"));
             }
         }
         drop(output);
+        drop(child);
         drop(source); // close handles before Windows publication
-        progress(total, total)?;
+        progress(SiblingPhase::ReadBack, rest_total, rest_total)?;
         Ok(CompactionStats {
             before_bytes: before,
             after_bytes: after,
             records_copied: copied,
-            defined_clusters: states.len() as u64,
+            defined_clusters: expected.len() as u64,
         })
     })
 }
 
-/// A conservative live-size bound: maintain only if at least 64 MiB and a
-/// quarter of the file can be reclaimed. Does not sum old per-pass counters.
-pub fn compact_if_needed(path: &Path, chain: &ChainKey) -> Result<Option<CompactionStats>> {
-    let mut image = ObkImage::open_path(path, chain)?;
-    let states = image.defined_cluster_states()?;
-    let file_len = std::fs::metadata(path)?.len();
+/// A conservative bound on the bytes the image's current state needs.
+fn live_upper_bound(
+    image: &mut ObkImage<std::io::BufReader<std::fs::File>>,
+    states: &[(u64, ClusterState)],
+    file_len: u64,
+) -> Result<u128> {
     let cs = image.cluster_size();
     let header = image.file_header().clone();
     let mut l2 = BTreeSet::new();
     let mut upper: u128 = super::DUAL_HEADER_DATA_START as u128;
-    for (cluster, state) in &states {
+    for (cluster, state) in states {
         l2.insert(cluster / (cs / 8));
         if matches!(state, ClusterState::Present(_)) {
-            let ClusterDescriptor::Compressed { length, .. } =
-                decode_l2_entry(image.raw_l2_entry(*cluster)?, header.cluster_bits)?
-            else {
-                return Err(bad("compaction estimate: present data has no descriptor"));
-            };
-            upper += length as u128;
+            upper += record_len(image, *cluster)? as u128;
         }
     }
     upper += states.len() as u128 * super::index::INDEX_ENTRY_LEN as u128;
@@ -208,13 +334,89 @@ pub fn compact_if_needed(path: &Path, chain: &ChainKey) -> Result<Option<Compact
     upper += crate::seal::cluster::MAX_PAYLOAD_LEN as u128;
     upper += (l2.len() as u128 + (header.l1_size as u64 * 8).div_ceil(cs) as u128 + 8) * cs as u128;
     upper += file_len.div_ceil(cs) as u128 * 16; // refcounts/tables: well over 2 B/host cluster
+    Ok(upper)
+}
+
+/// The stored length of a present cluster's record.
+fn record_len(
+    image: &mut ObkImage<std::io::BufReader<std::fs::File>>,
+    cluster: u64,
+) -> Result<u64> {
+    let bits = image.file_header().cluster_bits;
+    match decode_l2_entry(image.raw_l2_entry(cluster)?, bits)? {
+        ClusterDescriptor::Compressed { length, .. } => Ok(length),
+        _ => Err(bad("compaction estimate: present data has no descriptor")),
+    }
+}
+
+/// The maintenance rule: at least 64 MiB and a quarter of the file.
+fn worth_rebuilding(savings: u128, file_len: u128) -> bool {
+    savings >= 64 * 1024 * 1024 && savings * 4 >= file_len
+}
+
+/// A conservative live-size bound: maintain only if at least 64 MiB and a
+/// quarter of the file can be reclaimed. Does not sum old per-pass counters.
+pub fn compact_if_needed(path: &Path, chain: &ChainKey) -> Result<Option<CompactionStats>> {
+    compact_if_needed_checked(path, chain, None)
+}
+
+/// The same, with `check` reading the compacted sibling before it replaces
+/// the image (see [`SiblingCheck`]).
+pub fn compact_if_needed_checked(
+    path: &Path,
+    chain: &ChainKey,
+    check: Option<SiblingCheck<'_>>,
+) -> Result<Option<CompactionStats>> {
+    let mut image = ObkImage::open_path(path, chain)?;
+    let states = image.defined_cluster_states()?;
+    let file_len = std::fs::metadata(path)?.len();
+    let upper = live_upper_bound(&mut image, &states, file_len)?;
     let savings = (file_len as u128).saturating_sub(upper);
     drop(image);
     drop(states);
-    if savings < 64 * 1024 * 1024 || savings * 4 < file_len as u128 {
+    if !worth_rebuilding(savings, file_len as u128) {
         return Ok(None);
     }
-    compact_image(path, chain).map(Some)
+    build_sibling(path, chain, None, &mut |_, _, _| Ok(()), check).map(Some)
+}
+
+/// Would folding `child` into `base` in place leave the base worth
+/// compacting straight away? Then the fold is better done as one rebuild
+/// ([`super::fold::fold_into_fresh_base`]): the increment is written once,
+/// into the new file, instead of appended to the old one and copied again.
+///
+/// The same rule as [`compact_if_needed`], applied to the base as the fold
+/// would leave it: the records it holds now that nothing would point at,
+/// plus the ones the increment replaces, against the file grown by the
+/// increment's records.
+pub fn fold_leaves_base_worth_compacting(
+    base: &Path,
+    child: &Path,
+    chain: &ChainKey,
+) -> Result<bool> {
+    let mut image = ObkImage::open_path(base, chain)?;
+    let states = image.defined_cluster_states()?;
+    let file_len = std::fs::metadata(base)?.len();
+    let upper = live_upper_bound(&mut image, &states, file_len)?;
+    let present: HashSet<u64> = states
+        .iter()
+        .filter(|(_, s)| matches!(s, ClusterState::Present(_)))
+        .map(|&(c, _)| c)
+        .collect();
+    let mut increment = ObkImage::open_path(child, chain)?;
+    let mut replaced: u128 = 0;
+    let mut added: u128 = 0;
+    for (cluster, state) in increment.defined_cluster_states()? {
+        if present.contains(&cluster) {
+            replaced += record_len(&mut image, cluster)? as u128;
+        }
+        if matches!(state, ClusterState::Present(_)) {
+            added += record_len(&mut increment, cluster)? as u128;
+        }
+    }
+    let grown = file_len as u128 + added;
+    let savings = (file_len as u128).saturating_sub(upper) + replaced;
+    Ok(worth_rebuilding(savings, grown))
 }
 
 #[cfg(test)]

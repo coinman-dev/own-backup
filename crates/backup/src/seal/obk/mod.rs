@@ -59,8 +59,13 @@ mod staging;
 mod transaction;
 pub mod writer;
 
-pub use compact::{compact_if_needed, compact_image, compact_image_with_progress, CompactionStats};
-pub use fold::{fold_child_into_base, repoint_with_metadata, set_backing_file, FoldStats};
+pub use compact::{
+    compact_if_needed, compact_if_needed_checked, compact_image, compact_image_with_progress,
+    fold_leaves_base_worth_compacting, CompactionStats, SiblingCheck, SiblingPhase,
+};
+pub use fold::{
+    fold_child_into_base, fold_into_fresh_base, repoint_with_metadata, set_backing_file, FoldStats,
+};
 pub use header::{ObkOpenHeader, ObkRootPointer};
 pub use index::ClusterState;
 pub use io::{ObkRandomReader, ObkStagedWriter};

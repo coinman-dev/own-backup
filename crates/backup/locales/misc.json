@@ -97,6 +97,10 @@
     "ru": "после объединения версий базовая копия %{path} не прошла проверку: %{count} блоков не совпали с контрольными суммами. Влитая копия не удалена",
     "en": "after merging versions the base backup %{path} failed the check: %{count} blocks did not match their checksums. The merged backup was not deleted"
   },
+  "consolidate.sibling_check_failed": {
+    "ru": "собранная заново базовая копия %{path} не прошла проверку: %{count} блоков не совпали с контрольными суммами. Она отброшена, старая базовая копия и влитая копия не изменены",
+    "en": "the rebuilt base backup %{path} failed the check: %{count} blocks did not match their checksums. It was discarded; the old base backup and the merged backup are unchanged"
+  },
   "consolidate.marker_bad_name": {
     "ru": "маркер консолидации называет %{name} — это не имя файла в папке копий",
     "en": "the consolidation marker names %{name} — that is not a file name in the backup folder"
