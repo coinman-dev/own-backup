@@ -54,8 +54,7 @@
     finalizing ||
       releasing ||
       opening ||
-      consolidating ||
-      ((excluding || consolidateChecking) && (progress?.blocks_total ?? 0) === 0),
+      ((excluding || consolidating || consolidateChecking) && (progress?.blocks_total ?? 0) === 0),
   );
   /** The job copies an encrypted container (BitLocker/LUKS) that it opens with
    *  a password: the copy then holds the volume DECRYPTED. Without archive
@@ -109,16 +108,21 @@
     return onlyThis ? m.dash_verify_this() : m.dash_verify_all();
   });
 
-  // The round indicator spans BOTH phases when "проверять после создания" is on:
-  // 0–50 % = backup, 50–100 % = verify. The bar below stays per-phase.
-  // "prepare" (exclusion scan) sits at 0 %; "finalize" (flush to disk) means the
-  // copy is done, so the ring holds at the end of the backup half.
+  // The round indicator is the WHOLE run: the service outlines it before it
+  // starts — the copy, its check, the consolidation after it, each weighted
+  // by what it reads and writes — and stamps every event with the share
+  // behind it (`overall_percent`). It once held 100 % through a consolidation
+  // that took 45 of the run's 65 minutes (18.11.2026).
+  //
+  // Without that stamp (an older service, a job of several volumes): 0–50 % =
+  // backup, 50–100 % = verify, and a consolidation shows its own phase.
+  // The bar below stays per-phase.
   const ringPercent = $derived.by(() => {
     const p = progress;
+    if (p?.overall_percent != null) return p.overall_percent;
     if (!p || p.phase === 'prepare') return 0;
     if (p.phase === 'scheduled-verify') return p.percent;
-    // The copy and its check are both behind; what is left is older versions.
-    if (p.phase === 'consolidate' || p.phase === 'consolidate-verify') return 100;
+    if (p.phase === 'consolidate' || p.phase === 'consolidate-verify') return p.percent;
     if (['finalize', 'release', 'exclusions-open', 'exclusions'].includes(p.phase))
       return job.advanced.validate_after ? 50 : 100;
     if (job.advanced.validate_after) {
@@ -390,7 +394,7 @@
               {m.dash_release_note()}
             {:else if finalizing}
               {m.dash_finalizing_note()}
-            {:else if consolidating || (consolidateChecking && progress.blocks_total === 0)}
+            {:else if (consolidating || consolidateChecking) && progress.blocks_total === 0}
               {m.dash_consolidate_note()}
             {:else}
               <!-- Пробел перед «·» пишется явно: в начале блока {#if} Svelte

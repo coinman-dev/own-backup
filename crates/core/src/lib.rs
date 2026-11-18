@@ -23,6 +23,7 @@ pub mod busy;
 pub mod capabilities;
 mod engine_watch;
 pub mod restore_exec;
+mod run_progress;
 pub mod source_refresh;
 pub mod verification;
 
@@ -1838,6 +1839,11 @@ pub struct JobProgress {
     /// start of the phase and not from its own opening. `None` from the engine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase_started_ms: Option<u64>,
+    /// How far the whole run is — the copy, its check and the consolidation
+    /// after it — in percent ([`run_progress`]). `None` when the run is not
+    /// outlined, or for an event outside the outline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overall_percent: Option<u64>,
 }
 
 /// Sink for orchestration events. The GUI forwards these to Tauri window
@@ -2506,7 +2512,13 @@ pub async fn run_queue_worker(
                     run
                 }
                 Ok(keys) => {
-                    perform_backup(&sink, &job, &cancel, last_success, &passwords, keys).await
+                    // The whole run outlined from what is on the backup disk,
+                    // so the round indicator spans the consolidation too.
+                    let outline =
+                        off_the_workers(|| run_progress::Outline::of(&job, keys.as_ref()));
+                    let run_sink: Arc<dyn EventSink> =
+                        Arc::new(run_progress::OverallSink::new(sink.clone(), outline));
+                    perform_backup(&run_sink, &job, &cancel, last_success, &passwords, keys).await
                 }
             }
         };
@@ -3900,7 +3912,8 @@ pub(crate) enum ConsolidationStop {
 }
 
 /// What a consolidation step tells the window: `consolidate` while it folds
-/// (no count, the bar runs), `consolidate-verify` while it reads the base back.
+/// (no count in place, the bar runs; clusters written when the base is
+/// rebuilt), `consolidate-verify` while it reads the base back.
 fn consolidation_reporter<'a>(
     tail: &'a RunTail<'a>,
     image: Option<&'a Path>,
@@ -3918,12 +3931,22 @@ fn consolidation_reporter<'a>(
     let mut last_permille = u64::MAX;
     let mut last_emit = std::time::Instant::now();
     let mut rate: Option<VerifyRate> = None;
+    let mut rebuild_started: Option<std::time::Instant> = None;
     move |p| {
         if tail.cancel.load(Ordering::SeqCst) {
             return Err(own_backup_common::OwnBackupError::Cancelled);
         }
         let (phase, done, total, mbps) = match p {
             StepProgress::Folding => ("consolidate", 0, 0, 0.0),
+            StepProgress::Rebuilding { done, total } => {
+                let started = *rebuild_started.get_or_insert_with(std::time::Instant::now);
+                let secs = started.elapsed().as_secs_f64();
+                // Clusters of an encrypted image, 64 KiB each.
+                let bytes = done as f64
+                    * (1u64 << own_backup_backup::seal::context::OBK_CLUSTER_BITS) as f64;
+                let mbps = if secs > 1.0 { bytes / secs / 1e6 } else { 0.0 };
+                ("consolidate", done, total, mbps)
+            }
             StepProgress::Checking { done, total } => {
                 let rate = rate
                     .get_or_insert_with(|| VerifyRate::new(image.unwrap_or(Path::new("")), keys));
@@ -3952,6 +3975,7 @@ fn consolidation_reporter<'a>(
                 excluded_bytes: None,
                 stalled_secs: None,
                 phase_started_ms: None,
+                overall_percent: None,
             });
         }
         Ok(())

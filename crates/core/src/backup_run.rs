@@ -166,6 +166,7 @@ impl<'a> CopyProgress<'a> {
                     excluded_bytes: p.excluded.map(|(_, b)| b),
                     stalled_secs: None,
                     phase_started_ms: None,
+                    overall_percent: None,
                 },
             );
         }
@@ -237,6 +238,7 @@ pub(crate) fn verify_copy(
                     excluded_bytes: None,
                     stalled_secs: None,
                     phase_started_ms: None,
+                    overall_percent: None,
                 },
             );
         }

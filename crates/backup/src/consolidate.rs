@@ -128,8 +128,11 @@ pub enum FoldCheck {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepProgress {
     /// The increment is being folded in and the next one repointed. The
-    /// fold reports no count.
+    /// fold in place reports no count.
     Folding,
+    /// The base is being rebuilt with the increment in it: `done` of `total`
+    /// clusters written into the new file.
+    Rebuilding { done: u64, total: u64 },
     /// The base is being read back: `done` of `total` blocks.
     Checking { done: u64, total: u64 },
 }
@@ -718,9 +721,12 @@ fn sibling_tick(
     progress: &mut dyn FnMut(StepProgress) -> Result<()>,
     phase: crate::seal::obk::SiblingPhase,
     done: u64,
+    total: u64,
 ) -> Result<()> {
-    if phase == crate::seal::obk::SiblingPhase::Copy && done.is_multiple_of(2048) {
-        progress(StepProgress::Folding)?;
+    if phase == crate::seal::obk::SiblingPhase::Copy
+        && (done.is_multiple_of(2048) || done + 1 == total)
+    {
+        progress(StepProgress::Rebuilding { done, total })?;
     }
     Ok(())
 }
@@ -875,8 +881,8 @@ fn execute_with(
             "obk" if obk_fold_rebuilds(base, victim, keys)? => {
                 let key = chain_key_for(base, keys)?;
                 let progress = RefCell::new(&mut *opts.progress);
-                let mut tick = |phase: crate::seal::obk::SiblingPhase, done: u64, _total: u64| {
-                    sibling_tick(&mut **progress.borrow_mut(), phase, done)
+                let mut tick = |phase: crate::seal::obk::SiblingPhase, done: u64, total: u64| {
+                    sibling_tick(&mut **progress.borrow_mut(), phase, done, total)
                 };
                 let mut read = |stage: &Path| {
                     check_sibling(stage, base, &promoted, &key, &mut |p| {
