@@ -1666,7 +1666,9 @@
             <span class="sec-sub">{sourceReadonly
               ? m.wiz_src_sub_ro()
               : diskChosen
-                ? m.wiz_src_sub_volumes()
+                ? activeDisk && diskWhole(activeDisk) && isBootableDisk(activeDisk)
+                  ? m.wiz_src_sub_volumes_or_boot()
+                  : m.wiz_src_sub_volumes()
                 : m.wiz_src_sub_disk()}</span>
             {#if diskChosen && !sourceReadonly}
               <button class="link back-disk" onclick={pickAnotherDisk}>{m.wiz_src_other_disk()}</button>
@@ -2488,7 +2490,7 @@
   .src-wrap { width: 100%; }
   .sec-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
   .sec-title { font-size: 15px; font-weight: 600; color: var(--head); }
-  .sec-sub { font-size: 13px; color: var(--text-muted); }
+  .sec-sub { font-size: 13px; color: var(--text-muted); min-width: 0; }
   .disks { display: flex; flex-direction: column; gap: 14px; }
   /* Kept-files category breakdown, shown under the disk map (read-only). */
   .cat-block { margin-top: 14px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--card-bg); }
@@ -2511,7 +2513,7 @@
   button.disk-card:hover { border-color: var(--primary); }
   button.disk-card:hover .disk-head { background: var(--accent-soft); }
   /* Back to the disk question — small, next to the instruction it undoes. */
-  .back-disk { margin-left: auto; font-size: 12px; }
+  .back-disk { margin-left: auto; font-size: 12px; flex-shrink: 0; white-space: nowrap; }
   .disk-head { width: 100%; display: flex; align-items: center; justify-content: space-between; padding: 6px 12px; background: var(--panel2); border: 0; border-bottom: 1px solid var(--border); margin: 0; font-family: inherit; text-align: left; }
   .disk-head.whole { background: var(--accent-soft); color: var(--accent-text); }
   .disk-head.whole .disk-model { color: var(--accent-text); }

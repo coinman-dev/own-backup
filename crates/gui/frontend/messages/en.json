@@ -607,6 +607,7 @@
   "wiz_src_title": "What to back up",
   "wiz_src_sub_ro": "partitions included in this backup (cannot be changed)",
   "wiz_src_sub_volumes": "now choose one or more volumes on the disk",
+  "wiz_src_sub_volumes_or_boot": "now choose one or more volumes on the disk, or click “Bootable disk backup” if the disk should be bootable and the backup should include all boot partitions",
   "wiz_src_sub_disk": "first choose the disk it will work with",
   "wiz_src_other_disk": "← another disk",
   "wiz_disks_loading": "Loading the disk list…",
