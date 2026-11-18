@@ -3747,6 +3747,25 @@ pub fn job_verify_targets(
     Ok(targets)
 }
 
+/// Run minutes of blocking file work from inside the job's async task.
+///
+/// Retention, consolidation and the recovery of an interrupted one run in the
+/// job's future, on a runtime worker. A progress message sent from there wakes
+/// the task that forwards it to the window into that worker's own LIFO slot,
+/// which no other worker takes — and the worker is busy with the fold for
+/// minutes. On 18.11.2026 «Объединение версий» reached the window only when
+/// the merge was over, so the window showed the check frozen at 100 % instead.
+/// `block_in_place` hands the worker's queue to another thread first. Off a
+/// multi-thread runtime (a test's) the work simply runs.
+pub(crate) fn off_the_workers<R>(work: impl FnOnce() -> R) -> R {
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
+    }
+}
+
 /// Finish whatever a crash left half-done in the destination folder — before
 /// anything reads or plans against the chains in it.
 ///
@@ -3786,7 +3805,7 @@ fn recover_interrupted_consolidations(
             Some(report) => report,
             None => &mut quiet,
         };
-    let report = match resume_pending_with(folder, keys, progress) {
+    let report = match off_the_workers(|| resume_pending_with(folder, keys, progress)) {
         Ok(r) => r,
         Err(own_backup_common::OwnBackupError::Cancelled) => {
             return Some(("cancelled", tr!("lib.cancelled_by_user").into_owned()));
@@ -6346,6 +6365,42 @@ mod tests {
             store.get("job1").unwrap().last_run.unwrap().image_path,
             good.image_path
         );
+    }
+
+    /// Сообщение, отправленное из долгой блокирующей работы внутри задачи
+    /// задания, должно дойти до окна сразу, а не после этой работы
+    /// (18.11.2026: «Объединение версий» пришло только по окончании слияния).
+    #[test]
+    fn a_message_from_long_work_in_the_job_task_is_delivered_at_once() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = tokio::sync::broadcast::channel::<std::time::Instant>(8);
+            let (got_tx, got_rx) = std::sync::mpsc::channel();
+            // The forwarder, as the gRPC stream that carries progress.
+            tokio::spawn(async move {
+                if let Ok(sent) = rx.recv().await {
+                    let _ = got_tx.send(sent.elapsed());
+                }
+            });
+            tokio::task::yield_now().await;
+            tokio::spawn(async move {
+                off_the_workers(|| {
+                    let _ = tx.send(std::time::Instant::now());
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                })
+            })
+            .await
+            .unwrap();
+            let delay = got_rx.recv().unwrap();
+            assert!(
+                delay < std::time::Duration::from_millis(1500),
+                "delivered after {delay:?}: it waited for the work"
+            );
+        });
     }
 
     /// «Очистить» в «Активности»: уходит всё, кроме того, на что опирается сама

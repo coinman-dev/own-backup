@@ -511,8 +511,10 @@ pub(crate) fn retain_and_consolidate(
     keys: Option<&ArchiveKeys>,
     tail: &RunTail<'_>,
 ) {
-    apply_retention(job, protected);
-    let result = apply_consolidation(job, protected, keys, tail);
+    let result = crate::off_the_workers(|| {
+        apply_retention(job, protected);
+        apply_consolidation(job, protected, keys, tail)
+    });
     run.consolidated_increments = result.folded;
     match result.stop {
         None => {}
