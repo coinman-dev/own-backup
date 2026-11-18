@@ -130,8 +130,8 @@ pub enum StepProgress {
     /// The increment is being folded in and the next one repointed. The
     /// fold in place reports no count.
     Folding,
-    /// The base is being rebuilt with the increment in it: `done` of `total`
-    /// clusters written into the new file.
+    /// The increment's clusters going into the base — into a rebuilt one or
+    /// appended in place: `done` of `total`.
     Rebuilding { done: u64, total: u64 },
     /// The base is being read back: `done` of `total` blocks.
     Checking { done: u64, total: u64 },
@@ -929,7 +929,8 @@ fn execute_with(
             }
             "obk" => {
                 let key = chain_key_for(base, keys)?;
-                let stats = crate::seal::obk::fold_child_into_base(
+                let progress = &mut *opts.progress;
+                let stats = crate::seal::obk::fold_child_into_base_with(
                     base,
                     victim,
                     &key,
@@ -943,6 +944,14 @@ fn execute_with(
                     // The increment's own level, from its manifest: the job's
                     // setting as it stood when that copy ran.
                     promoted.manifest.compression_level,
+                    // Counted like a rebuild, so the window has a bar and an
+                    // estimate for this phase too.
+                    &mut |done, total| {
+                        if done.is_multiple_of(2048) || done == total {
+                            progress(StepProgress::Rebuilding { done, total })?;
+                        }
+                        Ok(())
+                    },
                 )?;
                 bytes_orphaned = stats.bytes_orphaned;
                 info!(
@@ -2947,5 +2956,32 @@ mod tests {
         assert!(!marker_path(&base).exists());
         assert_eq!(read_obk(&inc2, &keys), leaf_before);
         assert_eq!(obk_sidecar(&base, &keys).info.consolidated_increments, 1);
+    }
+    /// A fold in place counts the increment's clusters, so the window has a
+    /// bar and an estimate for it as for a rebuild.
+    #[test]
+    fn a_fold_in_place_reports_its_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = obk_keys();
+        let (base, inc1, inc2) = obk_checkable_chain(dir.path(), &keys, None);
+        let key = keys.open_chain_of(&base).unwrap().key;
+        crate::seal::obk::compact_image(&base, &key).unwrap();
+        assert!(!crate::seal::obk::fold_leaves_base_worth_compacting(&base, &inc1, &key).unwrap());
+
+        let mut seen = Vec::new();
+        obk_checked_step(&base, &inc1, &inc2, &keys, &mut |p| {
+            seen.push(p);
+            Ok(())
+        })
+        .unwrap();
+        let last = seen
+            .iter()
+            .filter_map(|p| match p {
+                StepProgress::Rebuilding { done, total } => Some((*done, *total)),
+                _ => None,
+            })
+            .last();
+        assert_eq!(last, Some((2, 2)), "both of inc1's clusters: {seen:?}");
+        assert!(!inc1.exists());
     }
 }

@@ -82,6 +82,29 @@ pub fn fold_child_into_base(
     identity: RebuildIdentity,
     zstd_level: i32,
 ) -> Result<FoldStats> {
+    fold_child_into_base_with(
+        base,
+        victim,
+        chain,
+        metadata,
+        identity,
+        zstd_level,
+        &mut |_, _| Ok(()),
+    )
+}
+
+/// [`fold_child_into_base`], telling `progress` how many of the increment's
+/// clusters have been read (`done`, `total`). An `Err` from it stops the
+/// fold before its header is written: the base stays as it was.
+pub fn fold_child_into_base_with(
+    base: &Path,
+    victim: &Path,
+    chain: &ChainKey,
+    metadata: &[u8],
+    identity: RebuildIdentity,
+    zstd_level: i32,
+    progress: &mut dyn FnMut(u64, u64) -> Result<()>,
+) -> Result<FoldStats> {
     let mut child = ObkImage::open_path(victim, chain)?;
     let already_applied = {
         let parent = ObkImage::open_path(base, chain)?;
@@ -98,11 +121,16 @@ pub fn fold_child_into_base(
         .map(|(cluster, _)| cluster)
         .collect();
 
+    let total = clusters.len() as u64;
+    let mut done = 0u64;
+    progress(0, total)?;
     let stats = apply_changed_with(
         base,
         chain,
         &clusters,
-        move |cluster| {
+        |cluster| {
+            done += 1;
+            progress(done, total)?;
             // Deliberately the increment's OWN view, not its chain's: a cluster
             // it does not define is the base's already, and reading it through
             // the chain would copy the base onto itself.
