@@ -873,6 +873,9 @@ export interface JobProgress {
   /** Seconds without any progress, once the service finds that worth saying
    *  (a backup disk that stopped taking writes). Absent otherwise. */
   stalled_secs?: number;
+  /** When this phase began (Unix ms), stamped by the service: a window
+   *  opened mid-run counts from there, not from its own opening. */
+  phase_started_ms?: number;
   /**
    * Разбивка оставшихся файлов по типам — приходит ОДИН раз, сразу после
    * скана, и дальше не меняется. Пары «категория → байты»: сканер видит каждый

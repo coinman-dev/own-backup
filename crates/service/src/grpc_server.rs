@@ -615,22 +615,88 @@ fn target_owned_letters(_plan: &own_backup_common::restore_plan::RestorePlan) ->
     Vec::new()
 }
 
+/// The last progress message of every run going on now.
+///
+/// Events go only to the windows connected when they are sent. A window
+/// opened in the middle of a run therefore showed nothing until the next one,
+/// and the folding and compacting of a consolidation send none for an hour:
+/// on 2026-11-18 a window reopened during it showed «Резервное копирование…»
+/// with an empty bar and «Прошло 0:00». `StreamEvents` starts with these.
+#[derive(Default)]
+pub struct LiveProgress(
+    std::sync::Mutex<std::collections::BTreeMap<String, own_backup_core::JobProgress>>,
+);
+
+impl LiveProgress {
+    /// Remember `progress`, stamped with when its phase began.
+    fn note(&self, progress: &mut own_backup_core::JobProgress) {
+        let mut runs = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let started = runs
+            .get(&progress.job_id)
+            .filter(|was| was.phase == progress.phase)
+            .and_then(|was| was.phase_started_ms);
+        progress.phase_started_ms =
+            started.or_else(|| Some(chrono::Utc::now().timestamp_millis().max(0) as u64));
+        // The breakdown by file type and what the exclusions took out come in
+        // one message only; the one kept for a late window must still carry them.
+        let mut kept = progress.clone();
+        if let Some(was) = runs.get(&progress.job_id) {
+            if kept.categories.is_empty() {
+                kept.categories = was.categories.clone();
+            }
+            if kept.excluded_bytes.is_none() {
+                kept.excluded_bytes = was.excluded_bytes;
+                kept.excluded_files = was.excluded_files;
+            }
+        }
+        runs.insert(progress.job_id.clone(), kept);
+    }
+
+    fn forget(&self, job_id: &str) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(job_id);
+    }
+
+    /// What a window that connects now should be told first: the runs still
+    /// going on. A queued run counts only while it is the queue's current
+    /// one, so a run whose end was somehow never announced cannot hang on
+    /// the screen as running.
+    fn replay(&self, current: Option<&str>) -> Vec<Event> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .filter(|p| p.phase == "scheduled-verify" || current == Some(p.job_id.as_str()))
+            .map(progress_event)
+            .collect()
+    }
+}
+
+fn progress_event(progress: &own_backup_core::JobProgress) -> Event {
+    Event {
+        kind: "progress".into(),
+        json: serde_json::to_string(progress).unwrap_or_default(),
+    }
+}
+
 /// Bridges core orchestration events onto the broadcast channel that
 /// `StreamEvents` reads. `send` errors only when there are no subscribers,
 /// which is fine — the events are simply dropped until a client connects.
 pub struct GrpcEventSink {
     pub tx: broadcast::Sender<proto::Event>,
+    /// Shared with [`AppState::live`].
+    pub live: Arc<LiveProgress>,
     /// The automatic cleanup, for a job that cleans before its copy. Set
     /// once the service's state exists (after the worker that holds this).
     pub auto: Arc<std::sync::OnceLock<Arc<crate::auto_cleanup::AutoCleanup>>>,
 }
 
 impl own_backup_core::EventSink for GrpcEventSink {
-    fn job_progress(&self, progress: own_backup_core::JobProgress) {
-        let _ = self.tx.send(Event {
-            kind: "progress".into(),
-            json: serde_json::to_string(&progress).unwrap_or_default(),
-        });
+    fn job_progress(&self, mut progress: own_backup_core::JobProgress) {
+        self.live.note(&mut progress);
+        let _ = self.tx.send(progress_event(&progress));
     }
     fn queue_changed(&self, snapshot: own_backup_core::QueueSnapshot) {
         let _ = self.tx.send(Event {
@@ -639,6 +705,7 @@ impl own_backup_core::EventSink for GrpcEventSink {
         });
     }
     fn job_finished(&self, mut run: own_backup_core::JobRun) {
+        self.live.forget(&run.job_id);
         run.in_language(own_backup_common::lang::code());
         let _ = self.tx.send(Event {
             kind: "finished".into(),
@@ -1593,9 +1660,16 @@ impl BackupService for BackupServiceImpl {
         // Drop "lagged" notices silently; a slow client just misses old events.
         let mut events =
             BroadcastStream::new(self.state.events.subscribe()).filter_map(|r| r.ok().map(Ok));
+        // Subscribed first, so nothing falls between the two; a message both
+        // here and in the stream only repeats what the window already shows.
+        let current = self.state.queue.snapshot().current;
+        let already = self.state.live.replay(current.as_deref());
         let mut shutdown = self.shutdown.clone();
         let busy = self.state.busy.clone();
         let stream = async_stream::stream! {
+            for event in already {
+                yield Ok(event);
+            }
             let drained = async move {
                 shutdown.wait_for_shutdown().await;
                 busy.wait_until_idle().await;
@@ -5127,9 +5201,90 @@ mod tests {
             std::sync::Arc::new(own_backup_core::PasswordStore::new(dir.join("meta.db")));
         let busy = own_backup_core::busy::Busy::new();
         let state = AppState::new(
-            config, store, queue, busy, job_tx, cancel, events, passwords,
+            config,
+            store,
+            queue,
+            busy,
+            job_tx,
+            cancel,
+            events,
+            Default::default(),
+            passwords,
         );
         BackupServiceImpl::new(state, String::new(), shutdown)
+    }
+
+    fn progress(job: &str, phase: &str) -> own_backup_core::JobProgress {
+        own_backup_core::JobProgress {
+            job_id: job.into(),
+            phase: phase.into(),
+            percent: 0,
+            blocks_done: 0,
+            blocks_total: 0,
+            speed_mbps: 0.0,
+            volume_index: 0,
+            volume_count: 1,
+            volume: String::new(),
+            image_file_name: String::new(),
+            categories: vec![],
+            excluded_files: None,
+            excluded_bytes: None,
+            stalled_secs: None,
+            phase_started_ms: None,
+        }
+    }
+
+    fn replayed(live: &LiveProgress, current: Option<&str>) -> Vec<own_backup_core::JobProgress> {
+        live.replay(current)
+            .iter()
+            .map(|e| serde_json::from_str(&e.json).unwrap())
+            .collect()
+    }
+
+    /// A window that connects in the middle of a run is told where the run
+    /// is, with when its phase began and the one-off breakdown by file type,
+    /// and is told nothing about a run that has ended.
+    #[test]
+    fn a_window_opened_mid_run_learns_where_the_run_is() {
+        let live = LiveProgress::default();
+        let mut scanned = progress("job", "backup");
+        scanned.categories = vec![("images".into(), 5)];
+        scanned.excluded_bytes = Some(7);
+        live.note(&mut scanned);
+        let began = scanned.phase_started_ms.expect("stamped");
+
+        let mut later = progress("job", "backup");
+        later.blocks_done = 10;
+        live.note(&mut later);
+        assert_eq!(
+            later.phase_started_ms,
+            Some(began),
+            "same phase, same start"
+        );
+
+        let [now] = &replayed(&live, Some("job"))[..] else {
+            panic!("one run")
+        };
+        assert_eq!(now.blocks_done, 10);
+        assert_eq!(now.categories, scanned.categories);
+        assert_eq!(now.excluded_bytes, Some(7));
+        assert_eq!(now.phase_started_ms, Some(began));
+
+        let mut folding = progress("job", "consolidate");
+        live.note(&mut folding);
+        assert!(folding.phase_started_ms.unwrap() >= began);
+        assert_eq!(replayed(&live, Some("job"))[0].phase, "consolidate");
+
+        // Not the queue's current run: nothing, not a phantom.
+        assert!(replayed(&live, None).is_empty());
+        assert!(replayed(&live, Some("other")).is_empty());
+        // A scheduled verification is not in the queue at all.
+        live.note(&mut progress("other", "scheduled-verify"));
+        assert_eq!(replayed(&live, None).len(), 1);
+
+        live.forget("job");
+        live.forget("other");
+        assert!(replayed(&live, Some("job")).is_empty());
     }
 
     /// The wizard's destination check says what the save would: a letter

@@ -2097,6 +2097,9 @@
           <div class="field-label mt">{m.wiz_retention_mode()}</div>
           <label class="radio blk"><input type="radio" checked={!isConsolidation} onchange={() => setSchemeMode('standard')} /> {m.wiz_mode_standard()}</label>
           <label class="radio blk"><input type="radio" checked={isConsolidation} onchange={() => setSchemeMode('consolidation')} /> {m.wiz_mode_consolidation()}</label>
+          {#if isConsolidation}
+            <div class="note warn">{m.wiz_consol_slow()}</div>
+          {/if}
         {/if}
 
         {#if job.scheme.method !== 'full' && !isConsolidation}

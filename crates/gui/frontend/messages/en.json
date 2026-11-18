@@ -712,6 +712,7 @@
   "wiz_retention_mode": "Retention mode:",
   "wiz_mode_standard": "Standard — chains roll over",
   "wiz_mode_consolidation": "Consolidation — a single chain",
+  "wiz_consol_slow": "Consolidation can take a long time, especially on a hard disk drive (HDD).",
   "wiz_chain_length": "Chain length:",
   "wiz_chain_max_before": "Make at most",
   "wiz_chain_max_after_inc": [

@@ -44,7 +44,10 @@ function keepTime(p: JobProgress): void {
   const now = Date.now();
   let c = runClock[p.job_id];
   if (!c || c.phase !== p.phase) {
-    c = { phase: p.phase, startMs: now, samples: [] };
+    // The service says when the phase began: a window opened in the middle
+    // of a run would otherwise count from its own opening.
+    const since = p.phase_started_ms && p.phase_started_ms <= now ? p.phase_started_ms : now;
+    c = { phase: p.phase, startMs: since, samples: [] };
     runClock[p.job_id] = c;
   }
   const last = c.samples[c.samples.length - 1];

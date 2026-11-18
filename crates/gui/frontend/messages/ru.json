@@ -726,6 +726,7 @@
   "wiz_retention_mode": "Режим хранения:",
   "wiz_mode_standard": "Стандартный — цепочки сменяются",
   "wiz_mode_consolidation": "Объединение (консолидация) — одна цепочка",
+  "wiz_consol_slow": "Объединение может занять длительное время, особенно на жёстком диске (HDD).",
   "wiz_chain_length": "Длина цепочки:",
   "wiz_chain_max_before": "Делать не более",
   "wiz_chain_max_after_inc": [

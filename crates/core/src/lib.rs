@@ -1833,6 +1833,11 @@ pub struct JobProgress {
     /// like this for as long as it fails (`engine_watch`). `None` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stalled_secs: Option<u64>,
+    /// When this phase began, Unix milliseconds. Stamped by the service, so
+    /// that a window opened in the middle of a run counts the time from the
+    /// start of the phase and not from its own opening. `None` from the engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_started_ms: Option<u64>,
 }
 
 /// Sink for orchestration events. The GUI forwards these to Tauri window
@@ -3946,6 +3951,7 @@ fn consolidation_reporter<'a>(
                 excluded_files: None,
                 excluded_bytes: None,
                 stalled_secs: None,
+                phase_started_ms: None,
             });
         }
         Ok(())
