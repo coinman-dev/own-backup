@@ -1,0 +1,10 @@
+# cargo audit (the release gate in .github/workflows/release.yml runs it with
+# --deny warnings). Every ignored advisory names why and when it goes.
+[advisories]
+ignore = [
+    # chrono is unmaintained (informational, no patched version, no known
+    # vulnerability). It is in 53 of our files and under `cron`, whose API is
+    # chrono's; moving to jiff or time is a change of its own (.ai/PLAN.md),
+    # not a release-day edit. Remove this line with that move. (2026-11-19)
+    "RUSTSEC-2026-0543",
+]

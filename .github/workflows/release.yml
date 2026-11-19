@@ -14,6 +14,11 @@ on:
         required: false
         default: false
         type: boolean
+      skip_tests:
+        description: 'Dry run only: skip the Windows tests, to try the packaging steps (a release always runs them)'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -29,7 +34,7 @@ env:
 jobs:
   windows:
     runs-on: windows-2025
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
       DRY_RUN: ${{ inputs.dry_run || false }}
@@ -54,9 +59,17 @@ jobs:
           mkdir -p target/notes
           bash scripts/release-notes.sh "${RELEASE_TAG#v}" > target/notes/release-notes.md
           cat target/notes/release-notes.md
-      - uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      # protoc 23.4, as arduino/setup-protoc@v3 gave; fetched directly, since
+      # that action still runs on the deprecated Node.js 20.
+      - name: Install protoc
+        shell: pwsh
+        run: |
+          $v = '23.4'
+          $dir = Join-Path $env:RUNNER_TEMP 'protoc'
+          Invoke-WebRequest "https://github.com/protocolbuffers/protobuf/releases/download/v$v/protoc-$v-win64.zip" -OutFile "$dir.zip"
+          Expand-Archive "$dir.zip" -DestinationPath $dir -Force
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value (Join-Path $dir 'bin')
+          & (Join-Path $dir 'bin\protoc.exe') --version
       - uses: actions/setup-node@v7
         with:
           node-version: 24
@@ -79,12 +92,50 @@ jobs:
           cargo install cargo-audit --locked --version 0.22.2
           cargo audit --deny warnings
           python scripts/check-vendor.py --audit
-      # A cancelled step leaves no log: the step's own limit ends it with one.
-      - name: Test Windows workspace
-        timeout-minutes: 60
-        run: cargo test --workspace --locked -j 2
+      # The tests run in groups, so the step that was running names the
+      # group even when the runner dies and its log is lost (19.11.2026: two
+      # hours, no log, no timeout). Temporary files go to the runner's
+      # temporary folder on D: — larger than C:, where a full drive takes the
+      # runner itself down, and named without 8.3 aliases (C:\Users\RUNNER~1).
+      - name: Free space before the tests
+        shell: pwsh
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table Name, Used, Free
+      - name: Test common, storage and metadata crates
+        if: ${{ !(inputs.dry_run && inputs.skip_tests) }}
+        timeout-minutes: 30
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+        run: cargo test --locked -j 2 --no-fail-fast -p own-backup-common -p own-backup-metadata -p own-backup-cleanup -p own-backup-inventory -p own-backup-snapshot
+      # Every group runs even after a failure, so one run shows them all;
+      # the job still fails.
+      - name: Test backup crate
+        if: ${{ !cancelled() && !(inputs.dry_run && inputs.skip_tests) }}
+        timeout-minutes: 45
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+        run: cargo test --locked -j 2 --no-fail-fast -p own-backup-backup
+      - name: Test core crate
+        if: ${{ !cancelled() && !(inputs.dry_run && inputs.skip_tests) }}
+        timeout-minutes: 30
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+        run: cargo test --locked -j 2 --no-fail-fast -p own-backup-core
+      - name: Test the rest of the workspace
+        if: ${{ !cancelled() && !(inputs.dry_run && inputs.skip_tests) }}
+        timeout-minutes: 30
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+        run: cargo test --workspace --locked -j 2 --no-fail-fast --exclude own-backup-common --exclude own-backup-metadata --exclude own-backup-cleanup --exclude own-backup-inventory --exclude own-backup-snapshot --exclude own-backup-backup --exclude own-backup-core
+      - name: Free space after the tests
+        if: always()
+        shell: pwsh
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table Name, Used, Free
       - name: Build Windows x64
-        run: cargo build --release --locked --target x86_64-pc-windows-msvc -p own-backup-gui -p own-backup-service -p own-backup-cli -p own-backup-shell -j 2
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc -p own-backup-gui -p own-backup-service -p own-backup-cli -p own-backup-shell -p own-backup-tc-plugin -j 2
       - name: Install NSIS
         shell: pwsh
         run: |
@@ -106,13 +157,13 @@ jobs:
         run: |
           mkdir -p target/release-files
           cp target/dist/own-backup-install.exe "target/release-files/own-backup-install_${RELEASE_TAG#v}.exe"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-release
           path: target/release-files/*.exe
           if-no-files-found: error
           retention-days: 3
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-notes
           path: target/notes/release-notes.md
@@ -186,7 +237,12 @@ jobs:
             scripts/build-linux-media.sh --deb "$PWD/target/release-files/own-backup_${v//-/.}_amd64.deb"
           rm -f target/release-files/*.sha256
           ls -l target/release-files
-      - uses: actions/upload-artifact@v4
+      # The medium's build tree is root's (a chroot with device nodes): left in
+      # target/, the Rust cache cannot pack it and fails to save at the end.
+      - name: Remove the medium's build tree
+        if: always()
+        run: sudo rm -rf target/linux-media
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-release
           path: |
@@ -208,15 +264,15 @@ jobs:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
       GH_REPO: ${{ github.repository }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: windows-release
           path: dist
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: linux-release
           path: dist
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: release-notes
           path: notes

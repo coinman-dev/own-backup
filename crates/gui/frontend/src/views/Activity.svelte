@@ -352,7 +352,7 @@
   .note { font-size: 13px; color: var(--error-text); margin-top: 5px; overflow-wrap: anywhere; }
   .summary { font-size: 13px; line-height: 1.5; color: var(--text-secondary); margin-top: 5px; overflow-wrap: anywhere; }
   .summary :global(b) { color: var(--head); font-weight: 600; }
-  .stats { display: flex; gap: 40px; margin-top: 12px; flex-wrap: wrap; }
+  .stats { display: flex; gap: 14px 28px; margin-top: 12px; flex-wrap: wrap; }
   .stats > div { display: flex; flex-direction: column; }
   .k { font-size: 12px; color: var(--accent-text); }
   .follow { margin-top: 10px; font-size: 13px; color: var(--head); }
