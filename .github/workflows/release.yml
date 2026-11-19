@@ -79,7 +79,9 @@ jobs:
           cargo install cargo-audit --locked --version 0.22.2
           cargo audit --deny warnings
           python scripts/check-vendor.py --audit
+      # A cancelled step leaves no log: the step's own limit ends it with one.
       - name: Test Windows workspace
+        timeout-minutes: 60
         run: cargo test --workspace --locked -j 2
       - name: Build Windows x64
         run: cargo build --release --locked --target x86_64-pc-windows-msvc -p own-backup-gui -p own-backup-service -p own-backup-cli -p own-backup-shell -j 2
@@ -97,12 +99,17 @@ jobs:
       - name: Installer integration check
         shell: pwsh
         run: ./scripts/test-installer.ps1 -Installer target/dist/own-backup-install.exe
+      # The release names the installer with its version: the README, the
+      # release notes and the site link to that name.
+      - name: Name the installer
+        shell: bash
+        run: |
+          mkdir -p target/release-files
+          cp target/dist/own-backup-install.exe "target/release-files/own-backup-install_${RELEASE_TAG#v}.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: windows-release
-          path: |
-            target/dist/own-backup-install.exe
-            target/dist/SHA256SUMS.txt
+          path: target/release-files/*.exe
           if-no-files-found: error
           retention-days: 3
       - uses: actions/upload-artifact@v4
@@ -112,10 +119,87 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
+  # The Linux package and boot medium. Built on Ubuntu 24.04, the oldest
+  # supported system: the binaries take its glibc and WebKitGTK as their
+  # minimum (plan §6, decision 2), and Debian 13 installs the same package.
+  # Packaging only — the Linux tests run on the owner's machine (AGENTS.md).
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      DRY_RUN: ${{ inputs.dry_run || false }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.dry_run && github.sha || inputs.tag || github.sha }}
+          fetch-depth: 0
+      - name: Validate version tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo 'Invalid release tag.'; exit 1; }
+          version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' Cargo.toml | head -1)"
+          [[ "$RELEASE_TAG" == "v$version" ]] || { echo "Tag $RELEASE_TAG and package version $version differ."; exit 1; }
+          if [[ "$DRY_RUN" != true ]]; then
+            [[ "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" == "$(git rev-parse HEAD)" ]] || { echo 'Checkout is not the requested tag.'; exit 1; }
+          fi
+      # The medium's build needs ~10 GiB beside the Rust build; the runner's
+      # preinstalled SDKs are not used here.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends build-essential pkg-config \
+            protobuf-compiler libwebkit2gtk-4.1-dev libsoup-3.0-dev libayatana-appindicator3-dev \
+            librsvg2-dev libgtk-layer-shell-dev dpkg-dev desktop-file-utils \
+            debootstrap debian-archive-keyring
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: crates/gui/frontend/package-lock.json
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Build the package
+        timeout-minutes: 60
+        shell: bash
+        run: |
+          set -euo pipefail
+          v="${RELEASE_TAG#v}"
+          mkdir -p target/release-files
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" DEB_REVISION=none \
+            OUTPUT="$PWD/target/release-files/own-backup_${v//-/.}_amd64.deb" scripts/build-deb.sh
+          dpkg-deb -f target/release-files/*.deb Package Version Depends
+      - name: Build the boot medium
+        timeout-minutes: 75
+        shell: bash
+        run: |
+          set -euo pipefail
+          v="${RELEASE_TAG#v}"
+          df -h /
+          OBK_MEDIA_RESERVE_GIB=0 OUTPUT="$PWD/target/release-files/OwnBackup-Linux-${v//-/.}_amd64.iso" \
+            scripts/build-linux-media.sh --deb "$PWD/target/release-files/own-backup_${v//-/.}_amd64.deb"
+          rm -f target/release-files/*.sha256
+          ls -l target/release-files
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-release
+          path: |
+            target/release-files/*.deb
+            target/release-files/*.iso
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
   publish:
-    timeout-minutes: 5
+    timeout-minutes: 20
     if: github.event_name != 'workflow_dispatch' || !inputs.dry_run
-    needs: windows
+    needs: [windows, linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -130,17 +214,20 @@ jobs:
           path: dist
       - uses: actions/download-artifact@v4
         with:
+          name: linux-release
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
           name: release-notes
           path: notes
       - name: Publish complete release
         shell: bash
         run: |
           set -euo pipefail
-          (cd dist && sha256sum --check SHA256SUMS.txt)
+          (cd dist && sha256sum -- *.exe *.deb *.iso > SHA256SUMS.txt && cat SHA256SUMS.txt)
           # One checksum list per release: the lines it already has for other
-          # files (the Linux medium and package, put in by
-          # scripts/upload-linux-media.sh or by hand) are kept; ours replace
-          # the lines of their own names.
+          # files (put in by scripts/upload-linux-media.sh or by hand) are
+          # kept; ours replace the lines of their own names.
           if gh release download "$RELEASE_TAG" --pattern SHA256SUMS.txt --dir old 2>/dev/null; then
             awk 'NR == FNR { n = $2; sub(/^\*/, "", n); ours[n] = 1; next }
                  { n = $2; sub(/^\*/, "", n); if (!(n in ours)) print }' \
@@ -151,7 +238,7 @@ jobs:
           prerelease=false
           [[ "$RELEASE_TAG" == *-* ]] && prerelease=true
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --verify-tag --draft --title "${RELEASE_TAG#v}" --notes-file notes/release-notes.md
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "Own Backup ${RELEASE_TAG#v}" --notes-file notes/release-notes.md
           fi
           gh release upload "$RELEASE_TAG" dist/* --clobber
           gh release edit "$RELEASE_TAG" --draft=false --prerelease="$prerelease" --notes-file notes/release-notes.md

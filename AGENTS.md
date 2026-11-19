@@ -65,7 +65,7 @@ The owner requested minimal necessary cloud work on 2026-10-06 after an Actions-
 
 - Main: frontend + vendor checks; full cached Windows validation on ready PR or manual dispatch.
 - Release: Windows tests, dependency audits and installer checks gate publication. Do not run Linux Rust tests in GitHub Actions (owner request, 2026-10-10).
-- Linux checks (tests, `cargo check`, clippy, `.deb` builds) run only locally; do not add them to GitHub Actions (owner, 2026-10-18). The free Actions minutes are exhausted until the end of October 2026: do not trigger any workflow (no push to `main`, no PR to `main`, no tags, no manual dispatch) without a new instruction. Pushing to `dev` triggers nothing.
+- Linux checks (tests, `cargo check`, clippy) run only locally; do not add them to GitHub Actions (owner, 2026-10-18). Since 2026-11-19 (owner: "пусть github собирает") the release workflow also packages the Linux `.deb` and boot ISO on `ubuntu-24.04` — packaging only, for release tags and dry runs; development `.deb` builds stay local. The repository is public, so standard runners are free; still trigger workflows only for an ordered release (dry run first). Pushing to `dev` triggers nothing.
 
 ## Keep the plan readable (owner request, 2026-10-08)
 

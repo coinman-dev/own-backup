@@ -2,6 +2,59 @@
 
 # Changelog
 
+## 0.2.2-beta — 2026-11-19
+
+### Added
+
+- **"Shut down the computer when finished" on the job page.** A tick under the schedule
+  line while the job runs or waits in the queue, for this run only; the job's own settings
+  do not change. The service keeps the request, so closing the window does not lose it; a
+  cancelled run does not shut the computer down.
+- **Hidden partitions on Linux.** Tools lists the EFI partition, the Windows recovery
+  environment and vendor partitions that nothing has mounted, and mounts one into a folder
+  under `/mnt` (after an administrator password) and unmounts it again — the counterpart of
+  drive letters for hidden partitions on Windows. When writing is impossible (a hibernated
+  Windows) the partition is mounted read-only.
+- **Activity: pages of 50 entries and a "Clear" button.** Clearing keeps, for every job,
+  the last scheduled run and the last successful backup, which the schedule relies on, and
+  unread restore reports. The backups themselves are not touched.
+- **Settings: update check** and a message when a new release is out.
+- **Cleanup: new items.** The certificate cache; more Windows logs (setup, WIA, delivery
+  optimisation, old WMI traces); program launch statistics (UserAssist, off by default).
+- **Help: a link to the program's website.**
+- **Wizard hints:** when the selected disk has boot partitions, the hint names "Bootable
+  disk copy"; the password field of an encrypted volume now comes before the hint about it.
+
+### Changed
+
+- **Merging versions of an OBK chain is much faster on a hard disk.** Compaction no longer
+  copies the whole image to a temporary file first (about an hour on a 100 GB image);
+  merging and compaction read and write in large batches; neighbouring records are read in
+  one request. A merge that would leave the base due for compaction builds the new base in
+  one pass and checks it before the old one is replaced.
+- **The base is checked after a merge, before the merged copy is deleted,** as far as the
+  job's verification setting says. A merge done in place reads only what it wrote.
+- **Progress during a merge.** The bar, "Remaining" and the ring on the job page cover the
+  whole run, merge included, instead of standing at 100 % for the whole merge; a window
+  opened in the middle of a run shows its progress at once. Speed, blocks and "Remaining"
+  change once a second, averaged, instead of jumping several times a second.
+- **Job page:** a short card of the backup's result instead of the full report (the full
+  text stays in Activity).
+- **Cleanup shows which item is running** and what DISM is doing, instead of a line that
+  does not move for ten minutes.
+
+### Fixed
+
+- **Shutting down after a backup works when someone is signed in.** Windows refused the
+  service's request (error 1191) because the signed-in person counts as another user; the
+  request is now repeated with the same 90-second warning, closing the sessions.
+- **A backup whose verification was stopped no longer counts as not made.** When Windows
+  shut down during the check of a finished backup, the schedule made another copy over it.
+  Such a run now shows "Backup created, verification interrupted".
+- **Drive letters for hidden partitions during a backup:** a letter on another disk is
+  given at once; on the disk being read the reason for the refusal is shown.
+- **The "Merging versions" message reaches the window at once** instead of after the merge.
+
 ## 0.2.1-beta — 2026-11-02
 
 ### Added
