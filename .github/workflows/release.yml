@@ -129,7 +129,7 @@ jobs:
         shell: pwsh
         run: Get-PSDrive -PSProvider FileSystem | Format-Table Name, Used, Free
       - name: Build Windows x64
-        run: cargo build --release --locked --target x86_64-pc-windows-msvc -p own-backup-gui -p own-backup-service -p own-backup-cli -p own-backup-shell -j 2
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc -p own-backup-gui -p own-backup-service -p own-backup-cli -p own-backup-shell -p own-backup-tc-plugin -j 2
       - name: Install NSIS
         shell: pwsh
         run: |

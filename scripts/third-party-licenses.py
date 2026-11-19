@@ -143,7 +143,7 @@ def ids_in(expr: str):
 def rust_packages(target, programs):
     out = subprocess.run(
         ['cargo', 'metadata', '--format-version', '1', '--filter-platform', target, '--locked'],
-        cwd=REPO, check=True, capture_output=True, text=True).stdout
+        cwd=REPO, check=True, capture_output=True, text=True, encoding="utf-8").stdout
     meta = json.loads(out)
     ws = set(meta['workspace_members'])
     pk = {p['id']: p for p in meta['packages']}
@@ -174,7 +174,7 @@ def npm_packages():
     if not (FRONTEND / 'node_modules').is_dir():
         sys.exit(f'{FRONTEND}/node_modules is missing: run npm ci there first')
     out = subprocess.run(['npm', 'ls', '--omit=dev', '--all', '--json'], cwd=FRONTEND,
-                         capture_output=True, text=True).stdout
+                         capture_output=True, text=True, encoding="utf-8").stdout
     names = set()
 
     def walk(node):
