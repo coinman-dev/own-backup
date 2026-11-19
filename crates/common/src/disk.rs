@@ -225,12 +225,16 @@ pub struct OwnMount {
     pub read_only: bool,
 }
 
-/// Linux: the partitions nothing has mounted that Linux can mount — EFI,
-/// Windows recovery, the volumes of another installed system — and the ones
-/// the «Инструменты» page itself mounted (`ours`, still mounted where it put
-/// them). A volume mounted by anything else (the system, fstab, a file
-/// manager) is not ours to unmount and is left out, as are loop devices,
-/// encrypted containers and file systems Linux has no driver for.
+/// Linux: the hidden system partitions nothing has mounted — EFI, Windows
+/// recovery, a vendor's recovery or tools partition — and the ones the
+/// «Инструменты» page itself mounted (`ours`, still mounted where it put
+/// them). The same partitions Windows lists for a letter
+/// ([`PartitionInfo::is_hidden_system`]), judged by the partition type alone:
+/// the Linux inventory reads no GPT attributes, and an ordinary data volume
+/// (Basic Data, a visible MBR type) is the file manager's to mount, not
+/// ours (owner, 19.11.2026). A volume mounted by anything else (the system,
+/// fstab, a file manager) is not ours to unmount and is left out, as are
+/// loop devices and encrypted containers.
 pub fn unmounted_volumes(disks: &[DiskInfo], ours: &[OwnMount]) -> Vec<HiddenVolume> {
     let mut out = Vec::new();
     for disk in disks {
@@ -241,14 +245,19 @@ pub fn unmounted_volumes(disks: &[DiskInfo], ours: &[OwnMount]) -> Vec<HiddenVol
             let device = p.volume_device.trim();
             let mountable = matches!(
                 p.filesystem,
-                FileSystem::Ntfs
-                    | FileSystem::Fat32
-                    | FileSystem::ExFat
-                    | FileSystem::Ext4
-                    | FileSystem::Xfs
-                    | FileSystem::Btrfs
+                FileSystem::Ntfs | FileSystem::Fat32 | FileSystem::ExFat
             );
-            if device.is_empty() || !mountable || p.is_encrypted {
+            if device.is_empty() || !mountable || p.is_encrypted || p.is_system {
+                continue;
+            }
+            // lsblk gives an MBR partition's type as `0x27` in the same field.
+            let ty = p.gpt_type_guid.trim().to_ascii_uppercase();
+            let hidden = match ty.strip_prefix("0X") {
+                Some(hex) => u8::from_str_radix(hex, 16)
+                    .is_ok_and(|t| t != 0 && !MBR_VISIBLE_TYPES.contains(&t)),
+                None => !ty.is_empty() && ty != GPT_TYPE_BASIC_DATA,
+            };
+            if !hidden {
                 continue;
             }
             let mounted_at = p.linux_last_mounted.trim();
@@ -258,8 +267,6 @@ pub fn unmounted_volumes(disks: &[DiskInfo], ours: &[OwnMount]) -> Vec<HiddenVol
             if !mounted_at.is_empty() && own.is_none() {
                 continue;
             }
-            let ty = p.gpt_type_guid.to_ascii_uppercase();
-            // lsblk gives an MBR partition's type as `0xef` in the same field.
             let kind = if ty == crate::gpt::GPT_TYPE_EFI_SYSTEM || ty == "0XEF" {
                 "esp"
             } else if ty == crate::gpt::GPT_TYPE_WINRE || ty == "0X27" {
@@ -529,12 +536,29 @@ mod tests {
                     "/dev/disk/by-partuuid/3",
                     "/mnt/Recovery",
                 ),
+                // A vendor's tools partition, but mounted by someone else.
                 at(
                     4,
-                    GPT_TYPE_BASIC_DATA,
+                    "BFBFAFE7-A34F-448A-9A5B-6213EB736C22",
                     FileSystem::Ntfs,
                     "/dev/disk/by-partuuid/4",
                     "/mnt/data",
+                ),
+                // An ordinary data volume (the owner's HDD-1Tb) and a Linux
+                // one: the file manager's, not hidden.
+                at(
+                    7,
+                    GPT_TYPE_BASIC_DATA,
+                    FileSystem::Ntfs,
+                    "/dev/disk/by-partuuid/7",
+                    "",
+                ),
+                at(
+                    8,
+                    "0FC63DAF-8483-4772-8E79-3D69D8477DE4",
+                    FileSystem::Ext4,
+                    "/dev/disk/by-partuuid/8",
+                    "",
                 ),
                 at(
                     5,
@@ -591,5 +615,32 @@ mod tests {
             ]
         );
         assert_eq!(found[0].kernel_device, "/dev/sda1");
+    }
+
+    #[test]
+    fn linux_mbr_types_come_as_hex_and_only_hidden_ones_count() {
+        let at = |index: u32, ty: &str, fs: FileSystem| {
+            let mut p = part(index, ty, fs, &format!("/dev/disk/by-uuid/{index}"));
+            p.volume_letter = None;
+            p
+        };
+        let mut d = disk(
+            "HDD",
+            PartitionTable::Mbr,
+            vec![
+                at(1, "0x7", FileSystem::Ntfs),
+                at(2, "0x27", FileSystem::Ntfs),
+                at(3, "0x12", FileSystem::Fat32),
+                at(4, "0xc", FileSystem::Fat32),
+                at(5, "0xef", FileSystem::Fat32),
+            ],
+        );
+        d.device_id = "/dev/sdb".into();
+        let found = unmounted_volumes(&[d], &[]);
+        let got: Vec<(u32, &str)> = found
+            .iter()
+            .map(|v| (v.part_index, v.kind.as_str()))
+            .collect();
+        assert_eq!(got, vec![(2, "winre"), (3, "other"), (5, "esp")]);
     }
 }

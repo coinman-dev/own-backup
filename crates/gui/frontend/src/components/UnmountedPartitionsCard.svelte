@@ -1,6 +1,6 @@
 <script lang="ts">
-  /* Linux: the partitions nothing has mounted — EFI, Windows recovery, the
-     volumes of another installed system — mounted under /mnt by the service
+  /* Linux: the hidden system partitions nothing has mounted — EFI, Windows
+     recovery, vendor partitions — mounted under /mnt by the service
      and unmounted again; the counterpart of HiddenVolumesCard on Windows.
      Which partitions qualify is decided there (`unmounted_volumes` in
      common/disk.rs); this card only shows its answer. */
@@ -18,7 +18,7 @@
   let errMsg: string | null = $state(null);
 
   const FS: Record<string, string> = {
-    ntfs: 'NTFS', fat32: 'FAT', ex_fat: 'exFAT', ext4: 'ext4', xfs: 'XFS', btrfs: 'Btrfs',
+    ntfs: 'NTFS', fat32: 'FAT32', ex_fat: 'exFAT',
   };
 
   function title(v: HiddenVolume): string {
