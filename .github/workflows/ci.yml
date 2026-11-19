@@ -72,9 +72,17 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.sha }}
-      - uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      # protoc 23.4, as arduino/setup-protoc@v3 gave; fetched directly, since
+      # that action still runs on the deprecated Node.js 20.
+      - name: Install protoc
+        shell: pwsh
+        run: |
+          $v = '23.4'
+          $dir = Join-Path $env:RUNNER_TEMP 'protoc'
+          Invoke-WebRequest "https://github.com/protocolbuffers/protobuf/releases/download/v$v/protoc-$v-win64.zip" -OutFile "$dir.zip"
+          Expand-Archive "$dir.zip" -DestinationPath $dir -Force
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value (Join-Path $dir 'bin')
+          & (Join-Path $dir 'bin\protoc.exe') --version
       - uses: actions/setup-node@v7
         with:
           node-version: 24

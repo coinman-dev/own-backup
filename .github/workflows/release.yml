@@ -54,9 +54,17 @@ jobs:
           mkdir -p target/notes
           bash scripts/release-notes.sh "${RELEASE_TAG#v}" > target/notes/release-notes.md
           cat target/notes/release-notes.md
-      - uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      # protoc 23.4, as arduino/setup-protoc@v3 gave; fetched directly, since
+      # that action still runs on the deprecated Node.js 20.
+      - name: Install protoc
+        shell: pwsh
+        run: |
+          $v = '23.4'
+          $dir = Join-Path $env:RUNNER_TEMP 'protoc'
+          Invoke-WebRequest "https://github.com/protocolbuffers/protobuf/releases/download/v$v/protoc-$v-win64.zip" -OutFile "$dir.zip"
+          Expand-Archive "$dir.zip" -DestinationPath $dir -Force
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value (Join-Path $dir 'bin')
+          & (Join-Path $dir 'bin\protoc.exe') --version
       - uses: actions/setup-node@v7
         with:
           node-version: 24
@@ -143,13 +151,13 @@ jobs:
         run: |
           mkdir -p target/release-files
           cp target/dist/own-backup-install.exe "target/release-files/own-backup-install_${RELEASE_TAG#v}.exe"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-release
           path: target/release-files/*.exe
           if-no-files-found: error
           retention-days: 3
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-notes
           path: target/notes/release-notes.md
@@ -223,7 +231,12 @@ jobs:
             scripts/build-linux-media.sh --deb "$PWD/target/release-files/own-backup_${v//-/.}_amd64.deb"
           rm -f target/release-files/*.sha256
           ls -l target/release-files
-      - uses: actions/upload-artifact@v4
+      # The medium's build tree is root's (a chroot with device nodes): left in
+      # target/, the Rust cache cannot pack it and fails to save at the end.
+      - name: Remove the medium's build tree
+        if: always()
+        run: sudo rm -rf target/linux-media
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-release
           path: |
@@ -245,15 +258,15 @@ jobs:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
       GH_REPO: ${{ github.repository }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: windows-release
           path: dist
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: linux-release
           path: dist
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: release-notes
           path: notes
