@@ -1795,6 +1795,10 @@
                     </div>
                   </div>
                 </div>
+                <!-- The password first, then what it is for (owner, 19.11.2026). -->
+                {#if encryptedForDisk(d).length > 0}
+                  {@render pwPanel(encryptedForDisk(d), d.device_id === sharedFormDiskId, isBootableCopy(d))}
+                {/if}
                 {#if isBootableCopy(d)}
                   {@const locked = d.partitions.filter((p) => bootRole(p) === 'locked')}
                   {#if locked.length > 0}
@@ -1808,9 +1812,6 @@
                       {m.wiz_boot_esp_only()}
                     </div>
                   {/if}
-                {/if}
-                {#if encryptedForDisk(d).length > 0}
-                  {@render pwPanel(encryptedForDisk(d), d.device_id === sharedFormDiskId, isBootableCopy(d))}
                 {/if}
                 {/if}
               {/each}

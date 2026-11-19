@@ -646,8 +646,8 @@
         "countPlural"
       ],
       "match": {
-        "countPlural=one": "— while it is encrypted, there is no telling whether it holds the system or data. Enter the password below: if the system turns out to be inside, the volume joins the backup by itself. Leave it locked and it stays out of the backup; on restore its space will be left free.",
-        "countPlural=*": "— while they are encrypted, there is no telling whether they hold the system or data. Enter the password below: if the system turns out to be inside, the volume joins the backup by itself. Leave a volume locked and it stays out of the backup; on restore its space will be left free."
+        "countPlural=one": "— while it is encrypted, there is no telling whether it holds the system or data. Enter the password above: if the system turns out to be inside, the volume joins the backup by itself. Leave it locked and it stays out of the backup; on restore its space will be left free.",
+        "countPlural=*": "— while they are encrypted, there is no telling whether they hold the system or data. Enter the password above: if the system turns out to be inside, the volume joins the backup by itself. Leave a volume locked and it stays out of the backup; on restore its space will be left free."
       }
     }
   ],
