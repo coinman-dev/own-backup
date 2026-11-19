@@ -28,6 +28,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -173,7 +174,12 @@ def npm_packages():
     # and an empty list here would ship a file silently missing the window's.
     if not (FRONTEND / 'node_modules').is_dir():
         sys.exit(f'{FRONTEND}/node_modules is missing: run npm ci there first')
-    out = subprocess.run(['npm', 'ls', '--omit=dev', '--all', '--json'], cwd=FRONTEND,
+    # On Windows npm is npm.cmd, which CreateProcess does not find by the bare
+    # name; which() looks the name up with PATHEXT.
+    npm = shutil.which('npm')
+    if not npm:
+        sys.exit('npm not found')
+    out = subprocess.run([npm, 'ls', '--omit=dev', '--all', '--json'], cwd=FRONTEND,
                          capture_output=True, text=True, encoding="utf-8").stdout
     names = set()
 

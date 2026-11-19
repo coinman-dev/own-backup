@@ -14,6 +14,11 @@ on:
         required: false
         default: false
         type: boolean
+      skip_tests:
+        description: 'Dry run only: skip the Windows tests, to try the packaging steps (a release always runs them)'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -96,6 +101,7 @@ jobs:
         shell: pwsh
         run: Get-PSDrive -PSProvider FileSystem | Format-Table Name, Used, Free
       - name: Test common, storage and metadata crates
+        if: ${{ !(inputs.dry_run && inputs.skip_tests) }}
         timeout-minutes: 30
         env:
           TEMP: ${{ runner.temp }}
@@ -104,21 +110,21 @@ jobs:
       # Every group runs even after a failure, so one run shows them all;
       # the job still fails.
       - name: Test backup crate
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && !(inputs.dry_run && inputs.skip_tests) }}
         timeout-minutes: 45
         env:
           TEMP: ${{ runner.temp }}
           TMP: ${{ runner.temp }}
         run: cargo test --locked -j 2 --no-fail-fast -p own-backup-backup
       - name: Test core crate
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && !(inputs.dry_run && inputs.skip_tests) }}
         timeout-minutes: 30
         env:
           TEMP: ${{ runner.temp }}
           TMP: ${{ runner.temp }}
         run: cargo test --locked -j 2 --no-fail-fast -p own-backup-core
       - name: Test the rest of the workspace
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && !(inputs.dry_run && inputs.skip_tests) }}
         timeout-minutes: 30
         env:
           TEMP: ${{ runner.temp }}
