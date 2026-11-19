@@ -1301,6 +1301,24 @@ impl BackupClient {
         parse(&reply.json)
     }
 
+    /// Linux: mount a partition from [`Self::list_hidden_volumes`] under
+    /// `/mnt` (`mount`), or unmount one mounted this way. Answers the list as
+    /// it is afterwards.
+    pub async fn set_volume_mount(
+        &mut self,
+        device: &str,
+        mount: bool,
+    ) -> Result<Vec<own_backup_common::disk::HiddenVolume>> {
+        let json = serde_json::json!({ "device": device, "mount": mount }).to_string();
+        let reply = self
+            .inner
+            .set_volume_mount(self.request(proto::JsonRequest { json }))
+            .await
+            .map_err(status)?
+            .into_inner();
+        parse(&reply.json)
+    }
+
     /// What this service's engine and scheduler carry out (`BackupCapabilities`).
     pub async fn backup_capabilities(&mut self) -> Result<serde_json::Value> {
         let reply = self

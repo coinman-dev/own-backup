@@ -1353,6 +1353,12 @@ export interface HiddenVolume {
   size_bytes: number;
   filesystem: string;
   label: string;
+  /** Linux: where the Tools page mounted it; null while not mounted. */
+  mount_point?: string | null;
+  /** Linux: mounted read-only because read-write was refused. */
+  read_only?: boolean;
+  /** Linux: the kernel name (`/dev/nvme0n1p1`). */
+  kernel_device?: string;
 }
 
 // --- «Очистка» (service/src/cleanup.rs) -----------------------------------

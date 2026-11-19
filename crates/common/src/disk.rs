@@ -202,6 +202,96 @@ pub struct HiddenVolume {
     pub size_bytes: u64,
     pub filesystem: FileSystem,
     pub label: String,
+    /// Linux: where the «Инструменты» page mounted it; `None` while it is not
+    /// mounted. Always `None` on Windows, where `letter` says the same.
+    #[serde(default)]
+    pub mount_point: Option<String>,
+    /// Linux: mounted read-only because a read-write mount was refused (an
+    /// NTFS volume of a hibernated Windows, a dirty file system).
+    #[serde(default)]
+    pub read_only: bool,
+    /// Linux: the kernel name (`/dev/nvme0n1p1`) — what people recognise;
+    /// `device` is the stable `/dev/disk/by-…` name the calls take.
+    #[serde(default)]
+    pub kernel_device: String,
+}
+
+/// A partition the Linux «Инструменты» page mounted, as its record keeps it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OwnMount {
+    pub device: String,
+    pub mount_point: String,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+/// Linux: the partitions nothing has mounted that Linux can mount — EFI,
+/// Windows recovery, the volumes of another installed system — and the ones
+/// the «Инструменты» page itself mounted (`ours`, still mounted where it put
+/// them). A volume mounted by anything else (the system, fstab, a file
+/// manager) is not ours to unmount and is left out, as are loop devices,
+/// encrypted containers and file systems Linux has no driver for.
+pub fn unmounted_volumes(disks: &[DiskInfo], ours: &[OwnMount]) -> Vec<HiddenVolume> {
+    let mut out = Vec::new();
+    for disk in disks {
+        if disk.device_id.starts_with("/dev/loop") {
+            continue;
+        }
+        for p in &disk.partitions {
+            let device = p.volume_device.trim();
+            let mountable = matches!(
+                p.filesystem,
+                FileSystem::Ntfs
+                    | FileSystem::Fat32
+                    | FileSystem::ExFat
+                    | FileSystem::Ext4
+                    | FileSystem::Xfs
+                    | FileSystem::Btrfs
+            );
+            if device.is_empty() || !mountable || p.is_encrypted {
+                continue;
+            }
+            let mounted_at = p.linux_last_mounted.trim();
+            let own = ours
+                .iter()
+                .find(|m| m.device == device && m.mount_point == mounted_at);
+            if !mounted_at.is_empty() && own.is_none() {
+                continue;
+            }
+            let ty = p.gpt_type_guid.to_ascii_uppercase();
+            // lsblk gives an MBR partition's type as `0xef` in the same field.
+            let kind = if ty == crate::gpt::GPT_TYPE_EFI_SYSTEM || ty == "0XEF" {
+                "esp"
+            } else if ty == crate::gpt::GPT_TYPE_WINRE || ty == "0X27" {
+                "winre"
+            } else {
+                "other"
+            };
+            out.push(HiddenVolume {
+                device: device.to_string(),
+                letter: None,
+                kind: kind.into(),
+                disk_number: 0,
+                disk_model: if disk.model.trim().is_empty() {
+                    disk.device_id.clone()
+                } else {
+                    disk.model.clone()
+                },
+                part_index: p.index,
+                size_bytes: p.size_bytes,
+                filesystem: p.filesystem,
+                label: p.volume_label.clone(),
+                mount_point: own.map(|m| m.mount_point.clone()),
+                read_only: own.is_some_and(|m| m.read_only),
+                kernel_device: if p.kernel_device.is_empty() {
+                    device.to_string()
+                } else {
+                    p.kernel_device.clone()
+                },
+            });
+        }
+    }
+    out
 }
 
 /// Every hidden system volume on these disks. Disks of mounted backup images
@@ -259,6 +349,9 @@ pub fn hidden_volumes(disks: &[DiskInfo]) -> Vec<HiddenVolume> {
                 size_bytes: p.size_bytes,
                 filesystem: p.filesystem,
                 label: p.volume_label.clone(),
+                mount_point: None,
+                read_only: false,
+                kernel_device: String::new(),
             });
         }
     }
@@ -398,5 +491,105 @@ mod tests {
         let found = hidden_volumes(&[d]);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].kind, "winre");
+    }
+
+    #[test]
+    fn linux_lists_unmounted_partitions_and_only_its_own_mounts() {
+        let at = |index: u32, ty: &str, fs: FileSystem, dev: &str, mounted: &str| {
+            let mut p = part(index, ty, fs, dev);
+            p.volume_letter = None;
+            p.kernel_device = format!("/dev/sda{index}");
+            p.linux_last_mounted = mounted.into();
+            p
+        };
+        let mut luks = at(6, "", FileSystem::Unknown, "/dev/disk/by-partuuid/6", "");
+        luks.is_encrypted = true;
+        let mut d = disk(
+            "WDC",
+            PartitionTable::Gpt,
+            vec![
+                at(
+                    1,
+                    GPT_TYPE_EFI_SYSTEM,
+                    FileSystem::Fat32,
+                    "/dev/disk/by-partuuid/1",
+                    "",
+                ),
+                at(
+                    2,
+                    GPT_TYPE_BASIC_DATA,
+                    FileSystem::Ext4,
+                    "/dev/disk/by-partuuid/2",
+                    "/",
+                ),
+                at(
+                    3,
+                    GPT_TYPE_WINRE,
+                    FileSystem::Ntfs,
+                    "/dev/disk/by-partuuid/3",
+                    "/mnt/Recovery",
+                ),
+                at(
+                    4,
+                    GPT_TYPE_BASIC_DATA,
+                    FileSystem::Ntfs,
+                    "/dev/disk/by-partuuid/4",
+                    "/mnt/data",
+                ),
+                at(
+                    5,
+                    GPT_TYPE_BASIC_DATA,
+                    FileSystem::Unknown,
+                    "/dev/disk/by-partuuid/5",
+                    "",
+                ),
+                luks,
+            ],
+        );
+        d.device_id = "/dev/sda".into();
+        let mut lp = disk(
+            "",
+            PartitionTable::Gpt,
+            vec![at(1, "", FileSystem::Ext4, "/dev/loop0", "")],
+        );
+        lp.device_id = "/dev/loop0".into();
+        let ours = vec![
+            OwnMount {
+                device: "/dev/disk/by-partuuid/3".into(),
+                mount_point: "/mnt/Recovery".into(),
+                read_only: true,
+            },
+            // Recorded, but /mnt/data is someone else's mount of partition 4.
+            OwnMount {
+                device: "/dev/disk/by-partuuid/4".into(),
+                mount_point: "/mnt/elsewhere".into(),
+                read_only: false,
+            },
+        ];
+        let found = unmounted_volumes(&[d, lp], &ours);
+        let got: Vec<(&str, &str, Option<&str>, bool)> = found
+            .iter()
+            .map(|v| {
+                (
+                    v.device.as_str(),
+                    v.kind.as_str(),
+                    v.mount_point.as_deref(),
+                    v.read_only,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("/dev/disk/by-partuuid/1", "esp", None, false),
+                (
+                    "/dev/disk/by-partuuid/3",
+                    "winre",
+                    Some("/mnt/Recovery"),
+                    true
+                ),
+            ]
+        );
+        assert_eq!(found[0].kernel_device, "/dev/sda1");
     }
 }

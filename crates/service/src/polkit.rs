@@ -39,6 +39,9 @@ pub(crate) enum Action {
     /// order, the menu timeout. A restore plan's boot steps are covered by
     /// `Restore`.
     BootConfig,
+    /// Mounting a partition nothing has mounted, and unmounting it, from the
+    /// «Инструменты» page: an internal disk, as udisks asks for one.
+    MountVolume,
 }
 
 impl Action {
@@ -49,6 +52,7 @@ impl Action {
             Action::ManageKeys => "com.ownbackup.manage-keys",
             Action::BuildMedia => "com.ownbackup.build-media",
             Action::BootConfig => "com.ownbackup.boot-config",
+            Action::MountVolume => "com.ownbackup.mount-volume",
         }
     }
 }

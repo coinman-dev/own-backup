@@ -733,6 +733,7 @@ fn main() {
             commands::disks::drive_signature,
             commands::disks::list_hidden_volumes,
             commands::disks::set_volume_letter,
+            commands::disks::set_volume_mount,
             // --- new job model (phase 6) ---
             commands::backup_jobs::list_backup_jobs,
             commands::backup_jobs::get_backup_job,

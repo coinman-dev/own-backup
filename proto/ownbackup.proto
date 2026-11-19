@@ -48,6 +48,9 @@ service BackupService {
   rpc ListHiddenVolumes(Empty) returns (JsonReply);  // JSON: [HiddenVolume]
   // JSON in: { "device": string, "letter": "R" | null } -> [HiddenVolume]
   rpc SetVolumeLetter(JsonRequest) returns (JsonReply);
+  // Linux: mount such a partition under /mnt, or unmount what this call
+  // mounted. JSON in: { "device": string, "mount": bool } -> [HiddenVolume]
+  rpc SetVolumeMount(JsonRequest) returns (JsonReply);
 
   rpc GetServiceStatus(Empty) returns (JsonReply);   // JSON: { version, uptime_secs, queue }
 

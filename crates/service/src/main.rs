@@ -9,6 +9,8 @@ mod cleanup;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod data_dir_acl;
 mod grpc_server;
+#[cfg(target_os = "linux")]
+mod hidden_mounts_linux;
 mod install;
 mod linux_browse;
 #[cfg(target_os = "linux")]

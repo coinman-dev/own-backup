@@ -126,6 +126,8 @@ export const api = {
   listHiddenVolumes: () => invoke<HiddenVolume[]>('list_hidden_volumes'),
   setVolumeLetter: (device: string, letter: string | null) =>
     invoke<HiddenVolume[]>('set_volume_letter', { device, letter }),
+  setVolumeMount: (device: string, mount: boolean) =>
+    invoke<HiddenVolume[]>('set_volume_mount', { device, mount }),
 
   // --- job model (phase 6) ---
   listBackupJobs: () => invoke<Job[]>('list_backup_jobs'),

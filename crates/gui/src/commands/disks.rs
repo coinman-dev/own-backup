@@ -62,3 +62,19 @@ pub async fn set_volume_letter(
         .set_volume_letter(&device, letter)
         .await
 }
+
+/// Linux: mount an unmounted partition under `/mnt`, or unmount one mounted
+/// this way (`mount: false`).
+#[tauri::command]
+pub async fn set_volume_mount(
+    state: State<'_, GuiState>,
+    device: String,
+    mount: bool,
+) -> Result<Vec<own_backup_common::disk::HiddenVolume>, String> {
+    state
+        .link
+        .client()
+        .await?
+        .set_volume_mount(&device, mount)
+        .await
+}

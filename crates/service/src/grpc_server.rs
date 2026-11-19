@@ -739,7 +739,22 @@ async fn hidden_volumes_now() -> Result<Vec<own_backup_common::disk::HiddenVolum
     Ok(own_backup_common::disk::hidden_volumes(&disks))
 }
 
-#[cfg(not(target_os = "windows"))]
+/// Linux: the partitions nothing has mounted, and the ones the «Инструменты»
+/// page mounted (`hidden_mounts_linux`).
+#[cfg(target_os = "linux")]
+async fn hidden_volumes_now() -> Result<Vec<own_backup_common::disk::HiddenVolume>, Status> {
+    use own_backup_inventory::DiskInventory;
+    let disks = own_backup_inventory::LinuxInventory::new()
+        .enumerate_disks()
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+    Ok(own_backup_common::disk::unmounted_volumes(
+        &disks,
+        &crate::hidden_mounts_linux::own_mounts(),
+    ))
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 async fn hidden_volumes_now() -> Result<Vec<own_backup_common::disk::HiddenVolume>, Status> {
     Err(Status::unimplemented(
         "drive letters for hidden partitions are a Windows feature",
@@ -1567,6 +1582,76 @@ impl BackupService for BackupServiceImpl {
         change_volume_letter(volume, p.letter.as_deref())?;
         tracing::info!(device = %p.device, letter = ?p.letter, "gRPC: SetVolumeLetter done");
         json_reply(&hidden_volumes_now().await?)
+    }
+
+    /// Linux: mount a partition [`hidden_volumes_now`] lists under `/mnt`,
+    /// or unmount one this call mounted. Asks an administrator (polkit) like
+    /// udisks does for an internal disk; re-checked against the disks as they
+    /// are now, never from what the window last saw.
+    #[cfg(target_os = "linux")]
+    async fn set_volume_mount(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[derive(serde::Deserialize)]
+        struct In {
+            device: String,
+            mount: bool,
+        }
+        let p: In = serde_json::from_str(&req.get_ref().json)
+            .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+        crate::polkit::authorize(&req, crate::polkit::Action::MountVolume).await?;
+        // A backup on Linux names no disk of its own (`backup_disk_resources`
+        // answers "any"), and a raw read of a partition must not meet a mount
+        // that writes to it.
+        let _slot = self
+            .state
+            .busy
+            .reserve_soon(
+                own_backup_core::busy::Doing::new(
+                    tr!("grpc_server.busy_volume_mount"),
+                    p.device.clone(),
+                )
+                .shared(vec![own_backup_core::busy::ANY_PHYSICAL_DISK.to_string()]),
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .map_err(|held| Status::failed_precondition(held.refusal()))?;
+        if self.shutdown.is_shutdown_requested() {
+            return Err(Status::unavailable("service is stopping"));
+        }
+        let volumes = hidden_volumes_now().await?;
+        let Some(volume) = volumes.iter().find(|v| v.device == p.device.trim()) else {
+            return Err(Status::failed_precondition(
+                tr!("hidden_mounts.not_listed", device = p.device).into_owned(),
+            ));
+        };
+        let volume = volume.clone();
+        let mount = p.mount;
+        tokio::task::spawn_blocking(move || {
+            if mount {
+                crate::hidden_mounts_linux::mount(&volume)
+            } else {
+                crate::hidden_mounts_linux::unmount(&volume)
+            }
+        })
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map_err(Status::failed_precondition)?;
+        tracing::info!(device = %p.device, mount = p.mount, "gRPC: SetVolumeMount done");
+        json_reply(&hidden_volumes_now().await?)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    async fn set_volume_mount(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        Err(Status::unimplemented(
+            "mounting partitions under /mnt is a Linux feature",
+        ))
     }
 
     // --- Queue / runs -----------------------------------------------------

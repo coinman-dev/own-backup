@@ -661,5 +661,14 @@
     "ru": "Отказано: для этого действия (%{action}) нужно подтверждение администратора, но polkit недоступен (%{error}). Выполните действие от root (sudo own-backup-cli …).",
     "en": "Denied: this action (%{action}) needs an administrator's confirmation, but polkit is unavailable (%{error}). Run it as root (sudo own-backup-cli …)."
   },
-  "grpc_server.archive_key_store_unavailable": {"ru": "Шифрование копий недоступно: у службы нет хранилища ключей (%{error}). Ключ восстановления не выдан — без хранилища разрешение нельзя было бы завершить.", "en": "Archive encryption is unavailable: the service has no key store (%{error}). No recovery key was issued — without the store the authorization could never be completed."}
+  "grpc_server.archive_key_store_unavailable": {"ru": "Шифрование копий недоступно: у службы нет хранилища ключей (%{error}). Ключ восстановления не выдан — без хранилища разрешение нельзя было бы завершить.", "en": "Archive encryption is unavailable: the service has no key store (%{error}). No recovery key was issued — without the store the authorization could never be completed."},
+  "hidden_mounts.already": {"ru": "Раздел уже подключён", "en": "The partition is already mounted"},
+  "hidden_mounts.not_mounted": {"ru": "Раздел не подключён из этой программы — отключать нечего", "en": "The partition was not mounted by this program; there is nothing to unmount"},
+  "hidden_mounts.no_folder": {"ru": "В /mnt нет свободной папки для раздела", "en": "No free folder for the partition in /mnt"},
+  "hidden_mounts.mkdir_failed": {"ru": "Не удалось создать папку %{dir}: %{error}", "en": "Could not create the folder %{dir}: %{error}"},
+  "hidden_mounts.mount_failed": {"ru": "Раздел не подключился: %{error}", "en": "The partition could not be mounted: %{error}"},
+  "hidden_mounts.busy": {"ru": "%{dir} занят: закройте открытые там файлы и окна (файловый менеджер, терминал) и попробуйте снова", "en": "%{dir} is busy: close the files and windows open there (file manager, terminal) and try again"},
+  "hidden_mounts.umount_failed": {"ru": "Не удалось отключить %{dir}: %{error}", "en": "Could not unmount %{dir}: %{error}"},
+  "hidden_mounts.not_listed": {"ru": "Раздел %{device} не найден среди неподключённых — обновите список", "en": "The partition %{device} is not among the unmounted ones; refresh the list"},
+  "grpc_server.busy_volume_mount": {"ru": "подключение раздела", "en": "mounting a partition"}
 }
