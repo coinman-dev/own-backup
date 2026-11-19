@@ -54,6 +54,10 @@
 - **Drive letters for hidden partitions during a backup:** a letter on another disk is
   given at once; on the disk being read the reason for the refusal is shown.
 - **The "Merging versions" message reaches the window at once** instead of after the merge.
+- **The log copy works in a folder named by its short 8.3 name** on
+  Windows; it was refused as if the folder had been swapped for another.
+- **Activity:** the result fields of a run stay on one line when there is room for them.
+- **SQLite updated** to a version without the vulnerability RUSTSEC-2026-0459 (CVE-2026-119375).
 
 ## 0.2.1-beta — 2026-11-02
 
