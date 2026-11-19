@@ -11,6 +11,7 @@
   import RunSummary from '../components/RunSummary.svelte';
   import type { Job } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
+  import { steady } from '../lib/steady.svelte';
   import { intlLocale } from '../lib/i18n.svelte';
   import { joinPath } from '../lib/paths';
 
@@ -151,13 +152,18 @@
   // and a clock kept here started again from zero on the way back.
   let nowMs = $state(Date.now());
   const eta = $derived(running ? etaMs(job.id) : NaN);
+  // What the line under the bar shows: once a second, the speed and the time
+  // left averaged over that second (`steady`).
+  const shownEta = steady(() => eta);
+  const shownSpeed = steady(() => (running && progress ? progress.speed_mbps : NaN));
+  const shownDone = steady(() => (running && progress ? progress.blocks_done : NaN), 'latest');
 
   // The only thing this view still ticks: the "Прошло" line, which has to
   // move on its own between progress messages.
   $effect(() => {
     if (!running) return;
     nowMs = Date.now();
-    const id = setInterval(() => (nowMs = Date.now()), 500);
+    const id = setInterval(() => (nowMs = Date.now()), 1000);
     return () => clearInterval(id);
   });
 
@@ -414,7 +420,7 @@
             {:else}
               <!-- Пробел перед «·» пишется явно: в начале блока {#if} Svelte
                    его срезает, и получалось «блоков· 85.1 МБ/с». -->
-              {m.dash_blocks({ done: progress.blocks_done, total: progress.blocks_total })}{#if progress.speed_mbps > 0}{'\u00a0· '}{m.dash_speed({ speed: progress.speed_mbps.toFixed(1) })}{/if}
+              {m.dash_blocks({ done: Number.isFinite(shownDone.value) ? shownDone.value : progress.blocks_done, total: progress.blocks_total })}{#if shownSpeed.value > 0}{'\u00a0· '}{m.dash_speed({ speed: shownSpeed.value.toFixed(1) })}{/if}
             {/if}
           </span>
         {/if}
@@ -425,7 +431,7 @@
           {sourceSummary(job)} → {destPath}
         </span>
         <span class="times">
-          {m.dash_elapsed({ time: formatClock(elapsedMs) })} · {m.dash_remaining({ time: Number.isFinite(eta) ? '~' + formatClock(eta) : m.dash_estimating() })}
+          {m.dash_elapsed({ time: formatClock(elapsedMs) })} · {m.dash_remaining({ time: Number.isFinite(shownEta.value) ? '~' + formatClock(shownEta.value) : m.dash_estimating() })}
         </span>
       </div>
       <!-- The service says when the copy has stood still for minutes: a backup
