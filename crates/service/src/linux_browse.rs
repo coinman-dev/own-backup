@@ -329,6 +329,10 @@ mod tests {
         let src = dir.path().join("src");
         std::fs::create_dir_all(src.join("home/user")).unwrap();
         std::fs::write(src.join("home/user/note.txt"), "hello").unwrap();
+        std::fs::create_dir_all(src.join("wineprefix/dosdevices")).unwrap();
+        std::os::unix::fs::symlink("/", src.join("wineprefix/dosdevices/z:")).unwrap();
+        std::fs::create_dir_all(src.join("bin/X11")).unwrap();
+        std::os::unix::fs::symlink(".", src.join("bin/X11/X11")).unwrap();
         let img = dir.path().join("fs.img");
         std::fs::File::create(&img)
             .unwrap()
@@ -357,6 +361,11 @@ mod tests {
             panic!("not opened");
         };
         assert_eq!(roots.len(), 1);
+        assert!(s
+            .list(session, 0, "\\wineprefix\\dosdevices")
+            .unwrap()
+            .is_empty());
+        assert!(s.list(session, 0, "\\bin\\X11").unwrap().is_empty());
         let user = s.list(session, 0, "\\home\\user").unwrap();
         assert_eq!(user[0].name, "note.txt");
         assert_eq!(

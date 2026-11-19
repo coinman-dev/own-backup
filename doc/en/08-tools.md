@@ -90,8 +90,9 @@ can be changed, deleted or moved.
 - Characters Windows does not allow in names (`: ? * " < > |`) and names that
   are not UTF-8 are shown with substitute characters, as WSL does; files are
   copied under those names.
-- Symbolic links are shown as what they point to; special files (devices,
-  sockets) are not shown.
+- Links to files are shown as their targets. Directory links and special
+  files (devices, sockets) are not shown, so recursive copies cannot follow
+  link cycles.
 - If Linux was not shut down cleanly, ext4 is read with its journal applied
   (in memory; nothing is written to the disk); btrfs shows its last committed
   state, without the last few seconds before the crash.

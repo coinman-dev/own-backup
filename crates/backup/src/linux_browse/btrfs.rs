@@ -539,8 +539,8 @@ impl Btrfs {
         }
     }
 
-    /// The entries of the directory at `path`, links shown as what they
-    /// point to; links to nowhere and special files left out.
+    /// The entries of the directory at `path`: links to files shown as their
+    /// targets; directory links, broken links and special files left out.
     pub fn list(&mut self, path: &[u8]) -> std::result::Result<Vec<Entry>, String> {
         let (dir, node, dir_path) = self.resolve(path).map_err(|e| e.to_string())?;
         if node.kind() != S_IFDIR {
@@ -563,8 +563,8 @@ impl Btrfs {
                 }
                 full.extend_from_slice(&name);
                 match self.resolve(&full) {
-                    Ok((_, target, _)) => node = target,
-                    Err(_) => continue,
+                    Ok((_, target, _)) if target.kind() != S_IFDIR => node = target,
+                    _ => continue,
                 }
             }
             if node.kind() != S_IFDIR && node.kind() != S_IFREG {
