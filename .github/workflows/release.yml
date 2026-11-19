@@ -29,7 +29,7 @@ env:
 jobs:
   windows:
     runs-on: windows-2025
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
       DRY_RUN: ${{ inputs.dry_run || false }}
@@ -79,10 +79,47 @@ jobs:
           cargo install cargo-audit --locked --version 0.22.2
           cargo audit --deny warnings
           python scripts/check-vendor.py --audit
-      # A cancelled step leaves no log: the step's own limit ends it with one.
-      - name: Test Windows workspace
-        timeout-minutes: 60
-        run: cargo test --workspace --locked -j 2
+      # The tests run in groups, so the step that was running names the
+      # group even when the runner dies and its log is lost (19.11.2026: two
+      # hours, no log, no timeout). Temporary files go to the runner's
+      # temporary folder on D: — larger than C:, where a full drive takes the
+      # runner itself down, and named without 8.3 aliases (C:\Users\RUNNER~1).
+      - name: Free space before the tests
+        shell: pwsh
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table Name, Used, Free
+      - name: Test common, storage and metadata crates
+        timeout-minutes: 30
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+        run: cargo test --locked -j 2 --no-fail-fast -p own-backup-common -p own-backup-metadata -p own-backup-cleanup -p own-backup-inventory -p own-backup-snapshot
+      # Every group runs even after a failure, so one run shows them all;
+      # the job still fails.
+      - name: Test backup crate
+        if: ${{ !cancelled() }}
+        timeout-minutes: 45
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+        run: cargo test --locked -j 2 --no-fail-fast -p own-backup-backup
+      - name: Test core crate
+        if: ${{ !cancelled() }}
+        timeout-minutes: 30
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+        run: cargo test --locked -j 2 --no-fail-fast -p own-backup-core
+      - name: Test the rest of the workspace
+        if: ${{ !cancelled() }}
+        timeout-minutes: 30
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+        run: cargo test --workspace --locked -j 2 --no-fail-fast --exclude own-backup-common --exclude own-backup-metadata --exclude own-backup-cleanup --exclude own-backup-inventory --exclude own-backup-snapshot --exclude own-backup-backup --exclude own-backup-core
+      - name: Free space after the tests
+        if: always()
+        shell: pwsh
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table Name, Used, Free
       - name: Build Windows x64
         run: cargo build --release --locked --target x86_64-pc-windows-msvc -p own-backup-gui -p own-backup-service -p own-backup-cli -p own-backup-shell -j 2
       - name: Install NSIS

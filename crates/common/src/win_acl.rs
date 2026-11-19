@@ -30,7 +30,7 @@ use windows::Win32::Security::{
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FileDispositionInfo, FileRenameInfo, GetFileInformationByHandle,
-    GetFinalPathNameByHandleW, GetVolumeInformationW, GetVolumePathNameW,
+    GetFinalPathNameByHandleW, GetLongPathNameW, GetVolumeInformationW, GetVolumePathNameW,
     SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, CREATE_NEW, DELETE, FILE_APPEND_DATA,
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
@@ -163,6 +163,22 @@ fn plain(path: &Path) -> String {
     text.to_lowercase()
 }
 
+/// `path` with every 8.3 short component spelled out (`RUNNER~1` →
+/// `runneradmin`), for comparing with [`final_path`], which the system always
+/// gives in the long form. Only names are expanded: a junction or a link on
+/// the way stays as it is, so the comparison still catches it. `path` itself
+/// unchanged when it cannot be expanded (it does not exist).
+fn long_form(path: &Path) -> PathBuf {
+    let name = wide(path);
+    let mut buf = vec![0u16; 1024];
+    // SAFETY: a NUL-terminated name and a buffer of the length passed.
+    let n = unsafe { GetLongPathNameW(PCWSTR(name.as_ptr()), Some(&mut buf)) } as usize;
+    if n == 0 || n >= buf.len() {
+        return path.to_path_buf();
+    }
+    PathBuf::from(std::ffi::OsString::from_wide(&buf[..n]))
+}
+
 fn final_path(file: &File) -> Option<String> {
     let mut buf = vec![0u16; 1024];
     // SAFETY: a live handle and a buffer of the length passed.
@@ -246,7 +262,9 @@ pub fn open_append_checked(path: &Path) -> io::Result<(File, bool)> {
             && i.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT.0 | FILE_ATTRIBUTE_DIRECTORY.0)
                 == 0
     });
-    let where_named = final_path(&file).is_some_and(|f| f == plain(path));
+    // Compared with the long form: a folder named by its 8.3 alias (the
+    // runner's `C:\Users\RUNNER~1\…\Temp`, 19.11.2026) is the same folder.
+    let where_named = final_path(&file).is_some_and(|f| f == plain(&long_form(path)));
     if plain_file && where_named {
         return Ok((file, made));
     }
