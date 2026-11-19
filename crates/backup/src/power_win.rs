@@ -24,7 +24,8 @@ use windows::Win32::System::Power::{
     SetSuspendState,
 };
 use windows::Win32::System::Shutdown::{
-    InitiateShutdownW, SHTDN_REASON_FLAG_PLANNED, SHTDN_REASON_MAJOR_OTHER, SHUTDOWN_POWEROFF,
+    InitiateShutdownW, SHTDN_REASON_FLAG_PLANNED, SHTDN_REASON_MAJOR_OTHER, SHUTDOWN_FLAGS,
+    SHUTDOWN_FORCE_OTHERS, SHUTDOWN_POWEROFF,
 };
 use windows::Win32::System::Threading::{
     CancelWaitableTimer, CreateWaitableTimerExW, GetCurrentThread, SetThreadPriority,
@@ -134,24 +135,39 @@ pub fn sleep_now() -> std::result::Result<(), String> {
 }
 
 /// Turn the machine off after `grace_secs`, with Windows' own notice to whoever
-/// is signed in — `shutdown /a` cancels it. Programs with unsaved work are not
-/// forced closed: on a machine someone is using, their work wins.
+/// is signed in — `shutdown /a` cancels it.
+///
+/// The service is LocalSystem, so to Windows the person at the machine is
+/// "another user", and a plain `InitiateShutdownW` refuses outright while
+/// anyone is signed in (ERROR_SHUTDOWN_USERS_LOGGED_ON, 1191) — on 18.11.2026
+/// «Выключить компьютер при завершении» did nothing for exactly that reason.
+/// So: the plain request first (nobody signed in), then the same with the
+/// signed-in sessions closed at the end of the notice. Someone who asked for
+/// the shutdown has the minute and a half to save or to cancel it.
 pub fn shutdown_in(grace_secs: u32, message: &str) -> std::result::Result<(), String> {
+    const ERROR_SHUTDOWN_USERS_LOGGED_ON: u32 = 1191;
     if !crate::privileges_win::enable_shutdown_privilege() {
         return Err(tr!("power_win.no_shutdown_privilege").into_owned());
     }
     info!(grace_secs, "after backup: shutting the machine down");
     let msg = HSTRING::from(message);
-    // SAFETY: null machine name = this machine; the message outlives the call.
-    let rc = unsafe {
-        InitiateShutdownW(
-            PCWSTR::null(),
-            &msg,
-            grace_secs,
-            SHUTDOWN_POWEROFF,
-            SHTDN_REASON_MAJOR_OTHER | SHTDN_REASON_FLAG_PLANNED,
-        )
+    let initiate = |flags: SHUTDOWN_FLAGS| {
+        // SAFETY: null machine name = this machine; the message outlives the call.
+        unsafe {
+            InitiateShutdownW(
+                PCWSTR::null(),
+                &msg,
+                grace_secs,
+                flags,
+                SHTDN_REASON_MAJOR_OTHER | SHTDN_REASON_FLAG_PLANNED,
+            )
+        }
     };
+    let mut rc = initiate(SHUTDOWN_POWEROFF);
+    if rc == ERROR_SHUTDOWN_USERS_LOGGED_ON {
+        info!("after backup: users are signed in — their sessions close when the notice runs out");
+        rc = initiate(SHUTDOWN_POWEROFF | SHUTDOWN_FORCE_OTHERS);
+    }
     if rc != 0 {
         return Err(std::io::Error::from_raw_os_error(rc as i32).to_string());
     }
