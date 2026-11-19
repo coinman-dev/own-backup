@@ -23,6 +23,14 @@ pub mod busy;
 pub mod capabilities;
 mod engine_watch;
 pub mod restore_exec;
+mod run_progress;
+
+/// How a run of `job` would be outlined now, without the archive keys (a
+/// fold is then taken to happen in place) — for `examples/run_outline_probe`.
+#[doc(hidden)]
+pub fn run_outline_for_probe(job: &Job) -> String {
+    format!("{:?}", run_progress::Outline::of(job, None))
+}
 pub mod source_refresh;
 pub mod verification;
 
@@ -642,6 +650,17 @@ pub struct JobRun {
     /// weekly copy cut off by a restart was taken as done and skipped).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub interrupted: bool,
+    /// A `cancelled` run whose copy WAS made: the image is written and
+    /// published, and only the check after it was stopped — by a person, or
+    /// by the service stopping. Such a run served its slot (never
+    /// `interrupted`: repeating it would only make another copy), but it
+    /// stays `cancelled`, so retention and consolidation, which delete and
+    /// rewrite older copies, do not run on an image nobody read back. The
+    /// window says "copy made, check stopped" from this flag, not from the
+    /// words of `error` (09.11.2026: a shutdown during the check was reported
+    /// as "the copy will be made after the next start" over a finished copy).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub verify_cancelled: bool,
     /// The scheduler did not start this run: its time came, and something the
     /// run needs was missing (a saved password of an encrypted source).
     /// Recorded so the person sees it in the history instead of a schedule
@@ -1023,6 +1042,26 @@ const ACTIVITY_CAP: usize = 200;
 #[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
 fn verify_cancelled_message() -> String {
     tr!("lib.verify_cancelled").into_owned()
+}
+
+/// A run cancelled while the service was stopping (Windows shutting down or
+/// restarting, the program being updated), not by a person.
+///
+/// If the copy itself was cut off, the run is `interrupted`: the schedule does
+/// not count it, and a job that catches up missed runs makes the copy after the
+/// next start. If only the check after a finished copy was cut off
+/// (`verify_cancelled`), the copy exists: the run served its slot and says so —
+/// it is not repeated, and it does not promise a copy that is already there.
+fn settle_stopped_run(run: &mut JobRun, stopping: bool) {
+    if run.status != "cancelled" || !stopping {
+        return;
+    }
+    if run.verify_cancelled {
+        run.error = tr!("lib.verify_interrupted_by_stop").into_owned();
+    } else {
+        run.interrupted = true;
+        run.error = tr!("lib.interrupted_by_stop").into_owned();
+    }
 }
 
 /// Check again after emitting progress: a CancelRunning request can arrive
@@ -1476,6 +1515,41 @@ impl JobStore {
         activity
     }
 
+    /// Forget the history the person asked to clear («Активность» →
+    /// «Очистить»), keeping what the program itself reads from it: for each
+    /// job that still exists, its newest run that served the schedule
+    /// ([`Self::last_scheduled_start`]) and its newest successful copy
+    /// ([`Self::last_success`]). Without the first a job that catches up
+    /// missed runs would start a copy at once; without the second the
+    /// planning would lose the copy it continues from. Returns how many runs
+    /// went.
+    pub fn clear_activity(&self) -> std::io::Result<usize> {
+        let jobs: std::collections::HashSet<String> = self
+            .jobs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|j| j.id.clone())
+            .collect();
+        let mut activity = self.activity.lock().unwrap();
+        let before = activity.len();
+        let mut served = std::collections::HashSet::new();
+        let mut succeeded = std::collections::HashSet::new();
+        // Newest first, so the first of each kind is the one kept.
+        activity.retain(|r| {
+            if !jobs.contains(&r.job_id) || !r.is_backup() {
+                return false;
+            }
+            let serves = !r.interrupted && !r.skipped && served.insert(r.job_id.clone());
+            let success = r.status == "success" && succeeded.insert(r.job_id.clone());
+            serves || success
+        });
+        let removed = before - activity.len();
+        write_json(&self.activity_path, &*activity)?;
+        info!(removed, kept = activity.len(), "activity cleared");
+        Ok(removed)
+    }
+
     /// Most recent successful run of a job. Chain planning keys on this, not
     /// on `last_run`: a failed or cancelled run must not reset an incremental
     /// chain back to a full backup.
@@ -1632,6 +1706,9 @@ struct QueueState {
     pending: VecDeque<String>,
     current: Option<String>,
     background_operations: usize,
+    /// The job whose run, when it ends, switches the computer off — asked for
+    /// on the job's page for this run only, the job's own setting untouched.
+    shutdown_after: Option<String>,
 }
 
 /// Keeps scheduled checks visible to the after-backup power decision while
@@ -1666,6 +1743,36 @@ impl RunQueue {
         QueueSnapshot {
             current: q.current.clone(),
             pending: q.pending.iter().cloned().collect(),
+            shutdown_after: q.shutdown_after.clone(),
+        }
+    }
+
+    /// Switch the computer off when `id`'s run ends — or not any more. Only
+    /// for a job that is running or waiting; `false` otherwise, and nothing
+    /// is remembered for a run that is not coming.
+    pub fn set_shutdown_after(&self, id: &str, on: bool) -> bool {
+        let mut q = self.state.lock().unwrap();
+        let queued = q.current.as_deref() == Some(id) || q.pending.iter().any(|j| j == id);
+        if on {
+            if !queued {
+                return false;
+            }
+            q.shutdown_after = Some(id.to_string());
+        } else if q.shutdown_after.as_deref() == Some(id) {
+            q.shutdown_after = None;
+        }
+        true
+    }
+
+    /// Whether `id`'s run that is ending was asked to switch the computer
+    /// off; the request is used up either way.
+    pub fn take_shutdown_after(&self, id: &str) -> bool {
+        let mut q = self.state.lock().unwrap();
+        if q.shutdown_after.as_deref() == Some(id) {
+            q.shutdown_after = None;
+            true
+        } else {
+            false
         }
     }
 
@@ -1722,6 +1829,10 @@ impl Default for RunQueue {
 pub struct QueueSnapshot {
     pub current: Option<String>,
     pub pending: Vec<String>,
+    /// The job whose run ends with the computer switched off, asked for on
+    /// its page for this run only ([`RunQueue::set_shutdown_after`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shutdown_after: Option<String>,
 }
 
 /// Progress payload for a running backup.
@@ -1767,6 +1878,16 @@ pub struct JobProgress {
     /// like this for as long as it fails (`engine_watch`). `None` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stalled_secs: Option<u64>,
+    /// When this phase began, Unix milliseconds. Stamped by the service, so
+    /// that a window opened in the middle of a run counts the time from the
+    /// start of the phase and not from its own opening. `None` from the engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_started_ms: Option<u64>,
+    /// How far the whole run is — the copy, its check and the consolidation
+    /// after it — in percent ([`run_progress`]). `None` when the run is not
+    /// outlined, or for an event outside the outline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overall_percent: Option<u64>,
 }
 
 /// Sink for orchestration events. The GUI forwards these to Tauri window
@@ -2349,10 +2470,16 @@ pub async fn run_queue_worker(
                     // Its destination folder, and the archive keys a copy
                     // may write; everything else may go on beside it — a
                     // verification of another job, a boot medium.
-                    .shared([
-                        crate::busy::chain_resource(std::path::Path::new(&job.dest_folder)),
-                        "archive-keys".to_string(),
-                    ])
+                    .shared(
+                        [
+                            crate::busy::chain_resource(std::path::Path::new(&job.dest_folder)),
+                            "archive-keys".to_string(),
+                        ]
+                        .into_iter()
+                        // The disks it reads: a drive letter may change on
+                        // any other disk meanwhile.
+                        .chain(crate::busy::backup_disk_resources(&job)),
+                    )
                     .backup(),
             ) => slot,
             _ = stop.changed() => {
@@ -2435,18 +2562,19 @@ pub async fn run_queue_worker(
                     run
                 }
                 Ok(keys) => {
-                    perform_backup(&sink, &job, &cancel, last_success, &passwords, keys).await
+                    // The whole run outlined from what is on the backup disk,
+                    // so the round indicator spans the consolidation too.
+                    let outline =
+                        off_the_workers(|| run_progress::Outline::of(&job, keys.as_ref()));
+                    let run_sink: Arc<dyn EventSink> =
+                        Arc::new(run_progress::OverallSink::new(sink.clone(), outline));
+                    perform_backup(&run_sink, &job, &cancel, last_success, &passwords, keys).await
                 }
             }
         };
         let mut run = run;
         run.set_layout_changed(layout_note);
-        // Cancelled because the service is stopping, not by a person: said
-        // so, and not counted as the schedule's run (`interrupted`).
-        if run.status == "cancelled" && busy.stopping() {
-            run.interrupted = true;
-            run.error = tr!("lib.interrupted_by_stop").into_owned();
-        }
+        settle_stopped_run(&mut run, busy.stopping());
         // How the run ended goes into the log as well as into its record. A
         // failure used to be written only to the record: on 2026-09-25 the log
         // said "Starting queued backup" and then nothing at all, and the reason
@@ -2465,6 +2593,9 @@ pub async fn run_queue_worker(
         }
         store.clear_running(&job.id);
 
+        // Asked on the job's page for this run: used up here, whatever the
+        // run's end, so it never carries over to a later one.
+        let shutdown_once = queue.take_shutdown_after(&job.id);
         queue.finish();
         sink.queue_changed(queue.snapshot());
 
@@ -2498,7 +2629,12 @@ pub async fn run_queue_worker(
         // Sleep / shut down — not while a retry is pending, and never after a
         // run someone cancelled: they are at the machine.
         if !retrying && run.status != "cancelled" && !*stop.borrow() {
-            after_backup(&job.advanced.after_backup, &job.name, &queue);
+            let action = if shutdown_once {
+                "shutdown"
+            } else {
+                job.advanced.after_backup.as_str()
+            };
+            after_backup(action, &job.name, &queue);
         }
         sink.job_finished(run);
         if *stop.borrow() {
@@ -3686,6 +3822,25 @@ pub fn job_verify_targets(
     Ok(targets)
 }
 
+/// Run minutes of blocking file work from inside the job's async task.
+///
+/// Retention, consolidation and the recovery of an interrupted one run in the
+/// job's future, on a runtime worker. A progress message sent from there wakes
+/// the task that forwards it to the window into that worker's own LIFO slot,
+/// which no other worker takes — and the worker is busy with the fold for
+/// minutes. On 18.11.2026 «Объединение версий» reached the window only when
+/// the merge was over, so the window showed the check frozen at 100 % instead.
+/// `block_in_place` hands the worker's queue to another thread first. Off a
+/// multi-thread runtime (a test's) the work simply runs.
+pub(crate) fn off_the_workers<R>(work: impl FnOnce() -> R) -> R {
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
+    }
+}
+
 /// Finish whatever a crash left half-done in the destination folder — before
 /// anything reads or plans against the chains in it.
 ///
@@ -3712,11 +3867,24 @@ fn recover_interrupted_consolidations(
     job: &Job,
     folder: &Path,
     keys: Option<&own_backup_backup::seal::context::ArchiveKeys>,
-) -> Option<String> {
-    use own_backup_backup::consolidate::resume_pending_with_keys;
+    tail: Option<&RunTail<'_>>,
+) -> Option<(&'static str, String)> {
+    use own_backup_backup::consolidate::{resume_pending_with, StepProgress};
 
-    let report = match resume_pending_with_keys(folder, keys) {
+    // A step being finished reads its base back if its marker says so, which
+    // is minutes on a big image — shown on the screen like any other step.
+    let mut quiet = |_: StepProgress| -> own_backup_common::Result<()> { Ok(()) };
+    let mut shown = tail.map(|tail| consolidation_reporter(tail, None, keys));
+    let progress: &mut dyn FnMut(StepProgress) -> own_backup_common::Result<()> =
+        match shown.as_mut() {
+            Some(report) => report,
+            None => &mut quiet,
+        };
+    let report = match off_the_workers(|| resume_pending_with(folder, keys, progress)) {
         Ok(r) => r,
+        Err(own_backup_common::OwnBackupError::Cancelled) => {
+            return Some(("cancelled", tr!("lib.cancelled_by_user").into_owned()));
+        }
         Err(e) => {
             warn!(job = %job.name, error = %e, "Could not scan for interrupted consolidations");
             return None; // the folder could not be read; the run's own checks will say so
@@ -3747,7 +3915,10 @@ fn recover_interrupted_consolidations(
         return None;
     }
     let bases = ours.join(", ");
-    Some(tr!("lib.consolidation_unfinished", bases = bases).into_owned())
+    Some((
+        "error",
+        tr!("lib.consolidation_unfinished", bases = bases).into_owned(),
+    ))
 }
 
 /// Does this image belong to the given job? Asked of the image's own sidecar,
@@ -3771,43 +3942,164 @@ fn belongs_to_job(image: &Path, job_id: &str) -> bool {
         .unwrap_or(true)
 }
 
+/// Where the end of a run reports what it is doing, and whether it was asked
+/// to stop — what consolidation needs to be seen and to be cancellable.
+pub(crate) struct RunTail<'a> {
+    pub(crate) sink: &'a Arc<dyn EventSink>,
+    pub(crate) cancel: &'a AtomicBool,
+    pub(crate) job_id: &'a str,
+}
+
+/// How the consolidation of a run ended, beyond how many increments it folded.
+#[derive(Debug, Default)]
+pub(crate) struct ConsolidationResult {
+    pub(crate) folded: u32,
+    pub(crate) stop: Option<ConsolidationStop>,
+}
+
+#[derive(Debug)]
+pub(crate) enum ConsolidationStop {
+    /// Cancelled half-way: the step's marker stays and the next run finishes
+    /// it, its check included. The copy this run made is not affected.
+    Cancelled,
+    /// A step failed after its marker was written — the base it was folding
+    /// into is in a state nobody has confirmed, and every later run of the
+    /// job stops on that marker until it is resolved. Said now, in this run,
+    /// rather than discovered by the next one.
+    Failed(String),
+}
+
+/// What a consolidation step tells the window: `consolidate` while it folds
+/// (no count in place, the bar runs; clusters written when the base is
+/// rebuilt), `consolidate-verify` while it reads the base back.
+fn consolidation_reporter<'a>(
+    tail: &'a RunTail<'a>,
+    image: Option<&'a Path>,
+    keys: Option<&'a own_backup_backup::seal::context::ArchiveKeys>,
+) -> impl FnMut(own_backup_backup::consolidate::StepProgress) -> own_backup_common::Result<()> + 'a
+{
+    use own_backup_backup::consolidate::StepProgress;
+
+    // The base being rewritten. A step finished at the start of a run is
+    // found by its marker, and the progress line then names no file.
+    let image_file_name = image
+        .and_then(Path::file_name)
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut last_permille = u64::MAX;
+    let mut last_emit = std::time::Instant::now();
+    let mut rate: Option<VerifyRate> = None;
+    let mut rebuild_started: Option<std::time::Instant> = None;
+    move |p| {
+        if tail.cancel.load(Ordering::SeqCst) {
+            return Err(own_backup_common::OwnBackupError::Cancelled);
+        }
+        let (phase, done, total, mbps) = match p {
+            StepProgress::Folding => ("consolidate", 0, 0, 0.0),
+            StepProgress::Rebuilding { done, total } => {
+                let started = *rebuild_started.get_or_insert_with(std::time::Instant::now);
+                let secs = started.elapsed().as_secs_f64();
+                // Clusters of an encrypted image, 64 KiB each.
+                let bytes = done as f64
+                    * (1u64 << own_backup_backup::seal::context::OBK_CLUSTER_BITS) as f64;
+                let mbps = if secs > 1.0 { bytes / secs / 1e6 } else { 0.0 };
+                ("consolidate", done, total, mbps)
+            }
+            StepProgress::Checking { done, total } => {
+                let rate = rate
+                    .get_or_insert_with(|| VerifyRate::new(image.unwrap_or(Path::new("")), keys));
+                ("consolidate-verify", done, total, rate.sample(done))
+            }
+        };
+        let permille = if total > 0 { done * 1000 / total } else { 0 };
+        let phase_changed = matches!(p, StepProgress::Folding)
+            || matches!(p, StepProgress::Checking { done: 0, .. });
+        if phase_changed || permille != last_permille || last_emit.elapsed().as_millis() >= 400 {
+            last_permille = permille;
+            last_emit = std::time::Instant::now();
+            tail.sink.job_progress(JobProgress {
+                job_id: tail.job_id.to_string(),
+                phase: phase.into(),
+                percent: permille / 10,
+                blocks_done: done,
+                blocks_total: total,
+                speed_mbps: mbps,
+                volume_index: 0,
+                volume_count: 1,
+                volume: String::new(),
+                image_file_name: image_file_name.clone(),
+                categories: Vec::new(),
+                excluded_files: None,
+                excluded_bytes: None,
+                stalled_secs: None,
+                phase_started_ms: None,
+                overall_percent: None,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// The read-back a step owes before its increment is deleted, from the job's
+/// own check setting: none when the job does not check its copies; the
+/// blocks the fold wrote when it checks "only the latest copy"; otherwise the
+/// whole base, which every older version stands on.
+fn fold_check(job: &Job) -> Option<own_backup_backup::consolidate::FoldCheck> {
+    use own_backup_backup::consolidate::FoldCheck;
+    if !job.advanced.validate_after {
+        None
+    } else if job.advanced.verify_latest_only {
+        Some(FoldCheck::Folded)
+    } else {
+        Some(FoldCheck::Whole)
+    }
+}
+
 /// Fold overflowed increments into their base after a successful run.
 ///
 /// Runs AFTER [`apply_retention`] on purpose: retention deletes whole chains,
 /// and folding an increment into a base that is about to be deleted anyway is
-/// pure wear. Failures are logged and never fail the run — the backup itself
-/// already succeeded, and a chain that did not get consolidated is a chain
-/// that is merely longer than asked for, not a broken one.
+/// pure wear. And after the check of the new copy: a copy that did not read
+/// back stops the run before anything older is rewritten.
+///
+/// Each step reads the rewritten base back before deleting the increment it
+/// absorbed (when the job checks its copies, [`fold_check`]). A step that
+/// fails before its marker is written leaves the chain as it was — merely
+/// longer than asked — and is only logged. One that fails after it is
+/// reported ([`ConsolidationStop::Failed`]): that chain is now waiting on a
+/// human or on the next run's recovery.
 fn apply_consolidation(
     job: &Job,
     protected: &[(String, PathBuf)],
     keys: Option<&own_backup_backup::seal::context::ArchiveKeys>,
-) -> u32 {
+    tail: &RunTail<'_>,
+) -> ConsolidationResult {
     use own_backup_backup::chains::{list_job_chains_strict, plan_consolidation};
-    use own_backup_backup::consolidate::consolidate_step_with_keys;
+    use own_backup_backup::consolidate::{consolidate_step_with, marker_path, StepOptions};
 
+    let mut result = ConsolidationResult::default();
     let Some(keep) = job.scheme.rolling_incrementals else {
-        return 0;
+        return result;
     };
     // Differential chains hang every child off the base, so moving the base
     // forward would silently rebase the rest. `plan_consolidation` refuses
     // them too; bailing here keeps the log quiet about a thing we never do.
     if job.scheme.method != "incremental" {
-        return 0;
+        return result;
     }
     let folder = PathBuf::from(&job.dest_folder);
+    let check = fold_check(job);
     // One step at a time, re-reading the folder after each: a step changes the
     // very chain the next decision is made from. The cap is a backstop against
     // a step that reports success without shortening anything — a loop that
     // never ends would be a far worse bug than a chain left one version long.
     const MAX_STEPS: usize = 64;
-    let mut folded = 0u32;
     for _ in 0..MAX_STEPS {
         let chains = match list_job_chains_strict(&folder, &job.id) {
             Ok(c) => c,
             Err(e) => {
                 warn!(job = %job.name, error = %e, "Consolidation scan failed");
-                return folded;
+                return result;
             }
         };
         let groups: std::collections::HashSet<(String, Option<String>)> = protected
@@ -3831,11 +4123,21 @@ fn apply_consolidation(
                 })
             })
             .find_map(|c| plan_consolidation(c, keep));
-        let Some(step) = step else { return folded };
+        let Some(step) = step else { return result };
 
-        match consolidate_step_with_keys(&step, keys) {
+        let base = step.base.image_path.clone();
+        let mut report = consolidation_reporter(tail, Some(&base), keys);
+        let outcome = consolidate_step_with(
+            &step,
+            &mut StepOptions {
+                keys,
+                check,
+                progress: &mut report,
+            },
+        );
+        match outcome {
             Ok(outcome) => {
-                folded += 1;
+                result.folded += 1;
                 info!(
                     job = %job.name,
                     base = %outcome.base.display(),
@@ -3844,20 +4146,33 @@ fn apply_consolidation(
                     "Consolidation: increment folded into the base"
                 );
             }
+            Err(own_backup_common::OwnBackupError::Cancelled) => {
+                warn!(job = %job.name, base = %base.display(),
+                    "Consolidation cancelled — the next run finishes the step");
+                result.stop = Some(ConsolidationStop::Cancelled);
+                return result;
+            }
             Err(e) => {
+                let started = marker_path(&base).exists();
                 warn!(
                     job = %job.name,
-                    base = %step.base.image_path.display(),
+                    base = %base.display(),
                     increment = %step.victim.image_path.display(),
                     error = %e,
-                    "Consolidation step failed — the chain is left as it was"
+                    marker_left = started,
+                    "Consolidation step failed"
                 );
-                return folded;
+                if started {
+                    result.stop = Some(ConsolidationStop::Failed(
+                        tr!("lib.consolidation_failed", error = e).into_owned(),
+                    ));
+                }
+                return result;
             }
         }
     }
     warn!(job = %job.name, "Consolidation stopped at the step cap — chains stay longer than asked");
-    folded
+    result
 }
 
 fn run_skeleton(job: &Job) -> JobRun {
@@ -3919,9 +4234,16 @@ async fn perform_backup(
     // FIRST, before the format check, before a parent is chosen and long
     // before anything is written: finish what a crash left half-done. Every
     // decision below reads these chains (audit AUD-06).
-    if let Some(msg) = recover_interrupted_consolidations(job, &folder, keys.as_ref()) {
+    let tail = RunTail {
+        sink,
+        cancel,
+        job_id: &job.id,
+    };
+    if let Some((status, msg)) =
+        recover_interrupted_consolidations(job, &folder, keys.as_ref(), Some(&tail))
+    {
         run.finished_at = chrono::Utc::now().to_rfc3339();
-        run.status = "error".into();
+        run.status = status.into();
         run.error = msg;
         return run;
     }
@@ -4071,6 +4393,9 @@ async fn perform_backup(
                 // because nobody checked it. Retention and consolidation do not
                 // run — a cancelled read must not delete anything.
                 if verify_cancelled {
+                    // The copy is made only if this was the last volume: the
+                    // ones after it were never copied.
+                    run.verify_cancelled = idx + 1 == volumes.len();
                     fatal = Some(("cancelled".into(), verify_cancelled_message()));
                     break;
                 }
@@ -4098,7 +4423,7 @@ async fn perform_backup(
         }
     }
 
-    totals.finish(run, fatal, job, keys.as_ref())
+    totals.finish(run, fatal, job, keys.as_ref(), &tail)
 }
 
 /// Back up a whole disk (bootable copy) into ONE image with the real GPT and
@@ -4275,10 +4600,16 @@ async fn perform_disk_backup(
             if verify_cancelled {
                 run.status = "cancelled".into();
                 run.error = verify_cancelled_message();
+                run.verify_cancelled = true;
                 return run;
             }
             let protected = [(disk_token, image_path)];
-            backup_run::retain_and_consolidate(&mut run, job, &protected, keys.as_ref());
+            let tail = RunTail {
+                sink,
+                cancel,
+                job_id: &job.id,
+            };
+            backup_run::retain_and_consolidate(&mut run, job, &protected, keys.as_ref(), &tail);
         }
         Ok(Err(OwnBackupError::Cancelled)) => {
             run.status = "cancelled".into();
@@ -4337,9 +4668,16 @@ async fn perform_backup(
     // FIRST, before the format check, before a parent is chosen and long
     // before anything is written: finish what a crash left half-done. Every
     // decision below reads these chains (audit AUD-06).
-    if let Some(msg) = recover_interrupted_consolidations(job, &folder, keys.as_ref()) {
+    let tail = RunTail {
+        sink,
+        cancel,
+        job_id: &job.id,
+    };
+    if let Some((status, msg)) =
+        recover_interrupted_consolidations(job, &folder, keys.as_ref(), Some(&tail))
+    {
         run.finished_at = chrono::Utc::now().to_rfc3339();
-        run.status = "error".into();
+        run.status = status.into();
         run.error = msg;
         return run;
     }
@@ -4568,12 +4906,14 @@ async fn perform_backup(
         // Recorded first, so the finished image is findable in the history;
         // then the run stops short of success, and retention does not run.
         if verify_cancelled {
+            // Made only if this was the last volume (see the Windows loop).
+            run.verify_cancelled = idx + 1 == volumes.len();
             fatal = Some(("cancelled".into(), verify_cancelled_message()));
             break;
         }
     }
 
-    totals.finish(run, fatal, job, keys.as_ref())
+    totals.finish(run, fatal, job, keys.as_ref(), &tail)
 }
 
 /// A device-mapper snapshot whose store the destination could not keep
@@ -4826,10 +5166,16 @@ async fn perform_disk_backup(
     if verify_cancelled {
         run.status = "cancelled".into();
         run.error = verify_cancelled_message();
+        run.verify_cancelled = true;
         return run;
     }
     let protected = [(tag, image_path)];
-    backup_run::retain_and_consolidate(&mut run, job, &protected, keys.as_ref());
+    let tail = RunTail {
+        sink,
+        cancel,
+        job_id: &job.id,
+    };
+    backup_run::retain_and_consolidate(&mut run, job, &protected, keys.as_ref(), &tail);
     run
 }
 
@@ -5528,6 +5874,75 @@ mod tests {
         worker.abort();
     }
 
+    /// 09.11.2026: Windows shut down while the check after a finished copy
+    /// was running. The copy is there, so the run is not `interrupted` (the
+    /// schedule would make another one) and does not promise a copy "after the
+    /// next start"; it stays `cancelled`, so nothing older is deleted.
+    #[test]
+    fn a_check_cut_off_by_a_stop_keeps_the_copy_it_checked() {
+        let mut run = JobRun {
+            status: "cancelled".into(),
+            error: verify_cancelled_message(),
+            verify_cancelled: true,
+            ..Default::default()
+        };
+        settle_stopped_run(&mut run, true);
+        assert_eq!(run.status, "cancelled");
+        assert!(!run.interrupted, "the copy served its slot");
+        assert!(run.verify_cancelled);
+        assert_eq!(run.error, tr!("lib.verify_interrupted_by_stop"));
+    }
+
+    #[test]
+    fn a_copy_cut_off_by_a_stop_is_interrupted() {
+        let mut run = JobRun {
+            status: "cancelled".into(),
+            error: tr!("lib.cancelled_by_user").into_owned(),
+            ..Default::default()
+        };
+        settle_stopped_run(&mut run, true);
+        assert!(run.interrupted);
+        assert_eq!(run.error, tr!("lib.interrupted_by_stop"));
+    }
+
+    #[test]
+    fn a_check_a_person_stopped_keeps_its_own_words() {
+        let mut run = JobRun {
+            status: "cancelled".into(),
+            error: verify_cancelled_message(),
+            verify_cancelled: true,
+            ..Default::default()
+        };
+        settle_stopped_run(&mut run, false);
+        assert!(!run.interrupted);
+        assert_eq!(run.error, verify_cancelled_message());
+        // Finished runs are never touched, stopping or not.
+        let mut done = JobRun {
+            status: "success".into(),
+            ..Default::default()
+        };
+        settle_stopped_run(&mut done, true);
+        assert!(!done.interrupted && done.error.is_empty());
+    }
+
+    /// Old history has no `verify_cancelled`; new history leaves it out when
+    /// false, so files stay as they were for runs it does not concern.
+    #[test]
+    fn verify_cancelled_is_optional_in_the_history() {
+        let old: JobRun =
+            serde_json::from_str(r#"{"id":"a","job_id":"j","status":"cancelled"}"#).unwrap();
+        assert!(!old.verify_cancelled);
+        let text = serde_json::to_string(&JobRun::default()).unwrap();
+        assert!(!text.contains("verify_cancelled"));
+        let marked = JobRun {
+            verify_cancelled: true,
+            ..Default::default()
+        };
+        assert!(serde_json::to_string(&marked)
+            .unwrap()
+            .contains("\"verify_cancelled\":true"));
+    }
+
     #[tokio::test]
     async fn a_waiting_backup_loads_the_job_again_after_a_key_repair_can_commit() {
         struct QuietSink;
@@ -5597,6 +6012,28 @@ mod tests {
     /// Asking "is it queued?" and queueing it are one step, or two callers
     /// arriving together both find it absent and both add it — and the job
     /// runs twice.
+    /// «Выключить компьютер при завершении»: only for a job that is running
+    /// or waiting, shown to every window, and used up by that run's end.
+    #[test]
+    fn a_shutdown_asked_for_one_run_is_used_up_by_it() {
+        let queue = RunQueue::new();
+        assert!(!queue.set_shutdown_after("a", true), "not queued: refused");
+        assert_eq!(queue.snapshot().shutdown_after, None);
+
+        queue.enqueue("a");
+        assert!(queue.set_shutdown_after("a", true));
+        assert_eq!(queue.snapshot().shutdown_after.as_deref(), Some("a"));
+        assert!(queue.set_shutdown_after("a", false));
+        assert_eq!(queue.snapshot().shutdown_after, None);
+
+        queue.set_shutdown_after("a", true);
+        assert!(queue.start("a"));
+        assert!(!queue.take_shutdown_after("b"));
+        assert!(queue.take_shutdown_after("a"));
+        assert!(!queue.take_shutdown_after("a"), "used up");
+        assert_eq!(queue.snapshot().shutdown_after, None);
+    }
+
     #[test]
     fn a_job_is_queued_once_however_many_ask() {
         let queue = RunQueue::new();
@@ -6038,6 +6475,88 @@ mod tests {
             store.get("job1").unwrap().last_run.unwrap().image_path,
             good.image_path
         );
+    }
+
+    /// Сообщение, отправленное из долгой блокирующей работы внутри задачи
+    /// задания, должно дойти до окна сразу, а не после этой работы
+    /// (18.11.2026: «Объединение версий» пришло только по окончании слияния).
+    #[test]
+    fn a_message_from_long_work_in_the_job_task_is_delivered_at_once() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = tokio::sync::broadcast::channel::<std::time::Instant>(8);
+            let (got_tx, got_rx) = std::sync::mpsc::channel();
+            // The forwarder, as the gRPC stream that carries progress.
+            tokio::spawn(async move {
+                if let Ok(sent) = rx.recv().await {
+                    let _ = got_tx.send(sent.elapsed());
+                }
+            });
+            tokio::task::yield_now().await;
+            tokio::spawn(async move {
+                off_the_workers(|| {
+                    let _ = tx.send(std::time::Instant::now());
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                })
+            })
+            .await
+            .unwrap();
+            let delay = got_rx.recv().unwrap();
+            assert!(
+                delay < std::time::Duration::from_millis(1500),
+                "delivered after {delay:?}: it waited for the work"
+            );
+        });
+    }
+
+    /// «Очистить» в «Активности»: уходит всё, кроме того, на что опирается сама
+    /// программа, — последнего состоявшегося запуска (расписание) и последней
+    /// удачной копии (планирование цепочки) каждого существующего задания.
+    #[test]
+    fn clearing_the_history_keeps_what_the_schedule_and_the_chain_need() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::load(dir.path());
+        let (job, good, _) = job_with_last(dir.path(), "incremental", "incremental", 1, true);
+        store.upsert(job).unwrap();
+        let run = |id: &str, job_id: &str, status: &str| JobRun {
+            id: id.into(),
+            job_id: job_id.into(),
+            status: status.into(),
+            started_at: format!("2026-11-{id}T10:00:00Z"),
+            ..Default::default()
+        };
+        // Oldest first: record_run puts each new one on top.
+        store.record_run(run("01", "job1", "success")).unwrap();
+        store.record_run(good.clone()).unwrap();
+        store.record_run(run("03", "job1", "error")).unwrap();
+        store
+            .record_run(JobRun {
+                interrupted: true,
+                ..run("04", "job1", "cancelled")
+            })
+            .unwrap();
+        store.record_run(run("05", "gone", "success")).unwrap();
+        store
+            .record_run(JobRun {
+                operation: "cleanup".into(),
+                ..run("06", "job1", "success")
+            })
+            .unwrap();
+        let served_before = store.last_scheduled_start("job1");
+
+        let removed = store.clear_activity().unwrap();
+        let left: Vec<String> = store.activity().iter().map(|r| r.id.clone()).collect();
+        assert_eq!(left, vec!["03".to_string(), good.id.clone()], "{left:?}");
+        assert_eq!(removed, 4);
+        assert_eq!(store.last_scheduled_start("job1"), served_before);
+        assert_eq!(store.last_success("job1").unwrap().id, good.id);
+        // On disk as well.
+        let reloaded = JobStore::load(dir.path());
+        assert_eq!(reloaded.activity().len(), 2);
     }
 
     #[test]
@@ -6690,9 +7209,9 @@ mod tests {
 
         let mut job = Job::default();
         job.id = "job1".into();
-        let stop = recover_interrupted_consolidations(&job, dir.path(), None);
+        let stop = recover_interrupted_consolidations(&job, dir.path(), None, None);
         assert!(stop.is_some(), "запуск обязан остановиться");
-        assert!(stop.unwrap().contains("a_full.vhdx"));
+        assert!(stop.unwrap().1.contains("a_full.vhdx"));
     }
 
     /// Чужая застрявшая цепочка в общей папке — проблема того задания, а не
@@ -6709,7 +7228,7 @@ mod tests {
 
         let mut job = Job::default();
         job.id = "job1".into();
-        assert!(recover_interrupted_consolidations(&job, dir.path(), None).is_none());
+        assert!(recover_interrupted_consolidations(&job, dir.path(), None, None).is_none());
     }
 
     /// Папка без маркеров — обычный случай, и он ничего не стоит.
@@ -6719,7 +7238,7 @@ mod tests {
         put_image_of_job(dir.path(), "c_full.vhdx", "job1");
         let mut job = Job::default();
         job.id = "job1".into();
-        assert!(recover_interrupted_consolidations(&job, dir.path(), None).is_none());
+        assert!(recover_interrupted_consolidations(&job, dir.path(), None, None).is_none());
     }
 
     /// Базу, у которой вообще не прочитать принадлежность, считаем своей:
@@ -6737,7 +7256,7 @@ mod tests {
 
         let mut job = Job::default();
         job.id = "job1".into();
-        assert!(recover_interrupted_consolidations(&job, dir.path(), None).is_some());
+        assert!(recover_interrupted_consolidations(&job, dir.path(), None, None).is_some());
     }
 
     // --- «Удалить задание вместе с копиями» (аудит AUD-09) ------------------

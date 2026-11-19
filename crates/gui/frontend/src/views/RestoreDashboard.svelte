@@ -20,6 +20,7 @@
   import { diskSegments, msrKept } from '../lib/diskLayout';
   import type { MapSlot } from '../components/DiskMap.svelte';
   import { m } from '../lib/paraglide/messages';
+  import { steady } from '../lib/steady.svelte';
   import { esc } from '../lib/i18n.svelte';
   import type {
     Job, DiskInfo, PartitionInfo, ImageInfo, RestoreRunState, DryRunResult, OpRecord,
@@ -1735,13 +1736,17 @@
   // outlives this view — it is unmounted on every walk through the menu.
   let nowMs = $state(Date.now());
   const eta = $derived(running ? restoreEtaMs() : NaN);
+  // Once a second, averaged over that second (`steady`).
+  const shownEta = steady(() => eta);
+  const shownSpeed = steady(() => (running && progress ? progress.speed_mbps : NaN));
+  const shownDone = steady(() => (running && progress ? progress.blocks_done : NaN), 'latest');
 
   // All this view still ticks: the "Прошло" line has to move between
   // progress messages.
   $effect(() => {
     if (!running) return;
     nowMs = Date.now();
-    const id = setInterval(() => (nowMs = Date.now()), 500);
+    const id = setInterval(() => (nowMs = Date.now()), 1000);
     return () => clearInterval(id);
   });
 
@@ -2340,13 +2345,13 @@
       <div class="progress-info">
         <span>{m.rd_run_running()}</span>
         {#if progress}
-          <span>{m.rd_progress_blocks({ done: progress.blocks_done, total: progress.blocks_total, speed: progress.speed_mbps.toFixed(1) })}</span>
+          <span>{m.rd_progress_blocks({ done: Number.isFinite(shownDone.value) ? shownDone.value : progress.blocks_done, total: progress.blocks_total, speed: (Number.isFinite(shownSpeed.value) ? shownSpeed.value : progress.speed_mbps).toFixed(1) })}</span>
         {/if}
       </div>
       <div class="bar"><div class="bar-fill" style="width:{progress?.percent ?? 0}%"></div></div>
       <div class="progress-meta">
         <span class="route">{job.name} → {targetLabel}</span>
-        <span class="times">{m.rd_elapsed_left({ elapsed: formatClock(elapsedMs), left: Number.isFinite(eta) ? '~' + formatClock(eta) : m.rd_estimating() })}</span>
+        <span class="times">{m.rd_elapsed_left({ elapsed: formatClock(elapsedMs), left: Number.isFinite(shownEta.value) ? '~' + formatClock(shownEta.value) : m.rd_estimating() })}</span>
       </div>
     </div>
   {/if}

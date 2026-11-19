@@ -3,6 +3,7 @@
   import { pickPath } from '../lib/pickPath.svelte';
   import BootMediaCard from '../components/BootMediaCard.svelte';
   import HiddenVolumesCard from '../components/HiddenVolumesCard.svelte';
+  import UnmountedPartitionsCard from '../components/UnmountedPartitionsCard.svelte';
   import { api } from '../lib/api';
   import ArchiveUnlockModal from '../components/ArchiveUnlockModal.svelte';
   import {
@@ -423,10 +424,12 @@
     {/if}
   </div>
 
-  <!-- Drive letters are a Windows thing; elsewhere the service has no such
-       list and would only answer that it has not. -->
+  <!-- Hidden partitions: drive letters on Windows, mounts under /mnt on
+       Linux. -->
   {#if isWindows()}
     <HiddenVolumesCard />
+  {:else}
+    <UnmountedPartitionsCard />
   {/if}
 
   <BootMediaCard />

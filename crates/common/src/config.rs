@@ -3,6 +3,15 @@ use std::path::PathBuf;
 
 use crate::error::{OwnBackupError, Result};
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateCheckInterval {
+    #[default]
+    Weekly,
+    Monthly,
+    Disabled,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default = "default_data_dir")]
@@ -47,6 +56,10 @@ pub struct AppConfig {
     /// ([`crate::lang`]).
     #[serde(default)]
     pub ui_language: String,
+    #[serde(default)]
+    pub update_check_interval: UpdateCheckInterval,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_update_check: Option<chrono::DateTime<chrono::Utc>>,
     // Removed on 2026-09-26, and an old config that still carries them loads
     // fine — unknown keys are ignored:
     // - `consolidation_enabled`, a master switch for consolidation: it is
@@ -77,6 +90,10 @@ pub struct SettingsPatch {
     pub remembered_backups: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_check_interval: Option<UpdateCheckInterval>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_update_check: Option<Option<chrono::DateTime<chrono::Utc>>>,
 }
 
 impl SettingsPatch {
@@ -94,6 +111,11 @@ impl SettingsPatch {
             ),
             remembered_backups: changed(&before.remembered_backups, &after.remembered_backups),
             ui_language: changed(&before.ui_language, &after.ui_language),
+            update_check_interval: changed(
+                &before.update_check_interval,
+                &after.update_check_interval,
+            ),
+            last_update_check: changed(&before.last_update_check, &after.last_update_check),
         }
     }
 
@@ -123,6 +145,12 @@ impl SettingsPatch {
             } else {
                 "ru".into()
             };
+        }
+        if let Some(v) = self.update_check_interval {
+            config.update_check_interval = v;
+        }
+        if let Some(v) = &self.last_update_check {
+            config.last_update_check = *v;
         }
     }
 }
@@ -198,6 +226,8 @@ impl Default for AppConfig {
             default_compression_level: default_compression_level(),
             remembered_backups: Vec::new(),
             ui_language: String::new(),
+            update_check_interval: UpdateCheckInterval::default(),
+            last_update_check: None,
         }
     }
 }
@@ -429,6 +459,30 @@ mod tests {
         )
         .expect("an old config must still load");
         assert_eq!(back.default_compression_level, 3);
+    }
+
+    #[test]
+    fn update_checks_default_to_weekly_and_survive_a_settings_round_trip() {
+        let mut old: AppConfig = toml::from_str("log_level = \"info\"\n").unwrap();
+        assert_eq!(old.update_check_interval, UpdateCheckInterval::Weekly);
+        assert_eq!(old.last_update_check, None);
+
+        let mut changed = old.clone();
+        changed.update_check_interval = UpdateCheckInterval::Monthly;
+        changed.last_update_check = Some(
+            chrono::DateTime::parse_from_rfc3339("2026-11-14T12:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        );
+        let patch = SettingsPatch::between(&old, &changed);
+        patch.apply(&mut old);
+        assert_eq!(old.update_check_interval, UpdateCheckInterval::Monthly);
+        assert_eq!(old.last_update_check, changed.last_update_check);
+
+        let text = toml::to_string_pretty(&old).unwrap();
+        let back: AppConfig = toml::from_str(&text).unwrap();
+        assert_eq!(back.update_check_interval, UpdateCheckInterval::Monthly);
+        assert_eq!(back.last_update_check, changed.last_update_check);
     }
 
     #[test]

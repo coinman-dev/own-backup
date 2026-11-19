@@ -1666,7 +1666,9 @@
             <span class="sec-sub">{sourceReadonly
               ? m.wiz_src_sub_ro()
               : diskChosen
-                ? m.wiz_src_sub_volumes()
+                ? activeDisk && diskWhole(activeDisk) && isBootableDisk(activeDisk)
+                  ? m.wiz_src_sub_volumes_or_boot()
+                  : m.wiz_src_sub_volumes()
                 : m.wiz_src_sub_disk()}</span>
             {#if diskChosen && !sourceReadonly}
               <button class="link back-disk" onclick={pickAnotherDisk}>{m.wiz_src_other_disk()}</button>
@@ -1793,6 +1795,10 @@
                     </div>
                   </div>
                 </div>
+                <!-- The password first, then what it is for (owner, 19.11.2026). -->
+                {#if encryptedForDisk(d).length > 0}
+                  {@render pwPanel(encryptedForDisk(d), d.device_id === sharedFormDiskId, isBootableCopy(d))}
+                {/if}
                 {#if isBootableCopy(d)}
                   {@const locked = d.partitions.filter((p) => bootRole(p) === 'locked')}
                   {#if locked.length > 0}
@@ -1806,9 +1812,6 @@
                       {m.wiz_boot_esp_only()}
                     </div>
                   {/if}
-                {/if}
-                {#if encryptedForDisk(d).length > 0}
-                  {@render pwPanel(encryptedForDisk(d), d.device_id === sharedFormDiskId, isBootableCopy(d))}
                 {/if}
                 {/if}
               {/each}
@@ -2097,6 +2100,9 @@
           <div class="field-label mt">{m.wiz_retention_mode()}</div>
           <label class="radio blk"><input type="radio" checked={!isConsolidation} onchange={() => setSchemeMode('standard')} /> {m.wiz_mode_standard()}</label>
           <label class="radio blk"><input type="radio" checked={isConsolidation} onchange={() => setSchemeMode('consolidation')} /> {m.wiz_mode_consolidation()}</label>
+          {#if isConsolidation}
+            <div class="note warn">{m.wiz_consol_slow()}</div>
+          {/if}
         {/if}
 
         {#if job.scheme.method !== 'full' && !isConsolidation}
@@ -2244,47 +2250,57 @@
           {#if !media.active && job.verification}
             <div class="adv-group">
               <div class="adv-title">{m.wiz_verify_schedule()}</div>
-              <label class="at">
-                <select bind:value={job.verification.schedule.kind}>
-                  <option value="none">{m.wiz_sched_none()}</option>
-                  <option value="daily">{m.wiz_sched_daily()}</option>
-                  <option value="weekly">{m.wiz_sched_weekly()}</option>
-                  <option value="monthly">{m.wiz_sched_monthly()}</option>
-                </select>
-              </label>
-              {#if job.verification.schedule.kind !== 'none'}
-                {#if job.verification.schedule.kind === 'weekly'}
-                  <div class="days">
-                    {#each weekdays as [day, label]}
-                      <button class="day" class:on={job.verification.schedule.days.includes(day)} onclick={() => {
-                        job.verification.schedule.days = job.verification.schedule.days.includes(day)
-                          ? job.verification.schedule.days.filter((d) => d !== day)
-                          : [...job.verification.schedule.days, day];
-                      }}>{label()}</button>
-                    {/each}
-                  </div>
-                {/if}
-                {#if job.verification.schedule.kind === 'monthly'}
-                  <label class="at">{m.wiz_sched_day_of_month()}
-                    <select bind:value={job.verification.schedule.day_of_month}>
-                      {#each Array.from({ length: 28 }, (_, i) => i + 1) as day}<option value={day}>{day}</option>{/each}
+              <div class="sched">
+                <div class="sched-kinds">
+                  <label class="at">
+                    <select bind:value={job.verification.schedule.kind}>
+                      <option value="none">{m.wiz_sched_none()}</option>
+                      <option value="daily">{m.wiz_sched_daily()}</option>
+                      <option value="weekly">{m.wiz_sched_weekly()}</option>
+                      <option value="monthly">{m.wiz_sched_monthly()}</option>
                     </select>
                   </label>
+                </div>
+                {#if job.verification.schedule.kind !== 'none'}
+                  <div class="sched-right">
+                    {#if job.verification.schedule.kind === 'weekly'}
+                      <div class="days">
+                        {#each weekdays as [day, label]}
+                          <button class="day" class:on={job.verification.schedule.days.includes(day)} onclick={() => {
+                            job.verification.schedule.days = job.verification.schedule.days.includes(day)
+                              ? job.verification.schedule.days.filter((d) => d !== day)
+                              : [...job.verification.schedule.days, day];
+                          }}>{label()}</button>
+                        {/each}
+                      </div>
+                    {/if}
+                    {#if job.verification.schedule.kind === 'monthly'}
+                      <label class="at">{m.wiz_sched_day_of_month()}
+                        <select bind:value={job.verification.schedule.day_of_month}>
+                          {#each Array.from({ length: 28 }, (_, i) => i + 1) as day}<option value={day}>{day}</option>{/each}
+                        </select>
+                      </label>
+                    {/if}
+                    <label class="at">{m.wiz_sched_at()} <input type="time" bind:value={job.verification.schedule.time} /></label>
+                  </div>
                 {/if}
-                <label class="at">{m.wiz_sched_at()} <input type="time" bind:value={job.verification.schedule.time} /></label>
-                <label class="chk"><input type="checkbox" bind:checked={job.verification.all_versions} /> {m.wiz_verify_all_versions()}</label>
-                <div class="sub-hint">{m.wiz_verify_schedule_hint()}</div>
-                <label class="chk"><input type="checkbox" bind:checked={job.verification.schedule.run_missed} /> {m.wiz_sched_run_missed()}</label>
-                {#if job.verification.schedule.run_missed}
-                  <label class="delay-min">{m.wiz_sched_missed_delay()}
-                    <select bind:value={job.verification.schedule.missed_delay_min}>
-                      {#each Array.from({ length: 60 }, (_, i) => i + 1) as minute}<option value={minute}>{minute}</option>{/each}
-                    </select> {m.wiz_min()}
-                  </label>
-                {/if}
-                {#if cap.wake_to_run}
-                  <label class="chk"><input type="checkbox" bind:checked={job.verification.schedule.wake_to_run} /> {m.wiz_sched_wake()}</label>
-                {/if}
+              </div>
+              {#if job.verification.schedule.kind !== 'none'}
+                <div class="adv-schedule">
+                  <label class="chk"><input type="checkbox" bind:checked={job.verification.all_versions} /> {m.wiz_verify_all_versions()}</label>
+                  <div class="sub-hint">{m.wiz_verify_schedule_hint()}</div>
+                  <label class="chk"><input type="checkbox" bind:checked={job.verification.schedule.run_missed} /> {m.wiz_sched_run_missed()}</label>
+                  {#if job.verification.schedule.run_missed}
+                    <label class="delay-min">{m.wiz_sched_missed_delay()}
+                      <select bind:value={job.verification.schedule.missed_delay_min}>
+                        {#each Array.from({ length: 60 }, (_, i) => i + 1) as minute}<option value={minute}>{minute}</option>{/each}
+                      </select> {m.wiz_min()}
+                    </label>
+                  {/if}
+                  {#if cap.wake_to_run}
+                    <label class="chk"><input type="checkbox" bind:checked={job.verification.schedule.wake_to_run} /> {m.wiz_sched_wake()}</label>
+                  {/if}
+                </div>
               {/if}
             </div>
           {/if}
@@ -2475,7 +2491,7 @@
   .src-wrap { width: 100%; }
   .sec-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
   .sec-title { font-size: 15px; font-weight: 600; color: var(--head); }
-  .sec-sub { font-size: 13px; color: var(--text-muted); }
+  .sec-sub { font-size: 13px; color: var(--text-muted); min-width: 0; }
   .disks { display: flex; flex-direction: column; gap: 14px; }
   /* Kept-files category breakdown, shown under the disk map (read-only). */
   .cat-block { margin-top: 14px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--card-bg); }
@@ -2498,7 +2514,7 @@
   button.disk-card:hover { border-color: var(--primary); }
   button.disk-card:hover .disk-head { background: var(--accent-soft); }
   /* Back to the disk question — small, next to the instruction it undoes. */
-  .back-disk { margin-left: auto; font-size: 12px; }
+  .back-disk { margin-left: auto; font-size: 12px; flex-shrink: 0; white-space: nowrap; }
   .disk-head { width: 100%; display: flex; align-items: center; justify-content: space-between; padding: 6px 12px; background: var(--panel2); border: 0; border-bottom: 1px solid var(--border); margin: 0; font-family: inherit; text-align: left; }
   .disk-head.whole { background: var(--accent-soft); color: var(--accent-text); }
   .disk-head.whole .disk-model { color: var(--accent-text); }

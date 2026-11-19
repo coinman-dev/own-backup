@@ -2,6 +2,7 @@
 /.claude
 /target
 /image
+/Blender
 **/target
 **/node_modules
 **/dist

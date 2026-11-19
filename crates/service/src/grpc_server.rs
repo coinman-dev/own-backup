@@ -615,22 +615,88 @@ fn target_owned_letters(_plan: &own_backup_common::restore_plan::RestorePlan) ->
     Vec::new()
 }
 
+/// The last progress message of every run going on now.
+///
+/// Events go only to the windows connected when they are sent. A window
+/// opened in the middle of a run therefore showed nothing until the next one,
+/// and the folding and compacting of a consolidation send none for an hour:
+/// on 2026-11-18 a window reopened during it showed «Резервное копирование…»
+/// with an empty bar and «Прошло 0:00». `StreamEvents` starts with these.
+#[derive(Default)]
+pub struct LiveProgress(
+    std::sync::Mutex<std::collections::BTreeMap<String, own_backup_core::JobProgress>>,
+);
+
+impl LiveProgress {
+    /// Remember `progress`, stamped with when its phase began.
+    fn note(&self, progress: &mut own_backup_core::JobProgress) {
+        let mut runs = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let started = runs
+            .get(&progress.job_id)
+            .filter(|was| was.phase == progress.phase)
+            .and_then(|was| was.phase_started_ms);
+        progress.phase_started_ms =
+            started.or_else(|| Some(chrono::Utc::now().timestamp_millis().max(0) as u64));
+        // The breakdown by file type and what the exclusions took out come in
+        // one message only; the one kept for a late window must still carry them.
+        let mut kept = progress.clone();
+        if let Some(was) = runs.get(&progress.job_id) {
+            if kept.categories.is_empty() {
+                kept.categories = was.categories.clone();
+            }
+            if kept.excluded_bytes.is_none() {
+                kept.excluded_bytes = was.excluded_bytes;
+                kept.excluded_files = was.excluded_files;
+            }
+        }
+        runs.insert(progress.job_id.clone(), kept);
+    }
+
+    fn forget(&self, job_id: &str) {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(job_id);
+    }
+
+    /// What a window that connects now should be told first: the runs still
+    /// going on. A queued run counts only while it is the queue's current
+    /// one, so a run whose end was somehow never announced cannot hang on
+    /// the screen as running.
+    fn replay(&self, current: Option<&str>) -> Vec<Event> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .filter(|p| p.phase == "scheduled-verify" || current == Some(p.job_id.as_str()))
+            .map(progress_event)
+            .collect()
+    }
+}
+
+fn progress_event(progress: &own_backup_core::JobProgress) -> Event {
+    Event {
+        kind: "progress".into(),
+        json: serde_json::to_string(progress).unwrap_or_default(),
+    }
+}
+
 /// Bridges core orchestration events onto the broadcast channel that
 /// `StreamEvents` reads. `send` errors only when there are no subscribers,
 /// which is fine — the events are simply dropped until a client connects.
 pub struct GrpcEventSink {
     pub tx: broadcast::Sender<proto::Event>,
+    /// Shared with [`AppState::live`].
+    pub live: Arc<LiveProgress>,
     /// The automatic cleanup, for a job that cleans before its copy. Set
     /// once the service's state exists (after the worker that holds this).
     pub auto: Arc<std::sync::OnceLock<Arc<crate::auto_cleanup::AutoCleanup>>>,
 }
 
 impl own_backup_core::EventSink for GrpcEventSink {
-    fn job_progress(&self, progress: own_backup_core::JobProgress) {
-        let _ = self.tx.send(Event {
-            kind: "progress".into(),
-            json: serde_json::to_string(&progress).unwrap_or_default(),
-        });
+    fn job_progress(&self, mut progress: own_backup_core::JobProgress) {
+        self.live.note(&mut progress);
+        let _ = self.tx.send(progress_event(&progress));
     }
     fn queue_changed(&self, snapshot: own_backup_core::QueueSnapshot) {
         let _ = self.tx.send(Event {
@@ -639,6 +705,7 @@ impl own_backup_core::EventSink for GrpcEventSink {
         });
     }
     fn job_finished(&self, mut run: own_backup_core::JobRun) {
+        self.live.forget(&run.job_id);
         run.in_language(own_backup_common::lang::code());
         let _ = self.tx.send(Event {
             kind: "finished".into(),
@@ -672,7 +739,22 @@ async fn hidden_volumes_now() -> Result<Vec<own_backup_common::disk::HiddenVolum
     Ok(own_backup_common::disk::hidden_volumes(&disks))
 }
 
-#[cfg(not(target_os = "windows"))]
+/// Linux: the partitions nothing has mounted, and the ones the «Инструменты»
+/// page mounted (`hidden_mounts_linux`).
+#[cfg(target_os = "linux")]
+async fn hidden_volumes_now() -> Result<Vec<own_backup_common::disk::HiddenVolume>, Status> {
+    use own_backup_inventory::DiskInventory;
+    let disks = own_backup_inventory::LinuxInventory::new()
+        .enumerate_disks()
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+    Ok(own_backup_common::disk::unmounted_volumes(
+        &disks,
+        &crate::hidden_mounts_linux::own_mounts(),
+    ))
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 async fn hidden_volumes_now() -> Result<Vec<own_backup_common::disk::HiddenVolume>, Status> {
     Err(Status::unimplemented(
         "drive letters for hidden partitions are a Windows feature",
@@ -1461,9 +1543,33 @@ impl BackupService for BackupServiceImpl {
         }
         let p: In = serde_json::from_str(&req.into_inner().json)
             .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+        // Beside other work, only not on a disk a backup is reading: a letter
+        // changes nothing on the disk, but a copy names its volumes as they
+        // were when it started (19.11.2026: refused outright during a copy
+        // of another disk). Told at once rather than queued — a button.
+        let disk = hidden_volumes_now()
+            .await?
+            .iter()
+            .find(|v| v.device.eq_ignore_ascii_case(p.device.trim()))
+            .map(|v| v.disk_number);
+        let mut needs = vec![own_backup_core::busy::ANY_PHYSICAL_DISK.to_string()];
+        needs.extend(disk.map(own_backup_core::busy::physical_disk_resource));
         let _slot = self
-            .reserve(&tr!("grpc_server.busy_volume_letter"), &p.device)
-            .await?;
+            .state
+            .busy
+            .reserve_soon(
+                own_backup_core::busy::Doing::new(
+                    tr!("grpc_server.busy_volume_letter"),
+                    p.device.clone(),
+                )
+                .shared(needs),
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .map_err(|held| Status::failed_precondition(held.refusal()))?;
+        if self.shutdown.is_shutdown_requested() {
+            return Err(Status::unavailable("service is stopping"));
+        }
         let volumes = hidden_volumes_now().await?;
         let Some(volume) = volumes
             .iter()
@@ -1476,6 +1582,76 @@ impl BackupService for BackupServiceImpl {
         change_volume_letter(volume, p.letter.as_deref())?;
         tracing::info!(device = %p.device, letter = ?p.letter, "gRPC: SetVolumeLetter done");
         json_reply(&hidden_volumes_now().await?)
+    }
+
+    /// Linux: mount a partition [`hidden_volumes_now`] lists under `/mnt`,
+    /// or unmount one this call mounted. Asks an administrator (polkit) like
+    /// udisks does for an internal disk; re-checked against the disks as they
+    /// are now, never from what the window last saw.
+    #[cfg(target_os = "linux")]
+    async fn set_volume_mount(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[derive(serde::Deserialize)]
+        struct In {
+            device: String,
+            mount: bool,
+        }
+        let p: In = serde_json::from_str(&req.get_ref().json)
+            .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+        crate::polkit::authorize(&req, crate::polkit::Action::MountVolume).await?;
+        // A backup on Linux names no disk of its own (`backup_disk_resources`
+        // answers "any"), and a raw read of a partition must not meet a mount
+        // that writes to it.
+        let _slot = self
+            .state
+            .busy
+            .reserve_soon(
+                own_backup_core::busy::Doing::new(
+                    tr!("grpc_server.busy_volume_mount"),
+                    p.device.clone(),
+                )
+                .shared(vec![own_backup_core::busy::ANY_PHYSICAL_DISK.to_string()]),
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .map_err(|held| Status::failed_precondition(held.refusal()))?;
+        if self.shutdown.is_shutdown_requested() {
+            return Err(Status::unavailable("service is stopping"));
+        }
+        let volumes = hidden_volumes_now().await?;
+        let Some(volume) = volumes.iter().find(|v| v.device == p.device.trim()) else {
+            return Err(Status::failed_precondition(
+                tr!("hidden_mounts.not_listed", device = p.device).into_owned(),
+            ));
+        };
+        let volume = volume.clone();
+        let mount = p.mount;
+        tokio::task::spawn_blocking(move || {
+            if mount {
+                crate::hidden_mounts_linux::mount(&volume)
+            } else {
+                crate::hidden_mounts_linux::unmount(&volume)
+            }
+        })
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map_err(Status::failed_precondition)?;
+        tracing::info!(device = %p.device, mount = p.mount, "gRPC: SetVolumeMount done");
+        json_reply(&hidden_volumes_now().await?)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    async fn set_volume_mount(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        Err(Status::unimplemented(
+            "mounting partitions under /mnt is a Linux feature",
+        ))
     }
 
     // --- Queue / runs -----------------------------------------------------
@@ -1553,6 +1729,33 @@ impl BackupService for BackupServiceImpl {
         Ok(Response::new(Empty {}))
     }
 
+    async fn set_shutdown_after_run(
+        &self,
+        req: Request<JsonRequest>,
+    ) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        #[derive(serde::Deserialize)]
+        struct Payload {
+            job_id: String,
+            on: bool,
+        }
+        let p: Payload = serde_json::from_str(&req.into_inner().json)
+            .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+        if !self.state.queue.set_shutdown_after(&p.job_id, p.on) {
+            return Err(Status::failed_precondition(
+                "the job is neither running nor waiting",
+            ));
+        }
+        info!(job = %p.job_id, on = p.on, "gRPC: SetShutdownAfterRun");
+        let snapshot = self.state.queue.snapshot();
+        // Every window shows the same tick.
+        let _ = self.state.events.send(Event {
+            kind: "queue".into(),
+            json: serde_json::to_string(&snapshot).unwrap_or_default(),
+        });
+        json_reply(&snapshot)
+    }
+
     async fn get_queue(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
         check_auth(&req, &self.service_token)?;
         json_reply(&self.state.queue.snapshot())
@@ -1566,6 +1769,23 @@ impl BackupService for BackupServiceImpl {
         json_reply(&runs)
     }
 
+    async fn clear_activity(&self, req: Request<Empty>) -> Result<Response<JsonReply>, Status> {
+        check_auth(&req, &self.service_token)?;
+        let store = self.state.store.clone();
+        let data_dir = self.state.config.data_dir.clone();
+        let (runs, restores) = tokio::task::spawn_blocking(move || {
+            Ok::<_, std::io::Error>((
+                store.clear_activity()?,
+                own_backup_core::restore_exec::clear_read_history(&data_dir)?,
+            ))
+        })
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map_err(|e| Status::internal(e.to_string()))?;
+        info!(runs, restores, "gRPC: ClearActivity");
+        json_reply(&serde_json::json!({ "runs": runs, "restores": restores }))
+    }
+
     type StreamEventsStream = Pin<Box<dyn Stream<Item = Result<Event, Status>> + Send>>;
 
     async fn stream_events(
@@ -1576,9 +1796,16 @@ impl BackupService for BackupServiceImpl {
         // Drop "lagged" notices silently; a slow client just misses old events.
         let mut events =
             BroadcastStream::new(self.state.events.subscribe()).filter_map(|r| r.ok().map(Ok));
+        // Subscribed first, so nothing falls between the two; a message both
+        // here and in the stream only repeats what the window already shows.
+        let current = self.state.queue.snapshot().current;
+        let already = self.state.live.replay(current.as_deref());
         let mut shutdown = self.shutdown.clone();
         let busy = self.state.busy.clone();
         let stream = async_stream::stream! {
+            for event in already {
+                yield Ok(event);
+            }
             let drained = async move {
                 shutdown.wait_for_shutdown().await;
                 busy.wait_until_idle().await;
@@ -4627,7 +4854,10 @@ impl BackupService for BackupServiceImpl {
         let report = tokio::task::spawn_blocking(move || {
             let mut last: Option<std::time::Instant> = None;
             cleaner.go(&asker, &chosen, &people, mode, options, &exclude, |p| {
-                if last.is_none_or(|t| t.elapsed().as_millis() >= 200) {
+                // What an item is busy with is said once per step and never
+                // thinned out: dropped, the window would name the wrong item
+                // through a DISM step of many minutes.
+                if p.tally.stage.is_some() || last.is_none_or(|t| t.elapsed().as_millis() >= 200) {
                     last = Some(std::time::Instant::now());
                     emit_engine(&events, "cleanup", &p);
                 }
@@ -5107,9 +5337,91 @@ mod tests {
             std::sync::Arc::new(own_backup_core::PasswordStore::new(dir.join("meta.db")));
         let busy = own_backup_core::busy::Busy::new();
         let state = AppState::new(
-            config, store, queue, busy, job_tx, cancel, events, passwords,
+            config,
+            store,
+            queue,
+            busy,
+            job_tx,
+            cancel,
+            events,
+            Default::default(),
+            passwords,
         );
         BackupServiceImpl::new(state, String::new(), shutdown)
+    }
+
+    fn progress(job: &str, phase: &str) -> own_backup_core::JobProgress {
+        own_backup_core::JobProgress {
+            job_id: job.into(),
+            phase: phase.into(),
+            percent: 0,
+            blocks_done: 0,
+            blocks_total: 0,
+            speed_mbps: 0.0,
+            volume_index: 0,
+            volume_count: 1,
+            volume: String::new(),
+            image_file_name: String::new(),
+            categories: vec![],
+            excluded_files: None,
+            excluded_bytes: None,
+            stalled_secs: None,
+            phase_started_ms: None,
+            overall_percent: None,
+        }
+    }
+
+    fn replayed(live: &LiveProgress, current: Option<&str>) -> Vec<own_backup_core::JobProgress> {
+        live.replay(current)
+            .iter()
+            .map(|e| serde_json::from_str(&e.json).unwrap())
+            .collect()
+    }
+
+    /// A window that connects in the middle of a run is told where the run
+    /// is, with when its phase began and the one-off breakdown by file type,
+    /// and is told nothing about a run that has ended.
+    #[test]
+    fn a_window_opened_mid_run_learns_where_the_run_is() {
+        let live = LiveProgress::default();
+        let mut scanned = progress("job", "backup");
+        scanned.categories = vec![("images".into(), 5)];
+        scanned.excluded_bytes = Some(7);
+        live.note(&mut scanned);
+        let began = scanned.phase_started_ms.expect("stamped");
+
+        let mut later = progress("job", "backup");
+        later.blocks_done = 10;
+        live.note(&mut later);
+        assert_eq!(
+            later.phase_started_ms,
+            Some(began),
+            "same phase, same start"
+        );
+
+        let [now] = &replayed(&live, Some("job"))[..] else {
+            panic!("one run")
+        };
+        assert_eq!(now.blocks_done, 10);
+        assert_eq!(now.categories, scanned.categories);
+        assert_eq!(now.excluded_bytes, Some(7));
+        assert_eq!(now.phase_started_ms, Some(began));
+
+        let mut folding = progress("job", "consolidate");
+        live.note(&mut folding);
+        assert!(folding.phase_started_ms.unwrap() >= began);
+        assert_eq!(replayed(&live, Some("job"))[0].phase, "consolidate");
+
+        // Not the queue's current run: nothing, not a phantom.
+        assert!(replayed(&live, None).is_empty());
+        assert!(replayed(&live, Some("other")).is_empty());
+        // A scheduled verification is not in the queue at all.
+        live.note(&mut progress("other", "scheduled-verify"));
+        assert_eq!(replayed(&live, None).len(), 1);
+
+        live.forget("job");
+        live.forget("other");
+        assert!(replayed(&live, Some("job")).is_empty());
     }
 
     /// The wizard's destination check says what the save would: a letter

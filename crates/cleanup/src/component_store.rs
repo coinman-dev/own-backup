@@ -13,6 +13,8 @@
 
 use std::sync::atomic::AtomicBool;
 
+use crate::engine::Stage;
+
 /// What an analysis found (`up_to`: at most this much) or a removal freed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Outcome {
@@ -88,14 +90,19 @@ pub fn estimate(report: &Report) -> Outcome {
 
 /// Measure the store, or clean it (`remove`). A cleanup under way is not interrupted:
 /// `cancel` is heard only before it starts.
-pub fn run(remove: bool, cancel: &AtomicBool) -> std::io::Result<Outcome> {
+/// `stage` hears each DISM call as it starts.
+pub fn run(
+    remove: bool,
+    cancel: &AtomicBool,
+    stage: &mut dyn FnMut(Stage),
+) -> std::io::Result<Outcome> {
     #[cfg(windows)]
     {
-        win::run(remove, cancel)
+        win::run(remove, cancel, stage)
     }
     #[cfg(not(windows))]
     {
-        let _ = (remove, cancel);
+        let _ = (remove, cancel, stage);
         Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
     }
 }
@@ -109,7 +116,7 @@ mod win {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    use super::{estimate, freed, parse, Outcome, Report};
+    use super::{estimate, freed, parse, Outcome, Report, Stage};
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -163,7 +170,12 @@ mod win {
         parse(&text).ok_or_else(|| io::Error::other("dism: an unexpected report"))
     }
 
-    pub(super) fn run(remove: bool, cancel: &AtomicBool) -> io::Result<Outcome> {
+    pub(super) fn run(
+        remove: bool,
+        cancel: &AtomicBool,
+        stage: &mut dyn FnMut(Stage),
+    ) -> io::Result<Outcome> {
+        stage(Stage::StoreAnalyze);
         let before = analyze(cancel)?;
         if !remove {
             return Ok(estimate(&before));
@@ -171,7 +183,9 @@ mod win {
         if estimate(&before).bytes == 0 || cancel.load(Ordering::Relaxed) {
             return Ok(Outcome::default());
         }
+        stage(Stage::StoreCleanup);
         call(&["/StartComponentCleanup"], cancel, false)?;
+        stage(Stage::StoreRecount);
         Ok(Outcome {
             bytes: freed(&before, &analyze(&AtomicBool::new(false))?),
             up_to: false,

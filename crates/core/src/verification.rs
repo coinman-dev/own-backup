@@ -118,6 +118,8 @@ pub fn perform(store: &JobStore, job: &Job, cancel: &CancelToken, sink: &dyn Eve
                     excluded_files: None,
                     excluded_bytes: None,
                     stalled_secs: None,
+                    phase_started_ms: None,
+                    overall_percent: None,
                 });
             }
             if cancel.is_cancelled() {

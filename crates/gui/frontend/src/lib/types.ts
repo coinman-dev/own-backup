@@ -536,6 +536,8 @@ export interface JobRun {
   status: 'success' | 'error' | 'cancelled' | string;
   /** Cancelled because the service stopped (shutdown, restart, update), not by a person. */
   interrupted?: boolean;
+  /** Cancelled, but the copy WAS made: only the check after it was stopped (by a person or a stop). */
+  verify_cancelled?: boolean;
   /** The scheduler did not start it: something it needed (a saved volume password) was missing. */
   skipped?: boolean;
   image_path: string;
@@ -836,6 +838,8 @@ export interface DecryptResult {
 export interface QueueSnapshot {
   current: string | null;
   pending: string[];
+  /** The job whose run ends with the computer switched off (this run only). */
+  shutdown_after?: string | null;
 }
 
 export interface JobProgress {
@@ -850,6 +854,10 @@ export interface JobProgress {
    * 'exclusions' = post-copy true-removal / in-image exclusion pass
    *                (blocks_done counts processed entries; minutes on big volumes)
    * 'verify'     = post-backup validation
+   * 'consolidate' = the oldest increment being folded into the full copy
+   *                (no granular progress)
+   * 'consolidate-verify' = that full copy read back before the increment is
+   *                deleted (blocks_done of blocks_total)
    */
   phase: 'prepare' | 'backup' | 'finalize' | 'exclusions' | 'verify' | string;
   percent: number;
@@ -867,6 +875,12 @@ export interface JobProgress {
   /** Seconds without any progress, once the service finds that worth saying
    *  (a backup disk that stopped taking writes). Absent otherwise. */
   stalled_secs?: number;
+  /** When this phase began (Unix ms), stamped by the service: a window
+   *  opened mid-run counts from there, not from its own opening. */
+  phase_started_ms?: number;
+  /** How far the whole run is (copy, check, consolidation), in percent,
+   *  as the service outlined it. Absent when it could not. */
+  overall_percent?: number;
   /**
    * Разбивка оставшихся файлов по типам — приходит ОДИН раз, сразу после
    * скана, и дальше не меняется. Пары «категория → байты»: сканер видит каждый
@@ -1339,6 +1353,12 @@ export interface HiddenVolume {
   size_bytes: number;
   filesystem: string;
   label: string;
+  /** Linux: where the Tools page mounted it; null while not mounted. */
+  mount_point?: string | null;
+  /** Linux: mounted read-only because read-write was refused. */
+  read_only?: boolean;
+  /** Linux: the kernel name (`/dev/nvme0n1p1`). */
+  kernel_device?: string;
 }
 
 // --- «Очистка» (service/src/cleanup.rs) -----------------------------------
@@ -1469,7 +1489,12 @@ export interface CleanupReport {
 export interface CleanupProgress extends CleanupTally {
   mode: 'analyze' | 'run';
   item: string;
+  /** Only on a report of what `item` is busy with — it counts nothing:
+   *  'started', or DISM's step on the component store. */
+  stage?: CleanupStage;
 }
+
+export type CleanupStage = 'started' | 'store_analyze' | 'store_cleanup' | 'store_recount';
 
 /** A page of the files an analysis found for one item. */
 export interface CleanupFilesPage {
@@ -1486,4 +1511,11 @@ export interface CleanupOptions {
   /** Keep this many last days of browser history (0: remove it all). */
   history_keep_days: number;
   junk?: CleanupJunk;
+}
+
+export interface UpdateCheckResult {
+  status: 'disabled' | 'not_due' | 'current' | 'available';
+  current_version: string;
+  latest_version?: string;
+  release_url?: string;
 }

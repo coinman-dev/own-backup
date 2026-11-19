@@ -299,7 +299,11 @@ impl AutoCleanup {
                 p.options.clone(),
                 &[],
                 |progress| {
-                    if last.is_none_or(|t| t.elapsed().as_millis() >= 200) {
+                    // Steps are said once each and never thinned out (see the
+                    // window's cleanup in `grpc_server`).
+                    if progress.tally.stage.is_some()
+                        || last.is_none_or(|t| t.elapsed().as_millis() >= 200)
+                    {
                         last = Some(std::time::Instant::now());
                         let _ = events.send(Event {
                             kind: "cleanup".into(),

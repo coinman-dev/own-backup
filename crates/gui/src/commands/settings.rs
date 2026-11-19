@@ -43,6 +43,7 @@ pub async fn save_config(state: State<'_, GuiState>, config: AppConfig) -> Resul
     let before = state.config.lock().map_err(|e| e.to_string())?.clone();
     let mut patch = own_backup_common::config::SettingsPatch::between(&before, &config);
     patch.ui_language = None;
+    patch.last_update_check = None;
     if patch.is_empty() {
         return Ok(());
     }

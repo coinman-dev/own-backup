@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- PAD (Portable Application Description) of Own Backup, published as
+     https://coinman-dev.github.io/own-backup/pad.xml for software catalogs.
+     The texts are edited here. The version, the release date and status, the
+     download links and the file size are written by scripts/site-release.py at
+     every site build from the latest release; the values below are its
+     fallback. The same script checks the length limits of the descriptions. -->
+<XML_DIZ_INFO>
+  <MASTER_PAD_VERSION_INFO>
+    <MASTER_PAD_VERSION>3.11</MASTER_PAD_VERSION>
+    <MASTER_PAD_EDITOR>Own Backup site build (scripts/site-release.py)</MASTER_PAD_EDITOR>
+    <MASTER_PAD_INFO>Portable Application Description, or PAD for short, is a data set that is used by software authors to disseminate information to anyone interested in their software products.</MASTER_PAD_INFO>
+  </MASTER_PAD_VERSION_INFO>
+  <Company_Info>
+    <Company_Name>CoinMan.dev</Company_Name>
+    <Address_1></Address_1>
+    <Address_2></Address_2>
+    <City_Town></City_Town>
+    <State_Province></State_Province>
+    <Zip_Postal_Code></Zip_Postal_Code>
+    <Country>Cyprus</Country>
+    <Company_WebSite_URL>https://coinman-dev.github.io/own-backup/</Company_WebSite_URL>
+    <Contact_Info>
+      <Author_First_Name>CoinMan.dev</Author_First_Name>
+      <Author_Last_Name></Author_Last_Name>
+      <Author_Email>coinman.dev@gmail.com</Author_Email>
+      <Contact_First_Name>CoinMan.dev</Contact_First_Name>
+      <Contact_Last_Name></Contact_Last_Name>
+      <Contact_Email>coinman.dev@gmail.com</Contact_Email>
+    </Contact_Info>
+    <Support_Info>
+      <Sales_Email>coinman.dev@gmail.com</Sales_Email>
+      <Support_Email>coinman.dev@gmail.com</Support_Email>
+      <General_Email>coinman.dev@gmail.com</General_Email>
+      <Sales_Phone></Sales_Phone>
+      <Support_Phone></Support_Phone>
+      <General_Phone></General_Phone>
+      <Fax_Phone></Fax_Phone>
+    </Support_Info>
+  </Company_Info>
+  <Program_Info>
+    <Program_Name>Own Backup</Program_Name>
+    <Program_Version>0.2.1-beta</Program_Version>
+    <Program_Release_Month>11</Program_Release_Month>
+    <Program_Release_Day>02</Program_Release_Day>
+    <Program_Release_Year>2026</Program_Release_Year>
+    <Program_Cost_Dollars>0</Program_Cost_Dollars>
+    <Program_Cost_Other_Code></Program_Cost_Other_Code>
+    <Program_Cost_Other></Program_Cost_Other>
+    <Program_Type>Freeware</Program_Type>
+    <Program_Release_Status>Beta</Program_Release_Status>
+    <Program_Install_Support>Install and Uninstall</Program_Install_Support>
+    <Program_OS_Support>Windows 10,Windows 11,Linux</Program_OS_Support>
+    <Program_Language>English,Russian</Program_Language>
+    <Program_Change_Info>Public beta. What is new: https://github.com/coinman-dev/own-backup/releases/tag/v0.2.1-beta</Program_Change_Info>
+    <Program_Specific_Category>Utilities</Program_Specific_Category>
+    <Program_Category_Class>System Utilities::Backup &amp; Restore</Program_Category_Class>
+    <Program_System_Requirements>Windows 10/11 x64 with Microsoft Edge WebView2 Runtime, or Ubuntu 24.04+ / Debian 13+ amd64; administrator rights to install</Program_System_Requirements>
+    <File_Info>
+      <File_Size_Bytes>17717778</File_Size_Bytes>
+      <File_Size_K>17303</File_Size_K>
+      <File_Size_MB>16.90</File_Size_MB>
+    </File_Info>
+    <Expire_Info>
+      <Has_Expire_Info>N</Has_Expire_Info>
+      <Expire_Count></Expire_Count>
+      <Expire_Based_On>Days</Expire_Based_On>
+      <Expire_Other_Info></Expire_Other_Info>
+      <Expire_Month></Expire_Month>
+      <Expire_Day></Expire_Day>
+      <Expire_Year></Expire_Year>
+    </Expire_Info>
+  </Program_Info>
+  <Program_Descriptions>
+    <English>
+      <Keywords>backup, disk image, disk imaging, system backup, incremental backup, differential backup, restore, bootable media, recovery, VHDX, qcow2, encryption, BitLocker, LUKS, VSS, Linux backup, Windows backup</Keywords>
+      <Char_Desc_45>Block-level backup of Windows and Linux disks</Char_Desc_45>
+      <Char_Desc_80>Disk and volume images for Windows and Linux: full, incremental, encrypted</Char_Desc_80>
+      <Char_Desc_250>Own Backup makes block-level images of Windows and Linux disks and volumes: full, incremental and differential backups in VHDX, qcow2 or encrypted OBK, real file exclusions, and boot media to restore the system disk.</Char_Desc_250>
+      <Char_Desc_450>Own Backup makes block-level images of Windows and Linux disks and volumes. Only used clusters are read, and excluded files are removed from the image. Full, incremental and differential backups go to VHDX, qcow2 or encrypted OBK (AES-256-GCM). A running system is copied from a snapshot. Restore a partition, a whole bootable disk or single files; boot media restore the system disk. Public beta, free for noncommercial use.</Char_Desc_450>
+      <Char_Desc_2000>Own Backup makes block-level images of Windows and Linux disks and volumes. A backup keeps a partition or a whole disk the way it was, so it can be put back exactly, including the disk the system boots from.
+
+- Full, incremental and differential backups of volumes and whole disks, on a schedule, on an event or by hand. A job can keep a sliding window of increments, the oldest folded into the base.
+- Only used clusters are read (NTFS, ReFS, FAT32, exFAT, ext2/3/4, XFS, btrfs). A running system is copied from a VSS snapshot on Windows and from an LVM or device-mapper snapshot on Linux.
+- Exclusions that really exclude: matched files are not read, and their entries are removed from the filesystem inside the image.
+- Three formats: VHDX (Windows mounts it by itself), qcow2 (zstd compression) and OBK (zstd and AES-256-GCM, opened with a password or a recovery key).
+- BitLocker volumes, locked ones included, and LUKS volumes are copied decrypted with their password or recovery key.
+- Per-block xxHash64 checksums and verification after a backup, on a schedule or on demand.
+- Restore of a partition or a whole bootable disk with its UEFI boot entries; the disk the system runs from is protected. Single files: mount a backup as a disk.
+- Boot media: one built from the computer's own Windows Recovery Environment, and a Linux one (Debian 13 live, UEFI with Secure Boot or BIOS).
+- Disk cleanup on Windows and Linux, with an analysis first and an optional cleanup before a backup.
+- A backup made on Windows opens, validates and restores on Linux, and back.
+
+Interface in English and Russian, light and dark themes. No advertising, no telemetry, no update checks.
+
+This is a public beta: check an important backup by restoring it before you rely on it. Free for noncommercial use under the PolyForm Noncommercial 1.0.0 license; commercial use needs a separate license.</Char_Desc_2000>
+    </English>
+    <Russian>
+      <Keywords>резервное копирование, образ диска, бэкап, резервная копия системы, инкрементная копия, дифференциальная копия, восстановление, загрузочный носитель, VHDX, qcow2, шифрование, BitLocker, LUKS, VSS, Linux, Windows</Keywords>
+      <Char_Desc_45>Образы дисков Windows и Linux блок за блоком</Char_Desc_45>
+      <Char_Desc_80>Образы дисков и томов Windows и Linux: полные, инкрементные, с шифрованием</Char_Desc_80>
+      <Char_Desc_250>Own Backup делает образы дисков и томов Windows и Linux блок за блоком: полные, инкрементные и дифференциальные копии в VHDX, qcow2 или зашифрованном OBK, настоящие исключения файлов и носитель для восстановления системного диска.</Char_Desc_250>
+      <Char_Desc_450>Own Backup делает образы дисков и томов Windows и Linux блок за блоком. Читаются только занятые кластеры, а исключённые файлы удаляются из образа. Полные, инкрементные и дифференциальные копии — в VHDX, qcow2 или зашифрованном OBK (AES-256-GCM). Работающая система копируется со снимка. Восстанавливается раздел, загрузочный диск или отдельные файлы. Публичная бета, бесплатно для некоммерческого использования.</Char_Desc_450>
+      <Char_Desc_2000>Own Backup делает образы дисков и томов Windows и Linux блок за блоком. Копия хранит раздел или весь диск таким, каким он был, поэтому его можно вернуть в точности — в том числе диск, с которого загружается система.
+
+- Полные, инкрементные и дифференциальные копии томов и целых дисков — по расписанию, по событию или вручную. Задание может держать скользящее окно инкрементов: старейший вливается в базу.
+- Читаются только занятые кластеры (NTFS, ReFS, FAT32, exFAT, ext2/3/4, XFS, btrfs). Работающая система копируется со снимка: в Windows — VSS, в Linux — LVM или device-mapper.
+- Исключения, которые действительно исключают: подходящие файлы не читаются, а записи о них удаляются из файловой системы внутри образа.
+- Три формата: VHDX (Windows подключает его сама), qcow2 (сжатие zstd) и OBK (zstd и AES-256-GCM, открывается паролем или ключом восстановления).
+- Тома BitLocker, в том числе заблокированные, и тома LUKS копируются расшифрованными — по их паролю или ключу восстановления.
+- Контрольные суммы xxHash64 на каждый блок; проверка после копии, по расписанию или в любой момент.
+- Восстановление раздела или целого загрузочного диска вместе с записями загрузки UEFI; диск, с которого работает система, защищён. Отдельные файлы — подключив копию как диск.
+- Загрузочные носители: из среды восстановления самой Windows этого компьютера и носитель Linux (Debian 13 live, UEFI с Secure Boot или BIOS).
+- Очистка диска в Windows и Linux: сначала анализ, по желанию — очистка перед копией.
+- Копия, сделанная в Windows, открывается, проверяется и восстанавливается в Linux, и наоборот.
+
+Интерфейс на русском и английском, светлая и тёмная темы. Нет рекламы, телеметрии и проверки обновлений.
+
+Это публичная бета: прежде чем полагаться на важную копию, проверьте её восстановлением. Бесплатно для некоммерческого использования по лицензии PolyForm Noncommercial 1.0.0; коммерческому использованию нужна отдельная лицензия.</Char_Desc_2000>
+    </Russian>
+  </Program_Descriptions>
+  <Web_Info>
+    <Application_URLs>
+      <Application_Info_URL>https://coinman-dev.github.io/own-backup/</Application_Info_URL>
+      <Application_Order_URL></Application_Order_URL>
+      <Application_Screenshot_URL>https://coinman-dev.github.io/own-backup/img/en/backup-dashboard.png</Application_Screenshot_URL>
+      <Application_Icon_URL>https://coinman-dev.github.io/own-backup/assets/icon-512.png</Application_Icon_URL>
+      <Application_XML_File_URL>https://coinman-dev.github.io/own-backup/pad.xml</Application_XML_File_URL>
+    </Application_URLs>
+    <Download_URLs>
+      <Primary_Download_URL>https://github.com/coinman-dev/own-backup/releases/download/v0.2.1-beta/own-backup-install_0.2.1-beta.exe</Primary_Download_URL>
+      <Secondary_Download_URL>https://github.com/coinman-dev/own-backup/releases/download/v0.2.1-beta/own-backup_0.2.1.beta_amd64.deb</Secondary_Download_URL>
+      <Additional_Download_URL_1>https://github.com/coinman-dev/own-backup/releases/download/v0.2.1-beta/OwnBackup-Linux-0.2.1.beta_amd64.iso</Additional_Download_URL_1>
+      <Additional_Download_URL_2>https://github.com/coinman-dev/own-backup/releases</Additional_Download_URL_2>
+    </Download_URLs>
+  </Web_Info>
+  <Permissions>
+    <Distribution_Permissions>Own Backup is free for noncommercial use under the PolyForm Noncommercial License 1.0.0. Software catalogs may list it and link to the official downloads. Redistribution must keep the LICENSE, NOTICE, COMMERCIAL-LICENSE.md and THIRD-PARTY-NOTICES files unchanged. Commercial use needs a separate license. This is a source-available license, not an OSI open source license.</Distribution_Permissions>
+    <EULA>PolyForm Noncommercial License 1.0.0: https://github.com/coinman-dev/own-backup/blob/main/LICENSE. Commercial use: https://github.com/coinman-dev/own-backup/blob/main/COMMERCIAL-LICENSE.md</EULA>
+  </Permissions>
+</XML_DIZ_INFO>

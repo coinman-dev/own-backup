@@ -82,6 +82,29 @@ pub fn fold_child_into_base(
     identity: RebuildIdentity,
     zstd_level: i32,
 ) -> Result<FoldStats> {
+    fold_child_into_base_with(
+        base,
+        victim,
+        chain,
+        metadata,
+        identity,
+        zstd_level,
+        &mut |_, _| Ok(()),
+    )
+}
+
+/// [`fold_child_into_base`], telling `progress` how many of the increment's
+/// clusters have been read (`done`, `total`). An `Err` from it stops the
+/// fold before its header is written: the base stays as it was.
+pub fn fold_child_into_base_with(
+    base: &Path,
+    victim: &Path,
+    chain: &ChainKey,
+    metadata: &[u8],
+    identity: RebuildIdentity,
+    zstd_level: i32,
+    progress: &mut dyn FnMut(u64, u64) -> Result<()>,
+) -> Result<FoldStats> {
     let mut child = ObkImage::open_path(victim, chain)?;
     let already_applied = {
         let parent = ObkImage::open_path(base, chain)?;
@@ -98,11 +121,16 @@ pub fn fold_child_into_base(
         .map(|(cluster, _)| cluster)
         .collect();
 
+    let total = clusters.len() as u64;
+    let mut done = 0u64;
+    progress(0, total)?;
     let stats = apply_changed_with(
         base,
         chain,
         &clusters,
-        move |cluster| {
+        |cluster| {
+            done += 1;
+            progress(done, total)?;
             // Deliberately the increment's OWN view, not its chain's: a cluster
             // it does not define is the base's already, and reading it through
             // the chain would copy the base onto itself.
@@ -127,6 +155,54 @@ pub fn fold_child_into_base(
         bytes_orphaned: stats.bytes_orphaned,
         already_applied,
     })
+}
+
+/// Fold `victim` into `base` by rebuilding the base into a fresh sibling:
+/// the base's records the increment does not replace, and the increment's
+/// own, moved whole without a new encryption, with `metadata` and `identity`
+/// as in [`fold_child_into_base`]. `check` reads the sibling before it is
+/// published in the base's place.
+///
+/// For a fold that would leave the base worth compacting at once
+/// ([`super::compact::fold_leaves_base_worth_compacting`]). The in-place fold
+/// appends the increment to the base, and the compaction after it writes the
+/// whole base again; here the increment is written once, nothing is
+/// decompressed or re-encrypted, and the base itself is not touched until the
+/// rename — a step stopped half-way leaves it exactly as it was. On
+/// 18.11.2026 the in-place fold of a 43 GB increment and the compaction after
+/// it took 80 minutes on the owner's backup disk.
+///
+/// `None` when the base already carries the increment's identity: an earlier
+/// attempt published the fold and was interrupted before saying so.
+pub fn fold_into_fresh_base(
+    base: &Path,
+    victim: &Path,
+    chain: &ChainKey,
+    metadata: &[u8],
+    identity: RebuildIdentity,
+    progress: &mut dyn FnMut(super::compact::SiblingPhase, u64, u64) -> Result<()>,
+    check: Option<super::compact::SiblingCheck<'_>>,
+) -> Result<Option<super::compact::CompactionStats>> {
+    let already_applied = {
+        let parent = ObkImage::open_path(base, chain)?;
+        let child = ObkImage::open_path(victim, chain)?;
+        check_fold(parent.root(), child.root())?
+    };
+    if already_applied {
+        return Ok(None);
+    }
+    super::compact::build_sibling(
+        base,
+        chain,
+        Some(super::compact::Overlay {
+            child: victim,
+            metadata,
+            identity,
+        }),
+        progress,
+        check,
+    )
+    .map(Some)
 }
 
 /// Is this pair foldable, and has the fold already happened?

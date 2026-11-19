@@ -87,6 +87,10 @@
     "ru": "Копия создана, но проверка отменена пользователем — образ не проверен.",
     "en": "The backup was created, but the validation was cancelled by the user — the image has not been validated."
   },
+  "lib.verify_interrupted_by_stop": {
+    "ru": "Копия создана, но проверка после неё прервана: служба остановилась — компьютер выключался или перезагружался, либо обновлялась программа. Образ не проверен; старые версии в этот раз не удалялись.",
+    "en": "The backup was created, but the validation after it was interrupted: the service stopped — the computer was shutting down or restarting, or the program was being updated. The image has not been validated; older versions were not removed this time."
+  },
   "lib.shutdown_message": {
     "ru": "Own Backup: копия «%{job}» готова, компьютер выключится",
     "en": "Own Backup: backup “%{job}” is done, the computer will shut down"
@@ -122,6 +126,14 @@
   "lib.consolidation_unfinished": {
     "ru": "Прерванная консолидация не доведена до конца: %{bases}. Пока состояние цепочки неизвестно, копировать в неё и удалять её нельзя — подробности в журнале службы.",
     "en": "An interrupted consolidation was not finished: %{bases}. Until the chain's state is known, it cannot be backed up to or deleted — see the service log for details."
+  },
+  "lib.consolidation_failed": {
+    "ru": "Копия сделана, но объединение старых версий не завершено: %{error}. Пока это не решено, в эту цепочку не копируется ничего нового — подробности в журнале службы.",
+    "en": "The backup was made, but merging older versions did not finish: %{error}. Until this is resolved nothing new is backed up to this chain — see the service log for details."
+  },
+  "lib.consolidation_stopped": {
+    "ru": "Объединение старых версий остановлено — оно завершится при следующем запуске.",
+    "en": "Merging older versions was stopped — it will finish on the next run."
   },
   "lib.no_source_volume": {
     "ru": "У задания не выбран ни один том-источник",

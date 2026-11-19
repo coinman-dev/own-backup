@@ -26,6 +26,13 @@
   let health: ServiceHealth | null = $state(null);
   let dataDir = $state('');
   let logMirrorDir = $state('');
+  let siteError = $state('');
+  // Shown here; opened by the window's own backend, which knows only this address.
+  const SITE = 'https://coinman-dev.github.io/own-backup/';
+  function openSite() {
+    siteError = '';
+    api.openProjectSite().catch((e) => (siteError = String(e)));
+  }
 
   onMount(async () => {
     ensureAppVersion();
@@ -91,6 +98,13 @@
     <p class="app-description">{m.about_description()}</p>
 
     <div class="info-table">
+      <div class="info-row">
+        <span class="info-label">{m.about_site()}</span>
+        <span class="info-value">
+          <button class="site-link" onclick={openSite}>{SITE}</button>
+          {#if siteError}<span class="site-error">{siteError}</span>{/if}
+        </span>
+      </div>
       <div class="info-row">
         <span class="info-label">{m.about_ui_version()}</span>
         <span class="info-value">{appVersion.value || '—'}</span>
@@ -208,6 +222,21 @@
     font-weight: 600;
     color: var(--head);
     text-align: right;
+  }
+
+  .site-link {
+    border: none;
+    background: none;
+    padding: 0;
+    font: inherit;
+    color: var(--accent-text);
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  .site-error {
+    display: block;
+    font-weight: 400;
+    color: var(--error-text);
   }
 
   .section-heading {

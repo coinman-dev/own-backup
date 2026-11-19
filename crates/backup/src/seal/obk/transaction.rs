@@ -16,9 +16,41 @@ use super::bad;
 use super::reader::ObkImage;
 use crate::seal::ChainKey;
 
+/// Stage a copy of the image, let `edit` change it, publish it.
 pub(super) fn replace<T>(
     path: &Path,
     chain: &ChainKey,
+    edit: impl FnOnce(&Path) -> Result<T>,
+) -> Result<T> {
+    replace_with(path, chain, Stage::Copy, edit)
+}
+
+/// The same for an edit that writes the whole image anew (compaction): the
+/// stage starts empty, with the image's permissions only.
+///
+/// Copying the image first, only for `edit` to truncate it, cost a full read
+/// and write of the image on the same disk — on 18.11.2026 98.7 GB, about an
+/// hour on the owner's backup disk — and as much free space again.
+pub(super) fn replace_fresh<T>(
+    path: &Path,
+    chain: &ChainKey,
+    edit: impl FnOnce(&Path) -> Result<T>,
+) -> Result<T> {
+    replace_with(path, chain, Stage::Empty, edit)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// The image's bytes, for an edit in place.
+    Copy,
+    /// Nothing, for an edit that writes everything.
+    Empty,
+}
+
+fn replace_with<T>(
+    path: &Path,
+    chain: &ChainKey,
+    contents: Stage,
     edit: impl FnOnce(&Path) -> Result<T>,
 ) -> Result<T> {
     // Resolve a symlink once, so publication replaces the image it points to
@@ -32,10 +64,18 @@ pub(super) fn replace<T>(
     // Hold ownership until publication and TempPath cleanup have finished.
     let (_owner, stage) = super::staging::create(&target, chain)?;
 
-    // `copy` keeps the source file's permissions. It also lets the OS use a
-    // filesystem copy primitive when one is available; the stage may still
-    // need as much free space as the complete image.
-    std::fs::copy(&target, &stage)?;
+    match contents {
+        // `copy` keeps the source file's permissions. It also lets the OS use
+        // a filesystem copy primitive when one is available; the stage may
+        // still need as much free space as the complete image.
+        Stage::Copy => {
+            std::fs::copy(&target, &stage)?;
+        }
+        Stage::Empty => {
+            OpenOptions::new().write(true).truncate(true).open(&stage)?;
+            std::fs::set_permissions(&stage, std::fs::metadata(&target)?.permissions())?;
+        }
+    }
     copy_security(&target, &stage)?;
     let value = edit(&stage)?;
     ObkImage::open_path(&stage, chain)?;
@@ -257,6 +297,50 @@ mod tests {
             );
         }
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    /// Сжатие пишет образ заново: его временный файл начинается пустым — без
+    /// копирования исходного целиком (18.11.2026: 98,7 ГБ, около часа на HDD) —
+    /// но с правами исходного, и исходник до публикации не меняется.
+    #[test]
+    fn a_fresh_stage_starts_empty_with_the_images_permissions() {
+        let f = Fixture::new();
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("full.obk");
+        let mut writer = ObkWriter::create(
+            &base,
+            &f.chain,
+            f.options(Uuid::new_v4(), ChainRole::Full, None),
+        )
+        .unwrap();
+        writer
+            .write_cluster(0, &vec![0x42; 1 << cluster_bits()])
+            .unwrap();
+        writer.finish(b"point").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o640)).unwrap();
+        }
+        let original = std::fs::read(&base).unwrap();
+        let seen = replace_fresh(&base, &f.chain, |stage| {
+            let len = std::fs::metadata(stage)?.len();
+            assert_eq!(len, 0, "the stage starts empty");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    std::fs::metadata(stage)?.permissions().mode() & 0o777,
+                    0o640
+                );
+            }
+            assert_eq!(std::fs::read(&base)?, original, "the original is untouched");
+            // Leave the stage unopenable, so nothing is published.
+            Ok(len)
+        });
+        assert!(seen.is_err(), "an empty stage must not be published");
+        assert_eq!(std::fs::read(&base).unwrap(), original);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

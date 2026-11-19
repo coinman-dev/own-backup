@@ -29,8 +29,8 @@ use own_backup_common::{tr, OwnBackupError};
 
 use crate::engine_watch::EngineWatch;
 use crate::{
-    apply_consolidation, apply_retention, backup_callback_checkpoint, EventSink, Job, JobProgress,
-    JobRun, Pace, VerifyRate,
+    apply_consolidation, apply_retention, backup_callback_checkpoint, ConsolidationStop, EventSink,
+    Job, JobProgress, JobRun, Pace, RunTail, VerifyRate,
 };
 
 /// The run a progress report belongs to and where it goes — the same for the
@@ -165,6 +165,8 @@ impl<'a> CopyProgress<'a> {
                     excluded_files: p.excluded.map(|(f, _)| f),
                     excluded_bytes: p.excluded.map(|(_, b)| b),
                     stalled_secs: None,
+                    phase_started_ms: None,
+                    overall_percent: None,
                 },
             );
         }
@@ -235,6 +237,8 @@ pub(crate) fn verify_copy(
                     excluded_files: None,
                     excluded_bytes: None,
                     stalled_secs: None,
+                    phase_started_ms: None,
+                    overall_percent: None,
                 },
             );
         }
@@ -393,6 +397,7 @@ impl VolumeTotals {
         fatal: Option<(String, String)>,
         job: &Job,
         keys: Option<&ArchiveKeys>,
+        tail: &RunTail<'_>,
     ) -> JobRun {
         run.finished_at = chrono::Utc::now().to_rfc3339();
         run.duration_secs = self.total_dur;
@@ -419,7 +424,7 @@ impl VolumeTotals {
 
         // Retention runs after a fully successful backup, independently per volume.
         // Its failures are logged, never surfaced as a run failure.
-        retain_and_consolidate(&mut run, job, &self.protected, keys);
+        retain_and_consolidate(&mut run, job, &self.protected, keys, tail);
 
         run
     }
@@ -508,7 +513,25 @@ pub(crate) fn retain_and_consolidate(
     job: &Job,
     protected: &[(String, PathBuf)],
     keys: Option<&ArchiveKeys>,
+    tail: &RunTail<'_>,
 ) {
-    apply_retention(job, protected);
-    run.consolidated_increments = apply_consolidation(job, protected, keys);
+    let result = crate::off_the_workers(|| {
+        apply_retention(job, protected);
+        apply_consolidation(job, protected, keys, tail)
+    });
+    run.consolidated_increments = result.folded;
+    match result.stop {
+        None => {}
+        // The copy is made and was checked; only the older versions' merge
+        // was stopped, and the next run takes it up where it stands.
+        Some(ConsolidationStop::Cancelled) => {
+            run.add_note(own_backup_common::tr_both!("lib.consolidation_stopped"))
+        }
+        // The chain this copy joined is mid-merge in a state nobody has
+        // confirmed: not a success, whatever the copy itself was.
+        Some(ConsolidationStop::Failed(msg)) => {
+            run.status = "error".into();
+            run.error = msg;
+        }
+    }
 }

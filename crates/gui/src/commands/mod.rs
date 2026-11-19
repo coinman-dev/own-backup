@@ -7,6 +7,7 @@ pub mod linux_media_download;
 #[cfg(target_os = "linux")]
 pub mod medium_volumes;
 pub mod settings;
+pub mod updates;
 
 /// A failure a screen acts on by its kind rather than its words: `code` is
 /// fixed and the frontend branches on it, `message` is only shown. Most

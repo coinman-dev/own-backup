@@ -733,6 +733,7 @@ fn main() {
             commands::disks::drive_signature,
             commands::disks::list_hidden_volumes,
             commands::disks::set_volume_letter,
+            commands::disks::set_volume_mount,
             // --- new job model (phase 6) ---
             commands::backup_jobs::list_backup_jobs,
             commands::backup_jobs::get_backup_job,
@@ -751,9 +752,11 @@ fn main() {
             commands::backup_jobs::decrypt_volume,
             commands::backup_jobs::run_backup_job,
             commands::backup_jobs::cancel_queued_job,
+            commands::backup_jobs::set_shutdown_after_run,
             commands::backup_jobs::cancel_running_backup,
             commands::backup_jobs::get_run_queue,
             commands::backup_jobs::list_activity,
+            commands::backup_jobs::clear_activity,
             // --- engine ops used by Restore/Tools ---
             commands::engine::inspect_backup_image,
             commands::engine::restore_now,
@@ -804,6 +807,9 @@ fn main() {
             commands::settings::set_tray_icon_enabled,
             commands::settings::platform_info,
             commands::settings::relaunch_elevated,
+            commands::updates::check_for_updates,
+            commands::updates::open_update_release,
+            commands::updates::open_project_site,
             // The boot medium has no taskbar to say which layout is active.
             commands::keyboard::keyboard_layout,
             // …and every password field says it too, beside its eye.

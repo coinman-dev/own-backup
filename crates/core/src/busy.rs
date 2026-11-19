@@ -525,6 +525,53 @@ pub fn chain_resource(folder: &std::path::Path) -> String {
     }
 }
 
+/// The resource name of a physical disk a backup reads and a drive-letter
+/// change touches: the two must not meet on one disk, and need not wait for
+/// each other on two.
+pub fn physical_disk_resource(number: u32) -> String {
+    format!("physical-disk:{number}")
+}
+
+/// Named by a backup whose disks are not known, and by every drive-letter
+/// change: such a backup keeps letters off every disk while it runs.
+pub const ANY_PHYSICAL_DISK: &str = "physical-disk:any";
+
+/// The physical disks a backup of `job` reads: the disk of a whole-disk job,
+/// the disks the saved layout puts its volumes on — or, when a volume cannot
+/// be placed, [`ANY_PHYSICAL_DISK`].
+pub fn backup_disk_resources(job: &crate::Job) -> Vec<String> {
+    if let Some(disk) = &job.disk_source {
+        return vec![physical_disk_resource(disk.disk_number)];
+    }
+    let mut out: Vec<String> = Vec::new();
+    for device in job.source_list() {
+        let disk = job.source_disks.iter().find(|d| {
+            d.partitions
+                .iter()
+                .any(|p| p.volume_device.eq_ignore_ascii_case(device.trim()))
+        });
+        let number = disk.and_then(|d| {
+            d.device_id
+                .rsplit("PhysicalDrive")
+                .next()
+                .and_then(|n| n.parse::<u32>().ok())
+        });
+        match number {
+            Some(n) => {
+                let name = physical_disk_resource(n);
+                if !out.contains(&name) {
+                    out.push(name);
+                }
+            }
+            None => return vec![ANY_PHYSICAL_DISK.to_string()],
+        }
+    }
+    if out.is_empty() {
+        out.push(ANY_PHYSICAL_DISK.to_string());
+    }
+    out
+}
+
 /// The resource name of the chain the image at `image` belongs to: its folder.
 pub fn image_chain_resource(image: &std::path::Path) -> String {
     chain_resource(image.parent().unwrap_or(std::path::Path::new("")))
@@ -777,6 +824,36 @@ mod tests {
             "nothing beside a restore"
         );
         drop(restore);
+    }
+
+    /// A drive letter changes beside a copy of another disk, not on the disk
+    /// the copy reads — and not at all beside a copy whose disks are unknown.
+    #[tokio::test]
+    async fn a_drive_letter_waits_only_for_a_copy_of_its_disk() {
+        let letter = |disk: u32| {
+            Doing::new("назначение буквы", "S:")
+                .shared([ANY_PHYSICAL_DISK.to_string(), physical_disk_resource(disk)])
+        };
+        let busy = Busy::new();
+        let copy = busy
+            .reserve(
+                Doing::new("копирование", "C")
+                    .shared(["chain:/f/c".to_string(), physical_disk_resource(4)]),
+            )
+            .unwrap();
+        let other = busy
+            .reserve(letter(3))
+            .expect("another disk: beside the copy");
+        drop(other);
+        assert!(busy.reserve(letter(4)).is_err(), "the disk the copy reads");
+        drop(copy);
+        assert!(busy.reserve(letter(4)).is_ok(), "after the copy");
+
+        let unknown = busy
+            .reserve(Doing::new("копирование", "D").shared([ANY_PHYSICAL_DISK]))
+            .unwrap();
+        assert!(busy.reserve(letter(3)).is_err(), "disks unknown: none");
+        drop(unknown);
     }
 
     /// A scheduled verification steps aside for a person: cancelled, ended,

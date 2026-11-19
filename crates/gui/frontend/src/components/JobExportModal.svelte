@@ -16,6 +16,7 @@
   import { media } from '../lib/mediaStore.svelte';
   import { pickPath } from '../lib/pickPath.svelte';
   import { formatBytes, formatDuration } from '../lib/format';
+  import { steady } from '../lib/steady.svelte';
   import { choiceLabel, newestFirst, severalSources, type VersionChoice } from '../lib/jobVersions';
   import type { ArchiveSecret, EngineProgress, ExportSummary, Job } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
@@ -35,6 +36,9 @@
   let folder = $state(job.dest_folder);
   let fileName = $state('');
   let progress = $state<EngineProgress | null>(null);
+  // Once a second, the speed averaged over that second (`steady`).
+  const shownSpeed = steady(() => progress?.speed_mbps ?? NaN);
+  const shownBytes = steady(() => progress?.bytes_done ?? NaN, 'latest');
   let summary = $state<ExportSummary | null>(null);
   let failure = $state('');
   let unlockBusy = $state(false);
@@ -222,7 +226,7 @@
       <div class="bar"><div class="bar-fill" style="width:{progress?.percent ?? 0}%"></div></div>
       <div class="percent">
         {#if progress}
-          {formatBytes(progress.bytes_done)} · {m.dash_speed({ speed: progress.speed_mbps.toFixed(1) })} · {progress.percent} %
+          {formatBytes(Number.isFinite(shownBytes.value) ? shownBytes.value : progress.bytes_done)} · {m.dash_speed({ speed: (Number.isFinite(shownSpeed.value) ? shownSpeed.value : progress.speed_mbps).toFixed(1) })} · {progress.percent} %
         {:else}
           0 %
         {/if}

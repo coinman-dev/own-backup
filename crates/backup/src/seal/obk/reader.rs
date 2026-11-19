@@ -57,6 +57,17 @@ impl ObkImage<BufReader<File>> {
     }
 }
 
+/// Where a data record lies in its file.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct RecordAt {
+    pub id: crate::seal::cluster::RecordId,
+    pub offset: u64,
+    /// The cluster table's length for it.
+    pub length: u64,
+    /// The bytes to read: the length, capped at the largest record.
+    pub capped: usize,
+}
+
 /// The open header on its own, for listings: no key, no authentication, and
 /// therefore nothing from it may be shown as a fact about the backup's content.
 pub fn read_open_header(path: &Path) -> Result<ObkOpenHeader> {
@@ -278,10 +289,20 @@ impl<R: Read + Seek> ObkImage<R> {
 
     /// Relocate ciphertext only after authenticating and decoding it in its
     /// unchanged chain/guest-cluster context. No encryption nonce is reused.
+    #[cfg(test)]
     pub(super) fn authenticated_data_record(
         &mut self,
         cluster: u64,
     ) -> Result<crate::seal::cluster::SealedRecord> {
+        let at = self.data_record_at(cluster)?;
+        let bytes = read_bytes(&mut self.r, at.offset, at.capped)?;
+        self.authenticate_data_record(cluster, &at, bytes)
+    }
+
+    /// Where a present cluster's record lies, from the authenticated index
+    /// and the cluster table — for a caller that reads many records in one
+    /// request and hands each back to [`Self::authenticate_data_record`].
+    pub(super) fn data_record_at(&mut self, cluster: u64) -> Result<RecordAt> {
         let ClusterState::Present(id) = self.cluster_state(cluster)? else {
             return Err(bad("relocation requires a present data record"));
         };
@@ -292,8 +313,23 @@ impl<R: Read + Seek> ObkImage<R> {
         else {
             return Err(bad("data index and relocation descriptor disagree"));
         };
-        let capped = (length as usize).min(HEADER_LEN + MAX_PAYLOAD_LEN + TAG_LEN);
-        let mut bytes = read_bytes(&mut self.r, host_offset, capped)?;
+        Ok(RecordAt {
+            id,
+            offset: host_offset,
+            length,
+            capped: (length as usize).min(HEADER_LEN + MAX_PAYLOAD_LEN + TAG_LEN),
+        })
+    }
+
+    /// Authenticate the bytes read at `at` (at most `at.capped` of them; fewer
+    /// only at the end of the file) as `cluster`'s current record.
+    pub(super) fn authenticate_data_record(
+        &self,
+        cluster: u64,
+        at: &RecordAt,
+        mut bytes: Vec<u8>,
+    ) -> Result<crate::seal::cluster::SealedRecord> {
+        let (id, length) = (at.id, at.length);
         let framed = framed_len(&bytes)?;
         if framed > bytes.len() || framed as u64 > length {
             return Err(bad("relocation record runs beyond its descriptor"));

@@ -36,6 +36,9 @@ pub struct AppState {
     pub busy: Arc<own_backup_core::busy::Busy>,
     /// Fan-out of orchestration events to `StreamEvents` subscribers.
     pub events: broadcast::Sender<proto::Event>,
+    /// The runs going on now, as last reported, for a window that connects
+    /// in the middle of one.
+    pub live: Arc<crate::grpc_server::LiveProgress>,
     /// Passwords for encrypted volumes (in-memory cache + OS-protected store).
     pub passwords: Arc<PasswordStore>,
     /// The disk cleanup: the window's, the scheduled one, the one before a
@@ -66,6 +69,7 @@ impl AppState {
         job_tx: UnboundedSender<String>,
         cancel: Arc<AtomicBool>,
         events: broadcast::Sender<proto::Event>,
+        live: Arc<crate::grpc_server::LiveProgress>,
         passwords: Arc<PasswordStore>,
     ) -> Arc<Self> {
         let auto = Arc::new(crate::auto_cleanup::AutoCleanup::new(
@@ -82,6 +86,7 @@ impl AppState {
             cancel,
             busy,
             events,
+            live,
             passwords,
             archive_setup: Arc::new(own_backup_core::archive_setup::ArchiveSetup::new()),
             active_mounts: std::sync::Mutex::new(Vec::new()),

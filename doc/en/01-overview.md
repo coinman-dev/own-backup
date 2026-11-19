@@ -43,8 +43,8 @@ restore on the other.
   goes to a folder — a local disk, a USB disk or a mounted network share.
 - It does not synchronise files or keep file versions one by one. To get one
   file back, mount the backup and copy the file.
-- It does not send anything anywhere: no advertising, no telemetry, no update
-  checks.
+- No advertising or telemetry. Update checks contact only GitHub at the chosen
+  interval and can be disabled in Settings.
 
 ## How it is built
 

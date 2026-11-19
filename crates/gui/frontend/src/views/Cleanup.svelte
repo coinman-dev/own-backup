@@ -342,7 +342,14 @@
     const un = listen<CleanupProgress>('cleanup-progress', (e) => {
       const p = e.payload;
       if (cleanupState.busy && p.mode === cleanupState.busy) {
-        cleanupState.tallies = { ...cleanupState.tallies, [p.item]: p };
+        // A report of what the item is busy with counts nothing: kept apart,
+        // so an item being measured does not read as «nothing found».
+        if (p.stage) {
+          cleanupState.current = { item: p.item, stage: p.stage === 'started' ? null : p.stage };
+        } else {
+          if (cleanupState.current?.item !== p.item) cleanupState.current = { item: p.item, stage: null };
+          cleanupState.tallies = { ...cleanupState.tallies, [p.item]: p };
+        }
       }
     });
     return () => {
@@ -455,6 +462,7 @@
     error = null;
     cleanupState.report = null;
     cleanupState.busy = mode;
+    cleanupState.current = null;
     cleanupState.shown = mode;
     cleanupState.stale = false;
     cleanupState.tallies = {};
@@ -469,8 +477,24 @@
       error = String(e);
     } finally {
       cleanupState.busy = null;
+      cleanupState.current = null;
     }
   }
+
+  const STAGE_TEXT: Record<string, () => string> = {
+    store_analyze: m.cl_stage_store_analyze,
+    store_cleanup: m.cl_stage_store_cleanup,
+    store_recount: m.cl_stage_store_recount,
+  };
+  /** «Сейчас: Очистка обновлений Windows — DISM очищает…», while busy. */
+  const nowText = $derived.by(() => {
+    const c = cleanupState.current;
+    if (!cleanupState.busy || !c) return '';
+    const label =
+      (catalog?.groups ?? []).flatMap((g) => g.items).find((i) => i.id === c.item)?.label ?? c.item;
+    const stage = c.stage ? STAGE_TEXT[c.stage]?.() : '';
+    return stage ? m.cl_now_stage({ item: label, stage }) : m.cl_now({ item: label });
+  });
 
   function cancel() {
     api.cleanupCancel().catch(() => {});
@@ -896,7 +920,13 @@
   {/if}
 
   <div class="footer">
-    <div class="hint">{hint()}</div>
+    <div class="hint">
+      {hint()}
+      {#if cleanupState.busy}
+        {#if nowText}<div class="now">{nowText}</div>{/if}
+        <div class="run-bar" role="progressbar" aria-busy="true"><div></div></div>
+      {/if}
+    </div>
     {#if askElevate && !cleanupState.busy}
       <button class="btn outline" onclick={() => (askElevate = false)}>{isWindows() ? m.common_cancel() : m.common_close()}</button>
       {#if isWindows()}<button class="btn green" onclick={elevate}>{m.cl_elevate()}</button>{/if}
@@ -978,7 +1008,13 @@
   .user { flex-wrap: wrap; }
   .user .note { flex-basis: 100%; padding-left: 24px; font-size: 12px; margin-top: -2px; }
   .banner.err { margin-top: 16px; padding: 10px 14px; font-size: 13px; color: var(--error-text); background: var(--error-soft); border: 1px solid var(--error-line); border-radius: 8px; overflow-wrap: anywhere; }
-  .hint { flex: 1; font-size: 13px; color: var(--text-secondary); }
+  .hint { flex: 1; min-width: 0; font-size: 13px; color: var(--text-secondary); }
+  .hint .now { margin-top: 3px; font-size: 12px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* Runs while the service works: the count above can stand still for minutes
+     (DISM), and a still line read as a hang. */
+  .run-bar { margin-top: 6px; height: 4px; border-radius: 2px; background: var(--track); overflow: hidden; max-width: 420px; }
+  .run-bar > div { width: 30%; height: 100%; border-radius: 2px; background: var(--primary); animation: run-bar 1.4s ease-in-out infinite; }
+  @keyframes run-bar { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
   /* The bar's buttons, as on the job dashboard (.footer is global). */
   .btn { border-radius: 6px; padding: 10px 24px; font-size: 14px; font-weight: 600; font-family: var(--font); cursor: pointer; border: 1px solid transparent; transition: background-color .15s ease; }
   .btn:disabled { opacity: .45; cursor: default; }

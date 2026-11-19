@@ -147,6 +147,8 @@ mod tests {
             excluded_files: None,
             excluded_bytes: None,
             stalled_secs: None,
+            phase_started_ms: None,
+            overall_percent: None,
         }
     }
 

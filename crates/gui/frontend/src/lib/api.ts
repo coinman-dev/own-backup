@@ -54,6 +54,7 @@ import type {
   ArchiveImageInfo,
   ArchiveSecret,
   BegunArchiveEncryption,
+  UpdateCheckResult,
 } from './types';
 
 /** Spread a secret into a Tauri call's arguments, and nothing when there is
@@ -125,6 +126,8 @@ export const api = {
   listHiddenVolumes: () => invoke<HiddenVolume[]>('list_hidden_volumes'),
   setVolumeLetter: (device: string, letter: string | null) =>
     invoke<HiddenVolume[]>('set_volume_letter', { device, letter }),
+  setVolumeMount: (device: string, mount: boolean) =>
+    invoke<HiddenVolume[]>('set_volume_mount', { device, mount }),
 
   // --- job model (phase 6) ---
   listBackupJobs: () => invoke<Job[]>('list_backup_jobs'),
@@ -164,9 +167,12 @@ export const api = {
     invoke<DecryptResult>('decrypt_volume', { volume, password, remember }),
   runBackupJob: (id: string) => invoke<void>('run_backup_job', { id }),
   cancelQueuedJob: (id: string) => invoke<void>('cancel_queued_job', { id }),
+  setShutdownAfterRun: (id: string, on: boolean) =>
+    invoke<QueueSnapshot>('set_shutdown_after_run', { id, on }),
   cancelRunningBackup: () => invoke<void>('cancel_running_backup'),
   getRunQueue: () => invoke<QueueSnapshot>('get_run_queue'),
   listActivity: () => invoke<JobRun[]>('list_activity'),
+  clearActivity: () => invoke<{ runs: number; restores: number }>('clear_activity'),
 
   // --- engine ops (Restore / Tools) ---
   // Each takes what the person typed to open an ENCRYPTED copy. A manual
@@ -302,6 +308,9 @@ export const api = {
   // --- misc ---
   getConfig: () => invoke<Record<string, unknown>>('get_config'),
   saveConfig: (config: Record<string, unknown>) => invoke<void>('save_config', { config }),
+  checkForUpdates: (force = false) => invoke<UpdateCheckResult>('check_for_updates', { force }),
+  openUpdateRelease: (url: string) => invoke<void>('open_update_release', { url }),
+  openProjectSite: () => invoke<void>('open_project_site'),
   /** The resolved language (`ru`/`en`): the GUI process's own messages and,
    *  through the config, the service's. */
   setUiLanguage: (lang: string) => invoke<void>('set_ui_language', { lang }),

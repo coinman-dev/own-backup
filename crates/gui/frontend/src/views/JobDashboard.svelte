@@ -11,6 +11,7 @@
   import RunSummary from '../components/RunSummary.svelte';
   import type { Job } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
+  import { steady } from '../lib/steady.svelte';
   import { intlLocale } from '../lib/i18n.svelte';
   import { joinPath } from '../lib/paths';
 
@@ -41,11 +42,20 @@
   // once stood behind a hung USB device under "сброс кэша" (2026-10-24).
   const releasing = $derived(progress?.phase === 'release');
   const opening = $derived(progress?.phase === 'exclusions-open');
+  // After the copy and its check: the oldest increment folded into the full
+  // copy (no count — the bar runs), then that full copy read back before the
+  // increment is deleted. Minutes of work that used to show as a check frozen
+  // at 100 % (16.11.2026: 3.5 min on a 64 GB base).
+  const consolidating = $derived(progress?.phase === 'consolidate');
+  const consolidateChecking = $derived(progress?.phase === 'consolidate-verify');
   /* Бегущая полоса — только когда считать нечего. У удаления исключённых
      файлов итог есть (сколько путей велено удалить), поэтому там обычная
      шкала и честное «Осталось»; «сброс кэша» итога не имеет никогда. */
   const indetBar = $derived(
-    finalizing || releasing || opening || (excluding && (progress?.blocks_total ?? 0) === 0),
+    finalizing ||
+      releasing ||
+      opening ||
+      ((excluding || consolidating || consolidateChecking) && (progress?.blocks_total ?? 0) === 0),
   );
   /** The job copies an encrypted container (BitLocker/LUKS) that it opens with
    *  a password: the copy then holds the volume DECRYPTED. Without archive
@@ -67,6 +77,21 @@
   });
   /** How the last attempt ended — the ✓/✕ and the banner under the stats. */
   const lastRun = $derived(job.last_run);
+  /** The job itself switches the computer off after every copy. */
+  const jobShutsDown = $derived(job.advanced.after_backup === 'shutdown');
+  let shutdownBusy = $state(false);
+  let shutdownErr = $state('');
+  async function toggleShutdown(on: boolean) {
+    shutdownBusy = true;
+    shutdownErr = '';
+    try {
+      jobs.queue = await api.setShutdownAfterRun(job.id, on);
+    } catch (e) {
+      shutdownErr = String(e);
+    } finally {
+      shutdownBusy = false;
+    }
+  }
   const lastVerification = $derived(job.last_verification);
   /** What the job HAS: the newest copy, its size and what is in it. A failed
    *  attempt after it changes nothing about that (see `lastSuccessfulRun`). */
@@ -99,14 +124,21 @@
     return onlyThis ? m.dash_verify_this() : m.dash_verify_all();
   });
 
-  // The round indicator spans BOTH phases when "проверять после создания" is on:
-  // 0–50 % = backup, 50–100 % = verify. The bar below stays per-phase.
-  // "prepare" (exclusion scan) sits at 0 %; "finalize" (flush to disk) means the
-  // copy is done, so the ring holds at the end of the backup half.
+  // The round indicator is the WHOLE run: the service outlines it before it
+  // starts — the copy, its check, the consolidation after it, each weighted
+  // by what it reads and writes — and stamps every event with the share
+  // behind it (`overall_percent`). It once held 100 % through a consolidation
+  // that took 45 of the run's 65 minutes (18.11.2026).
+  //
+  // Without that stamp (an older service, a job of several volumes): 0–50 % =
+  // backup, 50–100 % = verify, and a consolidation shows its own phase.
+  // The bar below stays per-phase.
   const ringPercent = $derived.by(() => {
     const p = progress;
+    if (p?.overall_percent != null) return p.overall_percent;
     if (!p || p.phase === 'prepare') return 0;
     if (p.phase === 'scheduled-verify') return p.percent;
+    if (p.phase === 'consolidate' || p.phase === 'consolidate-verify') return p.percent;
     if (['finalize', 'release', 'exclusions-open', 'exclusions'].includes(p.phase))
       return job.advanced.validate_after ? 50 : 100;
     if (job.advanced.validate_after) {
@@ -120,13 +152,18 @@
   // and a clock kept here started again from zero on the way back.
   let nowMs = $state(Date.now());
   const eta = $derived(running ? etaMs(job.id) : NaN);
+  // What the line under the bar shows: once a second, the speed and the time
+  // left averaged over that second (`steady`).
+  const shownEta = steady(() => eta);
+  const shownSpeed = steady(() => (running && progress ? progress.speed_mbps : NaN));
+  const shownDone = steady(() => (running && progress ? progress.blocks_done : NaN), 'latest');
 
   // The only thing this view still ticks: the "Прошло" line, which has to
   // move on its own between progress messages.
   $effect(() => {
     if (!running) return;
     nowMs = Date.now();
-    const id = setInterval(() => (nowMs = Date.now()), 500);
+    const id = setInterval(() => (nowMs = Date.now()), 1000);
     return () => clearInterval(id);
   });
 
@@ -353,6 +390,8 @@
           {:else if excluding || opening}{m.dash_phase_exclusions()}
           {:else if releasing}{m.dash_phase_release()}
           {:else if finalizing}{m.dash_phase_finalize()}
+          {:else if consolidating}{m.dash_phase_consolidate()}
+          {:else if consolidateChecking}{m.dash_phase_consolidate_verify()}
           {:else if verifying}{verifyLabel}
           {:else}{m.dash_phase_backup()}{/if}
         </span>
@@ -376,21 +415,23 @@
               {m.dash_release_note()}
             {:else if finalizing}
               {m.dash_finalizing_note()}
+            {:else if (consolidating || consolidateChecking) && progress.blocks_total === 0}
+              {m.dash_consolidate_note()}
             {:else}
               <!-- Пробел перед «·» пишется явно: в начале блока {#if} Svelte
                    его срезает, и получалось «блоков· 85.1 МБ/с». -->
-              {m.dash_blocks({ done: progress.blocks_done, total: progress.blocks_total })}{#if progress.speed_mbps > 0}{'\u00a0· '}{m.dash_speed({ speed: progress.speed_mbps.toFixed(1) })}{/if}
+              {m.dash_blocks({ done: Number.isFinite(shownDone.value) ? shownDone.value : progress.blocks_done, total: progress.blocks_total })}{#if shownSpeed.value > 0}{'\u00a0· '}{m.dash_speed({ speed: shownSpeed.value.toFixed(1) })}{/if}
             {/if}
           </span>
         {/if}
       </div>
-      <div class="bar"><div class="bar-fill" class:verify={verifying} class:indet={indetBar} style="width:{indetBar ? 100 : (progress?.percent ?? 0)}%"></div></div>
+      <div class="bar"><div class="bar-fill" class:verify={verifying || consolidateChecking} class:indet={indetBar} style="width:{indetBar ? 100 : (progress?.percent ?? 0)}%"></div></div>
       <div class="progress-meta">
         <span class="route" title="{sourceSummary(job)} → {destPath}">
           {sourceSummary(job)} → {destPath}
         </span>
         <span class="times">
-          {m.dash_elapsed({ time: formatClock(elapsedMs) })} · {m.dash_remaining({ time: Number.isFinite(eta) ? '~' + formatClock(eta) : m.dash_estimating() })}
+          {m.dash_elapsed({ time: formatClock(elapsedMs) })} · {m.dash_remaining({ time: Number.isFinite(shownEta.value) ? '~' + formatClock(shownEta.value) : m.dash_estimating() })}
         </span>
       </div>
       <!-- The service says when the copy has stood still for minutes: a backup
@@ -419,12 +460,16 @@
             <span class="bdot">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
             </span>
-            <span><RunSummary run={lastRun} /></span>
+            <span class="brief"><RunSummary run={lastRun} brief /></span>
             <button class="banner-x" title={m.common_close()} aria-label={m.common_close()} onclick={() => closeSummary(lastRun.id)}>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
             </button>
           </div>
         {/if}
+      {:else if lastRun?.status === 'cancelled' && lastRun.verify_cancelled}
+        <!-- The copy is there; only the check after it was stopped. Said, so
+             the cancelled sign above does not read as "no copy". -->
+        <div class="banner warn"><span>{m.dash_unverified({ date: formatDate(lastRun.finished_at), error: lastRun.error ?? '' })}</span></div>
       {:else if lastRun?.status === 'error'}
         <!-- When: the stats below date the last COPY, and without its own
              time this banner read as if that copy had failed. -->
@@ -525,6 +570,21 @@
       {:else}
         {m.dash_schedule({ schedule: job.schedule.kind === 'none' ? m.dash_sched_none() : (SCHED_LABELS[job.schedule.kind]?.() ?? job.schedule.kind) })}
       {/if}
+      <!-- For this run only: the job's own "after the copy" stays as it is.
+           When the job already switches off after every copy, the tick says
+           so and cannot be taken off here. -->
+      {#if running || status === 'queued'}
+        <label class="shutdown" title={jobShutsDown ? m.dash_shutdown_by_job() : m.dash_shutdown_hint()}>
+          <input
+            type="checkbox"
+            checked={jobShutsDown || jobs.queue.shutdown_after === job.id}
+            disabled={jobShutsDown || shutdownBusy}
+            onchange={(e) => toggleShutdown((e.target as HTMLInputElement).checked)}
+          />
+          {m.dash_shutdown_after()}
+        </label>
+        {#if shutdownErr}<div class="shutdown-err">{shutdownErr}</div>{/if}
+      {/if}
     </div>
     <button class="btn outline" onclick={onEdit} disabled={running}>{m.dash_options()}</button>
     {#if running}
@@ -541,6 +601,8 @@
 
 <style>
   .page { height: 100%; display: flex; flex-direction: column; }
+  .shutdown { display: flex; align-items: center; gap: 8px; margin-top: 6px; cursor: pointer; }
+  .shutdown-err { margin-top: 4px; color: var(--error-text); font-size: 12px; }
   .dash { flex: 1; overflow: auto; width: 100%; padding: 34px 44px 20px; display: flex; flex-direction: column; }
   .bottom { margin-top: auto; flex-shrink: 0; }
   .flow { display: flex; align-items: stretch; justify-content: center; }
@@ -634,8 +696,11 @@
   .banner { margin-top: 22px; border-radius: 8px; padding: 13px 16px; display: flex; align-items: center; gap: 12px; background: var(--accent-soft); font-size: 13.5px; line-height: 1.5; color: var(--text); }
   .banner.err { background: var(--error-soft); border: 1px solid var(--error-line); color: var(--error-text); }
   .banner.info { background: var(--info-soft); border: 1px solid var(--info-line); color: var(--info-text); }
+  .banner.warn { background: var(--warning-soft); border: 1px solid var(--warning-line); color: var(--warning-text); }
   .bdot { width: 20px; height: 20px; border-radius: 50%; background: var(--success); flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
   .bicon { flex-shrink: 0; }
+  /* At most six lines, whatever the numbers come to; the rest is in Activity. */
+  .banner .brief { display: -webkit-box; -webkit-line-clamp: 6; line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; }
   .banner .banner-x { margin-left: auto; flex-shrink: 0; width: 22px; height: 22px; border: none; background: none; color: var(--text-muted); cursor: pointer; border-radius: 4px; display: flex; align-items: center; justify-content: center; }
   .banner .banner-x:hover { background: var(--track); color: var(--head); }
   /* .footer is global (styles/global.css) — full-width bar, same on every page. */

@@ -207,6 +207,21 @@ pub async fn run_backup_job(state: State<'_, GuiState>, id: String) -> Result<()
     state.link.client().await?.run_job(&id).await
 }
 
+/// Switch the computer off when this job's run ends — this run only.
+#[tauri::command]
+pub async fn set_shutdown_after_run(
+    state: State<'_, GuiState>,
+    id: String,
+    on: bool,
+) -> Result<serde_json::Value, String> {
+    state
+        .link
+        .client()
+        .await?
+        .set_shutdown_after_run(&id, on)
+        .await
+}
+
 /// Remove a still-pending job from the queue.
 #[tauri::command]
 pub async fn cancel_queued_job(state: State<'_, GuiState>, id: String) -> Result<(), String> {
@@ -228,4 +243,10 @@ pub async fn get_run_queue(state: State<'_, GuiState>) -> Result<QueueSnapshot, 
 #[tauri::command]
 pub async fn list_activity(state: State<'_, GuiState>) -> Result<Vec<JobRun>, String> {
     state.link.client().await?.list_activity().await
+}
+
+/// «Активность» → «Очистить».
+#[tauri::command]
+pub async fn clear_activity(state: State<'_, GuiState>) -> Result<serde_json::Value, String> {
+    state.link.client().await?.clear_activity().await
 }

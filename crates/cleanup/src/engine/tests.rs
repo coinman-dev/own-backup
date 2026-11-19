@@ -1448,3 +1448,34 @@ fn as_root_a_users_folders_are_cleaned_with_the_users_rights() {
     use std::os::unix::fs::MetadataExt;
     assert_eq!(std::fs::metadata(&probe).unwrap().uid(), 0);
 }
+
+/// Каждый пункт сначала говорит, что начат, — и это сообщение ничего не
+/// считает; счёт приходит после него, без признака этапа (16.11.2026: строка
+/// «Очистка…» стояла десять минут, и не было видно, какой пункт идёт).
+#[test]
+fn each_item_says_it_has_started_before_it_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    write(&dir.path().join(r"Users/u/AppData/Local/Temp/a.tmp"), 100);
+    let mut seen: Vec<(String, Tally)> = Vec::new();
+    let report = run_at(
+        &[&TEMP],
+        &roots(dir.path()),
+        &[user(dir.path())],
+        Mode::Analyze,
+        &AtomicBool::new(false),
+        |item, tally| seen.push((item.to_string(), *tally)),
+        SystemTime::now() + TWO_DAYS,
+    );
+    let (first_item, first) = seen.first().expect("a report");
+    assert_eq!(first_item, "temp_user");
+    assert_eq!(
+        *first,
+        Tally::busy(Stage::Started),
+        "says it began, counts nothing"
+    );
+    let (_, last) = seen.last().unwrap();
+    assert_eq!(last.stage, None, "the count carries no stage");
+    assert_eq!(last.bytes, 100);
+    assert_eq!(report.total.stage, None);
+    assert_eq!(report.items[0].tally.stage, None);
+}

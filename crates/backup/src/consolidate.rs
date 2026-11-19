@@ -66,6 +66,7 @@
 //! using the images: after a completed backup, inside the job runner, with an
 //! explicit check that nothing has them mounted.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -106,6 +107,53 @@ pub struct ConsolidationOutcome {
     pub duration: Duration,
 }
 
+/// Reading the base back after the fold — before the increment is deleted.
+///
+/// The check after a copy reads what the copy wrote, and only then does the
+/// run consolidate; but consolidation REWRITES the base every older point
+/// stands on, so a check made before it says nothing about what it left. A
+/// base that came out of the fold wrong is found here, while the increment
+/// still exists, the marker still names the step, and every later run stops
+/// on it instead of writing new copies onto a broken chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FoldCheck {
+    /// Every block of the base's new state: the whole image is read.
+    Whole,
+    /// Only the blocks the fold wrote — the ones the increment stored.
+    Folded,
+}
+
+/// What a step is doing, for a progress line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepProgress {
+    /// The increment is being folded in and the next one repointed. The
+    /// fold in place reports no count.
+    Folding,
+    /// The increment's clusters going into the base — into a rebuilt one or
+    /// appended in place: `done` of `total`.
+    Rebuilding { done: u64, total: u64 },
+    /// The base is being read back: `done` of `total` blocks.
+    Checking { done: u64, total: u64 },
+}
+
+/// A step's key, check and progress.
+pub struct StepOptions<'a> {
+    pub keys: Option<&'a ArchiveKeys>,
+    /// Read the base back before the increment is deleted. Recorded in the
+    /// marker, so a step finished after a crash is checked as well.
+    pub check: Option<FoldCheck>,
+    /// Told what the step is doing. An `Err` (normally `Cancelled`) stops the
+    /// step where it stands: the increment and the marker stay, and the next
+    /// run finishes it — the check included.
+    pub progress: &'a mut dyn FnMut(StepProgress) -> Result<()>,
+}
+
+/// For callers that report nothing.
+fn quiet(_: StepProgress) -> Result<()> {
+    Ok(())
+}
+
 /// Crash marker. Holds file NAMES, not paths: a backup folder that has been
 /// moved or remounted under a different letter must still resume.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,6 +182,10 @@ struct Marker {
     /// never grows old, so an age-based rule would never fire.
     #[serde(default)]
     chain_started_at: Option<String>,
+    /// The read-back this step owes before the increment may go. Absent in
+    /// markers written before the check existed: those finish as they did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    check: Option<FoldCheck>,
 }
 
 /// Marker file for a given base image.
@@ -558,13 +610,155 @@ fn remove_quietly(path: &Path) {
     }
 }
 
+/// Read the folded base back against the checksums it now carries — the
+/// increment's, which describe the whole state the base has taken on.
+fn check_base(
+    base: &Path,
+    victim: &Path,
+    check: FoldCheck,
+    keys: Option<&ArchiveKeys>,
+    progress: &mut dyn FnMut(StepProgress) -> Result<()>,
+) -> Result<()> {
+    use crate::engine_core::verify::{verify_blocks, Blocks};
+
+    let which = match check {
+        FoldCheck::Whole => Blocks::All,
+        FoldCheck::Folded => Blocks::StoredIn(victim),
+    };
+    progress(StepProgress::Checking { done: 0, total: 0 })?;
+    let summary = verify_blocks(base, keys, which, |done, total| {
+        progress(StepProgress::Checking { done, total })
+    })?;
+    if !summary.valid() {
+        warn!(
+            base = %base.display(),
+            increment = %victim.display(),
+            mismatched = summary.mismatched_blocks.len(),
+            "Consolidation: the base does not read back as the increment described it — \
+             the increment and the marker stay"
+        );
+        return Err(OwnBackupError::ChainBroken(
+            tr!(
+                "consolidate.check_failed",
+                path = base.display(),
+                count = summary.mismatched_blocks.len()
+            )
+            .into_owned(),
+        ));
+    }
+    info!(
+        base = %base.display(),
+        blocks = summary.blocks_checked,
+        whole = check == FoldCheck::Whole,
+        secs = summary.duration.as_secs(),
+        "Consolidation: the base read back correctly"
+    );
+    Ok(())
+}
+
+/// Read the sibling that is about to replace the base — the base as the step
+/// leaves it — against the checksums the promoted sidecar carries, before it
+/// is published. The step's check, made where a failure still costs nothing:
+/// the old base is untouched, the sibling is discarded, the marker stays.
+///
+/// Returns the guest clusters the check read through the authenticated
+/// reader; the rebuild reads the rest back, so the new base is read once.
+fn check_sibling(
+    stage: &Path,
+    base: &Path,
+    sidecar: &Sidecar,
+    key: &crate::seal::ChainKey,
+    progress: &mut dyn FnMut(StepProgress) -> Result<()>,
+) -> Result<std::collections::HashSet<u64>> {
+    use crate::engine_core::verify::{verify_state, Blocks};
+
+    progress(StepProgress::Checking { done: 0, total: 0 })?;
+    let summary = verify_state(stage, sidecar, Some(key), Blocks::All, |done, total| {
+        progress(StepProgress::Checking { done, total })
+    })?;
+    if !summary.valid() {
+        warn!(
+            base = %base.display(),
+            mismatched = summary.mismatched_blocks.len(),
+            "Consolidation: the rebuilt base does not read back as the increment described it — \
+             it is discarded, the old base and the increment stay"
+        );
+        return Err(OwnBackupError::ChainBroken(
+            tr!(
+                "consolidate.sibling_check_failed",
+                path = base.display(),
+                count = summary.mismatched_blocks.len()
+            )
+            .into_owned(),
+        ));
+    }
+    info!(
+        base = %base.display(),
+        blocks = summary.blocks_checked,
+        secs = summary.duration.as_secs(),
+        "Consolidation: the rebuilt base read back correctly before replacing the old one"
+    );
+    let cs = crate::seal::obk::ObkImage::open_path(stage, key)?.cluster_size();
+    let block_size = sidecar.manifest.block_size as u64;
+    let volume_len = sidecar.manifest.source_disk.size_bytes;
+    let data_offset = sidecar.info.volume_data_offset;
+    let mut covered = std::collections::HashSet::new();
+    for entry in &sidecar.checksums {
+        let start = entry.block_number * block_size;
+        if start >= volume_len {
+            continue;
+        }
+        let len = block_size.min(volume_len - start);
+        covered.extend((data_offset + start) / cs..=(data_offset + start + len - 1) / cs);
+    }
+    Ok(covered)
+}
+
+/// The fold and compaction progress of a step: the phase, every 128 MiB of
+/// records — often enough for a cancel to be heard, rarely enough not to
+/// flood the window.
+fn sibling_tick(
+    progress: &mut dyn FnMut(StepProgress) -> Result<()>,
+    phase: crate::seal::obk::SiblingPhase,
+    done: u64,
+    total: u64,
+) -> Result<()> {
+    if phase == crate::seal::obk::SiblingPhase::Copy
+        && (done.is_multiple_of(2048) || done + 1 == total)
+    {
+        progress(StepProgress::Rebuilding { done, total })?;
+    }
+    Ok(())
+}
+
 /// Perform one consolidation step, from wherever a previous attempt left off.
+#[cfg_attr(not(test), allow(dead_code))]
 fn execute(
     base: &Path,
     victim: &Path,
     next: Option<&Path>,
     keys: Option<&ArchiveKeys>,
 ) -> Result<ConsolidationOutcome> {
+    execute_with(
+        base,
+        victim,
+        next,
+        &mut StepOptions {
+            keys,
+            check: None,
+            progress: &mut quiet,
+        },
+    )
+}
+
+/// [`execute`] with a check of the result and a progress report.
+fn execute_with(
+    base: &Path,
+    victim: &Path,
+    next: Option<&Path>,
+    opts: &mut StepOptions<'_>,
+) -> Result<ConsolidationOutcome> {
+    let keys = opts.keys;
     let started = Instant::now();
     let container = container_of(base)?;
     let marker_file = marker_path(base);
@@ -634,10 +828,15 @@ fn execute(
                         .clone()
                         .or_else(|| Some(manifest.created_at.clone()))
                 }),
+                check: None,
             }
         }
     };
+    // A check once promised stays promised: a resume asks for none of its
+    // own, and must still read the base back before the increment goes.
+    marker.check = marker.check.or(opts.check);
 
+    (opts.progress)(StepProgress::Folding)?;
     write_marker(&marker_file, &marker)?;
 
     // The increment describes the state the base is about to hold.
@@ -649,6 +848,14 @@ fn execute(
     )?;
 
     let mut bytes_orphaned = 0u64;
+    // The base was rebuilt and its rebuilt state read back before it was
+    // published, so the check after the step is already made.
+    let mut checked = false;
+    // The base was rebuilt into a fresh file: nothing to compact.
+    let mut rebuilt = false;
+    // Folded in place with everything else provably untouched: the check
+    // reads only what the fold wrote.
+    let mut narrowed = false;
     if !marker.merged {
         match container {
             "qcow2" => {
@@ -674,9 +881,65 @@ fn execute(
             // The fold carries the promotion with it: an encrypted image keeps
             // its sidecar inside the container, and the rebuild that puts the
             // increment's clusters in is the one write that can replace it.
+            "obk" if obk_fold_rebuilds(base, victim, keys)? => {
+                let key = chain_key_for(base, keys)?;
+                let progress = RefCell::new(&mut *opts.progress);
+                let mut tick = |phase: crate::seal::obk::SiblingPhase, done: u64, total: u64| {
+                    sibling_tick(&mut **progress.borrow_mut(), phase, done, total)
+                };
+                let mut read = |stage: &Path| {
+                    check_sibling(stage, base, &promoted, &key, &mut |p| {
+                        (*progress.borrow_mut())(p)
+                    })
+                };
+                let check: Option<crate::seal::obk::SiblingCheck<'_>> = match marker.check {
+                    Some(_) => Some(&mut read),
+                    None => None,
+                };
+                let stats = crate::seal::obk::fold_into_fresh_base(
+                    base,
+                    victim,
+                    &key,
+                    &sealed_blob(&promoted)?,
+                    crate::seal::obk::RebuildIdentity {
+                        backup_id: promoted.manifest.backup_id,
+                        created_at: promoted.manifest.created_at.clone(),
+                        consolidated_increments: promoted.info.consolidated_increments,
+                        chain_started_at: promoted.info.chain_started_at.clone(),
+                    },
+                    &mut tick,
+                    check,
+                )?;
+                match stats {
+                    Some(stats) => {
+                        checked = marker.check.is_some();
+                        rebuilt = true;
+                        info!(
+                            base = %base.display(),
+                            increment = %victim.display(),
+                            before = stats.before_bytes,
+                            after = stats.after_bytes,
+                            records = stats.records_copied,
+                            "Consolidation: increment folded into a rebuilt encrypted base"
+                        );
+                    }
+                    None => info!(
+                        base = %base.display(),
+                        increment = %victim.display(),
+                        "Consolidation: the rebuilt base was published by an earlier attempt"
+                    ),
+                }
+            }
             "obk" => {
                 let key = chain_key_for(base, keys)?;
-                let stats = crate::seal::obk::fold_child_into_base(
+                // What the fold must not touch, before it: the base's other
+                // clusters and the records they name.
+                let untouched = match marker.check {
+                    Some(FoldCheck::Whole) => Some(obk_untouched(base, victim, &key)?),
+                    _ => None,
+                };
+                let progress = &mut *opts.progress;
+                let stats = crate::seal::obk::fold_child_into_base_with(
                     base,
                     victim,
                     &key,
@@ -690,6 +953,14 @@ fn execute(
                     // The increment's own level, from its manifest: the job's
                     // setting as it stood when that copy ran.
                     promoted.manifest.compression_level,
+                    // Counted like a rebuild, so the window has a bar and an
+                    // estimate for this phase too.
+                    &mut |done, total| {
+                        if done.is_multiple_of(2048) || done == total {
+                            progress(StepProgress::Rebuilding { done, total })?;
+                        }
+                        Ok(())
+                    },
                 )?;
                 bytes_orphaned = stats.bytes_orphaned;
                 info!(
@@ -700,6 +971,27 @@ fn execute(
                     already_applied = stats.already_applied,
                     "Consolidation: increment folded into the encrypted base"
                 );
+                // A fold in place appends the increment's records and writes
+                // a new index; every other record stays where it was, as it
+                // was. If the new index names exactly the same records at the
+                // same places for those clusters, they are the records the
+                // check of the copy has just read — and only what the fold
+                // wrote needs reading.
+                if let Some(before) = untouched {
+                    if !stats.already_applied && obk_untouched(base, victim, &key)? == before {
+                        narrowed = true;
+                        info!(
+                            base = %base.display(),
+                            untouched = before.len(),
+                            "Consolidation: the base's other clusters keep their records —                              only what the fold wrote is read back"
+                        );
+                    } else {
+                        warn!(
+                            base = %base.display(),
+                            "Consolidation: the base's index changed beyond the fold —                              the whole base is read back"
+                        );
+                    }
+                }
             }
             other => {
                 return Err(OwnBackupError::ImageFormat(format!(
@@ -725,17 +1017,44 @@ fn execute(
     #[cfg(test)]
     fault_tests::hit(fault_tests::Point::RepointedBeforeDelete, base)?;
 
-    if container == "obk" {
+    if container == "obk" && !rebuilt {
         let key = chain_key_for(base, keys)?;
         // Keep the consolidation marker and victim until optional maintenance
         // has published safely. After a crash either complete base is readable;
         // retrying this phase preserves its identity and parent relationships.
-        if let Some(compacted) = crate::seal::obk::compact_if_needed(base, &key)? {
+        // The step's check reads the compacted sibling before it is published
+        // — the one read of the new base instead of a read-back and a check.
+        let sidecar = match marker.check {
+            Some(_) => Some(read_sidecar_of(base, keys)?),
+            None => None,
+        };
+        let progress = RefCell::new(&mut *opts.progress);
+        let mut read = |stage: &Path| match &sidecar {
+            Some(sidecar) => check_sibling(stage, base, sidecar, &key, &mut |p| {
+                (*progress.borrow_mut())(p)
+            }),
+            None => Ok(Default::default()),
+        };
+        let check: Option<crate::seal::obk::SiblingCheck<'_>> = match sidecar {
+            Some(_) => Some(&mut read),
+            None => None,
+        };
+        if let Some(compacted) = crate::seal::obk::compact_if_needed_checked(base, &key, check)? {
             bytes_orphaned = 0;
+            checked = marker.check.is_some();
             info!(base = %base.display(), before = compacted.before_bytes,
                 after = compacted.after_bytes, reclaimed = compacted.reclaimed_bytes(),
                 "Consolidation: obsolete encrypted records reclaimed");
         }
+    }
+
+    // The base the rest of the chain hangs off has just been rewritten. Read
+    // it back while the increment still exists: a failure here keeps the
+    // increment and the marker, so no later run writes onto this chain or
+    // deletes from it until the check passes.
+    if let Some(check) = marker.check.filter(|_| !checked) {
+        let check = if narrowed { FoldCheck::Folded } else { check };
+        check_base(base, victim, check, keys, &mut *opts.progress)?;
     }
 
     // Only now is the increment redundant. Its deletion is the step's last
@@ -770,6 +1089,47 @@ fn execute(
     Ok(outcome)
 }
 
+/// The base's clusters `victim` does not define, each with the record its
+/// index names and the cluster-table entry that says where it lies. Read from
+/// the index and the tables only — no data.
+fn obk_untouched(
+    base: &Path,
+    victim: &Path,
+    key: &ChainKey,
+) -> Result<Vec<(u64, crate::seal::obk::ClusterState, u64)>> {
+    use crate::seal::obk::ObkImage;
+    let defined: std::collections::HashSet<u64> = ObkImage::open_path(victim, key)?
+        .defined_cluster_states()?
+        .into_iter()
+        .map(|(cluster, _)| cluster)
+        .collect();
+    let mut image = ObkImage::open_path(base, key)?;
+    let mut out = Vec::new();
+    for (cluster, state) in image.defined_cluster_states()? {
+        if !defined.contains(&cluster) {
+            out.push((cluster, state, image.raw_l2_entry(cluster)?));
+        }
+    }
+    Ok(out)
+}
+
+/// Is this `.obk` fold better done as a rebuild of the base
+/// ([`crate::seal::obk::fold_into_fresh_base`]) than in place?
+///
+/// Also when the base already carries the increment's identity: a fold an
+/// earlier attempt published and could not record. The rebuild sees that and
+/// does nothing, where the in-place fold would append the whole increment
+/// again.
+fn obk_fold_rebuilds(base: &Path, victim: &Path, keys: Option<&ArchiveKeys>) -> Result<bool> {
+    let key = chain_key_for(base, keys)?;
+    if crate::seal::obk::ObkImage::open_path(base, &key)?.backup_id()
+        == crate::seal::obk::ObkImage::open_path(victim, &key)?.backup_id()
+    {
+        return Ok(true);
+    }
+    crate::seal::obk::fold_leaves_base_worth_compacting(base, victim, &key)
+}
+
 /// Run one step planned by [`crate::chains::plan_consolidation`].
 pub fn consolidate_step(step: &ConsolidationStep) -> Result<ConsolidationOutcome> {
     consolidate_step_with_keys(step, None)
@@ -780,11 +1140,27 @@ pub fn consolidate_step_with_keys(
     step: &ConsolidationStep,
     keys: Option<&ArchiveKeys>,
 ) -> Result<ConsolidationOutcome> {
-    execute(
+    consolidate_step_with(
+        step,
+        &mut StepOptions {
+            keys,
+            check: None,
+            progress: &mut quiet,
+        },
+    )
+}
+
+/// The same, reading the base back before the increment is deleted and
+/// saying what it is doing — what a job run uses.
+pub fn consolidate_step_with(
+    step: &ConsolidationStep,
+    opts: &mut StepOptions<'_>,
+) -> Result<ConsolidationOutcome> {
+    execute_with(
         &step.base.image_path,
         &step.victim.image_path,
         step.next.as_ref().map(|i| i.image_path.as_path()),
-        keys,
+        opts,
     )
 }
 
@@ -799,6 +1175,17 @@ pub fn resume_pending(folder: &Path) -> Result<ResumeReport> {
 
 /// The same, for a job whose chain may be encrypted.
 pub fn resume_pending_with_keys(folder: &Path, keys: Option<&ArchiveKeys>) -> Result<ResumeReport> {
+    resume_pending_with(folder, keys, &mut quiet)
+}
+
+/// The same, saying what a step being finished is doing. A step whose marker
+/// promised a check of the base is checked here too, before its increment
+/// is deleted.
+pub fn resume_pending_with(
+    folder: &Path,
+    keys: Option<&ArchiveKeys>,
+    progress: &mut dyn FnMut(StepProgress) -> Result<()>,
+) -> Result<ResumeReport> {
     let mut report = ResumeReport::default();
     let entries = match std::fs::read_dir(folder) {
         Ok(e) => e,
@@ -868,8 +1255,17 @@ pub fn resume_pending_with_keys(folder: &Path, keys: Option<&ArchiveKeys>) -> Re
             merged = marker.merged,
             "Consolidation: finishing a step interrupted earlier"
         );
-        match execute(&base, &victim, next.as_deref(), keys) {
+        let mut opts = StepOptions {
+            keys,
+            check: None,
+            progress: &mut *progress,
+        };
+        match execute_with(&base, &victim, next.as_deref(), &mut opts) {
             Ok(_) => report.finished.push(path.clone()),
+            // Stopped by the caller, not failed: the marker stays and the
+            // next pass takes the step up again. Said as itself, so a run
+            // being cancelled is not reported as a chain in an unknown state.
+            Err(OwnBackupError::Cancelled) => return Err(OwnBackupError::Cancelled),
             Err(e) => {
                 warn!(
                     base = %base.display(),
@@ -1427,6 +1823,7 @@ mod tests {
             merged: true,
             folded_before: 0,
             chain_started_at: Some("2026-01-01T00:00:00Z".into()),
+            check: None,
         };
         write_marker(&marker_path(&base), &marker).unwrap();
         crate::qcow2::merge_child_into_parent(&base, &inc1).unwrap();
@@ -1462,6 +1859,7 @@ mod tests {
             merged: true,
             folded_before: 0,
             chain_started_at: Some("2026-01-01T00:00:00Z".into()),
+            check: None,
         };
         write_marker(&marker_path(&base), &marker).unwrap();
         let report = resume_pending(dir.path()).unwrap();
@@ -1633,6 +2031,7 @@ mod tests {
             merged: false,
             folded_before: 0,
             chain_started_at: None,
+            check: None,
         };
         write_marker(&marker_path(&base), &marker).unwrap();
 
@@ -1661,6 +2060,7 @@ mod tests {
             merged: false,
             folded_before: 0,
             chain_started_at: None,
+            check: None,
         };
         write_marker(&path, &marker).unwrap();
         marker.merged = true;
@@ -1977,6 +2377,7 @@ mod tests {
             merged: true,
             folded_before: 0,
             chain_started_at: Some("2026-01-01T00:00:00Z".into()),
+            check: None,
         };
         write_marker(&marker_path(&base), &marker).unwrap();
         let promoted = promote(
@@ -2086,5 +2487,561 @@ mod tests {
                 "{bad:?} должно быть отвергнуто"
             );
         }
+    }
+
+    // ── Reading the base back after the fold ────────────────────────────
+
+    /// The volume a stack of layers reads as: later layers win, unwritten
+    /// clusters read zeros.
+    fn volume_of(layers: &[&[(u64, u8)]]) -> Vec<u8> {
+        let mut volume = vec![0u8; VOLUME_LEN as usize];
+        for layer in layers {
+            for &(index, fill) in *layer {
+                let at = (index * CS) as usize;
+                volume[at..at + CS as usize].fill(fill);
+            }
+        }
+        volume
+    }
+
+    fn true_sums(volume: &[u8]) -> Vec<BlockChecksum> {
+        crate::engine_core::testkit::checksums(volume, 4096)
+    }
+
+    const BASE_DATA: &[(u64, u8)] = &[(1, 0x11), (2, 0x11)];
+    const INC1_DATA: &[(u64, u8)] = &[(2, 0x22), (3, 0x22)];
+    const INC2_DATA: &[(u64, u8)] = &[(3, 0x33), (4, 0x33)];
+
+    /// base ← inc1 ← inc2 whose sidecars carry the REAL checksums of the
+    /// states they describe — except that inc1's, when `inc1_lies_about` names
+    /// a cluster, describes that cluster wrong: a base that took inc1's
+    /// description then does not read back as it says.
+    fn checkable_chain(dir: &Path, inc1_lies_about: Option<u64>) -> (PathBuf, PathBuf, PathBuf) {
+        let (base, base_id) = put_image(
+            dir,
+            "k_C_full_1.qcow2",
+            None,
+            ChainRole::Full,
+            "2026-01-01T00:00:00Z",
+            BackupType::Full,
+            None,
+            BASE_DATA,
+            &true_sums(&volume_of(&[BASE_DATA])),
+            None,
+        );
+        let mut inc1_state = volume_of(&[BASE_DATA, INC1_DATA]);
+        if let Some(cluster) = inc1_lies_about {
+            inc1_state[(cluster * CS) as usize] ^= 0xFF;
+        }
+        let (inc1, inc1_id) = put_image(
+            dir,
+            "k_C_inc_2.qcow2",
+            Some("k_C_full_1.qcow2"),
+            ChainRole::Incremental,
+            "2026-01-02T00:00:00Z",
+            BackupType::Incremental,
+            Some(base_id),
+            INC1_DATA,
+            &true_sums(&inc1_state),
+            None,
+        );
+        let (inc2, _) = put_image(
+            dir,
+            "k_C_inc_3.qcow2",
+            Some("k_C_inc_2.qcow2"),
+            ChainRole::Incremental,
+            "2026-01-03T00:00:00Z",
+            BackupType::Incremental,
+            Some(inc1_id),
+            INC2_DATA,
+            &true_sums(&volume_of(&[BASE_DATA, INC1_DATA, INC2_DATA])),
+            None,
+        );
+        (base, inc1, inc2)
+    }
+
+    /// Run one checked step, recording what it reported.
+    fn checked_step(
+        base: &Path,
+        inc1: &Path,
+        inc2: &Path,
+        check: FoldCheck,
+    ) -> (Result<ConsolidationOutcome>, Vec<StepProgress>) {
+        let mut seen = Vec::new();
+        let mut record = |p: StepProgress| {
+            seen.push(p);
+            Ok(())
+        };
+        let result = execute_with(
+            base,
+            inc1,
+            Some(inc2),
+            &mut StepOptions {
+                keys: None,
+                check: Some(check),
+                progress: &mut record,
+            },
+        );
+        (result, seen)
+    }
+
+    fn last_total(seen: &[StepProgress]) -> u64 {
+        match seen.last() {
+            Some(StepProgress::Checking { done, total }) => {
+                assert_eq!(done, total, "the check ran to the end");
+                *total
+            }
+            other => panic!("the step ended on {other:?}, not on the check"),
+        }
+    }
+
+    /// The step folds, then reads the whole base back, and only then deletes
+    /// the increment — and says so in that order.
+    #[test]
+    fn a_checked_step_reads_the_base_back_before_the_increment_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, inc1, inc2) = checkable_chain(dir.path(), None);
+        let leaf_before = read_volume(&inc2);
+
+        let (result, seen) = checked_step(&base, &inc1, &inc2, FoldCheck::Whole);
+        result.unwrap();
+
+        assert_eq!(seen.first(), Some(&StepProgress::Folding));
+        assert_eq!(
+            last_total(&seen),
+            VOLUME_LEN / 4096,
+            "every block of the base"
+        );
+        assert!(!inc1.exists());
+        assert!(!marker_path(&base).exists());
+        assert_eq!(read_volume(&inc2), leaf_before);
+    }
+
+    /// A base that does not read back as the increment described it: the
+    /// increment and the marker stay, and finishing the step later reads the
+    /// base again — it does not quietly complete the deletion.
+    #[test]
+    fn a_base_that_fails_the_check_keeps_the_increment_and_the_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, inc1, inc2) = checkable_chain(dir.path(), Some(3));
+
+        let (result, _) = checked_step(&base, &inc1, &inc2, FoldCheck::Whole);
+        let error = result.unwrap_err();
+        assert!(matches!(error, OwnBackupError::ChainBroken(_)), "{error}");
+        assert!(inc1.exists(), "the increment stays");
+        let marker = read_marker(&marker_path(&base)).expect("the marker stays");
+        assert!(marker.merged);
+        assert_eq!(marker.check, Some(FoldCheck::Whole), "the check is owed");
+
+        let report = resume_pending(dir.path()).unwrap();
+        assert!(report.finished.is_empty());
+        assert_eq!(report.stuck_bases(), vec![base.clone()]);
+        assert!(inc1.exists(), "still there after the resume");
+    }
+
+    /// «Только записанное объединением»: читаются лишь блоки, которые хранил
+    /// влитый инкремент. Ошибка в описании блока, которого он не хранил, этой
+    /// проверкой не видна — а полной видна.
+    #[test]
+    fn the_folded_check_reads_only_what_the_fold_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, inc1, inc2) = checkable_chain(dir.path(), Some(1));
+        let (result, seen) = checked_step(&base, &inc1, &inc2, FoldCheck::Folded);
+        result.unwrap();
+        let per_cluster = CS / 4096;
+        assert_eq!(
+            last_total(&seen),
+            INC1_DATA.len() as u64 * per_cluster,
+            "the two clusters inc1 stored"
+        );
+        assert!(!inc1.exists());
+
+        let dir = tempfile::tempdir().unwrap();
+        let (base, inc1, inc2) = checkable_chain(dir.path(), Some(1));
+        let (result, _) = checked_step(&base, &inc1, &inc2, FoldCheck::Whole);
+        assert!(result.is_err(), "reading everything finds it");
+        assert!(inc1.exists());
+    }
+
+    /// Stopped during the check: nothing is deleted, the marker remembers the
+    /// check, and the next resume — which asks for no check of its own — does
+    /// it before finishing the step.
+    #[test]
+    fn a_check_stopped_half_way_is_done_by_the_next_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, inc1, inc2) = checkable_chain(dir.path(), None);
+
+        let mut stop = |p: StepProgress| match p {
+            StepProgress::Checking { done, .. } if done > 3 => Err(OwnBackupError::Cancelled),
+            _ => Ok(()),
+        };
+        let result = execute_with(
+            &base,
+            &inc1,
+            Some(&inc2),
+            &mut StepOptions {
+                keys: None,
+                check: Some(FoldCheck::Whole),
+                progress: &mut stop,
+            },
+        );
+        assert!(matches!(result, Err(OwnBackupError::Cancelled)));
+        assert!(inc1.exists());
+        assert_eq!(
+            read_marker(&marker_path(&base)).unwrap().check,
+            Some(FoldCheck::Whole)
+        );
+
+        let mut seen = Vec::new();
+        let mut record = |p: StepProgress| {
+            seen.push(p);
+            Ok(())
+        };
+        let report = resume_pending_with(dir.path(), None, &mut record).unwrap();
+        assert_eq!(report.finished.len(), 1);
+        assert_eq!(last_total(&seen), VOLUME_LEN / 4096);
+        assert!(!inc1.exists());
+        assert!(!marker_path(&base).exists());
+
+        // And a resume that is itself stopped says so, rather than reporting
+        // the chain as stuck.
+        let dir = tempfile::tempdir().unwrap();
+        let (base, inc1, inc2) = checkable_chain(dir.path(), None);
+        let mut stop_at_check = |p: StepProgress| match p {
+            StepProgress::Checking { .. } => Err(OwnBackupError::Cancelled),
+            _ => Ok(()),
+        };
+        let _ = execute_with(
+            &base,
+            &inc1,
+            Some(&inc2),
+            &mut StepOptions {
+                keys: None,
+                check: Some(FoldCheck::Whole),
+                progress: &mut stop_at_check,
+            },
+        );
+        let resumed = resume_pending_with(dir.path(), None, &mut stop_at_check);
+        assert!(matches!(resumed, Err(OwnBackupError::Cancelled)));
+        assert!(inc1.exists());
+    }
+    // ── An encrypted fold done as one rebuild of the base ───────────────
+
+    /// Relative clusters of the test volume, as guest clusters of an `.obk`.
+    const OBK_VOLUME_START: u64 = DEFAULT_PARTITION_OFFSET / OBK_CLUSTER;
+
+    fn obk_layer(rel: &[(u64, u8)]) -> Vec<(u64, u8)> {
+        rel.iter()
+            .map(|&(c, fill)| (OBK_VOLUME_START + c, fill))
+            .collect()
+    }
+
+    fn obk_volume_of(layers: &[&[(u64, u8)]]) -> Vec<u8> {
+        let mut volume = vec![0u8; VOLUME_LEN as usize];
+        for layer in layers {
+            for &(rel, fill) in *layer {
+                let at = (rel * OBK_CLUSTER) as usize;
+                volume[at..at + OBK_CLUSTER as usize].fill(fill);
+            }
+        }
+        volume
+    }
+
+    const OBK_BASE: &[(u64, u8)] = &[(1, 0x11), (2, 0x11), (5, 0x15)];
+    const OBK_INC1: &[(u64, u8)] = &[(2, 0x22), (3, 0x22)];
+    const OBK_INC2: &[(u64, u8)] = &[(3, 0x33), (4, 0x33)];
+
+    /// An encrypted base ← inc1 ← inc2 with the real checksums of the states
+    /// they describe (inc1's wrong about `inc1_lies_about`), and a base whose
+    /// file is mostly dead space: folding inc1 in place would leave it worth
+    /// compacting at once, so the step rebuilds it.
+    fn obk_checkable_chain(
+        dir: &Path,
+        keys: &crate::seal::context::ArchiveKeys,
+        inc1_lies_about: Option<u64>,
+    ) -> (PathBuf, PathBuf, PathBuf) {
+        let session = keys.start_chain().unwrap();
+        let (base, base_id) = put_obk(
+            dir,
+            "r_C_full_1.obk",
+            keys,
+            &session,
+            ChainRole::Full,
+            "2026-01-01T00:00:00Z",
+            BackupType::Full,
+            None,
+            &obk_layer(OBK_BASE),
+            &true_sums(&obk_volume_of(&[OBK_BASE])),
+        );
+        let mut inc1_state = obk_volume_of(&[OBK_BASE, OBK_INC1]);
+        if let Some(rel) = inc1_lies_about {
+            inc1_state[(rel * OBK_CLUSTER) as usize] ^= 0xFF;
+        }
+        let (inc1, inc1_id) = put_obk(
+            dir,
+            "r_C_inc_2.obk",
+            keys,
+            &session,
+            ChainRole::Incremental,
+            "2026-01-02T00:00:00Z",
+            BackupType::Incremental,
+            Some((base_id, "r_C_full_1.obk")),
+            &obk_layer(OBK_INC1),
+            &true_sums(&inc1_state),
+        );
+        let (inc2, _) = put_obk(
+            dir,
+            "r_C_inc_3.obk",
+            keys,
+            &session,
+            ChainRole::Incremental,
+            "2026-01-03T00:00:00Z",
+            BackupType::Incremental,
+            Some((inc1_id, "r_C_inc_2.obk")),
+            &obk_layer(OBK_INC2),
+            &true_sums(&obk_volume_of(&[OBK_BASE, OBK_INC1, OBK_INC2])),
+        );
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&base)
+            .unwrap()
+            .set_len(128 * 1024 * 1024)
+            .unwrap();
+        (base, inc1, inc2)
+    }
+
+    fn obk_checked_step(
+        base: &Path,
+        inc1: &Path,
+        inc2: &Path,
+        keys: &crate::seal::context::ArchiveKeys,
+        progress: &mut dyn FnMut(StepProgress) -> Result<()>,
+    ) -> Result<ConsolidationOutcome> {
+        execute_with(
+            base,
+            inc1,
+            Some(inc2),
+            &mut StepOptions {
+                keys: Some(keys),
+                check: Some(FoldCheck::Whole),
+                progress,
+            },
+        )
+    }
+
+    fn checks_started(seen: &[StepProgress]) -> usize {
+        seen.iter()
+            .filter(|p| matches!(p, StepProgress::Checking { done: 0, total: 0 }))
+            .count()
+    }
+
+    /// Nothing but the stage's own files may be left of a rebuild that did
+    /// not publish.
+    fn no_stage_left(dir: &Path) {
+        let left: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".own-backup-obk"))
+            .collect();
+        assert!(left.is_empty(), "stage files left: {left:?}");
+    }
+
+    /// The fold and the compaction in one rebuild: the base comes out small,
+    /// the leaf reads what it read, and the new base is read ONCE — before it
+    /// replaced the old one — instead of a read-back and a check after.
+    #[test]
+    fn an_encrypted_fold_worth_compacting_is_one_rebuild_read_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = obk_keys();
+        let (base, inc1, inc2) = obk_checkable_chain(dir.path(), &keys, None);
+        let leaf_before = read_obk(&inc2, &keys);
+        let inc1_id = obk_sidecar(&inc1, &keys).manifest.backup_id;
+
+        let mut seen = Vec::new();
+        let outcome = obk_checked_step(&base, &inc1, &inc2, &keys, &mut |p| {
+            seen.push(p);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(outcome.bytes_orphaned, 0);
+        assert!(!inc1.exists());
+        assert!(!marker_path(&base).exists());
+        no_stage_left(dir.path());
+        assert!(std::fs::metadata(&base).unwrap().len() < 8 * 1024 * 1024);
+        assert_eq!(read_obk(&inc2, &keys), leaf_before);
+        assert_eq!(
+            checks_started(&seen),
+            1,
+            "the new base is read once: {seen:?}"
+        );
+        assert_eq!(last_total(&seen), VOLUME_LEN / 4096);
+        let promoted = obk_sidecar(&base, &keys);
+        assert_eq!(promoted.manifest.backup_id, inc1_id);
+        assert_eq!(promoted.info.consolidated_increments, 1);
+        assert_eq!(
+            promoted.info.chain_started_at.as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
+        let header = crate::seal::obk::read_open_header(&base).unwrap();
+        assert_eq!(header.backup_id, inc1_id);
+        assert_eq!(header.consolidated_increments, 1);
+    }
+
+    /// A rebuilt base that does not read back as the increment described it
+    /// is never published: the old base is byte for byte what it was, the
+    /// increment and the marker stay, and no stage is left behind.
+    #[test]
+    fn a_rebuilt_base_that_fails_the_check_is_not_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = obk_keys();
+        let (base, inc1, inc2) = obk_checkable_chain(dir.path(), &keys, Some(5));
+        let before = std::fs::read(&base).unwrap();
+
+        let error = obk_checked_step(&base, &inc1, &inc2, &keys, &mut |_| Ok(())).unwrap_err();
+        assert!(matches!(error, OwnBackupError::ChainBroken(_)), "{error}");
+        assert_eq!(
+            std::fs::read(&base).unwrap(),
+            before,
+            "the old base is untouched"
+        );
+        assert!(inc1.exists());
+        let marker = read_marker(&marker_path(&base)).expect("the marker stays");
+        assert!(!marker.merged, "nothing was folded");
+        no_stage_left(dir.path());
+    }
+
+    /// Stopped half-way through the rebuild's check: the old base is intact,
+    /// and the next resume does the whole step again, checked.
+    #[test]
+    fn a_rebuild_stopped_half_way_leaves_the_base_and_is_redone() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = obk_keys();
+        let (base, inc1, inc2) = obk_checkable_chain(dir.path(), &keys, None);
+        let leaf_before = read_obk(&inc2, &keys);
+        let before = std::fs::read(&base).unwrap();
+
+        let result = obk_checked_step(&base, &inc1, &inc2, &keys, &mut |p| match p {
+            StepProgress::Checking { done, .. } if done > 3 => Err(OwnBackupError::Cancelled),
+            _ => Ok(()),
+        });
+        assert!(matches!(result, Err(OwnBackupError::Cancelled)));
+        assert_eq!(std::fs::read(&base).unwrap(), before);
+        assert!(inc1.exists());
+        no_stage_left(dir.path());
+
+        let mut seen = Vec::new();
+        let mut record = |p: StepProgress| {
+            seen.push(p);
+            Ok(())
+        };
+        let report = resume_pending_with(dir.path(), Some(&keys), &mut record).unwrap();
+        assert_eq!(report.finished.len(), 1, "{report:?}");
+        assert_eq!(checks_started(&seen), 1);
+        assert!(!inc1.exists());
+        assert!(!marker_path(&base).exists());
+        assert_eq!(read_obk(&inc2, &keys), leaf_before);
+    }
+
+    /// A small increment over a base with no dead space is still folded in
+    /// place: rebuilding the whole base for it would write far more.
+    #[test]
+    fn a_small_fold_stays_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = obk_keys();
+        let (base, inc1, _) = obk_checkable_chain(dir.path(), &keys, None);
+        let key = keys.open_chain_of(&base).unwrap().key;
+        assert!(crate::seal::obk::fold_leaves_base_worth_compacting(&base, &inc1, &key).unwrap());
+        // Without the dead tail the same pair is not worth a rebuild.
+        crate::seal::obk::compact_image(&base, &key).unwrap();
+        assert!(!crate::seal::obk::fold_leaves_base_worth_compacting(&base, &inc1, &key).unwrap());
+    }
+    /// The rebuilt base was published and the step stopped before it could
+    /// say so in the marker. The resume sees the base already carries the
+    /// increment, does not fold it again, and finishes the step.
+    #[test]
+    fn a_published_rebuild_is_not_folded_again_by_the_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = obk_keys();
+        let (base, inc1, inc2) = obk_checkable_chain(dir.path(), &keys, None);
+        let leaf_before = read_obk(&inc2, &keys);
+        let key = keys.open_chain_of(&base).unwrap().key;
+        let marker = Marker {
+            version: MARKER_VERSION,
+            started_at: "2026-01-03T01:00:00Z".into(),
+            base: "r_C_full_1.obk".into(),
+            victim: "r_C_inc_2.obk".into(),
+            next: Some("r_C_inc_3.obk".into()),
+            merged: false,
+            folded_before: 0,
+            chain_started_at: Some("2026-01-01T00:00:00Z".into()),
+            check: None,
+        };
+        write_marker(&marker_path(&base), &marker).unwrap();
+        let promoted = promote(
+            &base,
+            obk_sidecar(&inc1, &keys),
+            1,
+            Some("2026-01-01T00:00:00Z".into()),
+        )
+        .unwrap();
+        crate::seal::obk::fold_into_fresh_base(
+            &base,
+            &inc1,
+            &key,
+            &sealed_blob(&promoted).unwrap(),
+            crate::seal::obk::RebuildIdentity {
+                backup_id: promoted.manifest.backup_id,
+                created_at: promoted.manifest.created_at.clone(),
+                consolidated_increments: 1,
+                chain_started_at: Some("2026-01-01T00:00:00Z".into()),
+            },
+            &mut |_, _, _| Ok(()),
+            None,
+        )
+        .unwrap()
+        .expect("rebuilt");
+        let published = std::fs::read(&base).unwrap();
+
+        let report = resume_pending_with_keys(dir.path(), Some(&keys)).unwrap();
+        assert!(report.all_finished(), "{report:?}");
+        assert_eq!(std::fs::read(&base).unwrap(), published, "not folded again");
+        assert!(!inc1.exists());
+        assert!(!marker_path(&base).exists());
+        assert_eq!(read_obk(&inc2, &keys), leaf_before);
+        assert_eq!(obk_sidecar(&base, &keys).info.consolidated_increments, 1);
+    }
+    /// A fold in place counts the increment's clusters, so the window has a
+    /// bar and an estimate for it as for a rebuild.
+    #[test]
+    fn a_fold_in_place_reports_its_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = obk_keys();
+        let (base, inc1, inc2) = obk_checkable_chain(dir.path(), &keys, None);
+        let key = keys.open_chain_of(&base).unwrap().key;
+        crate::seal::obk::compact_image(&base, &key).unwrap();
+        assert!(!crate::seal::obk::fold_leaves_base_worth_compacting(&base, &inc1, &key).unwrap());
+
+        let mut seen = Vec::new();
+        obk_checked_step(&base, &inc1, &inc2, &keys, &mut |p| {
+            seen.push(p);
+            Ok(())
+        })
+        .unwrap();
+        let last = seen
+            .iter()
+            .filter_map(|p| match p {
+                StepProgress::Rebuilding { done, total } => Some((*done, *total)),
+                _ => None,
+            })
+            .last();
+        assert_eq!(last, Some((2, 2)), "both of inc1's clusters: {seen:?}");
+        assert_eq!(
+            last_total(&seen),
+            2 * OBK_CLUSTER / 4096,
+            "only the blocks the fold wrote are read back"
+        );
+        assert!(!inc1.exists());
     }
 }

@@ -81,11 +81,14 @@ fi
 # Peak: the builder (~0.5 GiB), live-build's chroot and binary trees (~4 GiB),
 # the package cache (~1.5 GiB), the ISO twice (~2.5 GiB) — 10 GiB is generous.
 mkdir -p "$work"
+# OBK_MEDIA_RESERVE_GIB: what must stay free; 0 on a throwaway machine (the
+# release build on GitHub), where nothing else lives on the disk.
 peak_gib=10
+reserve_gib="${OBK_MEDIA_RESERVE_GIB:-30}"
 free_gib=$(( $(df --output=avail -B1 "$work" | tail -1) >> 30 ))
-if (( free_gib - peak_gib < 30 )); then
+if (( free_gib - peak_gib < reserve_gib )); then
     echo "only ${free_gib} GiB free on $(df --output=target "$work" | tail -1); the build needs" \
-        "${peak_gib} GiB and 30 GiB must stay free (AGENTS.md)" >&2
+        "${peak_gib} GiB and ${reserve_gib} GiB must stay free (AGENTS.md)" >&2
     exit 1
 fi
 say "space: ${free_gib} GiB free, peak ${peak_gib} GiB"

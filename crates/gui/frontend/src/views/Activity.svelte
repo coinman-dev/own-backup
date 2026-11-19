@@ -8,6 +8,7 @@
   import type { JobRun, RestoreRunState } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
   import RunSummary from '../components/RunSummary.svelte';
+  import Modal from '../components/Modal.svelte';
   import { locale } from '../lib/i18n.svelte';
 
   // Restores live in the service's own history, not in the job runs: this
@@ -25,6 +26,27 @@
   function refresh() {
     reloadActivity();
     loadRestores();
+  }
+
+  // «Очистить»: the service keeps, per job, what the schedule and the chain
+  // planning read (its last scheduled run and last good copy) and the
+  // restore reports not read yet.
+  let confirmClear = $state(false);
+  let clearing = $state(false);
+  let clearError = $state('');
+  async function clearHistory() {
+    clearing = true;
+    clearError = '';
+    try {
+      await api.clearActivity();
+      confirmClear = false;
+      page = 0;
+      refresh();
+    } catch (e) {
+      clearError = String(e);
+    } finally {
+      clearing = false;
+    }
   }
 
   type Item =
@@ -48,6 +70,22 @@
     ];
     return all.sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
   });
+
+  // Fifty to a page: the history holds up to two hundred runs plus the
+  // restores, and one long column of cards was slow to scroll through.
+  const PER_PAGE = 50;
+  let page = $state(0);
+  let scroller: HTMLDivElement | undefined = $state();
+  const pages = $derived(Math.max(1, Math.ceil(items.length / PER_PAGE)));
+  const shown = $derived(items.slice(page * PER_PAGE, (page + 1) * PER_PAGE));
+  // A shorter history (refreshed, cleared) must not leave the page past its end.
+  $effect(() => {
+    if (page > pages - 1) page = pages - 1;
+  });
+  function goPage(n: number) {
+    page = Math.min(Math.max(n, 0), pages - 1);
+    scroller?.scrollTo({ top: 0 });
+  }
 
   /** A copy that was made, as opposed to a cleanup, a check or a failure. */
   const copyMade = (r: JobRun) =>
@@ -88,11 +126,40 @@
   }
 </script>
 
-<div class="page">
+{#snippet pager()}
+  {#if pages > 1}
+    <div class="pager">
+      <button class="refresh" disabled={page === 0} onclick={() => goPage(page - 1)}>‹ {m.act_prev()}</button>
+      <span>{m.act_page({ n: page + 1, count: pages })}</span>
+      <button class="refresh" disabled={page >= pages - 1} onclick={() => goPage(page + 1)}>{m.act_next()} ›</button>
+    </div>
+  {/if}
+{/snippet}
+
+<div class="page" bind:this={scroller}>
   <div class="head">
     <h1>{m.act_title()}</h1>
-    <button class="refresh" onclick={refresh}>{m.common_refresh()}</button>
+    <div class="actions">
+      <button class="refresh danger" disabled={items.length === 0} onclick={() => { clearError = ''; confirmClear = true; }}>{m.act_clear()}</button>
+      <button class="refresh" onclick={refresh}>{m.common_refresh()}</button>
+    </div>
   </div>
+
+  {#if confirmClear}
+    <Modal
+      open
+      danger
+      title={m.act_clear_title()}
+      onClose={() => (confirmClear = false)}
+      cancelLabel={m.common_cancel()}
+      confirmLabel={m.act_clear_yes()}
+      confirmDisabled={clearing}
+      onConfirm={clearHistory}
+    >
+      <p>{m.act_clear_text()}</p>
+      {#if clearError}<p class="note">{clearError}</p>{/if}
+    </Modal>
+  {/if}
 
   {#each checking as progress (progress.job_id)}
     <div class="card">
@@ -108,8 +175,9 @@
     <div class="empty">{m.act_empty()}</div>
   {/if}
 
+  {@render pager()}
   <div class="list">
-    {#each items as item (item.key)}
+    {#each shown as item (item.key)}
       {#if item.kind === 'restore'}
         {@const r = item.run}
         <div class="card">
@@ -173,11 +241,11 @@
                         : m.act_cleanup_done())
                 : r.operation === 'verify'
                 ? (r.status === 'success' ? m.act_verify_done() : r.status === 'cancelled' ? m.act_verify_cancelled() : m.act_verify_failed())
-                : (r.status === 'success' ? m.act_backup_done() : r.skipped ? m.act_backup_skipped() : r.interrupted ? m.act_backup_interrupted() : r.status === 'cancelled' ? m.act_backup_cancelled() : m.act_backup_failed())}
+                : (r.status === 'success' ? m.act_backup_done() : r.skipped ? m.act_backup_skipped() : r.verify_cancelled ? m.act_backup_unverified() : r.interrupted ? m.act_backup_interrupted() : r.status === 'cancelled' ? m.act_backup_cancelled() : m.act_backup_failed())}
               {#if r.job_name && r.operation !== 'cleanup'}— {r.job_name}{/if}
               <span class="time">{formatDate(r.finished_at || r.started_at)}</span>
             </div>
-            {#if (r.status === 'error' || r.interrupted) && r.error}
+            {#if (r.status === 'error' || r.interrupted || r.verify_cancelled) && r.error}
               <div class="note">{r.error}</div>
             {/if}
             {#if r.status === 'error' && r.error_kind === 'key_protection'}
@@ -253,6 +321,7 @@
       {/if}
     {/each}
   </div>
+  {@render pager()}
 </div>
 
 <style>
@@ -260,7 +329,13 @@
   .head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 22px; }
   h1 { font-size: 24px; font-weight: 300; color: var(--head); }
   .refresh { background: var(--card-bg); border: 1px solid var(--border-strong); border-radius: 6px; padding: 7px 16px; font-size: 13px; font-weight: 600; color: var(--text); cursor: pointer; font-family: var(--font); transition: background-color .15s ease; }
-  .refresh:hover { background: var(--panel2); }
+  .refresh:hover:not(:disabled) { background: var(--panel2); }
+  .refresh:disabled { opacity: .45; cursor: default; }
+  /* Removes records: a hint of red, as the other buttons that delete. */
+  .refresh.danger { background: var(--error-soft); border-color: var(--error-line); color: var(--error-text); }
+  .refresh.danger:hover:not(:disabled) { background: var(--error-line); }
+  .actions { display: flex; gap: 8px; }
+  .pager { display: flex; align-items: center; justify-content: center; gap: 14px; margin: 14px 0; font-size: 13px; color: var(--text-secondary); }
   .empty { color: var(--text-muted); font-size: 14px; padding: 20px 0; }
   .list { display: flex; flex-direction: column; gap: 12px; }
   .card { border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; display: flex; gap: 16px; background: var(--card-bg); }

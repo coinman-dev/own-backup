@@ -23,7 +23,13 @@ service BackupService {
   rpc CancelQueued(IdRequest) returns (Empty);       // drop a still-pending job
   rpc CancelRunning(Empty) returns (Empty);          // signal-cancel the running job
   rpc GetQueue(Empty) returns (JsonReply);           // JSON: QueueSnapshot
+  // Switch the computer off when this job's run ends (this run only).
+  // JSON in: { "job_id": string, "on": bool } -> out: QueueSnapshot
+  rpc SetShutdownAfterRun(JsonRequest) returns (JsonReply);
   rpc ListActivity(Empty) returns (JsonReply);       // JSON: [JobRun]
+  // Clear the history: keeps per job its last scheduled run and last good
+  // copy, and unread restore reports. JSON: {"runs": n, "restores": n}
+  rpc ClearActivity(Empty) returns (JsonReply);
   rpc StreamEvents(Empty) returns (stream Event);    // progress / queue / finished
 
   // --- Encrypted volumes ---
@@ -42,6 +48,9 @@ service BackupService {
   rpc ListHiddenVolumes(Empty) returns (JsonReply);  // JSON: [HiddenVolume]
   // JSON in: { "device": string, "letter": "R" | null } -> [HiddenVolume]
   rpc SetVolumeLetter(JsonRequest) returns (JsonReply);
+  // Linux: mount such a partition under /mnt, or unmount what this call
+  // mounted. JSON in: { "device": string, "mount": bool } -> [HiddenVolume]
+  rpc SetVolumeMount(JsonRequest) returns (JsonReply);
 
   rpc GetServiceStatus(Empty) returns (JsonReply);   // JSON: { version, uptime_secs, queue }
 

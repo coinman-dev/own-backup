@@ -139,30 +139,66 @@ pub fn verify_image_scoped(
     image_path: &Path,
     keys: Option<&crate::seal::context::ArchiveKeys>,
     scope: VerifyScope,
-    mut progress: impl FnMut(u64, u64) -> Result<()>,
+    progress: impl FnMut(u64, u64) -> Result<()>,
 ) -> Result<VerifySummary> {
-    let started = Instant::now();
-    let sidecar = load_sidecar_with_keys(image_path, keys)?;
-    let block_size = sidecar.manifest.block_size as u64;
-    let volume_len = sidecar.manifest.source_disk.size_bytes;
-    let data_offset = sidecar.info.volume_data_offset;
+    let which = match scope {
+        VerifyScope::Everything => Blocks::All,
+        VerifyScope::LatestCopyOnly => Blocks::StoredIn(image_path),
+    };
+    verify_blocks(image_path, keys, which, progress)
+}
 
+/// Which blocks of an image's state a check reads.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Blocks<'a> {
+    /// Every block the state is made of.
+    All,
+    /// Only the blocks the given file of the same chain stores itself — the
+    /// image being checked, or (after a consolidation) the increment that
+    /// was just folded into it: those are the blocks the fold rewrote.
+    StoredIn(&'a Path),
+}
+
+/// Read `image_path`'s state back and compare it with its sidecar's checksums.
+pub(crate) fn verify_blocks(
+    image_path: &Path,
+    keys: Option<&crate::seal::context::ArchiveKeys>,
+    which: Blocks<'_>,
+    progress: impl FnMut(u64, u64) -> Result<()>,
+) -> Result<VerifySummary> {
+    let sidecar = load_sidecar_with_keys(image_path, keys)?;
     let chain_key = match (keys, sidecar.info.container.as_str()) {
         (Some(keys), "obk") => Some(keys.open_chain_of(image_path)?.key),
         _ => None,
     };
-    let mut image_dev =
-        ImageReadSource::open_with(image_path, &sidecar.info.container, chain_key.as_ref())?;
+    verify_state(image_path, &sidecar, chain_key.as_ref(), which, progress)
+}
+
+/// [`verify_blocks`] against a sidecar the caller already holds — for a file
+/// that is not yet an image under its own name: the sibling a consolidation
+/// builds, read before it replaces the base.
+pub(crate) fn verify_state(
+    image_path: &Path,
+    sidecar: &crate::sidecar::Sidecar,
+    chain_key: Option<&crate::seal::ChainKey>,
+    which: Blocks<'_>,
+    mut progress: impl FnMut(u64, u64) -> Result<()>,
+) -> Result<VerifySummary> {
+    let started = Instant::now();
+    let block_size = sidecar.manifest.block_size as u64;
+    let volume_len = sidecar.manifest.source_disk.size_bytes;
+    let data_offset = sidecar.info.volume_data_offset;
+    let mut image_dev = ImageReadSource::open_with(image_path, &sidecar.info.container, chain_key)?;
 
     // The sidecar of an increment describes the WHOLE state, so reading all
     // of it walks every copy underneath. For "latest only" the file itself is
     // asked which blocks it holds, and only those are read.
-    let only: Option<std::collections::HashSet<u64>> = match scope {
-        VerifyScope::Everything => None,
-        VerifyScope::LatestCopyOnly => Some(blocks_stored_in_this_file(
-            image_path,
+    let only: Option<std::collections::HashSet<u64>> = match which {
+        Blocks::All => None,
+        Blocks::StoredIn(file) => Some(blocks_stored_in_this_file(
+            file,
             &sidecar.info.container,
-            chain_key.as_ref(),
+            chain_key,
             data_offset,
             block_size,
         )?),

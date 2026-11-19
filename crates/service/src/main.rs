@@ -9,6 +9,8 @@ mod cleanup;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod data_dir_acl;
 mod grpc_server;
+#[cfg(target_os = "linux")]
+mod hidden_mounts_linux;
 mod install;
 mod linux_browse;
 #[cfg(target_os = "linux")]
@@ -793,9 +795,11 @@ pub async fn run_main_loop(
     let (events, _bootstrap_rx) = tokio::sync::broadcast::channel::<grpc_server::proto::Event>(256);
 
     let cleanup_hook = std::sync::Arc::new(std::sync::OnceLock::new());
+    let live = std::sync::Arc::new(grpc_server::LiveProgress::default());
     let sink: std::sync::Arc<dyn own_backup_core::EventSink> =
         std::sync::Arc::new(grpc_server::GrpcEventSink {
             tx: events.clone(),
+            live: live.clone(),
             auto: cleanup_hook.clone(),
         });
     // The installed Windows service keeps remembered volume passwords in its
@@ -1014,6 +1018,7 @@ pub async fn run_main_loop(
         job_tx,
         cancel,
         events,
+        live,
         passwords,
     );
     // The cleanup before a copy, and the scheduled one (Windows: the cleanup
