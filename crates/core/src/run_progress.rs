@@ -117,16 +117,21 @@ impl Outline {
                         })
                         .unwrap_or(false);
                 // A rebuild reads the base and the increment and writes the
-                // new base; a fold in place reads and appends the increment.
+                // new base. A fold in place reads, re-encrypts and appends
+                // the increment: on 19.11.2026 2.3 minutes for 2.5 GB, where
+                // reading the whole 93 GB chain back took 14.
                 let fold = if rebuilds {
                     2.0 + victim_share
                 } else {
-                    2.0 * victim_share
+                    5.0 * victim_share
                 };
+                // After a rebuild the whole base is read; after a fold in
+                // place only what the fold wrote (`consolidate::execute_with`)
+                // — 21 seconds that same morning.
                 let check = if !job.advanced.validate_after {
                     0.0
-                } else if job.advanced.verify_latest_only {
-                    victim_share.clamp(0.05, 1.0)
+                } else if job.advanced.verify_latest_only || !rebuilds {
+                    victim_share.clamp(0.02, 1.0)
                 } else {
                     1.0
                 };
@@ -238,7 +243,10 @@ impl Overall {
             + self.outline.steps.iter().map(|(f, c)| f + c).sum::<f64>();
         let share = if total > 0.0 { at / total } else { 0.0 };
         self.shown = self.shown.max(share.clamp(0.0, 1.0));
-        Some((self.shown * 100.0).floor() as u64)
+        // 100 % is the run's end, which is not a progress message: after the
+        // last one the increment is still deleted and the run recorded. On
+        // 19.11.2026 the indicator stood at 100 % under a check still going.
+        Some(((self.shown * 100.0).floor() as u64).min(99))
     }
 }
 
@@ -325,7 +333,7 @@ mod tests {
         assert_eq!(o.note(&at("consolidate", 100, 100)), Some(79));
         assert_eq!(o.note(&at("consolidate-verify", 0, 0)), Some(79));
         assert_eq!(o.note(&at("consolidate-verify", 50, 100)), Some(89));
-        assert_eq!(o.note(&at("consolidate-verify", 100, 100)), Some(100));
+        assert_eq!(o.note(&at("consolidate-verify", 100, 100)), Some(99));
     }
 
     /// A step nobody foresaw is added when it starts and the share is
@@ -338,7 +346,7 @@ mod tests {
             steps: Vec::new(),
         });
         o.note(&at("backup", 100, 100));
-        assert_eq!(o.note(&at("verify", 100, 100)), Some(100));
+        assert_eq!(o.note(&at("verify", 100, 100)), Some(99));
         assert_eq!(o.note(&at("consolidate", 0, 0)), Some(41));
         assert_eq!(o.note(&at("consolidate-verify", 50, 100)), Some(85));
         assert_eq!(
@@ -355,9 +363,9 @@ mod tests {
         });
         o.note(&at("backup", 100, 100));
         o.note(&at("verify", 100, 100));
-        assert_eq!(o.note(&at("consolidate-verify", 100, 100)), Some(100));
+        assert_eq!(o.note(&at("consolidate-verify", 100, 100)), Some(99));
         assert_eq!(o.note(&at("consolidate", 0, 0)), Some(62));
-        assert_eq!(o.note(&at("consolidate-verify", 100, 100)), Some(100));
+        assert_eq!(o.note(&at("consolidate-verify", 100, 100)), Some(99));
     }
 
     /// A step an earlier run left is finished before the copy: it is not

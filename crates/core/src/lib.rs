@@ -24,6 +24,13 @@ pub mod capabilities;
 mod engine_watch;
 pub mod restore_exec;
 mod run_progress;
+
+/// How a run of `job` would be outlined now, without the archive keys (a
+/// fold is then taken to happen in place) — for `examples/run_outline_probe`.
+#[doc(hidden)]
+pub fn run_outline_for_probe(job: &Job) -> String {
+    format!("{:?}", run_progress::Outline::of(job, None))
+}
 pub mod source_refresh;
 pub mod verification;
 
@@ -2463,10 +2470,16 @@ pub async fn run_queue_worker(
                     // Its destination folder, and the archive keys a copy
                     // may write; everything else may go on beside it — a
                     // verification of another job, a boot medium.
-                    .shared([
-                        crate::busy::chain_resource(std::path::Path::new(&job.dest_folder)),
-                        "archive-keys".to_string(),
-                    ])
+                    .shared(
+                        [
+                            crate::busy::chain_resource(std::path::Path::new(&job.dest_folder)),
+                            "archive-keys".to_string(),
+                        ]
+                        .into_iter()
+                        // The disks it reads: a drive letter may change on
+                        // any other disk meanwhile.
+                        .chain(crate::busy::backup_disk_resources(&job)),
+                    )
                     .backup(),
             ) => slot,
             _ = stop.changed() => {

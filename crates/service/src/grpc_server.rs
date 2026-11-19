@@ -1528,9 +1528,33 @@ impl BackupService for BackupServiceImpl {
         }
         let p: In = serde_json::from_str(&req.into_inner().json)
             .map_err(|e| Status::invalid_argument(format!("bad JSON: {e}")))?;
+        // Beside other work, only not on a disk a backup is reading: a letter
+        // changes nothing on the disk, but a copy names its volumes as they
+        // were when it started (19.11.2026: refused outright during a copy
+        // of another disk). Told at once rather than queued — a button.
+        let disk = hidden_volumes_now()
+            .await?
+            .iter()
+            .find(|v| v.device.eq_ignore_ascii_case(p.device.trim()))
+            .map(|v| v.disk_number);
+        let mut needs = vec![own_backup_core::busy::ANY_PHYSICAL_DISK.to_string()];
+        needs.extend(disk.map(own_backup_core::busy::physical_disk_resource));
         let _slot = self
-            .reserve(&tr!("grpc_server.busy_volume_letter"), &p.device)
-            .await?;
+            .state
+            .busy
+            .reserve_soon(
+                own_backup_core::busy::Doing::new(
+                    tr!("grpc_server.busy_volume_letter"),
+                    p.device.clone(),
+                )
+                .shared(needs),
+                std::time::Duration::from_secs(30),
+            )
+            .await
+            .map_err(|held| Status::failed_precondition(held.refusal()))?;
+        if self.shutdown.is_shutdown_requested() {
+            return Err(Status::unavailable("service is stopping"));
+        }
         let volumes = hidden_volumes_now().await?;
         let Some(volume) = volumes
             .iter()
