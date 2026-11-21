@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The menu of a job, on a real Windows: the service's half and the window's.
 
-    tmp/sync/build-win.sh               # the four exes, with the frontend built
+    scripts/build-win.sh                # the four exes, with the frontend built
     scripts/lab/run-job-menu.py         # about fifteen minutes
     scripts/lab/run-job-menu.py --resume    # the window's half again
 

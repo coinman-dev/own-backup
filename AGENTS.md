@@ -10,10 +10,10 @@
 ### Two checkouts and synchronization (since 2026-10-18)
 The owner now works on a native Linux machine (Ubuntu 26.04, KDE Plasma on Wayland). The project lives in two folders that must be kept in sync:
 1. `/home/modulator/Development/own-backup` — **the working checkout.** Edit, build, test and commit here.
-2. `/run/media/modulator/WorkDisk-1/Development/own-backup` — a copy on the WorkDisk (BitLocker NTFS; under Windows this is `D:\Development\own-backup`). Keep it identical: after committing, bring its `dev` to the same commit (`git pull` there; it must stay clean) and copy the git-ignored working files (`.ai/`, `backup/`, `design/`, `tmp/`) with `rsync` without `--delete`. Do not build in the copy.
+2. `/run/media/modulator/WorkDisk-1/Development/own-backup` — a copy on the WorkDisk (BitLocker NTFS; under Windows this is `D:\Development\own-backup`). Keep it identical: after committing, bring its `dev` to the same commit (`git pull` there; it must stay clean) and copy the git-ignored working files (`.ai/`, `backup/`, `design/`) with `rsync` without `--delete`. `tmp/` is scratch and is not copied. Do not build in the copy.
 - **Sync is two-way:** another agent or a Windows session may have worked in either folder. **Before syncing**, check `git status` and `git log` on both sides so foreign work is never overwritten.
 - **Line endings:** the repo is strictly LF (`.gitattributes`). Preserve LF when copying text files written under Windows (strip `\r` if needed).
-- **Temporary and scratch files:** put ALL temporary files into the repo's `tmp/` (git-ignored), never in `/tmp`, `~`, or outside the project (opening files outside the project causes Zed/editor freezes on replay).
+- **Temporary and scratch files:** put ALL temporary files into the repo's `tmp/` (git-ignored), never in `/tmp`, `~`, or outside the project (opening files outside the project causes Zed/editor freezes on replay). `scripts/clean-artifacts.sh --force` empties `tmp/` completely: a script that is needed again belongs in `scripts/`, evidence worth keeping in `backup/`.
 
 ### Building and artifacts
 - **Build on the Linux machine, in the working checkout:**
@@ -72,7 +72,7 @@ The owner requested minimal necessary cloud work on 2026-10-06 after an Actions-
 - Keep exactly three active files in `.ai/`: `PLAN.md` (remaining implementation and decisions), `DONE.md` (brief accepted results), `CHECKS.md` (unverified behavior, why, and acceptance steps). Historical reports and evidence are in `.ai/archive/`. The entire `.ai/` directory is local-only and git-ignored; keep the two local copies synchronized explicitly, without commits or pushes.
 - Update existing items in place. Do not append session diaries, hashes, commands, build inventories, or repeated reports to these files. Do not create extra plans or handoffs in `.ai/` or `docs/`.
 - Accepted work stays closed unless relevant code changes or a concrete regression appears. Partial coverage is not full acceptance; user-skipped tests stay skipped.
-- Historical reports/evidence live in `.ai/archive/`; old local plans/logs are in ignored `backup/documentation-local-before-2026-10-08.tar.gz`. Neither is an active task list. New raw evidence and a necessary compact checkpoint belong in ignored `tmp/`, not the user-facing plan.
+- Historical reports/evidence live in `.ai/archive/`; old local plans/logs are in ignored `backup/documentation-local-before-2026-10-08.tar.gz`. Neither is an active task list. New raw evidence and a necessary compact checkpoint belong in ignored `backup/` (not `tmp/`, which the cleanup empties), not the user-facing plan.
 - Retain useful test scripts, source, vendored dependencies, design assets and current binaries. Do not call VM bases or backing images disposable without checking dependencies.
 
 ## Stand resource limits
