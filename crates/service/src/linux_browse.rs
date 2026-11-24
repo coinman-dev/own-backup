@@ -324,6 +324,15 @@ mod tests {
         }
     }
 
+    /// A small ext4 image with a file and two links to directories, made by
+    /// `mke2fs -d`. Unix only: the links are made with `std::os::unix`, and
+    /// on Windows there is no `mke2fs` to make the image anyway.
+    #[cfg(not(unix))]
+    fn ext4_image() -> Option<Vec<u8>> {
+        None
+    }
+
+    #[cfg(unix)]
     fn ext4_image() -> Option<Vec<u8>> {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
