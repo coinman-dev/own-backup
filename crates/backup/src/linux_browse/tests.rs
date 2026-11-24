@@ -162,6 +162,10 @@ mod real {
         std::fs::create_dir(src.join("etc")).unwrap();
         std::fs::write(src.join("etc/hostname"), "own-backup\n").unwrap();
         std::os::unix::fs::symlink("/etc/hostname", src.join("etc/abs")).unwrap();
+        std::fs::create_dir_all(src.join("wineprefix/dosdevices")).unwrap();
+        std::os::unix::fs::symlink("/", src.join("wineprefix/dosdevices/z:")).unwrap();
+        std::fs::create_dir_all(src.join("bin/X11")).unwrap();
+        std::os::unix::fs::symlink(".", src.join("bin/X11/X11")).unwrap();
         let sparse = std::fs::File::create(src.join("home/user/sparse.bin")).unwrap();
         sparse.set_len(2 * MIB as u64).unwrap();
         use std::os::unix::fs::FileExt;
@@ -185,10 +189,19 @@ mod real {
             "{root:?}"
         );
         let home = names("\\home");
-        // Links shown as what they point to; the one to nowhere left out.
-        assert!(home.contains(&"userlink".to_string()), "{home:?}");
+        // File links are shown as their targets; directory and broken links
+        // are left out so Total Commander cannot recursively copy a cycle.
+        assert!(!home.contains(&"userlink".to_string()), "{home:?}");
         assert!(home.contains(&"link.bin".to_string()), "{home:?}");
         assert!(!home.contains(&"broken".to_string()), "{home:?}");
+        assert!(
+            names("\\wineprefix\\dosdevices").is_empty(),
+            "a link to / must not become a directory to copy"
+        );
+        assert!(
+            names("\\bin\\X11").is_empty(),
+            "a link to its own directory must not become a directory to copy"
+        );
 
         let user = fs.list(&at("\\home\\user")).unwrap();
         assert!(user[0].dir, "directories first: {user:?}");

@@ -826,19 +826,23 @@ pub struct DiskSourceSpec {
 }
 
 impl DiskSourceSpec {
-    /// The token the disk's images are named and chained by: `disk<N>` on
-    /// Windows; on Linux `disk` and the token of its device
-    /// (`source_identity::unix_device_token`), which a by-id name keeps
-    /// across reboots while `sdb` does not.
+    /// The token the disk's images are named by: `disk<N>` on Windows, plain
+    /// `disk` on Linux. A Linux disk has no number, and a token of its by-id
+    /// device (`diskHC3711ED2`) told the owner nothing (2026-11-21); a job
+    /// copies one disk, and its chains are found by the device the images
+    /// record ([`Self::chain_identity`]), not by this name. Copies named by
+    /// the old token stay in their chain for the same reason.
     pub fn file_tag(&self) -> String {
-        match self
-            .device
-            .as_deref()
-            .and_then(own_backup_backup::source_identity::unix_device_token)
-        {
-            Some(token) => format!("disk{token}"),
+        match self.device {
+            Some(_) => "disk".to_string(),
             None => format!("disk{}", self.disk_number),
         }
+    }
+
+    /// What the disk's images record as their source (`source_id`): its by-id
+    /// device on Linux. `None` on Windows, where the name decides as before.
+    pub fn chain_identity(&self) -> Option<String> {
+        self.device.clone()
     }
 }
 
@@ -2967,11 +2971,15 @@ fn next_chain_number_for_volume(job: &Job, folder: &Path, device: &str) -> u32 {
     })
 }
 
-/// [`next_chain_number`] for a whole disk whose images carry `tag`.
-fn next_chain_number_for_disk(job: &Job, folder: &Path, tag: &str) -> u32 {
-    next_chain_number(job, folder, |base| {
-        image_token(&base.image_path).is_some_and(|t| t.eq_ignore_ascii_case(tag))
-    })
+/// [`next_chain_number`] for a whole disk whose images carry `tag`, or —
+/// when both sides know it — record `identity` ([`DiskSourceSpec::chain_identity`]).
+fn next_chain_number_for_disk(
+    job: &Job,
+    folder: &Path,
+    tag: &str,
+    identity: &Option<String>,
+) -> u32 {
+    next_chain_number(job, folder, |base| chain_belongs_to(base, tag, identity))
 }
 
 fn image_name(job: &Job, token: &str, kind: &str, chain: Option<u32>, stamp: &str) -> PathBuf {
@@ -3185,13 +3193,21 @@ pub fn plan_run_for_disk_at(
     disk_number: u32,
     now: chrono::DateTime<chrono::Utc>,
 ) -> RunPlan {
-    plan_run_for_disk_tag_at(job, folder, &format!("disk{disk_number}"), now)
+    plan_run_for_disk_tag_at(job, folder, &format!("disk{disk_number}"), &None, now)
 }
 
 /// [`plan_run_for_disk`] for the disk whose images carry `tag`
-/// ([`DiskSourceSpec::file_tag`]): how Linux names a disk (decision R1).
-pub fn plan_run_for_disk_tag(job: &Job, folder: &Path, tag: &str) -> RunPlan {
-    plan_run_for_disk_tag_at(job, folder, tag, chrono::Utc::now())
+/// ([`DiskSourceSpec::file_tag`]) or record `identity`
+/// ([`DiskSourceSpec::chain_identity`], its by-id device on Linux — decision
+/// R1). Identity decides when both sides have one, as for a volume
+/// ([`chain_belongs_to`]): a chain begun as `diskHC3711ED2` goes on as `disk`.
+pub fn plan_run_for_disk_tag(
+    job: &Job,
+    folder: &Path,
+    tag: &str,
+    identity: &Option<String>,
+) -> RunPlan {
+    plan_run_for_disk_tag_at(job, folder, tag, identity, chrono::Utc::now())
 }
 
 /// [`plan_run_for_disk_tag`] with the clock passed in.
@@ -3199,6 +3215,7 @@ pub fn plan_run_for_disk_tag_at(
     job: &Job,
     folder: &Path,
     tag: &str,
+    identity: &Option<String>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> RunPlan {
     use own_backup_backup::chains::list_job_chains;
@@ -3213,14 +3230,14 @@ pub fn plan_run_for_disk_tag_at(
         Ok(c) => c,
         Err(_) => return RunPlan::full(),
     };
-    // Keep only this disk's chains (base image tagged `disk<N>`), newest last.
+    // Keep only this disk's chains (by identity, else base tagged `disk<N>`),
+    // newest last.
     let Some(chain) = chains
         .into_iter()
         .filter(|c| {
             c.images
                 .first()
-                .and_then(|i| image_token(&i.image_path))
-                .is_some_and(|t| t.eq_ignore_ascii_case(tag))
+                .is_some_and(|base| chain_belongs_to(base, tag, identity))
         })
         .next_back()
     else {
@@ -3578,13 +3595,15 @@ fn role_word(role: own_backup_backup::sidecar::ChainRole) -> &'static str {
     }
 }
 
-/// The key that says two chains are of one source: the file-name token, and
-/// the source's identity when the copies recorded one.
+/// The key that says two chains are of one source: the source's identity when
+/// the copies recorded one — alone, as planning decides ([`chain_belongs_to`]):
+/// a chain whose name changed (a new drive letter, a Linux disk first named
+/// `diskHC3711ED2` and now `disk`) is the same source — else the file-name token.
 fn source_group(base: &own_backup_backup::chains::ChainImage) -> (String, Option<String>) {
-    (
-        image_token(&base.image_path).unwrap_or_default(),
-        base.source_id.as_ref().map(|id| id.to_ascii_lowercase()),
-    )
+    match &base.source_id {
+        Some(id) => (String::new(), Some(id.to_ascii_lowercase())),
+        None => (image_token(&base.image_path).unwrap_or_default(), None),
+    }
 }
 
 /// The copies a job has on disk, grouped the way they depend on each other.
@@ -4458,7 +4477,7 @@ async fn perform_disk_backup(
         job,
         &disk_tag,
         &plan,
-        next_chain_number_for_disk(job, &folder, &disk_tag),
+        next_chain_number_for_disk(job, &folder, &disk_tag, &None),
     );
 
     let partitions: Vec<DiskPartitionBackup> = ds
@@ -4962,12 +4981,13 @@ async fn perform_disk_backup(
 
     let folder = PathBuf::from(&job.dest_folder);
     let tag = ds.file_tag();
-    let plan = plan_run_for_disk_tag(job, &folder, &tag);
+    let identity = ds.chain_identity();
+    let plan = plan_run_for_disk_tag(job, &folder, &tag, &identity);
     let (image_path, full_image_path) = output_paths_for(
         job,
         &tag,
         &plan,
-        next_chain_number_for_disk(job, &folder, &tag),
+        next_chain_number_for_disk(job, &folder, &tag, &identity),
     );
 
     // Every partition held before a block is copied; one that cannot be is
@@ -5289,10 +5309,10 @@ async fn perform_backup(
 #[cfg(test)]
 mod tests {
     /// The window previews the file name with its own copy of this rule
-    /// (`diskFileTag` in `diskNames.ts`), which gives the same token for the
-    /// same by-id device: `diskH8B343557` for `ata-TEST`.
+    /// (`diskFileTag` in `diskNames.ts`): plain `disk` for a disk named by its
+    /// by-id device, `disk<N>` for a Windows disk number.
     #[test]
-    fn a_disk_named_by_its_device_is_tagged_by_its_token() {
+    fn a_disk_named_by_its_device_is_tagged_disk() {
         let mut ds = super::DiskSourceSpec {
             disk_number: 0,
             device: Some("/dev/disk/by-id/ata-TEST".into()),
@@ -5300,7 +5320,11 @@ mod tests {
             parts: Vec::new(),
             bootable: false,
         };
-        assert_eq!(ds.file_tag(), "diskH8B343557");
+        assert_eq!(ds.file_tag(), "disk");
+        assert_eq!(
+            ds.chain_identity().as_deref(),
+            Some("/dev/disk/by-id/ata-TEST")
+        );
         ds.device = None;
         ds.disk_number = 3;
         assert_eq!(ds.file_tag(), "disk3");
@@ -7101,6 +7125,116 @@ mod tests {
         assert_eq!(plan_run_for_disk(&job, d, 3), RunPlan::full());
     }
 
+    /// A Linux disk's images were named by a hash of its by-id device
+    /// (`diskHC3711ED2`) until 2026-11-21 and are named `disk` since. The
+    /// chain is found by the device the images record: the old chain goes on,
+    /// its number continues, and another disk's chain in the same job's
+    /// folder is never taken for it — whatever the names say.
+    #[test]
+    fn a_linux_disk_chain_is_found_by_its_device_not_its_name() {
+        use own_backup_backup::sidecar::{read_sidecar, write_sidecar, ChainRole};
+        use own_backup_backup::sidecar_path_for;
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let mine = "/dev/disk/by-id/nvme-Samsung_SSD_990_PRO_S7DNNJ0X123456";
+        let other = "/dev/disk/by-id/ata-WDC_WD40EFRX_WD-WCC7K0ABCDEF";
+        let from = |name: &str, device: &str| {
+            let path = sidecar_path_for(&d.join(name));
+            let mut sidecar = read_sidecar(&path).unwrap();
+            sidecar.info.source_id = Some(device.into());
+            write_sidecar(&path, &sidecar.info, &sidecar.manifest, &sidecar.checksums).unwrap();
+        };
+        let old_full = "Kubuntu_diskHC3711ED2_4-full_20261112-131650.qcow2";
+        let old_inc = "Kubuntu_diskHC3711ED2_4-inc_20261113-131650.qcow2";
+        put_real_image(
+            d,
+            old_full,
+            ChainRole::Full,
+            None,
+            "job1",
+            "2026-11-12T13:16:50Z",
+        );
+        put_real_image(
+            d,
+            old_inc,
+            ChainRole::Incremental,
+            Some(old_full),
+            "job1",
+            "2026-11-13T13:16:50Z",
+        );
+        from(old_full, mine);
+        from(old_inc, mine);
+        // Newer, named `disk` too, but of another disk.
+        let foreign = "Kubuntu_disk_9-full_20261114-000000.qcow2";
+        put_real_image(
+            d,
+            foreign,
+            ChainRole::Full,
+            None,
+            "job1",
+            "2026-11-14T00:00:00Z",
+        );
+        from(foreign, other);
+
+        let mut job = Job::default();
+        job.id = "job1".into();
+        job.scheme.method = "incremental".into();
+        job.scheme.full_every_n = 5;
+        let ds = DiskSourceSpec {
+            device: Some(mine.into()),
+            ..Default::default()
+        };
+        assert_eq!(ds.file_tag(), "disk");
+
+        let plan = plan_run_for_disk_tag(&job, d, &ds.file_tag(), &ds.chain_identity());
+        assert_eq!(plan.kind, "incremental");
+        assert_eq!(plan.base_image.as_deref(), Some(d.join(old_full).as_path()));
+        assert_eq!(
+            plan.parent_image.as_deref(),
+            Some(d.join(old_inc).as_path())
+        );
+        assert_eq!(
+            next_chain_number_for_disk(&job, d, &ds.file_tag(), &ds.chain_identity()),
+            5,
+            "the next full of this disk follows its own chain 4, not the other disk's 9"
+        );
+
+        // The versions list keeps the old chain and the new full of one disk
+        // in one group, whatever their names.
+        let renamed = "Kubuntu_disk_5-full_20261120-000000.qcow2";
+        put_real_image(
+            d,
+            renamed,
+            ChainRole::Full,
+            None,
+            "job1",
+            "2026-11-20T00:00:00Z",
+        );
+        from(renamed, mine);
+        let base_of = |name: &str| own_backup_backup::chains::ChainImage {
+            image_path: d.join(name),
+            sidecar_path: PathBuf::new(),
+            role: ChainRole::Full,
+            container: "qcow2".into(),
+            created_at: String::new(),
+            parent_file_name: None,
+            source_id: read_sidecar(&sidecar_path_for(&d.join(name)))
+                .unwrap()
+                .info
+                .source_id,
+            consolidated_increments: 0,
+            chain_started_at: None,
+        };
+        assert_eq!(
+            source_group(&base_of(old_full)),
+            source_group(&base_of(renamed))
+        );
+        assert_ne!(
+            source_group(&base_of(old_full)),
+            source_group(&base_of(foreign))
+        );
+    }
+
     // --- Восстановление запускается ПЕРВЫМ и умеет остановить запуск (AUD-06)
 
     /// Образ с внешним sidecar, принадлежащий заданию `job_id`.
@@ -7162,7 +7296,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut job = Job::default();
         job.id = "job1".into();
-        let next = || next_chain_number_for_disk(&job, dir.path(), "disk4");
+        let next = || next_chain_number_for_disk(&job, dir.path(), "disk4", &None);
         assert_eq!(next(), 1, "an empty folder starts at 1");
 
         // Two chains from before the numbers: the next one is the third.
@@ -8366,7 +8500,7 @@ mod linux_run_tests {
         assert_eq!(first.status, "success", "{}", first.error);
         assert_eq!(first.backup_kind, "full");
         let tag = ds.file_tag();
-        assert!(tag.starts_with("diskH"), "{tag}");
+        assert_eq!(tag, "disk");
         let name = PathBuf::from(&first.image_path);
         assert_eq!(image_token(&name).unwrap(), tag.to_ascii_uppercase());
         assert_eq!(first.images.len(), 1);

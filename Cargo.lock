@@ -673,9 +673,9 @@ checksum = "6245d59a3e82a7fc217c5828a6692dbc6dfb63a0c8c90495621f7b9d79704a0e"
 
 [[package]]
 name = "cookie"
-version = "0.18.1"
+version = "0.18.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ddef33a339a91ea89fb53151bd0a4689cfce27055c291dfa69945475d22c747"
+checksum = "d55f2d6c30eeec7d5c6f98bd4395d4abb1895629eab97ee6522d340623615f8a"
 dependencies = [
  "time",
  "version_check",
@@ -1308,9 +1308,9 @@ checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -2943,7 +2943,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-backup"
-version = "0.2.2-beta"
+version = "0.2.3-beta"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2987,7 +2987,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-cleanup"
-version = "0.2.2-beta"
+version = "0.2.3-beta"
 dependencies = [
  "libc",
  "own-backup-common",
@@ -3002,7 +3002,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-cli"
-version = "0.2.2-beta"
+version = "0.2.3-beta"
 dependencies = [
  "chrono",
  "clap",
@@ -3031,7 +3031,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-client"
-version = "0.2.2-beta"
+version = "0.2.3-beta"
 dependencies = [
  "hyper-util",
  "own-backup-backup",
@@ -3053,7 +3053,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-common"
-version = "0.2.2-beta"
+version = "0.2.3-beta"
 dependencies = [
  "chrono",
  "libc",
@@ -3069,7 +3069,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-core"
-version = "0.2.2-beta"
+version = "0.2.3-beta"
 dependencies = [
  "chrono",
  "own-backup-backup",
@@ -3090,7 +3090,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-gui"
-version = "0.2.2-beta"
+version = "0.2.3-beta"
 dependencies = [
  "chrono",
  "glib",
@@ -3132,7 +3132,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-inventory"
-version = "0.2.2-beta"
+version = "0.2.3-beta"
 dependencies = [
  "async-trait",
  "own-backup-common",
@@ -3146,7 +3146,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-metadata"
-version = "0.2.2-beta"
+version = "0.2.3-beta"
 dependencies = [
  "chrono",
  "own-backup-common",
@@ -3161,7 +3161,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-restore"
-version = "0.2.2-beta"
+version = "0.2.3-beta"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3181,7 +3181,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-scheduler"
-version = "0.2.2-beta"
+version = "0.2.3-beta"
 dependencies = [
  "chrono",
  "cron",
@@ -3197,7 +3197,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-service"
-version = "0.2.2-beta"
+version = "0.2.3-beta"
 dependencies = [
  "async-stream",
  "chrono",
@@ -3235,7 +3235,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-shell"
-version = "0.2.2-beta"
+version = "0.2.3-beta"
 dependencies = [
  "gtk",
  "libc",
@@ -3249,7 +3249,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-snapshot"
-version = "0.2.2-beta"
+version = "0.2.3-beta"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3266,7 +3266,7 @@ dependencies = [
 
 [[package]]
 name = "own-backup-tc-plugin"
-version = "0.2.2-beta"
+version = "0.2.3-beta"
 dependencies = [
  "hyper-util",
  "own-backup-common",
@@ -5501,9 +5501,9 @@ dependencies = [
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",

@@ -515,9 +515,9 @@ impl Fs {
         }
     }
 
-    /// The entries of the directory at `path` (absolute Linux path bytes),
-    /// symbolic links shown as what they point to; links to nowhere and
-    /// special files (devices, sockets, pipes) left out.
+    /// The entries of the directory at `path` (absolute Linux path bytes).
+    /// Links to files are shown as their targets; directory links, broken
+    /// links and special files (devices, sockets, pipes) are left out.
     pub fn list(&mut self, path: &[u8]) -> std::result::Result<Vec<Entry>, String> {
         match self {
             Fs::Ext(f) => f.list(path),
@@ -563,10 +563,10 @@ impl ExtFs {
         self.ext.label().to_str().unwrap_or_default().to_string()
     }
 
-    /// The entries of the directory at `path` (absolute Linux path bytes),
-    /// symbolic links shown as what they point to. Links that point nowhere
-    /// or outside this filesystem, and special files (devices, sockets,
-    /// pipes), have no files to show and are left out.
+    /// The entries of the directory at `path` (absolute Linux path bytes).
+    /// Links to files are shown as their targets; directory links are left out
+    /// so a recursive copy cannot follow cycles. Broken links and special
+    /// files (devices, sockets, pipes) are left out too.
     pub fn list(&self, path: &[u8]) -> std::result::Result<Vec<Entry>, String> {
         let mut out = Vec::new();
         for entry in self.ext.read_dir(path).map_err(ext_error)? {
@@ -577,10 +577,19 @@ impl ExtFs {
                 continue;
             }
             let name = names::to_display(raw);
-            // `metadata` of the path follows a symbolic link; of the entry it
-            // would not.
-            let Ok(meta) = self.ext.metadata(&entry.path()) else {
+            let Ok(meta) = entry.metadata() else {
                 continue;
+            };
+            let meta = if meta.file_type().is_symlink() {
+                let Ok(target) = self.ext.metadata(&entry.path()) else {
+                    continue;
+                };
+                if target.is_dir() {
+                    continue;
+                }
+                target
+            } else {
+                meta
             };
             let kind = meta.file_type();
             if !kind.is_dir() && !kind.is_regular_file() {

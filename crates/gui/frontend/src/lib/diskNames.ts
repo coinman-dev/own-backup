@@ -11,7 +11,6 @@
 // It is not a disk and has no partition table: it is named for what it is.
 
 import type { DiskInfo, DiskSourceSpec } from './types';
-import { linuxDeviceToken } from './sourceToken';
 import { m } from './paraglide/messages';
 
 /** `crypt` / `lvm` for a device-mapper volume listed as a disk, else ''. */
@@ -65,8 +64,8 @@ export function isSpecDisk(spec: DiskSourceSpec, d: DiskInfo, checkModel = false
 }
 
 /** The disk's part of an image file name — `own_backup_core::DiskSourceSpec::file_tag`:
- *  `disk<N>` on Windows, `disk` + the token of its by-id device on Linux. */
+ *  `disk<N>` on Windows, plain `disk` on Linux (a job copies one disk, and its
+ *  chain is found by the device the images record, not by the name). */
 export function diskFileTag(spec: DiskSourceSpec): string {
-  const token = spec.device ? linuxDeviceToken(spec.device) : null;
-  return token ? `disk${token}` : `disk${spec.disk_number}`;
+  return spec.device ? 'disk' : `disk${spec.disk_number}`;
 }

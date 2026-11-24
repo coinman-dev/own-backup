@@ -2,6 +2,23 @@
 
 # Changelog
 
+## 0.2.3-beta — 2026-11-24
+
+### Changed
+
+- **Whole-disk backups on Linux have a simpler name:** `Job_disk_5-full_…` instead of
+  `Job_diskHC3711ED2_4-full_…`. The letters and digits were a hash of the disk's name and
+  told nothing. The program finds the chain by the disk recorded in the backup itself, so
+  chains already started go on; files already written are not renamed.
+
+### Fixed
+
+- **Total Commander no longer loops on Linux backups:** links to directories inside a
+  backup are no longer shown, so a recursive copy cannot follow them round in circles.
+  Links to files are shown as their contents, as before.
+- **The `url` and `cookie` libraries are updated** to versions without the vulnerabilities
+  RUSTSEC-2026-0592 and RUSTSEC-2026-0594.
+
 ## 0.2.2-beta — 2026-11-19
 
 ### Added
