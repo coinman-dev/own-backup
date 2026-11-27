@@ -512,6 +512,7 @@
   "dmap_encrypted": "Зашифрован",
   "dmap_bootable": "загрузочный",
   "dmap_disk": "Диск {n}",
+  "dmap_disk_linux": "Диск {n} ({name})",
   "dmap_unalloc": "Не распределено — {size}",
   "dmap_unalloc_short": "Не распределено — {size}: не хватает {short} (нужно {need})",
   "dmap_unalloc_create": "Не распределено — {size} (кликните, чтобы создать здесь раздел)",

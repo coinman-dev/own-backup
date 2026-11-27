@@ -97,6 +97,7 @@ mod audit {
                     job.disk_source = Some(DiskSourceSpec {
                         disk_number: 1,
                         device: None,
+                        file_number: None,
                         disk_model: "A07 disposable disk".into(),
                         bootable: false,
                         parts: vec![DiskPartSpec {

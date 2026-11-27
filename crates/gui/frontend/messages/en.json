@@ -506,6 +506,7 @@
   "dmap_encrypted": "Encrypted",
   "dmap_bootable": "bootable",
   "dmap_disk": "Disk {n}",
+  "dmap_disk_linux": "Disk {n} ({name})",
   "dmap_unalloc": "Unallocated — {size}",
   "dmap_unalloc_short": "Unallocated — {size}: {short} short (needs {need})",
   "dmap_unalloc_create": "Unallocated — {size} (click to create a partition here)",

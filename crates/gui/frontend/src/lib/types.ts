@@ -721,6 +721,9 @@ export interface DiskSourceSpec {
   /** Linux: the disk's `/dev/disk/by-id/…` device (a number names no disk
    *  there). Absent on Windows. */
   device?: string | null;
+  /** Linux: the window's number of the disk when the job was saved
+   *  (`linuxDiskNumber`), for the file names only. Absent on Windows. */
+  file_number?: number | null;
   disk_model: string;
   parts: DiskPartSpec[];
   /** "Загрузочная копия диска" is on for this disk. Decides whether the

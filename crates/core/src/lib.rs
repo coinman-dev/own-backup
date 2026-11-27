@@ -810,6 +810,15 @@ pub struct DiskSourceSpec {
     /// in every job saved before Linux copied whole disks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
+    /// The number the window gave a Linux disk when the job was saved: its
+    /// place among the machine's disks then (1, 2, 3…), shown as «Диск 1».
+    /// Linux has no disk numbers of its own; the owner wanted them anyway,
+    /// like Windows (2026-11-27). Only the file name uses it — the disk is
+    /// still found by [`Self::device`], so a number that went stale after
+    /// disks were swapped renames nothing and breaks no chain. `None` on
+    /// Windows and in Linux jobs saved before it existed (named plain `disk`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_number: Option<u32>,
     pub disk_model: String,
     pub parts: Vec<DiskPartSpec>,
     /// The user ticked "Загрузочная копия диска" for this disk.
@@ -826,16 +835,18 @@ pub struct DiskSourceSpec {
 }
 
 impl DiskSourceSpec {
-    /// The token the disk's images are named by: `disk<N>` on Windows, plain
-    /// `disk` on Linux. A Linux disk has no number, and a token of its by-id
-    /// device (`diskHC3711ED2`) told the owner nothing (2026-11-21); a job
-    /// copies one disk, and its chains are found by the device the images
-    /// record ([`Self::chain_identity`]), not by this name. Copies named by
-    /// the old token stay in their chain for the same reason.
+    /// The token the disk's images are named by: `disk<N>` on Windows; on
+    /// Linux `disk<N>` with the window's number ([`Self::file_number`]), or
+    /// plain `disk` in a job saved without one. A token of the by-id device
+    /// (`diskHC3711ED2`) told the owner nothing (2026-11-21). A Linux chain is
+    /// found by the device the images record ([`Self::chain_identity`]), not
+    /// by this name, so copies named `disk`, `disk2` or by the old token stay
+    /// in one chain.
     pub fn file_tag(&self) -> String {
-        match self.device {
-            Some(_) => "disk".to_string(),
-            None => format!("disk{}", self.disk_number),
+        match (&self.device, self.file_number) {
+            (Some(_), Some(n)) => format!("disk{n}"),
+            (Some(_), None) => "disk".to_string(),
+            (None, _) => format!("disk{}", self.disk_number),
         }
     }
 
@@ -5309,13 +5320,15 @@ async fn perform_backup(
 #[cfg(test)]
 mod tests {
     /// The window previews the file name with its own copy of this rule
-    /// (`diskFileTag` in `diskNames.ts`): plain `disk` for a disk named by its
-    /// by-id device, `disk<N>` for a Windows disk number.
+    /// (`diskFileTag` in `diskNames.ts`): `disk<N>` for a Windows disk number
+    /// and for a Linux disk the window numbered, plain `disk` for a Linux job
+    /// saved without a number.
     #[test]
-    fn a_disk_named_by_its_device_is_tagged_disk() {
+    fn a_disk_is_tagged_by_its_number_or_plain_disk() {
         let mut ds = super::DiskSourceSpec {
             disk_number: 0,
             device: Some("/dev/disk/by-id/ata-TEST".into()),
+            file_number: None,
             disk_model: String::new(),
             parts: Vec::new(),
             bootable: false,
@@ -5325,7 +5338,10 @@ mod tests {
             ds.chain_identity().as_deref(),
             Some("/dev/disk/by-id/ata-TEST")
         );
+        ds.file_number = Some(2);
+        assert_eq!(ds.file_tag(), "disk2");
         ds.device = None;
+        ds.file_number = None;
         ds.disk_number = 3;
         assert_eq!(ds.file_tag(), "disk3");
     }
@@ -7198,6 +7214,21 @@ mod tests {
             5,
             "the next full of this disk follows its own chain 4, not the other disk's 9"
         );
+        // The job saved again with a number (`disk1`): still the same chain.
+        let numbered = DiskSourceSpec {
+            file_number: Some(1),
+            ..ds.clone()
+        };
+        assert_eq!(numbered.file_tag(), "disk1");
+        let tag = numbered.file_tag();
+        let id = numbered.chain_identity();
+        let plan = plan_run_for_disk_tag(&job, d, &tag, &id);
+        assert_eq!(plan.kind, "incremental");
+        assert_eq!(
+            plan.parent_image.as_deref(),
+            Some(d.join(old_inc).as_path())
+        );
+        assert_eq!(next_chain_number_for_disk(&job, d, &tag, &id), 5);
 
         // The versions list keeps the old chain and the new full of one disk
         // in one group, whatever their names.
@@ -8469,6 +8500,7 @@ mod linux_run_tests {
         let ds = DiskSourceSpec {
             disk_number: 0,
             device: Some(disk.to_str().unwrap().into()),
+            file_number: None,
             disk_model: "file disk".into(),
             parts: [(1, &p1), (2, &p2)]
                 .iter()

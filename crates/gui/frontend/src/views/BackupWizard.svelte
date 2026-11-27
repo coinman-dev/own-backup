@@ -10,12 +10,12 @@
   import { sourceToken } from '../lib/sourceToken';
   import PasswordField from '../components/PasswordField.svelte';
   import ArchiveKeyModal from '../components/ArchiveKeyModal.svelte';
-  import type { Job, DiskInfo, PartitionInfo } from '../lib/types';
+  import type { Job, DiskInfo, DiskSourceSpec, PartitionInfo } from '../lib/types';
   import { m } from '../lib/paraglide/messages';
   import { examplePath, joinPath } from '../lib/paths';
   import { caps, ensureCapabilities, dropUnsupported, canChain, offersWholeDisk, wholeDiskOf } from '../lib/capabilitiesStore.svelte';
   import { isWindows } from '../lib/platformStore.svelte';
-  import { diskCaption, diskTableText, diskNumber, isSpecDisk, diskFileTag, mapperKind } from '../lib/diskNames';
+  import { diskCaption, diskTableText, diskNumber, isSpecDisk, diskFileTag, mapperKind, linuxDiskNumber } from '../lib/diskNames';
   import type { DestinationCheck } from '../lib/types';
 
   interface Props {
@@ -579,11 +579,19 @@
     job.disk_source = {
       disk_number: byDevice ? 0 : diskNumber(d),
       device: byDevice ? d.stable_device : undefined,
+      file_number: byDevice ? linuxDiskNumber(d) : undefined,
       disk_model: d.model || d.device_id,
       parts: [],
       bootable: isBootableCopy(d),
     };
     syncDiskSourceParts(d);
+  }
+
+  /** The number a Linux job's files carry (`DiskSourceSpec.file_number`): the
+   *  one it keeps, or — a job saved before numbers — its disk's number now. */
+  function fileNumber(spec: DiskSourceSpec, d: DiskInfo): number | undefined {
+    if (!spec.device) return undefined;
+    return spec.file_number ?? linuxDiskNumber(d);
   }
 
   function pickDisk(d: DiskInfo) {
@@ -948,7 +956,11 @@
     const folder = job.dest_folder.trim();
     if (!folder || job.sources.length === 0) return '';
     const safe = safeFileStem(job.name, 'backup');
-    const token = job.disk_source ? diskFileTag(job.disk_source) : sourceToken(job.sources[0]);
+    const spec = job.disk_source;
+    const disk = spec?.device ? engine.disks.find((x) => isSpecDisk(spec, x)) : undefined;
+    const token = spec
+      ? diskFileTag(disk ? { ...spec, file_number: fileNumber(spec, disk) } : spec)
+      : sourceToken(job.sources[0]);
     return joinPath(folder, `${safe}_${token}_full_${previewStamp}.${previewExt}`);
   });
 
@@ -1386,7 +1398,7 @@
     // that mode, which is the honest answer to the same question.
     if (job.disk_source) {
       const d = engine.disks.find((x) => isSpecDisk(job.disk_source!, x));
-      if (d) job.disk_source = { ...job.disk_source, bootable: isBootableCopy(d) };
+      if (d) job.disk_source = { ...job.disk_source, bootable: isBootableCopy(d), file_number: fileNumber(job.disk_source, d) };
     }
     // Turning encryption on cannot go through an ordinary save: the service
     // refuses it there on purpose, because the job and its key have to be

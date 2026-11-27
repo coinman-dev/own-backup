@@ -257,6 +257,7 @@ mod tests {
         j.disk_source = Some(crate::DiskSourceSpec {
             disk_number: 1,
             device: None,
+            file_number: None,
             disk_model: String::new(),
             parts: Vec::new(),
             bootable: false,
@@ -288,6 +289,7 @@ mod tests {
         let mut ds = crate::DiskSourceSpec {
             disk_number: 0,
             device: Some("/dev/disk/by-id/virtio-x".into()),
+            file_number: None,
             disk_model: String::new(),
             parts: Vec::new(),
             bootable: false,
