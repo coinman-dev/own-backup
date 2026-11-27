@@ -1280,6 +1280,47 @@ pub fn resume_pending_with(
     Ok(report)
 }
 
+/// A step a crash or a shutdown left half-done, as its marker names it: what
+/// the next run of the folder's job finishes first, before its copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingStep {
+    pub base: PathBuf,
+    /// The increment being folded in; still on disk.
+    pub victim: PathBuf,
+    /// The read-back the step owes.
+    pub check: Option<FoldCheck>,
+}
+
+/// The steps [`resume_pending_with`] would take up in `folder`, without
+/// taking them: for the round indicator to count them in the run. A marker
+/// whose increment is gone (only the marker left to clear) and one that
+/// cannot be read are not work and are left out.
+pub fn pending_steps(folder: &Path) -> Vec<PendingStep> {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return Vec::new();
+    };
+    let mut steps: Vec<PendingStep> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().ends_with(MARKER_SUFFIX))
+        })
+        .filter_map(|p| {
+            let m = read_marker(&p)?;
+            let base = name_inside(folder, &m.base).ok()?;
+            let victim = name_inside(folder, &m.victim).ok()?;
+            victim.exists().then_some(PendingStep {
+                base,
+                victim,
+                check: m.check,
+            })
+        })
+        .collect();
+    steps.sort_by(|a, b| a.base.cmp(&b.base));
+    steps
+}
+
 /// What a recovery pass over a folder found and what it managed to finish.
 ///
 /// It used to return a bare count of markers cleared, which made "three
@@ -1318,6 +1359,45 @@ impl ResumeReport {
 mod tests {
     use super::*;
     use crate::vhdx_format::VhdxWriter;
+
+    /// The steps a run will finish first, as the round indicator counts
+    /// them: one whose increment is still there; not one with only its
+    /// marker left, nor an unreadable marker.
+    #[test]
+    fn pending_steps_are_the_markers_with_work_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let marker = |base: &str, victim: &str| {
+            serde_json::json!({
+                "version": MARKER_VERSION, "started_at": "2026-11-25T13:29:45Z",
+                "base": base, "victim": victim, "next": null, "check": "whole",
+            })
+            .to_string()
+        };
+        std::fs::write(d.join("a-full.obk"), b"").unwrap();
+        std::fs::write(d.join("a-inc.obk"), b"").unwrap();
+        std::fs::write(
+            marker_path(&d.join("a-full.obk")),
+            marker("a-full.obk", "a-inc.obk"),
+        )
+        .unwrap();
+        std::fs::write(
+            marker_path(&d.join("b-full.obk")),
+            marker("b-full.obk", "b-gone.obk"),
+        )
+        .unwrap();
+        std::fs::write(marker_path(&d.join("c-full.obk")), b"{not json").unwrap();
+
+        assert_eq!(
+            pending_steps(d),
+            vec![PendingStep {
+                base: d.join("a-full.obk"),
+                victim: d.join("a-inc.obk"),
+                check: Some(FoldCheck::Whole),
+            }]
+        );
+        assert!(pending_steps(&d.join("missing")).is_empty());
+    }
 
     /// The crash-path question "did the fold already happen?" must be answered
     /// from the DATA. The old answer — "the child's parent linkage went stale"
